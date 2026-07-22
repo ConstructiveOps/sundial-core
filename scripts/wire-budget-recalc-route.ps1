@@ -13,7 +13,7 @@
     REQUIRED CREDENTIALS: run with a principal that has apigateway write access
     (apigateway:POST/PUT on this API) AND lambda:AddPermission on sundial-budget.
     The default backend user (solar-portal-api) is NOT authorized for apigateway:POST
-    — running as that user fails with AccessDeniedException on create-resource.
+    - running as that user fails with AccessDeniedException on create-resource.
 
     PRECONDITIONS (verified; the script stops if unmet):
       1. sundial-budget Lambda exists.
@@ -26,7 +26,9 @@
 [CmdletBinding()]
 param([switch]$Yes)
 
-$ErrorActionPreference = "Stop"
+# Continue (not Stop): native aws stderr under PS 5.1 + Stop raises NativeCommandError
+# even on benign 404s. We check $LASTEXITCODE explicitly on the calls that matter.
+$ErrorActionPreference = "Continue"
 $Region = "us-west-1"
 $ApiId  = "5sktfwldh1"
 $Stage  = "prod"
@@ -45,11 +47,6 @@ function Ensure-Resource($parentId, $part) {
     Write-Host "  created resource '$part' ($($c.id))"
     return $c.id
 }
-function Method-Exists($resourceId, $method) {
-    aws apigateway get-method --rest-api-id $ApiId --region $Region --resource-id $resourceId --http-method $method --output json 2>$null | Out-Null
-    return ($LASTEXITCODE -eq 0)
-}
-
 Write-Host "==> Verifying $Fn exists..." -ForegroundColor Cyan
 aws lambda get-function-configuration --function-name $Fn --region $Region --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "$Fn does not exist yet." }
@@ -66,13 +63,11 @@ $recalc   = Ensure-Resource $budget "recalc"
 # Both methods -> Lambda proxy. The handler returns computed fields on POST and
 # 204 + CORS on OPTIONS, so no MOCK/CORS wiring is required.
 foreach ($m in @("POST", "OPTIONS")) {
-    if (Method-Exists $recalc $m) {
-        Write-Host "  method $m exists — updating integration" -ForegroundColor DarkGray
-    } else {
-        aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $recalc `
-            --http-method $m --authorization-type NONE --no-api-key-required --output json | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "put-method $m failed" }
-    }
+    # put-method: on a fresh method this succeeds; if it already exists it errors
+    # harmlessly (stderr suppressed). The integration is set either way, and that
+    # is the call we gate on.
+    aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $recalc `
+        --http-method $m --authorization-type NONE --no-api-key-required --output json 2>$null | Out-Null
     aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $recalc `
         --http-method $m --type AWS_PROXY --integration-http-method POST --uri $Uri --output json | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "put-integration $m failed" }
@@ -85,7 +80,7 @@ $srcArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/*/projects/*/budge
 aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-budget-recalc" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn $srcArn --output json 2>$null | Out-Null
-Write-Host "  (an 'already exists' error here is harmless — permission is in place)" -ForegroundColor DarkGray
+Write-Host "  (an 'already exists' error here is harmless - permission is in place)" -ForegroundColor DarkGray
 
 if (-not $Yes) {
     $ans = Read-Host "Deploy API to '$Stage' now? LIVE production change. (y/N)"

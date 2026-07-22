@@ -47,25 +47,36 @@ Webhook endpoints use a separate verification mechanism (signed payload from the
 #### `GET /auth/me`
 
 **Lambda:** `sundial-auth-proxy`
-**Purpose:** Returns the authenticated user's `Sundial_User__c` record, hierarchy context, and module enablement.
+**Purpose:** Verifies the caller's Supabase token, resolves the matching `Sundial_User__c` record, and returns the user's identity + tenant scope. Side effect: upserts the caller's `public.profiles` row (for Supabase RLS), which never affects the response.
 
-**Response shape:**
+**Auth:** Supabase JWT (`Authorization: Bearer <jwt>`). 401 if missing/invalid; 403 (`NO_SUNDIAL_USER` / `USER_INACTIVE`) if the token has no matching, active `Sundial_User__c`.
+
+**Response shape (200):**
 ```json
 {
-  "sundialUserId": "a01XX0000034ABCD",
-  "tenantId": "harmon",
-  "firstName": "Tim",
-  "lastName": "Murphy",
-  "email": "tim@example.com",
-  "hierarchyLevel": "Client",
-  "parentUserId": null,
-  "defaultDepartment": "Residential Solar",
-  "roles": ["Executive"],
-  "enabledModules": ["residentialSolar", "roofing", "service", "commercial"]
+  "user": {
+    "id": "a01XX0000034ABCD",
+    "firstName": "Tim",
+    "lastName": "Murphy",
+    "email": "tim@example.com",
+    "phone": null,
+    "hierarchyLevel": "Client",
+    "accessLevel": "Executive",
+    "superAdmin": true,
+    "defaultDepartment": "Residential Solar",
+    "parentUserId": null,
+    "supabaseUserId": "8f3c…"
+  },
+  "tenant": { "clientId": "a1W7y000007AszBEAS" }
 }
 ```
 
-**Implementation status:** Skeleton deployed. Real implementation pending Phase 1 development.
+- `accessLevel` (`Access_Level__c`) — gates UI tiers (tabs/sections/fields/reports); frontend only.
+- `superAdmin` (`Super_Admin__c`) — strict boolean, gates the Manage Users surface. **Salesforce-set only; never writable via any endpoint.**
+- `defaultDepartment` (`Default_Department__c`) — portal landing page only, not an access restriction.
+- `tenant.clientId` — the Salesforce Client record id (the tenant isolation key), **not** a slug.
+
+See DECISIONS.md D-043 for the access model.
 
 ---
 

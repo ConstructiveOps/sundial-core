@@ -2,6 +2,17 @@
 
 Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
+## Portal Access Model (D-043)
+
+- [x] Add `Access_Level__c`, `Super_Admin__c`, `Default_Department__c` to the portal identity (`lib/identity.js`) — verified live on `Sundial_User__c`
+- [x] `sundial-auth-proxy` returns the new fields (no structural change); deployed
+- [x] `upsertProfile` unchanged (`public.profiles` has no `access_level`/`is_super_admin` columns)
+- [x] Docs: real `/auth/me` shape in `api-endpoints.md`; DECISIONS.md D-043
+- [~] Verify live: `GET /auth/me` with a real portal-user token (Tim to supply one) → confirm `user.accessLevel` + `user.superAdmin`
+- [ ] Frontend (harmon-crm, separate): gate tabs/sections/fields/reports on `accessLevel`; gate Manage Users on `superAdmin`
+- [ ] Future user-admin endpoints: server-side `superAdmin` checks (the ONLY place these fields are enforced server-side)
+- [ ] Other Lambdas pick up the `lib/identity.js` change on their next routine deploy (no action needed now)
+
 ## Budget Calculator (feature/budget-calculator)
 
 ### Lambda + triggers

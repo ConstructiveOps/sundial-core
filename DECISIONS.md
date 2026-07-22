@@ -917,6 +917,30 @@ Both placements must stay visually subtle (muted, small) so they never compete w
 
 ---
 
+## D-043: Portal Access Model — Access_Level__c + Super_Admin__c (UI-Tier Gating)
+
+**Date:** 2026-07-22
+**Status:** Decided
+
+**Context:** Sundial needs a portal access model: who sees which tabs/sections/fields/reports, and who can manage users. The hierarchy fields (`Hierarchy_Level__c`, `Parent_User__c`) exist but conflate "org position" with "permission tier," and dealer-based record visibility is a later phase. A simple, explicit tier that the frontend can gate on now — without building record-level authorization yet — is what's needed to ship.
+
+**Decision:** Two new `Sundial_User__c` fields, surfaced on the portal identity (`GET /auth/me` via `lib/identity.js`):
+- **`Access_Level__c`** — restricted picklist (Executive, Manager, Admin, Sales Dealer, Sales Rep, Technician). Drives **UI-tier gating**: which tabs/sections/fields and which reports a user sees. Frontend enforcement.
+- **`Super_Admin__c`** — checkbox (default false). Gates **only** the upcoming Manage Users surface. **Set exclusively by hand in Salesforce; never writable through any Sundial endpoint.** Surfaced as a strict boolean (`=== true`, fail closed).
+- **`Default_Department__c`** — landing page only, not an access restriction.
+
+Reserved / out of scope for now:
+- **`Hierarchy_Level__c` + `Parent_User__c`** — reserved for the future dealer-visibility phase (record-level scoping), not used for gating today.
+- **No module-level restrictions** — all four departments are visible to all users; access differences are tier-based, not module-based.
+
+**Enforcement:** For now, **UI gating** (frontend reads `accessLevel`/`superAdmin`) plus **server-side checks on the future user-admin endpoints only**. The read/write Lambdas (`sf-query`/`sf-update`) get **no** new authorization/filtering from this decision — tenant isolation via `Client__c` (D-034/D-035) remains the only server-side access control until the dealer-visibility phase.
+
+**Alternatives:** Gate on `Hierarchy_Level__c` — rejected: it's an org-position concept, and overloading it with permissions blocks the clean dealer-visibility model later. Module-enablement flags — rejected: all departments are visible to all users; tiers, not modules, differentiate access.
+
+**Notes:** `public.profiles` does not carry `access_level`/`is_super_admin` columns, so `upsertProfile` is unchanged (Supabase schema changes out of scope). The stale `/auth/me` doc (fictional `roles`/`enabledModules`) was corrected to the real shape in the same change.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

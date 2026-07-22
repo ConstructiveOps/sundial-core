@@ -1,104 +1,98 @@
 <#
 .SYNOPSIS
-    Wires the POST /projects/{recordId}/budget/recalc route on the Sundial REST API
-    (API Gateway 5sktfwldh1, region us-west-1, stage prod) to the sundial-budget
-    Lambda, with a MOCK OPTIONS method for CORS and the Lambda invoke permission.
+    Wires POST (and OPTIONS) /projects/{recordId}/budget/recalc on the Sundial REST
+    API (API Gateway 5sktfwldh1, region us-west-1, stage prod) to the sundial-budget
+    Lambda, and deploys the stage.
 
 .DESCRIPTION
-    Idempotent: every step checks for the existing resource/method before creating.
-    Mirrors the existing gateway conventions (REST API v1, AWS_PROXY integration,
-    MOCK OPTIONS returning the CORS headers, per docs/api-endpoints.md).
+    Both POST and OPTIONS route to the Lambda as AWS_PROXY: the handler returns the
+    computed budget on POST and a 204 + CORS headers on OPTIONS (see corsHeaders in
+    lib/http.js), so no MOCK/CORS integration config is needed. Idempotent: resources
+    and methods are checked before creating.
 
-    PRECONDITIONS (the script verifies these and stops if unmet):
-      1. The sundial-budget Lambda must already exist (add-permission needs it).
-      2. You are deploying to the PRODUCTION stage — this is a live change. The
-         script prompts before the final `create-deployment` unless -Yes is passed.
+    REQUIRED CREDENTIALS: run with a principal that has apigateway write access
+    (apigateway:POST/PUT on this API) AND lambda:AddPermission on sundial-budget.
+    The default backend user (solar-portal-api) is NOT authorized for apigateway:POST
+    — running as that user fails with AccessDeniedException on create-resource.
 
-    Path is built as nested resources:
-      /projects  ->  /projects/{recordId}  ->  .../budget  ->  .../recalc (POST + OPTIONS)
+    PRECONDITIONS (verified; the script stops if unmet):
+      1. sundial-budget Lambda exists.
+    The final `create-deployment` (the live change) prompts unless -Yes is passed.
 
 .EXAMPLE
-    .\scripts\wire-budget-recalc-route.ps1            # interactive, prompts before prod deploy
-    .\scripts\wire-budget-recalc-route.ps1 -Yes       # non-interactive
+    .\scripts\wire-budget-recalc-route.ps1          # prompts before the prod deploy
+    .\scripts\wire-budget-recalc-route.ps1 -Yes     # non-interactive
 #>
 [CmdletBinding()]
 param([switch]$Yes)
 
 $ErrorActionPreference = "Stop"
-$Region  = "us-west-1"
-$ApiId   = "5sktfwldh1"
-$Stage   = "prod"
-$Fn      = "sundial-budget"
-$AcctId  = "891377232720"
-$FnArn   = "arn:aws:lambda:${Region}:${AcctId}:function:${Fn}"
-$IntegrationUri = "arn:aws:apigateway:${Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations"
+$Region = "us-west-1"
+$ApiId  = "5sktfwldh1"
+$Stage  = "prod"
+$Fn     = "sundial-budget"
+$AcctId = "891377232720"
+$Uri    = "arn:aws:apigateway:${Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${Region}:${AcctId}:function:${Fn}/invocations"
 
-function Get-ChildResource($parentId, $pathPart) {
-    $items = aws apigateway get-resources --rest-api-id $ApiId --region $Region --limit 500 --output json | ConvertFrom-Json
-    foreach ($r in $items.items) { if ($r.parentId -eq $parentId -and $r.pathPart -eq $pathPart) { return $r.id } }
-    return $null
+# Refetch resources on each lookup so the function is correct across re-runs and
+# within a single run (a just-created child is visible to the next call).
+function Get-Resources { (aws apigateway get-resources --rest-api-id $ApiId --region $Region --limit 500 --output json | ConvertFrom-Json).items }
+function Ensure-Resource($parentId, $part) {
+    $ex = (Get-Resources | Where-Object { $_.parentId -eq $parentId -and $_.pathPart -eq $part }).id
+    if ($ex) { Write-Host "  resource '$part' exists ($ex)"; return $ex }
+    $c = aws apigateway create-resource --rest-api-id $ApiId --region $Region --parent-id $parentId --path-part $part --output json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or -not $c.id) { throw "create-resource '$part' failed (need apigateway:POST)" }
+    Write-Host "  created resource '$part' ($($c.id))"
+    return $c.id
 }
-function Ensure-Resource($parentId, $pathPart) {
-    $existing = Get-ChildResource $parentId $pathPart
-    if ($existing) { Write-Host "  resource '$pathPart' exists ($existing)"; return $existing }
-    $created = aws apigateway create-resource --rest-api-id $ApiId --region $Region --parent-id $parentId --path-part $pathPart --output json | ConvertFrom-Json
-    Write-Host "  created resource '$pathPart' ($($created.id))"
-    return $created.id
+function Method-Exists($resourceId, $method) {
+    aws apigateway get-method --rest-api-id $ApiId --region $Region --resource-id $resourceId --http-method $method --output json 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
 }
 
-# --- Precondition: Lambda must exist -----------------------------------------
 Write-Host "==> Verifying $Fn exists..." -ForegroundColor Cyan
 aws lambda get-function-configuration --function-name $Fn --region $Region --output json | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "$Fn does not exist yet. Create it, then re-run." }
+if ($LASTEXITCODE -ne 0) { throw "$Fn does not exist yet." }
 
-# --- Root resource id ---------------------------------------------------------
-$root = (aws apigateway get-resources --rest-api-id $ApiId --region $Region --limit 500 --output json | ConvertFrom-Json).items |
-    Where-Object { $_.path -eq "/" } | Select-Object -First 1
+$root = (Get-Resources | Where-Object { $_.path -eq "/" }).id
 if (-not $root) { throw "Could not find root resource." }
 
-Write-Host "==> Ensuring resource path /projects/{recordId}/budget/recalc" -ForegroundColor Cyan
-$projects = Ensure-Resource $root.id "projects"
+Write-Host "==> Ensuring /projects/{recordId}/budget/recalc" -ForegroundColor Cyan
+$projects = Ensure-Resource $root "projects"
 $recordId = Ensure-Resource $projects "{recordId}"
 $budget   = Ensure-Resource $recordId "budget"
 $recalc   = Ensure-Resource $budget "recalc"
 
-# --- POST method + AWS_PROXY integration -------------------------------------
-Write-Host "==> POST method -> $Fn (AWS_PROXY)" -ForegroundColor Cyan
-aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method POST --authorization-type NONE --api-key-required $false 2>$null | Out-Null
-aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method POST --type AWS_PROXY --integration-http-method POST --uri $IntegrationUri | Out-Null
-aws apigateway put-method-response --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method POST --status-code 200 `
-    --response-parameters "method.response.header.Access-Control-Allow-Origin=false" 2>$null | Out-Null
+# Both methods -> Lambda proxy. The handler returns computed fields on POST and
+# 204 + CORS on OPTIONS, so no MOCK/CORS wiring is required.
+foreach ($m in @("POST", "OPTIONS")) {
+    if (Method-Exists $recalc $m) {
+        Write-Host "  method $m exists — updating integration" -ForegroundColor DarkGray
+    } else {
+        aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $recalc `
+            --http-method $m --authorization-type NONE --no-api-key-required --output json | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "put-method $m failed" }
+    }
+    aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $recalc `
+        --http-method $m --type AWS_PROXY --integration-http-method POST --uri $Uri --output json | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "put-integration $m failed" }
+    Write-Host "  wired $m -> AWS_PROXY -> $Fn" -ForegroundColor Green
+}
 
-# --- OPTIONS (MOCK) for CORS preflight ---------------------------------------
-Write-Host "==> OPTIONS method (MOCK CORS)" -ForegroundColor Cyan
-aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method OPTIONS --authorization-type NONE 2>$null | Out-Null
-aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method OPTIONS --type MOCK --request-templates '{\"application/json\":\"{\\\"statusCode\\\": 200}\"}' | Out-Null
-aws apigateway put-method-response --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method OPTIONS --status-code 200 `
-    --response-parameters "method.response.header.Access-Control-Allow-Headers=false,method.response.header.Access-Control-Allow-Methods=false,method.response.header.Access-Control-Allow-Origin=false" 2>$null | Out-Null
-aws apigateway put-integration-response --rest-api-id $ApiId --region $Region --resource-id $recalc `
-    --http-method OPTIONS --status-code 200 `
-    --response-parameters "method.response.header.Access-Control-Allow-Headers='Content-Type,Authorization',method.response.header.Access-Control-Allow-Methods='OPTIONS,POST',method.response.header.Access-Control-Allow-Origin='*'" | Out-Null
-
-# --- Lambda invoke permission for this route ---------------------------------
+# Lambda invoke permission covering any stage + any method on this route.
 Write-Host "==> Lambda invoke permission (apigateway)" -ForegroundColor Cyan
-$srcArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/projects/*/budget/recalc"
+$srcArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/*/projects/*/budget/recalc"
 aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-budget-recalc" --action "lambda:InvokeFunction" `
-    --principal apigateway.amazonaws.com --source-arn $srcArn 2>$null | Out-Null
-Write-Host "  (a 'ResourceConflictException' here just means the permission already exists — safe)" -ForegroundColor DarkGray
+    --principal apigateway.amazonaws.com --source-arn $srcArn --output json 2>$null | Out-Null
+Write-Host "  (an 'already exists' error here is harmless — permission is in place)" -ForegroundColor DarkGray
 
-# --- Deploy to prod (the live change) ----------------------------------------
 if (-not $Yes) {
-    $ans = Read-Host "Deploy API to '$Stage' now? This is a LIVE production change. (y/N)"
-    if ($ans -ne "y") { Write-Host "Skipped deploy. Route created but NOT live until you deploy." -ForegroundColor Yellow; exit 0 }
+    $ans = Read-Host "Deploy API to '$Stage' now? LIVE production change. (y/N)"
+    if ($ans -ne "y") { Write-Host "Route created but NOT live until you deploy." -ForegroundColor Yellow; exit 0 }
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Add POST /projects/{recordId}/budget/recalc -> $Fn" | Out-Null
-Write-Host "SUCCESS: route live at https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/projects/{recordId}/budget/recalc" -ForegroundColor Green
+    --description "Add POST /projects/{recordId}/budget/recalc -> $Fn" --output json | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
+Write-Host "SUCCESS: live at https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/projects/{recordId}/budget/recalc" -ForegroundColor Green

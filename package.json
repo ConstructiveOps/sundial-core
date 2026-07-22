@@ -1,0 +1,22 @@
+{
+  "name": "sundial-core",
+  "version": "0.1.0",
+  "description": "Shared AWS Lambda backend layer for the Sundial platform.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "deploy": "echo \"Use .\\\\deploy.ps1 <function-name> on Windows\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1083.0",
+    "@aws-sdk/client-secrets-manager": "^3.1075.0",
+    "@aws-sdk/s3-request-presigner": "^3.1083.0",
+    "@supabase/supabase-js": "^2.108.2",
+    "exceljs": "^4.4.0",
+    "jose": "^6.2.3",
+    "jsonwebtoken": "^9.0.3"
+  }
+}

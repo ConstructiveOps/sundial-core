@@ -1,0 +1,13 @@
+node_modules/
+.build/
+*.zip
+# Source-of-record deploy artifacts are kept and git-tracked (exception to *.zip).
+!artifacts/
+!artifacts/*.zip
+.env
+.env.local
+.secrets-temp/
+
+# Transient deploy-time build artifact (sundial-budget): base64-embedded template
+# generated from template/budget-template.xlsx by prebuild.mjs. Never committed.
+lambdas/*/template.generated.js

@@ -1,0 +1,9 @@
+{
+  "name": "sundial-auth-proxy",
+  "version": "0.1.0",
+  "description": "Auth proxy Lambda for the Sundial portal (placeholder skeleton).",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "dependencies": {}
+}

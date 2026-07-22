@@ -161,6 +161,14 @@ create index idx_sundial_solar_cache_stale on sundial_solar_cache(tenant_id, is_
 
 Indexes mirror the queries the portal actually runs. Add or drop indexes as portal patterns emerge.
 
+### `sundial_roofing_cache` (Roofing list/board)
+
+Mirrors the Solar pattern: a narrow display subset for the list table + Kanban board, plus the standard control columns. Full SQL: **`sql/sundial_roofing_cache.sql`**. The detail view does **not** read this table (it uses `GET /sf/roofing/{id}?full=true`, describe-driven), so the 116 material/input + 36 output budget fields stay out of the cache.
+
+Display columns (names match `sfFieldToColumn()` so `sundial-sf-query`/`sundial-cache-sync` populate them with no code change): `name`, `project_name`, `sundial_customer_sf_id`, `customer_name_at_creation`, `address_at_creation`, `primary_phone_at_creation`, `primary_email_at_creation`, `stage` (board grouping), `sales_rep_sf_id`, `project_manager_sf_id`, `acumatica_project_id`, `contract_presented_amount` (headline $), `total_proposal_cost` (computed $, null until the budget calc runs). Control columns are identical to `sundial_solar_cache` (`sf_id`, `client_sf_id` isolation key, `tenant_id` slug, `last_synced_at`, `cache_version`, `is_stale`).
+
+**No new sync mechanism:** roofing is already registered in the `OBJECT_ALLOWLIST` of `sundial-sf-query` (read/list/full), `sundial-sf-update` (write), and `sundial-cache-sync` (scheduled populate). Creating the table is the only step — records then populate via read-through and the sync job. Until the table exists, `sundial-cache-sync` gracefully skips roofing.
+
 ---
 
 ## Operational Concerns

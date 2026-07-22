@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Two formula (Text) fields on Sundial_Roofing__c that mirror the Solar object's
+  Sales_Rep_Name__c / Project_Manager_Name__c EXACTLY (verified from the live Solar
+  describe). They resolve the assigned user's display name (First + Last) so the
+  generic cache sync maps them into the sundial_roofing_cache.sales_rep_name /
+  project_manager_name columns — the same way Solar populates them. No Lambda change.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Sales_Rep_Name__c</fullName>
+        <externalId>false</externalId>
+        <formula>Sales_Rep__r.First_Name__c + &quot; &quot; +  Sales_Rep__r.Last_Name__c</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <label>Sales Rep Name</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Project_Manager_Name__c</fullName>
+        <externalId>false</externalId>
+        <formula>Project_Manager__r.First_Name__c + &quot; &quot; +  Project_Manager__r.Last_Name__c</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <label>Project Manager Name</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+</CustomObject>

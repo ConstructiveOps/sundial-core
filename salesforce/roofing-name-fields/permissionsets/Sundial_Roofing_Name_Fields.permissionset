@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Read FLS on the two new roofing name formula fields, so the integration user can
+  SELECT them (the cache sync runs as the integration user). Formula fields are
+  read-only, so editable is false. Assign this to the integration user, OR merge
+  these two fieldPermissions into the existing Sundial roofing/integration
+  permission set the integration user already has.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Sundial Roofing Name Fields</label>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Sundial_Roofing__c.Sales_Rep_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Sundial_Roofing__c.Project_Manager_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+</PermissionSet>

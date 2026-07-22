@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: adds Sundial_Roofing__c.Sales_Rep_Name__c / Project_Manager_Name__c
+  (formula Text, mirroring Solar) + a read-FLS permission set.
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. Additive: no existing field is
+  touched. Then run sql/sundial_roofing_cache_name_columns.sql in Supabase.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Roofing__c.Sales_Rep_Name__c</members>
+        <members>Sundial_Roofing__c.Project_Manager_Name__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Roofing_Name_Fields</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

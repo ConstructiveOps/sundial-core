@@ -44,6 +44,11 @@ const DEPARTMENTS = new Set([
 ]);
 // ~100 years — an effectively permanent Supabase auth ban for deactivated users.
 const BAN_DURATION = "876000h";
+// Hierarchy_Level__c is REQUIRED on Sundial_User__c but is NOT part of the D-043
+// access model (reserved for the future dealer-visibility phase, and not admin-
+// editable here). New users default to the least-privilege base tier to satisfy the
+// requirement; a SF admin sets the real value when dealer visibility ships.
+const DEFAULT_HIERARCHY_LEVEL = "Sales Rep";
 
 // --- CORS (mirrors sundial-sf-update: localhost + *.vercel.app; GET/POST/PATCH) ---
 function corsHeaders(origin) {
@@ -260,6 +265,7 @@ async function handleCreate(identity, event, cors) {
     Last_Name__c: lastName,
     Email__c: email,
     Access_Level__c: accessLevel,
+    Hierarchy_Level__c: DEFAULT_HIERARCHY_LEVEL, // required field; base default (see const)
     Active__c: true,
     Supabase_User_Id__c: authUserId,
     Client__c: identity.tenantId,

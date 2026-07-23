@@ -941,6 +941,27 @@ Reserved / out of scope for now:
 
 ---
 
+## D-044: User Provisioning Model — sundial-user-admin (Super-Admin-Gated)
+
+**Date:** 2026-07-23
+**Status:** Decided
+
+**Context:** D-043 defined `Super_Admin__c` as the gate for user management. The admin surface needs to create/list/update/deactivate portal users, which means coordinating **two** systems per user — a Supabase auth user (the login) and a `Sundial_User__c` record (the identity/tenant). Two-system writes risk orphans (auth user with no SF record, or vice versa), and a live Supabase session must not outlive a deactivation.
+
+**Decision:** A dedicated `sundial-user-admin` Lambda (`GET/POST /admin/users`, `PATCH /admin/users/{id}`), gated on `Super_Admin__c === true` (fail closed) and tenant-scoped on `Client__c` from the verified token. Specific choices:
+- **Credential mode is caller's choice per user:** `invite` (Supabase emails a set-password link) or `password` (admin sets a `tempPassword`, `email_confirm: true`, `must_change_password` flag). Supports both "let them set it" and "read it to them" onboarding.
+- **Create order is fail-safe (mirrors the aurora-push philosophy):** duplicate-guard → Supabase auth user → `Sundial_User__c`. If the SF create fails after a **fresh** auth user was made, the auth user is **deleted (compensating action)** so no orphan login survives. An existing auth user (same email) is **reused, not recreated**, so a retry after a partial failure re-links cleanly.
+- **Deactivate = SF `Active__c=false` + Supabase ban** (`ban_duration ~100y`), reactivate unbans. Salesforce is the source of truth; the ban is **defense-in-depth** to kill live supabase-direct sessions (comments RLS) — a ban failure is reported (`supabaseBanFailed`) but does not fail the SF change.
+- **Email is not editable via PATCH** (deliberate non-feature: an email change would desync the Supabase login and SF record; revisit if needed).
+- **Self-deactivation is blocked** (`CANNOT_DEACTIVATE_SELF`) so a Super Admin can't lock the tenant out of user management.
+- **Never writable from request input:** `Super_Admin__c` (Salesforce-set only, per D-043), `Client__c`, `Supabase_User_Id__c`. `Super_Admin__c` may appear in list responses; the raw `Supabase_User_Id__c` value is never returned (only a `hasLogin` boolean).
+
+**Enforcement:** This is the **only** server-side enforcement of the D-043 model — `sf-query`/`sf-update` get no new authorization from this decision. Tenant isolation remains `Client__c` (D-034/D-035).
+
+**Alternatives:** Create SF first then Supabase — rejected: a failed auth create would leave a Sundial_User__c that can never log in, and there's no clean compensating "un-create" for the login the user might already be mid-invite on. Hard-delete on deactivate — rejected: loses history and breaks record references; deactivate + ban preserves the audit trail.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

@@ -304,6 +304,66 @@ The Lambda also sets `Budget_Calc_Status__c = 'Calculated'`, `Budget_Last_Calcul
 
 ---
 
+### Admin — User Management
+
+**Lambda:** `sundial-user-admin`
+
+All routes require a Supabase JWT **and** the caller's `Super_Admin__c = true` (verified in-Lambda via `resolveIdentity`; `403 NOT_SUPER_ADMIN` otherwise, fail closed). Every read/write is tenant-scoped on `Client__c` from the token — a Super Admin can only manage their **own** tenant's users. `Super_Admin__c`, `Client__c`, and `Supabase_User_Id__c` are **never** writable from request input; email is not editable via PATCH. See DECISIONS.md D-044.
+
+#### `GET /admin/users`
+
+Lists all `Sundial_User__c` in the caller's tenant, **including inactive**.
+
+**Response (200):**
+```json
+{
+  "users": [
+    {
+      "id": "a0X...", "firstName": "Jane", "lastName": "Doe",
+      "email": "jane@example.com", "phone": null,
+      "accessLevel": "Sales Rep", "defaultDepartment": "Roofing",
+      "active": true, "superAdmin": false, "hierarchyLevel": "Sales Rep",
+      "hasLogin": true
+    }
+  ]
+}
+```
+`hasLogin` is a boolean (is a Supabase auth user linked); the actual `Supabase_User_Id__c` is never returned.
+
+#### `POST /admin/users`
+
+Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
+
+**Request:**
+```json
+{
+  "firstName": "Jane", "lastName": "Doe",
+  "email": "jane@example.com", "phone": "602-555-0100",
+  "accessLevel": "Sales Rep", "defaultDepartment": "Roofing",
+  "credentialMode": "invite",
+  "tempPassword": "<password mode only, min 8>"
+}
+```
+- `credentialMode: "invite"` emails a set-password link; `"password"` creates the user with `tempPassword` (email pre-confirmed, `must_change_password` flag).
+- **Order** (fail-safe): duplicate-guard (409) → Supabase auth create (reuses an existing auth user by email if already registered) → `Sundial_User__c` create (force-stamps `Client__c`, sets the auth id). If the SF create fails after a *fresh* auth user was made, that auth user is deleted (compensating); if the delete also fails, the response includes `orphanAuthUser: true`.
+
+**Response (201):**
+```json
+{ "id": "a0X...", "email": "jane@example.com", "credentialMode": "invite", "inviteSent": true }
+```
+**Errors:** 400 `VALIDATION_ERROR` (field-level `fields`), 409 `USER_ALREADY_EXISTS`, 502 `SUPABASE_CREATE_FAILED` / `SF_CREATE_FAILED`. `tempPassword` is never logged or returned.
+
+#### `PATCH /admin/users/{id}`
+
+Updates whitelisted fields on one tenant user. Body may contain `firstName`, `lastName`, `phone`, `accessLevel`, `defaultDepartment`, `active` (boolean). Any other key (`superAdmin`, `email`, `Client__c`, `Supabase_User_Id__c`, `hierarchyLevel`, …) → 400 `FIELD_NOT_ALLOWED`.
+- Tenant pre-check: a cross-tenant or missing id → 404 `RECORD_NOT_FOUND`.
+- `active: false` also **bans** the linked Supabase auth user (kills live supabase-direct sessions, e.g. comments RLS); `active: true` unbans. Salesforce `Active__c` is the source of truth — a ban failure still applies the SF change and returns `supabaseBanFailed: true`.
+- A Super Admin **cannot deactivate themselves** → 400 `CANNOT_DEACTIVATE_SELF`.
+
+**Response (200):** `{ "success": true, "id": "a0X..." }`
+
+---
+
 ### Webhooks
 
 #### `POST /webhooks/acumatica`
@@ -348,6 +408,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-download-file` | GET /files/by-id/{fileId}/download |
 | `sundial-delete-file` | DELETE /files/by-id/{fileId} |
 | `sundial-budget` | POST /projects/{recordId}/budget/recalc |
+| `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:

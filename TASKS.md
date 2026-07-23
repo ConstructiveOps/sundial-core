@@ -2,6 +2,17 @@
 
 Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
+## User Management Backend (D-044)
+
+- [x] `sundial-user-admin` Lambda — GET/POST `/admin/users`, PATCH `/admin/users/{id}`; Super-Admin-gated, tenant-scoped, fail-safe create + compensating delete, Supabase ban on deactivate, self-deactivation guard
+- [x] `scripts/wire-user-admin-routes.ps1` (mirrors corrected budget wire script)
+- [x] Docs: `api-endpoints.md` Admin section; DECISIONS.md D-044
+- [!] **Create the `sundial-user-admin` Lambda function** (Node 22 / arm64 / us-west-1 / role `sundial-lambda-execution-role` / 30 s / 256 MB) — deploy.ps1 can't create it
+- [ ] Deploy `sundial-user-admin` (`.\deploy.ps1 sundial-user-admin`) after the function exists
+- [ ] Run `scripts/wire-user-admin-routes.ps1` against the prod gateway (needs go-ahead — live change; requires apigateway write + `lambda:AddPermission`)
+- [~] Verify end-to-end with a Super-Admin token (list/create/patch, 403 for non-super-admin, `USER_INACTIVE` on deactivated user's `/auth/me`)
+- [ ] Frontend (harmon-crm, separate): the Manage Users surface, gated on `superAdmin`
+
 ## Portal Access Model (D-043)
 
 - [x] Add `Access_Level__c`, `Super_Admin__c`, `Default_Department__c` to the portal identity (`lib/identity.js`) — verified live on `Sundial_User__c`

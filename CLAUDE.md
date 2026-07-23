@@ -8,17 +8,17 @@
 ## Project Overview
 
 **Product Name:** Sundial
-**Client:** Harmon Solar (Phoenix, AZ — established multi-department solar company)
+**Client:** Harmon Electric (Phoenix, AZ — established multi-department solar company)
 **Vendor:** Constructive Operations LLC (Phoenix, AZ)
 **Owner/Developer:** Tim Murphy — sole AI developer, non-professional coder. Claude Code is the co-developer.
 **Repository Path:** `C:\Users\TimMurphy\Projects\harmon-crm`
 **GitHub Repo (to be created):** `https://github.com/ConstructiveOps/harmon-crm` (working name)
 
-Sundial is a single-tenant, custom-built operations platform for Harmon Solar covering four operational departments: residential solar, roofing, service operations, and commercial solar. It is built on Salesforce data infrastructure (no Salesforce user licenses for Harmon), integrated with Acumatica for accounting, and integrated with Nonstop Automation for marketing intake.
+Sundial is a single-tenant, custom-built operations platform for Harmon Electric covering four operational departments: residential solar, roofing, service operations, and commercial solar. It is built on Salesforce data infrastructure (no Salesforce user licenses for Harmon), integrated with Acumatica for accounting, and integrated with Nonstop Automation for marketing intake.
 
 ### Business Context
 
-Harmon Solar is replacing Sunbase (their current CRM) and Housecall Pro (their service platform) with a unified custom-built solution. They are keeping Acumatica (accounting), Aurora Solar (design and proposals — for now), Dropbox (document storage, as a mirror), and Nonstop Automation (marketing/AI voice).
+Harmon Electric is replacing Sunbase (their current CRM) and Housecall Pro (their service platform) with a unified custom-built solution. They are keeping Acumatica (accounting), Aurora Solar (design and proposals — for now), Dropbox (document storage, as a mirror), and Nonstop Automation (marketing/AI voice).
 
 Harmon will **not have any Salesforce user licenses**. All Salesforce data access happens through a single integration user in Constructive Operations' existing Sales Cloud Enterprise org. Harmon users authenticate against Supabase and interact with Salesforce data exclusively through the Sundial portal UI. Tim handles all Salesforce administration, Flow development, report and dashboard creation, and ongoing platform configuration.
 

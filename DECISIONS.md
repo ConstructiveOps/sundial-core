@@ -823,7 +823,7 @@ The tenant **slug** (e.g. `harmon`, sourced from `Client__r.Name` and stored in 
 
 Two specific, standard placements:
 
-1. **Login page** — a small Sundial mark centered at the bottom of the page, beneath the existing "Harmon Solar · Powered by Sundial" footer text.
+1. **Login page** — a small Sundial mark centered at the bottom of the page, beneath the existing "Harmon Electric · Powered by Sundial" footer text.
 2. **Application shell** — a persistent footer on every authenticated page showing the Sundial logo/mark, as a subtle "Powered by Sundial" treatment, so it appears on every shell page automatically.
 
 Both placements must stay visually subtle (muted, small) so they never compete with client branding.

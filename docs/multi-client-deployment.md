@@ -51,7 +51,7 @@ Status: **planned/standard element, not yet built.** It depends on a Sundial mar
 
 ### Frontend Repository
 Each client gets its own GitHub repo, forked from the `sundial-template` repo. Examples:
-- `harmon-crm` (Harmon Solar)
+- `harmon-crm` (Harmon Electric)
 - `clientB-crm`
 - `clientC-crm`
 

@@ -50,6 +50,12 @@ const BAN_DURATION = "876000h";
 // requirement; a SF admin sets the real value when dealer visibility ships.
 const DEFAULT_HIERARCHY_LEVEL = "Sales Rep";
 
+// Base URL of the portal. Invited users are redirected here to set their password.
+// Env-configurable so the go-live domain change (Harmon's real domain) is a Lambda
+// config update, not a code edit; defaults to the current Vercel prod URL.
+const PORTAL_BASE_URL = (process.env.PORTAL_BASE_URL || "https://harmon-crm.vercel.app").replace(/\/+$/, "");
+const RESET_PASSWORD_URL = `${PORTAL_BASE_URL}/reset-password`;
+
 // --- CORS (mirrors sundial-sf-update: localhost + *.vercel.app; GET/POST/PATCH) ---
 function corsHeaders(origin) {
   const allowOrigin = isAllowedOrigin(origin) ? origin : "http://localhost:5173";
@@ -240,7 +246,7 @@ async function handleCreate(identity, event, cors) {
   try {
     const res =
       credentialMode === "invite"
-        ? await supabase.auth.admin.inviteUserByEmail(email)
+        ? await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL })
         : await supabase.auth.admin.createUser({
             email,
             password: tempPassword,

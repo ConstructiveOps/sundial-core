@@ -344,7 +344,8 @@ Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
   "tempPassword": "<password mode only, min 8>"
 }
 ```
-- `credentialMode: "invite"` emails a set-password link; `"password"` creates the user with `tempPassword` (email pre-confirmed, `must_change_password` flag).
+- `credentialMode: "invite"` emails a set-password link (with `redirectTo` → `<PORTAL_BASE_URL>/reset-password`); `"password"` creates the user with `tempPassword` (email pre-confirmed, `must_change_password` flag).
+- `PORTAL_BASE_URL` is a Lambda env var (defaults to `https://harmon-crm.vercel.app`). Set it to the client's real domain at go-live so invite links land on the live portal — a config change, no redeploy of code required.
 - **Order** (fail-safe): duplicate-guard (409) → Supabase auth create (reuses an existing auth user by email if already registered) → `Sundial_User__c` create (force-stamps `Client__c`, sets the auth id). If the SF create fails after a *fresh* auth user was made, that auth user is deleted (compensating); if the delete also fails, the response includes `orphanAuthUser: true`.
 
 **Response (201):**
@@ -357,7 +358,7 @@ Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
 
 Updates whitelisted fields on one tenant user. Body may contain `firstName`, `lastName`, `phone`, `accessLevel`, `defaultDepartment`, `active` (boolean). Any other key (`superAdmin`, `email`, `Client__c`, `Supabase_User_Id__c`, `hierarchyLevel`, …) → 400 `FIELD_NOT_ALLOWED`.
 - Tenant pre-check: a cross-tenant or missing id → 404 `RECORD_NOT_FOUND`.
-- `active: false` also **bans** the linked Supabase auth user (kills live supabase-direct sessions, e.g. comments RLS); `active: true` unbans. Salesforce `Active__c` is the source of truth — a ban failure still applies the SF change and returns `supabaseBanFailed: true`.
+- `active: false` also **bans** the linked Supabase auth user (kills live supabase-direct sessions, e.g. comments RLS); `active: true` unbans. The ban/unban is **retried (3 attempts, backoff)** so a transient blip can't leave a deactivated user un-banned or a reactivated user stuck banned. Salesforce `Active__c` is the source of truth — a persistent ban failure still applies the SF change and returns `supabaseBanFailed: true`.
 - A Super Admin **cannot deactivate themselves** → 400 `CANNOT_DEACTIVATE_SELF`.
 
 **Response (200):** `{ "success": true, "id": "a0X..." }`

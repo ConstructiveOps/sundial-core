@@ -7,10 +7,12 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [x] `sundial-user-admin` Lambda — GET/POST `/admin/users`, PATCH `/admin/users/{id}`; Super-Admin-gated, tenant-scoped, fail-safe create + compensating delete, Supabase ban on deactivate, self-deactivation guard
 - [x] `scripts/wire-user-admin-routes.ps1` (mirrors corrected budget wire script)
 - [x] Docs: `api-endpoints.md` Admin section; DECISIONS.md D-044
-- [!] **Create the `sundial-user-admin` Lambda function** (Node 22 / arm64 / us-west-1 / role `sundial-lambda-execution-role` / 30 s / 256 MB) — deploy.ps1 can't create it
-- [ ] Deploy `sundial-user-admin` (`.\deploy.ps1 sundial-user-admin`) after the function exists
-- [ ] Run `scripts/wire-user-admin-routes.ps1` against the prod gateway (needs go-ahead — live change; requires apigateway write + `lambda:AddPermission`)
-- [~] Verify end-to-end with a Super-Admin token (list/create/patch, 403 for non-super-admin, `USER_INACTIVE` on deactivated user's `/auth/me`)
+- [x] **Create the `sundial-user-admin` Lambda function** (Node 22 / arm64 / us-west-1 / role `sundial-lambda-execution-role` / 30 s / 256 MB)
+- [x] Deploy `sundial-user-admin` (`.\deploy.ps1 sundial-user-admin`)
+- [x] Run `scripts/wire-user-admin-routes.ps1` against the prod gateway (routes live)
+- [x] Verify end-to-end with a Super-Admin token — GET/POST/PATCH, 403 for non-super-admin, `USER_INACTIVE` on deactivated user's `/auth/me`, self-deactivation + `FIELD_NOT_ALLOWED` guards, compensating auth-user delete on SF failure
+- [x] Invite `redirectTo` → `<PORTAL_BASE_URL>/reset-password` (env var, defaults to `https://harmon-crm.vercel.app`); **at go-live set `PORTAL_BASE_URL` to Harmon's real domain**
+- [x] Ban/unban retry-hardened (`setSupabaseBan`, 3× backoff); flow logic re-verified with fresh login (deployed-API re-verify skipped per Tim)
 - [ ] Frontend (harmon-crm, separate): the Manage Users surface, gated on `superAdmin`
 
 ## Portal Access Model (D-043)

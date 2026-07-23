@@ -138,6 +138,29 @@ async function handleList(identity, cors) {
   return jsonResponse(200, cors, { users });
 }
 
+// Apply (or clear) a Supabase auth ban, with a small retry. A TRANSIENT failure
+// here must not leave a deactivated user un-banned, or — worse — a REACTIVATED user
+// stuck banned (SF says Active but login fails). ban_duration "none" clears the ban;
+// a duration string applies one. Persistent failure is non-fatal (SF Active__c is
+// the source of truth) but surfaced to the caller via supabaseBanFailed.
+async function setSupabaseBan(supabase, uid, banDuration) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const { error } = await supabase.auth.admin.updateUserById(uid, {
+        ban_duration: banDuration,
+      });
+      if (!error) return { ok: true };
+      lastErr = error.message;
+    } catch (e) {
+      lastErr = e?.message || String(e);
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 250 * attempt));
+  }
+  console.error(`supabase ban/unban failed after retries (ban_duration=${banDuration}):`, lastErr);
+  return { ok: false, error: lastErr };
+}
+
 // Find an existing Supabase auth user by email (case-insensitive). supabase-js admin
 // has no getUserByEmail; listUsers is paginated — fine at Harmon's user scale. Used
 // to REUSE an auth user after a partial failure instead of erroring.
@@ -409,19 +432,9 @@ async function handleUpdate(identity, event, cors) {
   // failure does NOT fail the request — SF already changed; we flag it.
   let supabaseBanFailed = false;
   if (activeChange !== null && uid) {
-    try {
-      const supabase = await getSupabaseClient();
-      const { error } = await supabase.auth.admin.updateUserById(uid, {
-        ban_duration: activeChange ? "none" : BAN_DURATION,
-      });
-      if (error) {
-        supabaseBanFailed = true;
-        console.error("supabase ban/unban failed:", error.message);
-      }
-    } catch (e) {
-      supabaseBanFailed = true;
-      console.error("supabase ban/unban threw:", e?.message || String(e));
-    }
+    const supabase = await getSupabaseClient();
+    const res = await setSupabaseBan(supabase, uid, activeChange ? "none" : BAN_DURATION);
+    supabaseBanFailed = !res.ok;
   }
 
   const resp = { success: true, id: recordId };

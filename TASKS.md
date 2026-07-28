@@ -2,6 +2,16 @@
 
 Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
+## List pagination + cache backfill (fix: "exactly 50" bug, 2026-07-28)
+
+- [x] `sfQuery` follows `nextRecordsUrl` to exhaustion (`lib/salesforce.js`) — removes the silent 2000-row truncation on every read
+- [x] `sundial-sf-query` list endpoint: real server-side pagination (`limit`≤500 + `offset`, exact `total`, `hasMore`, stable `sf_id` order, per-page refresh); deployed
+- [x] `sundial-cache-sync` full-resync mode (`{ "mode": "full" }`), per-run LIMIT removed; function raised to 900 s / 1024 MB; deployed
+- [x] Backfill run + verified: customer 31,948 & solar 4,545 caches now match Salesforce; paginated API verified live
+- [ ] **Frontend (harmon-crm, separate session):** send `limit`/`offset`, consume `total`/`hasMore`, add pager or load-more; boards fetch per-stage counts + lazy-load cards (must NOT pull 40k); Dashboard use aggregates not a 50-row page. See the bug report for the exact file/line changes.
+- [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param, EventBridge schedule for incremental `sundial-cache-sync`
+
+
 ## User Management Backend (D-044)
 
 - [x] `sundial-user-admin` Lambda — GET/POST `/admin/users`, PATCH `/admin/users/{id}`; Super-Admin-gated, tenant-scoped, fail-safe create + compensating delete, Supabase ban on deactivate, self-deactivation guard

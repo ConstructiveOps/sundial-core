@@ -90,19 +90,24 @@ See DECISIONS.md D-043 for the access model.
 **Path parameters:**
 - `{object}` — short Sundial object name resolved through a fixed allowlist (Phase 1: `solar`, `customer`, `roofing`, `po`, `user`). Off-allowlist values are rejected with `400 OBJECT_NOT_ALLOWED`. See DECISIONS.md D-035 for the allowlist → Salesforce object → cache table mapping.
 
-**Query string parameters (typical):**
-- `status` — Filter by Status__c picklist value
-- `stage` — Filter by Stage__c picklist value
-- `salesRepId` — Filter by Sales_Rep__c lookup
-- `limit` — Max results (default 50, max 200)
-- `offset` — Pagination offset
-- `forceFresh` — Boolean, if `true` bypasses cache and reads directly from Salesforce
+**Query string parameters:**
+- `limit` — Page size (default 50, **max 500**). This is the size of ONE page, not a cap on the dataset — use `offset` to page through everything.
+- `offset` — Start row for the page (default 0). Server-side paginated: the response includes `total` (exact count of all matching rows) and `hasMore`.
+- `field` / `value` — Optional single-field filter (string/picklist; a numeric/boolean value may error). A `Client__c` filter from the caller is ignored — tenant scoping is forced.
+- `forceFresh` — reserved (not yet honored on the list path).
+
+**Paged response shape:**
+```json
+{ "source": "cache", "count": 50, "total": 31948, "limit": 50, "offset": 0, "hasMore": true, "records": [ ... ] }
+```
+- `count` = rows in THIS page; `total` = all matching rows across pages; `hasMore` = `offset + count < total`.
+- Rows are returned in a **stable `sf_id` order** so paging never shifts rows as they are re-synced. Only the rows on the requested page are freshness-checked/refreshed — a read never scans the whole table.
 
 **Tenant scoping:** Always enforced via the authenticated user's Client__c context — the Salesforce Client record ID resolved from the verified token (`resolveIdentity` → `tenantId`). The cache is filtered on `client_sf_id`; Salesforce is filtered on `Client__c = '<tenantId>'`. The tenant slug is a label only and is never used for isolation. No request input can set or override the tenant. See DECISIONS.md D-035.
 
-**Implementation status:** Built, deployed, and verified end to end against the live org. Cache miss falls through to Salesforce and writes back; an immediate repeat serves `source: "cache"`.
+**Implementation status:** Built, deployed, and verified end to end against the live org (31,948-row customer set paged correctly with `total`). Cache miss falls through to Salesforce and writes back; an immediate repeat serves `source: "cache"`.
 
-> **Known limitation (deferred):** the list read currently treats any non-empty tenant cache result as authoritative and does not re-check Salesforce for completeness, so a partially-populated cache can return an incomplete list. The optional `?field=&value=` filter quotes the value as a string (works for text/picklist; a numeric/boolean filter can error).
+> **Cache completeness:** the cache is kept complete by `sundial-cache-sync` (incremental on a schedule; **full resync** via `{ "mode": "full" }` after a bulk load — see below). The shared `sfQuery` follows the Salesforce query locator (`nextRecordsUrl`) to exhaustion, so neither the sync nor a Salesforce fallback is silently truncated at the 2000-row REST page limit.
 
 #### `GET /sf/{object}/{id}`
 

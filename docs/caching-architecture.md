@@ -85,6 +85,23 @@ For non-real-time cache maintenance:
 - **Cross-tenant operations:** When a schema change requires cache rebuild across all clients, EventBridge orchestrates the rollout.
 - **Retry queue:** Failed cache updates land in an SQS dead-letter queue; EventBridge triggers retry Lambdas on a schedule.
 
+### `sundial-cache-sync` — incremental sync + manual full resync
+
+The `sundial-cache-sync` Lambda keeps the cache current. Two modes:
+
+- **Incremental (default):** queries `WHERE SystemModstamp > <per-object watermark>` (bounded first-run lookback of 24h), ordered ascending, and advances the watermark to the batch's max modstamp. Meant for the EventBridge schedule. Suitable for an empty event `{}` (all objects) or `{ "object": "solar" }` (one).
+- **Full resync:** `{ "mode": "full" }` (optionally `+ "object"`) ignores the watermark window and pulls **every** record for the object(s). Use it to **backfill after a bulk data load** whose records fall outside the incremental window, or whenever a cache count has drifted below Salesforce. Idempotent (upsert on `sf_id`) — safe to re-run.
+
+Both modes follow the Salesforce query locator (`nextRecordsUrl`) to exhaustion via the shared `sfQuery`, so a single run captures the whole result set — there is **no** 2000-row-per-run cap, and records that share a `SystemModstamp` can't be split across a REST page boundary and partially skipped.
+
+**Run a full resync (AWS CLI):**
+```
+aws lambda invoke --function-name sundial-cache-sync --region us-west-1 \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"object":"customer","mode":"full"}' out.json
+```
+The function is provisioned at **900 s / 1024 MB** so a large object (tens of thousands of rows) completes in one invoke. The response reports `{ processed, fetched, newWatermark, mode }` per object. (Verified 2026-07-28: a 31,948-row customer backfill completed in ~27 s.)
+
 ---
 
 ## Cache Invalidation Strategy

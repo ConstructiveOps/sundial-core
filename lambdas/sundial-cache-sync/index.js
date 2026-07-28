@@ -6,9 +6,22 @@
 // DIRECTLY in Salesforce — changes the read-time freshness path can't catch for
 // records nobody happens to view.
 //
-// v1 SCOPE: CHANGED and NEW records only. DELETE-DETECTION IS DEFERRED — a record
-// deleted in Salesforce is NOT removed from the cache by this job (a future v2
-// reconciliation pass, or the read-time single-record 404 path, handles that).
+// MODES:
+//   - incremental (default): CHANGED and NEW records since the per-object
+//     SystemModstamp watermark (bounded first-run lookback). Meant for the
+//     EventBridge schedule.
+//   - full resync: invoke with { "mode": "full" } (optionally + { "object": ... })
+//     to ignore the watermark window and pull EVERY record for the object(s).
+//     Use this to backfill after a bulk data load whose records fall outside the
+//     incremental window, or whenever the cache count has drifted below Salesforce.
+//     Idempotent (upsert on sf_id) — safe to re-run.
+//
+// Both modes now follow the Salesforce query locator to exhaustion (via sfQuery),
+// so a single run captures the whole result set rather than one 2000-row page.
+//
+// DELETE-DETECTION IS DEFERRED — a record deleted in Salesforce is NOT removed
+// from the cache by this job (a future v2 reconciliation pass, or the read-time
+// single-record 404 path, handles that).
 //
 // TENANT CORRECTNESS: the Salesforce query is intentionally CROSS-TENANT (no
 // Client__c filter) BY DESIGN — the job refreshes every tenant. Each row is then
@@ -43,9 +56,6 @@ const SF_API_VERSION = "v60.0";
 
 // --- Sync tuning -----------------------------------------------------------
 const SYNC_STATE_TABLE = "sundial_sync_state";
-// Max records pulled per object per run. A batch that fills this is fine for v1:
-// the watermark advances to the last processed record, and the next run continues.
-const BATCH_LIMIT = 2000;
 // First-run backstop when an object has no stored watermark: only look back this
 // far, so the first run is bounded (not an unbounded full-history scan). Chosen
 // value: 24h. Trade-off noted in the runbook — records changed longer ago than
@@ -224,7 +234,14 @@ async function writeSyncState(supabase, objectKey, { modstamp, status, count }) 
 }
 
 // --- Per-object sync -------------------------------------------------------
-async function syncObject(supabase, objectKey) {
+// full=false (default): incremental — only records changed since the watermark
+//   (or the bounded first-run lookback).
+// full=true: FULL RESYNC — ignores the incremental window entirely and pulls
+//   EVERY record for the object. Use this to backfill after a bulk load whose
+//   records fall outside the incremental window, or whenever the cache count has
+//   drifted below Salesforce. Still cross-tenant; each row's own Client__c drives
+//   its cache tenant. Idempotent (upsert on sf_id), so it's safe to re-run.
+async function syncObject(supabase, objectKey, { full = false } = {}) {
   const entry = OBJECT_ALLOWLIST[objectKey];
   const columnSet = await getCacheColumns(entry.cacheTable);
 
@@ -263,16 +280,23 @@ async function syncObject(supabase, objectKey) {
 
   // CROSS-TENANT system query — NO Client__c filter BY DESIGN. Each record still
   // carries its own Client__c, which drives its cache row's tenant below.
-  const soql =
-    `SELECT ${syncSelectList} FROM ${entry.sfObject} ` +
-    `WHERE SystemModstamp > ${watermarkIso} ` +
-    `ORDER BY SystemModstamp ASC ` +
-    `LIMIT ${BATCH_LIMIT}`;
+  //
+  // NO SOQL LIMIT in either mode: sfQuery follows nextRecordsUrl to exhaustion, so
+  // a single run captures the WHOLE result set (all ~40k on a full resync, or the
+  // entire changed window on an incremental run). This removes the old 2000-per-run
+  // cap AND the tie bug where >2000 records sharing one SystemModstamp could be
+  // split across a page boundary and partially skipped by the "> watermark" cursor.
+  //   - full:        every record for the object (ignores the window).
+  //   - incremental: only records changed since the watermark / first-run lookback.
+  const soql = full
+    ? `SELECT ${syncSelectList} FROM ${entry.sfObject} ORDER BY SystemModstamp ASC`
+    : `SELECT ${syncSelectList} FROM ${entry.sfObject} ` +
+      `WHERE SystemModstamp > ${watermarkIso} ORDER BY SystemModstamp ASC`;
   const records = await sfQuery(soql);
 
   if (!records || records.length === 0) {
     await writeSyncState(supabase, objectKey, { modstamp: null, status: "ok", count: 0 });
-    return { processed: 0, skipped: 0, newWatermark: watermarkIso, status: "ok" };
+    return { processed: 0, skipped: 0, fetched: 0, newWatermark: watermarkIso, status: "ok", mode: full ? "full" : "incremental" };
   }
 
   // Max SystemModstamp across ALL returned records (incl. skipped null-tenant
@@ -350,9 +374,10 @@ async function syncObject(supabase, objectKey) {
     return {
       processed: valid.length,
       skipped,
+      fetched: records.length,
       newWatermark,
       status: "ok",
-      batchFull: records.length >= BATCH_LIMIT,
+      mode: full ? "full" : "incremental",
     };
   }
 
@@ -412,10 +437,17 @@ export const handler = async (event) => {
     objectKeys = Object.keys(OBJECT_ALLOWLIST);
   }
 
+  // FULL RESYNC toggle: { "mode": "full" } (or { "full": true }) ignores the
+  // incremental watermark window and pulls EVERY record for each selected object.
+  // Combine with { "object": "customer" } to full-resync one object. Safe to
+  // re-run (idempotent upserts). Absent this flag, runs are incremental as before.
+  const full = event?.mode === "full" || event?.full === true;
+  summary.mode = full ? "full" : "incremental";
+
   // Per-object try/catch so one object's failure doesn't abort the rest.
   for (const objectKey of objectKeys) {
     try {
-      summary.objects[objectKey] = await syncObject(supabase, objectKey);
+      summary.objects[objectKey] = await syncObject(supabase, objectKey, { full });
     } catch (e) {
       const msg = e?.message || String(e);
       console.error(`cache-sync: object ${objectKey} failed:`, msg);

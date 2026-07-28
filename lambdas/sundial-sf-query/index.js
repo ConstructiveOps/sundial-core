@@ -47,8 +47,13 @@ const OBJECT_ALLOWLIST = {
 };
 
 const SF_API_VERSION = "v60.0";
+// List pagination. The client sends ?limit= & ?offset= (both optional). limit is
+// the PAGE SIZE (not a cap on the dataset) — real server-side paging returns a
+// `total` so the frontend can render a pager / load-more. Defaults keep a small
+// first page; MAX_LIMIT bounds any single page so a caller can't ask for 40k rows
+// in one request (that's what paging is for).
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 200;
+const MAX_LIMIT = 500;
 
 // --- Read-time cache freshness ---------------------------------------------
 // A cache row is trustworthy on read only if BOTH: is_stale is false/null AND it
@@ -509,14 +514,23 @@ async function handleSingleRead(ctx) {
   return jsonResponse(200, cors, { source: "salesforce", record: mapped });
 }
 
-// --- LIST read -------------------------------------------------------------
+// --- LIST read (server-side paginated) -------------------------------------
+// Cache-first, tenant-scoped, PAGED. Inputs: ?limit= (page size, bounded by
+// MAX_LIMIT) & ?offset= (start row). Returns a page PLUS the exact `total` across
+// all pages so the frontend can render a pager / load-more. Stable ORDER BY sf_id
+// means paging never shifts rows as they are re-synced. Only the rows ON THE PAGE
+// are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
+// table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
   const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, qs, cors } =
     ctx;
 
+  // Pagination inputs. limit = PAGE SIZE (not a dataset cap); offset = start row.
   let limit = parseInt(qs.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = DEFAULT_LIMIT;
   if (limit > MAX_LIMIT) limit = MAX_LIMIT;
+  let offset = parseInt(qs.offset, 10);
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
 
   const { fields } = await getQueryableFields(sfObject);
   const { selectFields, selectList } = buildCacheSelect(fields, columnSet);
@@ -547,152 +561,174 @@ async function handleListRead(ctx) {
     }
   }
 
-  // b. Cache-first candidate fetch. TENANT FILTER: .eq("client_sf_id", tenantId).
-  //    We intentionally do NOT filter is_stale here — stale rows must be IN the
-  //    candidate set so we can refresh them. Freshness is decided in code (d).
+  // b. Cache-first PAGED fetch WITH exact total. TENANT FILTER: client_sf_id.
+  //    - count:"exact" returns the FULL matching total regardless of .range().
+  //    - ORDER BY sf_id (stable): re-syncing a row changes last_synced_at but not
+  //      sf_id, so a row can't jump between pages (the old last_synced_at ordering
+  //      would reshuffle pages on every refresh — dup/skip under pagination).
+  //    - is_stale is NOT filtered: stale rows stay on the page and get refreshed.
   let cq = supabase
     .from(cacheTable)
-    .select("*")
+    .select("*", { count: "exact" })
     .eq("client_sf_id", tenantId);
   if (filterColumn && columnSet.has(filterColumn)) {
     cq = cq.eq(filterColumn, filterValue);
   }
-  cq = cq.order("last_synced_at", { ascending: false }).limit(limit);
-  const { data: candidateRows, error: cacheErr } = await cq;
+  cq = cq.order("sf_id", { ascending: true }).range(offset, offset + limit - 1);
+  const { data: pageRows, count: total, error: cacheErr } = await cq;
   if (cacheErr) console.error("cache read error (list):", cacheErr.message);
 
-  // c. Empty cache for this tenant -> existing FULL Salesforce fallback + populate
-  //    (behavior unchanged). TENANT FILTER: Client__c = '<escaped tenantId>'.
-  if (!candidateRows || candidateRows.length === 0) {
-    let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
-    if (filterFieldName) {
-      where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
-    }
-    const soql = `SELECT ${selectList} FROM ${sfObject} WHERE ${where} LIMIT ${limit}`;
-    const sfRecords = await sfQuery(soql);
+  // c. Cold cache for this tenant/object (nothing cached yet) -> page-aware SF
+  //    fallback + populate. Rare now that cache-sync's full resync backfills, but
+  //    kept so a brand-new tenant/object still returns data.
+  if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
+    return await listColdCacheFallback({
+      supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, cors,
+      selectFields, selectList, filterFieldName, filterValue, limit, offset,
+    });
+  }
 
-    const now = new Date().toISOString();
-    const mappedRows = (sfRecords || []).map((rec) =>
-      mapSfRecordToCacheRow(rec, selectFields, columnSet, {
-        tenantId,
-        tenantSlug,
-        now,
-        // Cache was empty for this tenant -> first-population rows -> version 1.
-        cacheVersion: 1,
-      })
+  // d. Partition ONLY THIS PAGE into fresh vs stale per the single freshness rule.
+  const nowMs = Date.now();
+  const freshBySfId = new Map();
+  const staleRows = [];
+  for (const row of pageRows) {
+    if (isRowFresh(row, nowMs)) freshBySfId.set(row.sf_id, row);
+    else staleRows.push(row);
+  }
+
+  // e. Refresh ONLY this page's stale rows from Salesforce, by Id, tenant-scoped
+  //    (chunked). A stale id NOT returned by Salesforce was deleted/moved tenant.
+  const refreshedBySfId = new Map();
+  const deletedIds = [];
+  if (staleRows.length > 0) {
+    const staleIds = staleRows.map((r) => r.sf_id).filter(Boolean);
+    const versionBySfId = new Map(
+      staleRows.map((r) => [r.sf_id, r.cache_version ?? 0])
     );
+    const nowIso = new Date().toISOString();
 
-    if (mappedRows.length > 0) {
+    const refetched = await refetchByIds({ sfObject, selectList, tenantId, ids: staleIds });
+    const refetchedById = new Map(refetched.map((rec) => [rec.Id, rec]));
+
+    const refreshedRows = [];
+    for (const sfId of staleIds) {
+      const rec = refetchedById.get(sfId);
+      if (!rec) { deletedIds.push(sfId); continue; } // deleted in SF
+      const mapped = mapSfRecordToCacheRow(rec, selectFields, columnSet, {
+        tenantId, tenantSlug, now: nowIso,
+        cacheVersion: (versionBySfId.get(sfId) ?? 0) + 1,
+      });
+      refreshedRows.push(mapped);
+      refreshedBySfId.set(sfId, mapped);
+    }
+
+    // Write refreshed rows back (best-effort — a cache-write failure != read fail).
+    if (refreshedRows.length > 0) {
       try {
         const { error: upErr } = await supabase
           .from(cacheTable)
-          .upsert(mappedRows, { onConflict: "sf_id" });
-        if (upErr) console.error("cache upsert error (list):", upErr.message);
+          .upsert(refreshedRows, { onConflict: "sf_id" });
+        if (upErr) console.error("cache upsert error (list refresh):", upErr.message);
       } catch (e) {
-        console.error("cache upsert threw (list):", e?.message || String(e));
+        console.error("cache upsert threw (list refresh):", e?.message || String(e));
       }
     }
 
-    return jsonResponse(200, cors, {
-      source: "salesforce",
-      count: mappedRows.length,
-      records: mappedRows,
-    });
+    // Delete-detection: orphaned cache rows (gone from SF), tenant-scoped, best-effort.
+    if (deletedIds.length > 0) {
+      try {
+        const { error: delErr } = await supabase
+          .from(cacheTable)
+          .delete()
+          .eq("client_sf_id", tenantId)
+          .in("sf_id", deletedIds);
+        if (delErr) console.error("cache delete error (list refresh):", delErr.message);
+      } catch (e) {
+        console.error("cache delete threw (list refresh):", e?.message || String(e));
+      }
+    }
   }
 
-  // d. Partition candidates into fresh vs stale per the single freshness rule.
-  const nowMs = Date.now();
-  const freshRows = [];
-  const staleRows = [];
-  for (const row of candidateRows) {
-    (isRowFresh(row, nowMs) ? freshRows : staleRows).push(row);
+  // f. Rebuild the page IN STABLE sf_id ORDER: fresh rows as-is, stale rows
+  //    replaced by their refreshed version, deleted rows dropped. Order comes from
+  //    the paged query (never reordered by refresh), so pages stay consistent.
+  const deletedSet = new Set(deletedIds);
+  const records = [];
+  for (const row of pageRows) {
+    if (deletedSet.has(row.sf_id)) continue;
+    records.push(refreshedBySfId.get(row.sf_id) || freshBySfId.get(row.sf_id) || row);
   }
 
-  // e. All fresh -> serve from cache exactly as before.
-  if (staleRows.length === 0) {
-    return jsonResponse(200, cors, {
-      source: "cache",
-      count: freshRows.length,
-      records: freshRows,
-    });
-  }
-
-  // f. Surgically re-fetch ONLY the stale rows from Salesforce, by Id, tenant-
-  //    scoped (chunked). Each stale row's current cache_version came back with
-  //    the candidate fetch, so we bump versions without an extra query.
-  const staleIds = staleRows.map((r) => r.sf_id).filter(Boolean);
-  const versionBySfId = new Map(
-    staleRows.map((r) => [r.sf_id, r.cache_version ?? 0])
-  );
-  const nowIso = new Date().toISOString();
-
-  const refetched = await refetchByIds({
-    sfObject,
-    selectList,
-    tenantId,
-    ids: staleIds,
+  const adjustedTotal = Math.max(0, (total ?? records.length) - deletedIds.length);
+  const source = staleRows.length === 0 ? "cache" : "cache+salesforce";
+  return jsonResponse(200, cors, {
+    source,
+    count: records.length, // rows in THIS page (backward compatible)
+    total: adjustedTotal, // total matching rows across ALL pages (for the pager)
+    limit,
+    offset,
+    hasMore: offset + records.length < adjustedTotal,
+    records,
   });
-  const refetchedById = new Map(refetched.map((rec) => [rec.Id, rec]));
+}
 
-  // Map refreshed records -> cache rows (bump cache_version). A stale id NOT
-  // returned by Salesforce was DELETED (or moved tenant) -> dropped here so we
-  // never return a record that no longer exists.
-  const refreshedRows = [];
-  for (const sfId of staleIds) {
-    const rec = refetchedById.get(sfId);
-    if (!rec) continue; // deleted in SF -> drop from results
-    refreshedRows.push(
-      mapSfRecordToCacheRow(rec, selectFields, columnSet, {
-        tenantId,
-        tenantSlug,
-        now: nowIso,
-        cacheVersion: (versionBySfId.get(sfId) ?? 0) + 1,
-      })
-    );
+// Cold-cache list fallback: the tenant/object has nothing cached yet. Return the
+// requested PAGE straight from Salesforce (page-aware) plus an exact COUNT() total,
+// and populate the page's rows into the cache. Salesforce caps SOQL OFFSET at 2000,
+// so a deep offset on a cold cache is clamped — the cache-sync full resync is the
+// real fix for large sets, after which this path stops being hit.
+async function listColdCacheFallback(ctx) {
+  const {
+    supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, cors,
+    selectFields, selectList, filterFieldName, filterValue, limit, offset,
+  } = ctx;
+
+  let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
+  if (filterFieldName) {
+    where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
   }
 
-  // g. Write refreshed rows back (last_synced_at=now, is_stale=false, version
-  //    bumped — all set by mapSfRecordToCacheRow). Best-effort: a cache-write
-  //    failure must NOT fail the read.
-  if (refreshedRows.length > 0) {
+  // Exact total for the pager (aggregate COUNT(Id) returns one row {c:N}).
+  let total = 0;
+  try {
+    const cnt = await sfQuery(`SELECT COUNT(Id) c FROM ${sfObject} WHERE ${where}`);
+    total = Number(cnt?.[0]?.c ?? cnt?.[0]?.expr0 ?? 0) || 0;
+  } catch (e) {
+    console.error("cold-cache count error:", e?.message || String(e));
+  }
+
+  const sfOffset = Math.min(offset, 2000); // SOQL OFFSET hard cap
+  const soql =
+    `SELECT ${selectList} FROM ${sfObject} WHERE ${where} ` +
+    `ORDER BY Id ASC LIMIT ${limit} OFFSET ${sfOffset}`;
+  const sfRecords = await sfQuery(soql);
+
+  const now = new Date().toISOString();
+  const mappedRows = (sfRecords || []).map((rec) =>
+    mapSfRecordToCacheRow(rec, selectFields, columnSet, {
+      tenantId, tenantSlug, now, cacheVersion: 1,
+    })
+  );
+  if (mappedRows.length > 0) {
     try {
       const { error: upErr } = await supabase
         .from(cacheTable)
-        .upsert(refreshedRows, { onConflict: "sf_id" });
-      if (upErr) console.error("cache upsert error (list refresh):", upErr.message);
+        .upsert(mappedRows, { onConflict: "sf_id" });
+      if (upErr) console.error("cache upsert error (list cold):", upErr.message);
     } catch (e) {
-      console.error("cache upsert threw (list refresh):", e?.message || String(e));
+      console.error("cache upsert threw (list cold):", e?.message || String(e));
     }
   }
-
-  // h. Delete-detection: stale ids Salesforce did NOT return are gone. They're
-  //    already dropped from the results; best-effort remove the orphaned cache
-  //    rows too. TENANT-SCOPED delete (isolation preserved).
-  const deletedIds = staleIds.filter((sfId) => !refetchedById.has(sfId));
-  if (deletedIds.length > 0) {
-    try {
-      const { error: delErr } = await supabase
-        .from(cacheTable)
-        .delete()
-        .eq("client_sf_id", tenantId)
-        .in("sf_id", deletedIds);
-      if (delErr) console.error("cache delete error (list refresh):", delErr.message);
-    } catch (e) {
-      console.error("cache delete threw (list refresh):", e?.message || String(e));
-    }
-  }
-
-  // i. Merge fresh + refreshed, newest last_synced_at first.
-  const merged = [...freshRows, ...refreshedRows].sort((a, b) => {
-    const ta = a.last_synced_at ? Date.parse(a.last_synced_at) : 0;
-    const tb = b.last_synced_at ? Date.parse(b.last_synced_at) : 0;
-    return tb - ta;
-  });
 
   return jsonResponse(200, cors, {
-    source: "cache+salesforce",
-    count: merged.length,
-    records: merged,
+    source: "salesforce",
+    count: mappedRows.length,
+    total,
+    limit,
+    offset,
+    hasMore: offset + mappedRows.length < total,
+    records: mappedRows,
   });
 }
 

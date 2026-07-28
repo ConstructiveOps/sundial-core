@@ -54,6 +54,29 @@ const OBJECT_ALLOWLIST = {
 
 const SF_API_VERSION = "v60.0";
 
+// Ordered list of Salesforce fields that populate each object's `created_date`
+// cache column (the list-ordering key: newest first) — the FIRST non-empty value
+// wins (a COALESCE). Most objects use the standard CreatedDate; Solar prefers
+// Contract_Date__c and falls back to CreatedDate (3,025 of 4,545 solar rows have no
+// Contract_Date__c). Only applied when the cache table has a `created_date` column.
+const CREATED_DATE_SOURCE = {
+  solar: ["Contract_Date__c", "CreatedDate"],
+  customer: ["CreatedDate"],
+  roofing: ["CreatedDate"],
+  po: ["CreatedDate"],
+  user: ["CreatedDate"],
+};
+const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
+
+// First non-empty source value for a record (the COALESCE), or null.
+function resolveCreatedDate(record, sources) {
+  for (const name of sources || []) {
+    const v = record[name];
+    if (v != null && v !== "") return v;
+  }
+  return null;
+}
+
 // --- Sync tuning -----------------------------------------------------------
 const SYNC_STATE_TABLE = "sundial_sync_state";
 // First-run backstop when an object has no stored watermark: only look back this
@@ -141,8 +164,12 @@ function sfFieldToColumn(field) {
   return base;
 }
 
-// Select ONLY cache-backed fields (+ Id + Client__c, always retained).
-function buildCacheSelect(fields, columnSet) {
+// Select ONLY cache-backed fields (+ Id + Client__c, always retained). When the
+// cache table has a `created_date` column, also force-include EVERY created-date
+// source field (e.g. Contract_Date__c, CreatedDate) — their own sfFieldToColumn
+// names aren't cache columns, so they wouldn't otherwise be selected, but the
+// mapper reads them to populate created_date (first non-empty wins).
+function buildCacheSelect(fields, columnSet, createdDateSources) {
   const REQUIRED = new Set(["Id", "Client__c"]);
   const selectFields = fields.filter(
     (f) => REQUIRED.has(f.name) || columnSet.has(sfFieldToColumn(f))
@@ -151,6 +178,18 @@ function buildCacheSelect(fields, columnSet) {
     if (!selectFields.some((f) => f.name === name)) {
       const orig = fields.find((f) => f.name === name);
       if (orig) selectFields.push(orig);
+    }
+  }
+  if (Array.isArray(createdDateSources) && columnSet.has("created_date")) {
+    for (const srcName of createdDateSources) {
+      const already = selectFields.some(
+        (f) => f.name.toLowerCase() === srcName.toLowerCase()
+      );
+      if (already) continue;
+      const src = fields.find(
+        (f) => f.name.toLowerCase() === srcName.toLowerCase()
+      );
+      if (src) selectFields.push(src);
     }
   }
   return {
@@ -174,6 +213,13 @@ function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
   row.sf_id = record.Id;
   if (columnSet.has("tenant_id")) row.tenant_id = ctx.tenantSlug ?? null;
   row.client_sf_id = ctx.tenantId; // isolation key (per-record)
+  // List-ordering key: created_date = first non-empty source value (COALESCE of
+  // e.g. Contract_Date__c, CreatedDate). Always written when the column exists
+  // (null when all sources empty) so a batch's column set is consistent and a
+  // refresh upsert never clobbers a sibling row via an inconsistent column set.
+  if (columnSet.has("created_date")) {
+    row.created_date = resolveCreatedDate(record, ctx.createdDateSources);
+  }
   if (columnSet.has("last_synced_at")) row.last_synced_at = ctx.now;
   if (columnSet.has("is_stale")) row.is_stale = false;
   if (ctx.cacheVersion != null && columnSet.has("cache_version")) {
@@ -256,8 +302,10 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
     return { processed: 0, newWatermark: null, status };
   }
 
+  const createdDateSources =
+    CREATED_DATE_SOURCE[objectKey] ?? DEFAULT_CREATED_DATE_SOURCE;
   const { fields } = await getQueryableFields(entry.sfObject);
-  const { selectFields } = buildCacheSelect(fields, columnSet);
+  const { selectFields } = buildCacheSelect(fields, columnSet, createdDateSources);
 
   // Sync SELECT = cache-backed fields + SystemModstamp (watermark) + Client__r.Name
   // (tenant slug for the tenant_id column). Dedupe so nothing is selected twice.
@@ -338,6 +386,7 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
       tenantSlug: rec.Client__r?.Name ?? null, // human label only
       now: nowIso,
       cacheVersion: hasVersion ? (versionMap.get(rec.Id) ?? 0) + 1 : null,
+      createdDateSources,
     })
   );
 

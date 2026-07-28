@@ -47,6 +47,30 @@ const OBJECT_ALLOWLIST = {
 };
 
 const SF_API_VERSION = "v60.0";
+
+// Ordered source fields that populate each object's `created_date` cache column —
+// the list-ordering key (newest first). FIRST non-empty value wins (a COALESCE):
+// Solar prefers Contract_Date__c, falling back to CreatedDate; others use the
+// standard CreatedDate. Mirrors sundial-cache-sync. Only used when the cache table
+// has a `created_date` column.
+const CREATED_DATE_SOURCE = {
+  solar: ["Contract_Date__c", "CreatedDate"],
+  customer: ["CreatedDate"],
+  roofing: ["CreatedDate"],
+  po: ["CreatedDate"],
+  user: ["CreatedDate"],
+};
+const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
+
+// First non-empty source value for a record (the COALESCE), or null.
+function resolveCreatedDate(record, sources) {
+  for (const name of sources || []) {
+    const v = record[name];
+    if (v != null && v !== "") return v;
+  }
+  return null;
+}
+
 // List pagination. The client sends ?limit= & ?offset= (both optional). limit is
 // the PAGE SIZE (not a cap on the dataset) — real server-side paging returns a
 // `total` so the frontend can render a pager / load-more. Defaults keep a small
@@ -315,7 +339,7 @@ function sfFieldToColumn(field) {
 //     and then dropped, and
 //   - the SELECT tracks the (narrow) cache schema, so an object's total field
 //     count no longer matters — nothing is truncated by an arbitrary cap.
-function buildCacheSelect(fields, columnSet) {
+function buildCacheSelect(fields, columnSet, createdDateSources) {
   const REQUIRED = new Set(["Id", "Client__c"]);
   const selectFields = fields.filter(
     (f) => REQUIRED.has(f.name) || columnSet.has(sfFieldToColumn(f))
@@ -325,6 +349,21 @@ function buildCacheSelect(fields, columnSet) {
     if (!selectFields.some((f) => f.name === name)) {
       const orig = fields.find((f) => f.name === name);
       if (orig) selectFields.push(orig);
+    }
+  }
+  // When the cache has a `created_date` column, also select EVERY source field
+  // (Contract_Date__c / CreatedDate) so the mapper can populate created_date — their
+  // own sfFieldToColumn names aren't cache columns, so they aren't selected above.
+  if (Array.isArray(createdDateSources) && columnSet.has("created_date")) {
+    for (const srcName of createdDateSources) {
+      const already = selectFields.some(
+        (f) => f.name.toLowerCase() === srcName.toLowerCase()
+      );
+      if (already) continue;
+      const src = fields.find(
+        (f) => f.name.toLowerCase() === srcName.toLowerCase()
+      );
+      if (src) selectFields.push(src);
     }
   }
   return {
@@ -347,6 +386,12 @@ function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
   row.sf_id = record.Id;
   if (columnSet.has("tenant_id")) row.tenant_id = ctx.tenantSlug ?? null;
   row.client_sf_id = ctx.tenantId; // isolation key
+  // List-ordering key: created_date = first non-empty source value (COALESCE of
+  // e.g. Contract_Date__c, CreatedDate). Always written when the column exists so a
+  // refresh upsert never clobbers a sibling row via an inconsistent column set.
+  if (columnSet.has("created_date")) {
+    row.created_date = resolveCreatedDate(record, ctx.createdDateSources);
+  }
   if (columnSet.has("last_synced_at")) row.last_synced_at = ctx.now;
   if (columnSet.has("is_stale")) row.is_stale = false;
   if (ctx.cacheVersion != null && columnSet.has("cache_version")) {
@@ -448,7 +493,7 @@ async function handleSingleReadFull(ctx) {
 
 // --- SINGLE-RECORD read ----------------------------------------------------
 async function handleSingleRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, cors, full } =
+  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, cors, full } =
     ctx;
 
   // ?full=true -> all-fields, cache-bypassing detail read (see handleSingleReadFull).
@@ -473,7 +518,7 @@ async function handleSingleRead(ctx) {
   // b. Missing OR stale/aged -> refresh from Salesforce (cache-backed fields).
   //    TENANT FILTER: AND Client__c = '<escaped tenantId>'
   const { fields } = await getQueryableFields(sfObject);
-  const { selectFields, selectList } = buildCacheSelect(fields, columnSet);
+  const { selectFields, selectList } = buildCacheSelect(fields, columnSet, createdDateSources);
   const soql =
     `SELECT ${selectList} FROM ${sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
@@ -500,6 +545,7 @@ async function handleSingleRead(ctx) {
   const mapped = mapSfRecordToCacheRow(sfRecord, selectFields, columnSet, {
     tenantId,
     tenantSlug,
+    createdDateSources,
     now: new Date().toISOString(),
     cacheVersion: existingVersion + 1,
   });
@@ -522,7 +568,7 @@ async function handleSingleRead(ctx) {
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, qs, cors } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, qs, cors } =
     ctx;
 
   // Pagination inputs. limit = PAGE SIZE (not a dataset cap); offset = start row.
@@ -533,7 +579,7 @@ async function handleListRead(ctx) {
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
 
   const { fields } = await getQueryableFields(sfObject);
-  const { selectFields, selectList } = buildCacheSelect(fields, columnSet);
+  const { selectFields, selectList } = buildCacheSelect(fields, columnSet, createdDateSources);
 
   // Optional single-field filter. Validate against ALL real SF field names (not
   // just the cache-backed subset). A tenant/client filter from the caller is
@@ -563,9 +609,11 @@ async function handleListRead(ctx) {
 
   // b. Cache-first PAGED fetch WITH exact total. TENANT FILTER: client_sf_id.
   //    - count:"exact" returns the FULL matching total regardless of .range().
-  //    - ORDER BY sf_id (stable): re-syncing a row changes last_synced_at but not
-  //      sf_id, so a row can't jump between pages (the old last_synced_at ordering
-  //      would reshuffle pages on every refresh — dup/skip under pagination).
+  //    - ORDER BY created_date DESC (newest first) with NULLS LAST, then sf_id as a
+  //      stable tiebreaker. created_date doesn't change on re-sync, so a row can't
+  //      jump between pages; the sf_id tiebreaker keeps rows with equal/NULL dates
+  //      in a deterministic order (no dup/skip under pagination). Backed by the
+  //      (client_sf_id, created_date DESC NULLS LAST, sf_id) index.
   //    - is_stale is NOT filtered: stale rows stay on the page and get refreshed.
   let cq = supabase
     .from(cacheTable)
@@ -574,7 +622,19 @@ async function handleListRead(ctx) {
   if (filterColumn && columnSet.has(filterColumn)) {
     cq = cq.eq(filterColumn, filterValue);
   }
-  cq = cq.order("sf_id", { ascending: true }).range(offset, offset + limit - 1);
+  // Order newest-first by created_date WHEN the cache actually has that column;
+  // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
+  // and self-healing while the created_date column/backfill is rolled out — a
+  // missing column would otherwise error the cache query and dump every list onto
+  // the slow Salesforce cold path.
+  if (columnSet.has("created_date")) {
+    cq = cq
+      .order("created_date", { ascending: false, nullsFirst: false })
+      .order("sf_id", { ascending: true });
+  } else {
+    cq = cq.order("sf_id", { ascending: true });
+  }
+  cq = cq.range(offset, offset + limit - 1);
   const { data: pageRows, count: total, error: cacheErr } = await cq;
   if (cacheErr) console.error("cache read error (list):", cacheErr.message);
 
@@ -583,7 +643,7 @@ async function handleListRead(ctx) {
   //    kept so a brand-new tenant/object still returns data.
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
-      supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, cors,
+      supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
       selectFields, selectList, filterFieldName, filterValue, limit, offset,
     });
   }
@@ -616,7 +676,7 @@ async function handleListRead(ctx) {
       const rec = refetchedById.get(sfId);
       if (!rec) { deletedIds.push(sfId); continue; } // deleted in SF
       const mapped = mapSfRecordToCacheRow(rec, selectFields, columnSet, {
-        tenantId, tenantSlug, now: nowIso,
+        tenantId, tenantSlug, createdDateSources, now: nowIso,
         cacheVersion: (versionBySfId.get(sfId) ?? 0) + 1,
       });
       refreshedRows.push(mapped);
@@ -680,7 +740,7 @@ async function handleListRead(ctx) {
 // real fix for large sets, after which this path stops being hit.
 async function listColdCacheFallback(ctx) {
   const {
-    supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, cors,
+    supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, limit, offset,
   } = ctx;
 
@@ -698,16 +758,23 @@ async function listColdCacheFallback(ctx) {
     console.error("cold-cache count error:", e?.message || String(e));
   }
 
+  // Order newest-first. SOQL has no COALESCE, so this rare cold path orders by the
+  // LAST source in the chain — always the standard CreatedDate, which is never null
+  // — rather than the coalesced expression. Canonical SF field name (safe to
+  // interpolate), Id as the stable tiebreaker. Rows are cached immediately after,
+  // so subsequent reads use the coalesced created_date column ordering.
+  const orderField =
+    createdDateSources?.[createdDateSources.length - 1] || "CreatedDate";
   const sfOffset = Math.min(offset, 2000); // SOQL OFFSET hard cap
   const soql =
     `SELECT ${selectList} FROM ${sfObject} WHERE ${where} ` +
-    `ORDER BY Id ASC LIMIT ${limit} OFFSET ${sfOffset}`;
+    `ORDER BY ${orderField} DESC NULLS LAST, Id ASC LIMIT ${limit} OFFSET ${sfOffset}`;
   const sfRecords = await sfQuery(soql);
 
   const now = new Date().toISOString();
   const mappedRows = (sfRecords || []).map((rec) =>
     mapSfRecordToCacheRow(rec, selectFields, columnSet, {
-      tenantId, tenantSlug, now, cacheVersion: 1,
+      tenantId, tenantSlug, createdDateSources, now, cacheVersion: 1,
     })
   );
   if (mappedRows.length > 0) {
@@ -1098,6 +1165,8 @@ export const handler = async (event) => {
       columnSet,
       tenantId,
       tenantSlug,
+      createdDateSources:
+        CREATED_DATE_SOURCE[objectKey] ?? DEFAULT_CREATED_DATE_SOURCE,
       cors,
     };
 

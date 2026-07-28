@@ -101,7 +101,7 @@ See DECISIONS.md D-043 for the access model.
 { "source": "cache", "count": 50, "total": 31948, "limit": 50, "offset": 0, "hasMore": true, "records": [ ... ] }
 ```
 - `count` = rows in THIS page; `total` = all matching rows across pages; `hasMore` = `offset + count < total`.
-- Rows are returned in a **stable `sf_id` order** so paging never shifts rows as they are re-synced. Only the rows on the requested page are freshness-checked/refreshed — a read never scans the whole table.
+- Rows are ordered **`created_date` DESC (newest first), NULLs last, with `sf_id` as a stable tiebreaker** — so the first page is the most recent records and paging never shifts rows as they are re-synced. `created_date` is a cache column populated from Salesforce: `CreatedDate` for most objects, **`COALESCE(Contract_Date__c, CreatedDate)` for Solar**. Backed by the `(client_sf_id, created_date DESC NULLS LAST, sf_id)` index. (If the `created_date` column is absent, the endpoint falls back to stable `sf_id` order — no error.) Only the rows on the requested page are freshness-checked/refreshed — a read never scans the whole table.
 
 **Tenant scoping:** Always enforced via the authenticated user's Client__c context — the Salesforce Client record ID resolved from the verified token (`resolveIdentity` → `tenantId`). The cache is filtered on `client_sf_id`; Salesforce is filtered on `Client__c = '<tenantId>'`. The tenant slug is a label only and is never used for isolation. No request input can set or override the tenant. See DECISIONS.md D-035.
 

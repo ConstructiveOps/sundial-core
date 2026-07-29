@@ -25,6 +25,8 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [x] Invite `redirectTo` → `<PORTAL_BASE_URL>/reset-password` (env var, defaults to `https://harmon-crm.vercel.app`); **at go-live set `PORTAL_BASE_URL` to Harmon's real domain**
 - [x] Ban/unban retry-hardened (`setSupabaseBan`, 3× backoff); flow logic re-verified with fresh login (deployed-API re-verify skipped per Tim)
 - [ ] Frontend (harmon-crm, separate): the Manage Users surface, gated on `superAdmin`
+- [x] **Provisioning incident (2026-07-29):** root-caused to Supabase built-in email non-delivery (not the user-admin work). Fixed email-independent (default to temp-password mode, disable invite); recovered this morning's 10 users in place; verify + recovery scripts added.
+- [!] **Wire AWS SES for Supabase Auth email** (invite + password reset; also mention emails). Until done: invite + self-service reset are disabled in the UI; provisioning is temp-password only. Then re-enable the invite radio and the login "forgot password" flow, and confirm `https://harmon-crm.vercel.app/reset-password` (and the real go-live domain) are in Supabase Auth → URL Configuration → Redirect URLs.
 
 ## Portal Access Model (D-043)
 

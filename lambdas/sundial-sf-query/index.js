@@ -242,17 +242,26 @@ function extractRoute(event) {
   return { kind: "none", objectKey: null, id: null };
 }
 
-// --- Salesforce describe (module-scope cached per object) ------------------
+// --- Salesforce describe (module-scope cached per object, WITH TTL) --------
 // rawDescribeCache holds the FULL describe JSON (including each field's
 // picklistValues). getQueryableFields derives its trimmed name/type list from
 // the same cached describe, and the picklist metadata route reads picklistValues
 // straight from it — so both paths share a single describe fetch per object.
-const rawDescribeCache = new Map(); // sfObject -> full describe JSON
-const describeCache = new Map(); // sfObject -> { fields:[{name,type}] }
+//
+// TTL (D-045): the describe reflects per-integration-user FLS and the field set.
+// A warm container that cached an OLD describe would keep missing a newly-added
+// field or a newly-FLS-granted field (matching the write Lambda's stale-describe
+// bug — the Utility_Password__c report). A short TTL bounds staleness to minutes
+// without a redeploy; a refresh also clears the derived trimmed-field cache so it
+// rebuilds from the fresh describe. A 401 still forces an immediate refresh.
+const DESCRIBE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const rawDescribeCache = new Map(); // sfObject -> { meta, at }
+const describeCache = new Map(); // sfObject -> { fields:[{name,type}] } (derived)
 const EXCLUDED_FIELD_TYPES = new Set(["address", "location", "base64"]);
 
 async function getRawDescribe(sfObject) {
-  if (rawDescribeCache.has(sfObject)) return rawDescribeCache.get(sfObject);
+  const cached = rawDescribeCache.get(sfObject);
+  if (cached && Date.now() - cached.at < DESCRIBE_TTL_MS) return cached.meta;
 
   async function run(forceRefresh) {
     const { access_token, instance_url } = await getSalesforceToken({
@@ -269,7 +278,10 @@ async function getRawDescribe(sfObject) {
   }
 
   const meta = await resp.json();
-  rawDescribeCache.set(sfObject, meta);
+  rawDescribeCache.set(sfObject, { meta, at: Date.now() });
+  // Invalidate the derived trimmed-field cache so it rebuilds from this fresh
+  // describe (otherwise a newly-added field would still be missing from queries).
+  describeCache.delete(sfObject);
   return meta;
 }
 

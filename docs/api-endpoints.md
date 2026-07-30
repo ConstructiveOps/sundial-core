@@ -307,6 +307,32 @@ The Lambda also sets `Budget_Calc_Status__c = 'Calculated'`, `Budget_Last_Calcul
 
 **Other recalc trigger (not an HTTP route):** the same Lambda also runs from the `Sundial_Budget_Recalc__e` platform event via the EventBridge/SQS relay (field-change Flow). See `docs/integrations/budget-recalc-relay.md` and the Flow in `salesforce/flows/`. Calc-in-Lambda rationale: D-038.
 
+### Design Request
+
+#### `POST /projects/{recordId}/design-request/submit`
+
+**Lambda:** `sundial-aurora-push`
+**Purpose:** The "Submit Design Request" button on the Solar Design Request Form tab. Server-side, it resolves the Solar record's linked customer (`Sundial_Customer__c` lookup) and pushes that customer to Aurora Solar — creates the Aurora project and pushes the 12-month consumption profile, then writes `Aurora_Project_ID__c` + `Sent_to_Aurora__c` back to the customer. **Idempotent:** a customer that already has an `Aurora_Project_ID__c` returns `already_pushed` (never a second project).
+
+**Path parameters:**
+- `{recordId}` — **`Sundial_Solar__c`** record ID (15 or 18 char). The customer is resolved from it server-side; the frontend never sends a customer id.
+
+**Auth:** Supabase JWT (`Authorization: Bearer <jwt>`), verified in-Lambda via `resolveIdentity`. Both the Solar read and the customer read/write are tenant-scoped (`Client__c = <caller tenant>`, D-035); a missing/cross-tenant Solar id returns 404.
+
+**Request body:** none required (send `{}`). The path carries the record id.
+
+**Response shape (200):**
+```json
+{ "status": "pushed", "auroraProjectId": "43bfd824-…", "recordId": "<customer id>", "solarRecordId": "<solar id>", "consumption": "pushed" }
+```
+- `status` is one of `pushed`, `already_pushed`, or `pushed_writeback_failed` (Aurora project created but the SF write-back failed — non-retryable, the id is in the body so it isn't lost). `recordId` is the resolved **customer** id; `solarRecordId` echoes the path id.
+
+**Errors:** 400 (`INVALID_RECORD_ID`; `NO_LINKED_CUSTOMER` — the Solar project has no linked customer; `MISSING_SITE_ADDRESS`), 401 (no/invalid token), 403 (`NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 502 (`aurora_create_failed`).
+
+**Forward-compat (SES):** the same submit will additionally email the sales manager once `lib/email.js` + SES are live. That is an **additive** step inside the handler (a marked seam right before the success return) — it adds an `email` key to the response and does **not** change this route or its request contract.
+
+**Also supported (manual, not the button):** the legacy body-based call `POST` with `{ "object": "customer", "recordId": "<customer id>", "retryConsumptionOnly"?: true }` still works for a direct customer push / consumption resend.
+
 ---
 
 ### Admin — User Management
@@ -415,6 +441,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-delete-file` | DELETE /files/by-id/{fileId} |
 | `sundial-budget` | POST /projects/{recordId}/budget/recalc |
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
+| `sundial-aurora-push` | POST /projects/{recordId}/design-request/submit |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:

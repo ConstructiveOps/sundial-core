@@ -150,13 +150,24 @@ function extractRoute(event) {
   return { objectKey: null, id: null };
 }
 
-// --- Salesforce describe (module-scope cached per object) ------------------
+// --- Salesforce describe (module-scope cached per object, WITH TTL) --------
 // Holds the FULL describe JSON so each field's updateable/createable flags are
-// available. Cached across warm invocations; refreshed on a 401.
-const describeCache = new Map();
+// available. Cached across warm invocations but only for DESCRIBE_TTL_MS.
+//
+// WHY A TTL (D-045): the describe carries each field's per-integration-user FLS
+// (updateable/createable). When an admin grants FLS or adds a field, a warm Lambda
+// container that cached the OLD describe keeps seeing the field as non-writable —
+// and validateWritableFields rejects the ENTIRE PATCH if ANY one field is
+// non-writable. That produced intermittent, un-reproducible "save blocked" errors
+// (the Utility_Password__c report) that only self-healed when the container
+// recycled. A short TTL bounds that staleness to minutes without a redeploy. A 401
+// still forces an immediate refresh (auth change), as before.
+const DESCRIBE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const describeCache = new Map(); // sfObject -> { meta, at }
 
 async function getRawDescribe(sfObject) {
-  if (describeCache.has(sfObject)) return describeCache.get(sfObject);
+  const cached = describeCache.get(sfObject);
+  if (cached && Date.now() - cached.at < DESCRIBE_TTL_MS) return cached.meta;
 
   async function run(forceRefresh) {
     const { access_token, instance_url } = await getSalesforceToken({
@@ -173,7 +184,7 @@ async function getRawDescribe(sfObject) {
   }
 
   const meta = await resp.json();
-  describeCache.set(sfObject, meta);
+  describeCache.set(sfObject, { meta, at: Date.now() });
   return meta;
 }
 

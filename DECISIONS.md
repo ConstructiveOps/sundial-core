@@ -962,6 +962,21 @@ Reserved / out of scope for now:
 
 ---
 
+## D-045: Salesforce describe cache gets a TTL (FLS/schema-change propagation)
+
+**Date:** 2026-07-30
+**Status:** Decided
+
+**Context:** `sundial-sf-update` and `sundial-sf-query` cache the Salesforce object `describe` in Lambda module scope and only refreshed it on a 401. The describe carries each field's **per-integration-user FLS** (`updateable`/`createable`) and the field set. When FLS was granted this week (the budget permission set assigned to all users, which added edit access to fields like `Utility_Password__c`), warm containers that had cached the describe **before** the grant kept seeing those fields as non-writable. Because `sundial-sf-update`'s `validateWritableFields` **rejects the entire PATCH if any one field is non-writable** (fail-closed, by design), a single stale field blocked the **whole record save** — an intermittent, un-reproducible failure (per container) that self-healed only when the container recycled. Reproduction confirmed every direct/deployed write path *succeeds* once a container has a fresh describe; the failure was purely stale-cache.
+
+**Decision:** Cache the raw describe with a **5-minute TTL** in both Lambdas (`DESCRIBE_TTL_MS`). On expiry the describe is refetched; in `sundial-sf-query` the derived trimmed-field cache is invalidated on refresh so newly-added fields also appear. A 401 still forces an immediate refresh (auth change). This bounds FLS/schema-change staleness to ≤5 min without a redeploy. A redeploy on 2026-07-30 flushed the then-stale containers immediately.
+
+**Consequences:** One extra describe call per object per 5-min window per warm container — negligible vs. the API budget, and describe is not tenant-scoped so it's shared across all callers. Does not change the fail-closed whole-PATCH rejection (that stays — it's correct; the fix is keeping the writability data fresh, not weakening the gate).
+
+**Note (security, related):** `Utility_Password__c` is a **plaintext** SF string field (not encrypted, not mirrored into the Supabase cache). Storing real utility-portal passwords in the clear is a posture worth revisiting (Shield Platform Encryption or off-platform secret storage) — tracked separately, not part of this ADR.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

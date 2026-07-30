@@ -56,6 +56,11 @@ const AURORA_SECRET_NAME = "sundial/aurora/api";
 // Only "customer" is a valid push source in this build. Anything else -> 400.
 const SUPPORTED_OBJECT = "customer";
 const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
+// The Solar project object. The "Submit Design Request" button posts a Solar
+// record id; we resolve its linked customer (the Sundial_Customer__c lookup field,
+// same name) and push THAT customer to Aurora.
+const SOLAR_SF_OBJECT = "Sundial_Solar__c";
+const SOLAR_CUSTOMER_LOOKUP = "Sundial_Customer__c"; // lookup field ON the Solar obj
 
 // The 12 monthly usage fields in CALENDAR ORDER Jan..Dec. This order is the
 // contract for Aurora's monthly_energy array (index 0 = January), so it must
@@ -399,6 +404,19 @@ function buildWritebackFields(describe, auroraProjectId) {
   return out;
 }
 
+// Detect the Solar-triggered "Submit Design Request" route:
+//   POST /projects/{recordId}/design-request/submit   (recordId = Sundial_Solar__c Id)
+// Returns the Solar record id when on that route, else null (the body-based
+// customer push). The linked customer is resolved server-side in the handler.
+function extractDesignRequestSolarId(event) {
+  const path = event?.rawPath || event?.path || "";
+  if (!/\/design-request\/submit\/?$/.test(path)) return null;
+  const pp = event?.pathParameters || {};
+  if (pp.recordId) return decodeURIComponent(pp.recordId);
+  const m = path.match(/\/projects\/([^/]+)\/design-request\/submit\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 // --- handler ---------------------------------------------------------------
 export const handler = async (event) => {
   const method =
@@ -417,43 +435,55 @@ export const handler = async (event) => {
   }
 
   try {
-    // --- Body / input validation (before any auth or external calls) --------
-    const body = parseBody(event);
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return jsonResponse(400, cors, {
-        error: "invalid_body",
-        code: "INVALID_BODY",
-        message: 'Expected JSON { "object": "customer", "recordId": "<id>" }.',
-      });
-    }
+    // --- Input: two routes, one push -----------------------------------------
+    // (a) Design-request route: POST /projects/{solarId}/design-request/submit —
+    //     the "Submit Design Request" button. We resolve the Solar record's linked
+    //     customer server-side (tenant-scoped) and push THAT customer.
+    // (b) Body route (existing): POST body { object:"customer", recordId, ... } —
+    //     direct customer push / manual / retry.
+    const solarRecordId = extractDesignRequestSolarId(event);
+    const viaDesignRequest = solarRecordId !== null;
 
-    const objectKey = cleanStr(body.object).toLowerCase();
-    if (objectKey !== SUPPORTED_OBJECT) {
-      return jsonResponse(400, cors, {
-        error: "unsupported_object",
-        code: "OBJECT_NOT_ALLOWED",
-        message: `Only "${SUPPORTED_OBJECT}" is supported by this endpoint.`,
-      });
-    }
+    let recordId; // the CUSTOMER id we ultimately push (resolved from Solar in (a))
+    let retryConsumptionOnly = false;
 
-    const recordId = cleanStr(body.recordId);
-    // Light Salesforce-id shape check (15 or 18 char alphanumeric) — a cheap 400
-    // for obviously bad input before touching Salesforce. The value is still
-    // SOQL-escaped below regardless.
-    if (!/^[a-zA-Z0-9]{15,18}$/.test(recordId)) {
+    if (!viaDesignRequest) {
+      const body = parseBody(event);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return jsonResponse(400, cors, {
+          error: "invalid_body",
+          code: "INVALID_BODY",
+          message: 'Expected JSON { "object": "customer", "recordId": "<id>" }.',
+        });
+      }
+      const objectKey = cleanStr(body.object).toLowerCase();
+      if (objectKey !== SUPPORTED_OBJECT) {
+        return jsonResponse(400, cors, {
+          error: "unsupported_object",
+          code: "OBJECT_NOT_ALLOWED",
+          message: `Only "${SUPPORTED_OBJECT}" is supported by this endpoint.`,
+        });
+      }
+      recordId = cleanStr(body.recordId);
+      // Light Salesforce-id shape check — cheap 400 before touching Salesforce.
+      // The value is still SOQL-escaped below regardless.
+      if (!/^[a-zA-Z0-9]{15,18}$/.test(recordId)) {
+        return jsonResponse(400, cors, {
+          error: "invalid_record_id",
+          code: "INVALID_RECORD_ID",
+          message: "recordId must be a Salesforce record id.",
+        });
+      }
+      // Optional "resend consumption" mode: (re)send the consumption profile to an
+      // EXISTING Aurora project only — never creates one. Body route only.
+      retryConsumptionOnly = body.retryConsumptionOnly === true;
+    } else if (!/^[a-zA-Z0-9]{15,18}$/.test(solarRecordId)) {
       return jsonResponse(400, cors, {
         error: "invalid_record_id",
         code: "INVALID_RECORD_ID",
-        message: "recordId must be a Salesforce record id.",
+        message: "Design request requires a Salesforce Solar record id in the path.",
       });
     }
-
-    // Optional "resend consumption" mode. When true AND the record already has an
-    // Aurora project, we ONLY (re)send the consumption profile to that existing
-    // project — no create, and the idempotency early-return is bypassed. This is
-    // a legitimately useful resend operation (and lets consumption fixes be tested
-    // against an already-pushed record). It can NEVER create a project.
-    const retryConsumptionOnly = body.retryConsumptionOnly === true;
 
     // --- Auth: tenant derived ONLY from the verified token ------------------
     let identity;
@@ -467,6 +497,35 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId; // SALESFORCE Client record id
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // --- Design-request: resolve the Solar record's linked customer, TENANT-
+    //     SCOPED, and push that customer. A Solar project outside the tenant or
+    //     missing -> 404; one with no linked customer -> 400 (Aurora needs the
+    //     customer/site). This is the ONLY added Salesforce read on this path.
+    if (viaDesignRequest) {
+      const solarSoql =
+        `SELECT Id, ${SOLAR_CUSTOMER_LOOKUP} FROM ${SOLAR_SF_OBJECT} ` +
+        `WHERE Id = '${soqlEscapeString(solarRecordId)}' ` +
+        `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
+        `LIMIT 1`;
+      const solarRows = await sfQuery(solarSoql);
+      if (!solarRows || solarRows.length === 0) {
+        return jsonResponse(404, cors, {
+          error: "not_found",
+          code: "RECORD_NOT_FOUND",
+        });
+      }
+      const customerId = cleanStr(solarRows[0][SOLAR_CUSTOMER_LOOKUP]);
+      if (!customerId) {
+        return jsonResponse(400, cors, {
+          error: "no_linked_customer",
+          code: "NO_LINKED_CUSTOMER",
+          message:
+            "This Solar project has no linked customer, so it can't be sent to Aurora.",
+        });
+      }
+      recordId = customerId;
     }
 
     // --- 1) Read the customer, TENANT-SCOPED (Id + Client__c) ---------------
@@ -522,6 +581,7 @@ export const handler = async (event) => {
         status: "already_pushed",
         auroraProjectId: existingAuroraId,
         recordId: rec.Id,
+        ...(viaDesignRequest ? { solarRecordId } : {}),
       });
     }
 
@@ -682,6 +742,14 @@ export const handler = async (event) => {
       });
     }
 
+    // --- FUTURE (SES, D-045-adjacent): when this was a Design Request submit
+    //     (viaDesignRequest), notify the sales manager by email HERE, once
+    //     lib/email.js + SES are live. It's an ADDITIVE step — send after the
+    //     Aurora push succeeds and add an `email: { sent, ... }` key to the
+    //     response below. No API/route reshape needed; the frontend contract
+    //     (POST .../design-request/submit) and the fields it already reads stay
+    //     the same. Keep the email non-fatal to the push (mirror writeback).
+
     // --- 6) SUCCESS ---------------------------------------------------------
     return jsonResponse(200, cors, {
       status: "pushed",
@@ -689,6 +757,7 @@ export const handler = async (event) => {
       recordId: rec.Id,
       consumption,
       ...(consumptionError ? { consumptionError } : {}),
+      ...(viaDesignRequest ? { solarRecordId } : {}),
     });
   } catch (err) {
     console.error("aurora-push unexpected error:", err?.message || String(err));

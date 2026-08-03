@@ -8,9 +8,11 @@
 //       InventoryID+Type is therefore NOT unique on the mapping side — SLPC (x2),
 //       GENO (x3), BURDENEXR (x2) collide without it. InventoryID must be added to
 //       the mapping before any write. See docs/integrations/acumatica-budget-push.md.
-//   (B) The mapping's income row uses task code BILL, but the live scaffold was
-//       reported to carry income on BALANCE + GENM/BILLING with NO BILL task.
-//       The income code must be confirmed before writing that line.
+//   (B) The Geo commission task code is unconfirmed (UNCONFIRMED.geoCommissionTaskId
+//       is null) — its scaffold line cannot be matched until the code is supplied.
+//
+// Income is CONFIRMED (Gate 5a): TWO lines — BALANCE (Balance of Contract) and
+// GENM/BILLING (Solar Material), both Type=Income. There is NO "BILL" task.
 //
 // WHAT THIS DOES NOW (safe, read-only): given a Salesforce Sundial_Solar__c record
 // (or an Acumatica ProjectID), read the EXISTING scaffolded ProjectBudget lines
@@ -29,7 +31,9 @@ import { sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
 const SOLAR_SF_OBJECT = "Sundial_Solar__c";
 
-// --- The 17 mapping rows (from the Acumatica Mapping tab) -------------------
+// --- The mapping rows (from the Acumatica Mapping tab) ----------------------
+// NOTE: 18 rows here vs. the sheet's 17 data rows — the single sheet income row is
+// split into TWO code rows (BALANCE + GENM/BILLING) per Gate 5a, hence the +1.
 // inventoryId is null for EVERY row because the mapping tab has no InventoryID
 // column (blocker A). Filling these in is a prerequisite to the write path — the
 // matcher fails loudly while they are null. amountField/hours are informational
@@ -170,11 +174,11 @@ export function matchMappingToLines(mappingRows, lines) {
 
 // HARD GUARD: the write path is not built. It throws so nothing can accidentally
 // push. Do NOT implement until Gate 5a confirms the reconciliation table, the
-// mapping InventoryIDs are filled in, and the income code is confirmed.
+// mapping InventoryIDs are filled in, and the geo commission task code is confirmed.
 export async function writeBudgetLines() {
   throw new Error(
     "BLOCKED: ProjectBudget write path is intentionally not implemented. " +
-      "Resolve mapping InventoryIDs + income task code (Gate 5a) first."
+      "Resolve mapping InventoryIDs + geo commission task code (Gate 5a) first."
   );
 }
 
@@ -218,7 +222,7 @@ export const handler = async (event) => {
       mappingMatch: { matchedCount: matched.length, matched, problems },
       blockers: [
         "Mapping tab has no InventoryID column — matcher will report all 17 rows as problems until filled in.",
-        "Income row task code is BILL — confirm vs BALANCE/GENM before any write.",
+        "Geo commission task code is unconfirmed (UNCONFIRMED.geoCommissionTaskId is null).",
       ],
     };
   } catch (err) {

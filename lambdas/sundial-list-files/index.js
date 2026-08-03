@@ -79,6 +79,17 @@ export const handler = async (event) => {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
     }
 
+    // TEMP — Sales Rep hard-restrict (remove with the per-user visibility feature;
+    // see TASKS.md "Sales Rep visibility"). A caller whose Hierarchy_Level__c ===
+    // "Sales Rep" may NOT list/download SOLAR record files (Customer files stay
+    // allowed). Solar files can expose install/proposal docs across reps.
+    if (identity?.user?.hierarchyLevel === "Sales Rep" && objectKey === "solar") {
+      return jsonResponse(403, cors, {
+        error: "forbidden",
+        code: "SALES_REP_FILES_RESTRICTED",
+      });
+    }
+
     // Tenant-ownership gate. Not owned (or unknown object) -> 404.
     const owned = await assertTenantOwnsRecord(recordId, objectKey, tenantId);
     if (!owned) {

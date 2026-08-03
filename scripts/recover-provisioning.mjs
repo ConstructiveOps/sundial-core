@@ -14,8 +14,11 @@
 //                           must_change_password=true, ensure not banned. Temp
 //                           passwords are written ONLY to OUT (never stdout/logs);
 //                           distribute securely. Users are forced to change on login.
-//   DELETE_ORPHANS=1     -> delete ORPHAN_AUTH users (e.g. the troyjohnson typo dup).
-//                           Destructive; off by default. Review the dry run first.
+//   DELETE_ORPHANS=1     -> delete ALL ORPHAN_AUTH users. Destructive; off by
+//                           default. Review the dry run first.
+//   DELETE_ORPHAN_EMAILS=a@b.com,c@d.com  -> delete ONLY these specific orphan
+//                           auth users (safer than the blanket flag; a listed
+//                           email that isn't an ORPHAN_AUTH is skipped, not touched).
 //
 // Dry run (default) changes nothing:  node scripts/recover-provisioning.mjs
 //
@@ -30,6 +33,8 @@ import { writeFileSync } from 'node:fs';
 
 const apply = process.env.APPLY === '1';
 const deleteOrphans = process.env.DELETE_ORPHANS === '1';
+const deleteOrphanEmails = (process.env.DELETE_ORPHAN_EMAILS || '')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
 const out = process.env.OUT;
 const genPw = () =>
   randomBytes(12).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 12) + 'A9!';
@@ -116,13 +121,23 @@ if (apply) {
   }
 }
 
-if (deleteOrphans) {
-  for (const r of rows.filter((x) => x.cls === 'ORPHAN_AUTH')) {
+const orphanAuthRows = rows.filter((x) => x.cls === 'ORPHAN_AUTH');
+const toDelete = deleteOrphans
+  ? orphanAuthRows
+  : orphanAuthRows.filter((r) => deleteOrphanEmails.includes(r.email));
+if (toDelete.length) {
+  for (const r of toDelete) {
     const { error: e } = await admin.auth.admin.deleteUser(r.authId);
     console.log(`  ${e ? 'FAILED delete' : 'deleted orphan'} ${r.email}${e ? `: ${e.message}` : ''}`);
   }
-} else if (rows.some((x) => x.cls === 'ORPHAN_AUTH')) {
-  console.log('  (ORPHAN_AUTH users present — re-run with DELETE_ORPHANS=1 to remove, after review)');
+} else if (orphanAuthRows.length) {
+  console.log('  (ORPHAN_AUTH present — DELETE_ORPHANS=1 removes ALL, or DELETE_ORPHAN_EMAILS=a@b removes specific ones, after review)');
+}
+// Safety: flag any requested email that is NOT actually an orphan (never deleted).
+for (const em of deleteOrphanEmails) {
+  if (!orphanAuthRows.some((r) => r.email === em)) {
+    console.log(`  (skip: ${em} is not an ORPHAN_AUTH — not deleted)`);
+  }
 }
 
 if (!apply) console.log('\n(dry run — nothing changed; set APPLY=1 to fix NEVER_ONBOARDED, DELETE_ORPHANS=1 to remove orphans)');

@@ -1,5 +1,24 @@
 # Sundial — Progress Log
 
+## 2026-08-03 — Provisioning: end-to-end fix + live re-diagnosis (auth email via SES, D-046)
+
+Re-opened the provisioning breakage with **live diagnostics** against prod Supabase + Salesforce. Key correction to the incident's working hypothesis:
+
+- **Invite users are NOT missing their tenant binding.** Queried `tmurphy5213+inviteuser1` and every invite-created user directly: all have `Client__c = harmon`, `Active__c = true`, and a matching `Supabase_User_Id__c`. `sundial-user-admin` force-stamps the tenant (fail-closed `NO_TENANT`) since its first commit — there is no gap. inviteuser1's earlier "Couldn't load sales records" dated to 2026-07-23, *before* the pagination/cache-backfill fixes (5cead0b/0b7498a); it is not reproducible now.
+- **Live e2e proof (`scripts/verify-provisioning-e2e.mjs`, all green):** create → temp-password login → `/auth/me` tenant=harmon → `GET /sf/customer` 200 with **31,576** tenant-scoped records → forced change → re-login → old password rejected. The temp-password chain works end-to-end today.
+- **The real breakage is email delivery** — Supabase's built-in mailer doesn't deliver invites or resets. Fix = Supabase Custom SMTP via SES (now out of sandbox for `sundialcrm.com`). See `docs/integrations/auth-email-ses.md` for the exact console/dashboard steps and values (Tim runs these — Claude can't reach those consoles).
+
+**Changes made (branch `fix/provisioning-auth-email`, backend; `fix/provisioning-auth-email` in harmon-crm, frontend):**
+- `docs/integrations/auth-email-ses.md` — SES SMTP credential creation + Supabase Custom SMTP config + redirect-allowlist values + deployment-ordering warning.
+- `scripts/verify-provisioning-e2e.mjs` — true end-to-end check (proves tenant scope via the live `sf-query` customer endpoint). Self-cleaning.
+- `scripts/recover-provisioning.mjs` — discovers + classifies all portal users (OK / NEVER_ONBOARDED / ORPHAN_AUTH / ORPHAN_SF / NO_TENANT / INACTIVE); fix-in-place temp-password recovery (`APPLY=1`) and guarded orphan deletion (`DELETE_ORPHANS=1`). Supersedes the name-listed `recover-provisioned-users.mjs`.
+- `lib/salesforce.js` — added `sfDeleteRecord` (teardown for the e2e verify; no Lambda write path uses it).
+- **harmon-crm** `src/pages/settings/UserFormModal.tsx` — default credential mode flipped to **invite**; invite radio re-enabled. Deploy only AFTER SES SMTP is live (see ordering note).
+
+**Current user state (dry-run classification):** 16 OK; 1 NEVER_ONBOARDED (`davidcoleman@harmonelectric.net`); 2 ORPHAN_AUTH (`troyjohnson@harmonelectric.net` — signed-in typo-dup of `troyjohnston`; `team+5069@nonstopautomation.com`); 1 ORPHAN_SF (`harmon@constructiveoperations.com`); 2 INACTIVE/BANNED test users. No changes applied — awaiting Tim's go.
+
+**Also captured (Step 6 discovery, no build):** role/visibility model — roles live on `Sundial_User__c` (`Access_Level__c`, `Hierarchy_Level__c`, `Super_Admin__c`, `Parent_User__c`, `Roles__c`), mirrored subset into `public.profiles.role` for RLS. Only enforced check anywhere is `superAdmin` (gates Manage Users); **no rep/dealer record-visibility filtering exists** — reads are tenant-scoped only. Records carry `Sales_Rep__c`; user hierarchy is `Parent_User__c`. Feeds the separate visibility spec.
+
 ## 2026-08-02 — Chore: purge stale "BILL" income-task references
 
 Docs/comments only — no functional or logic changes. Gate 5a confirmed the ProjectBudget income is TWO lines (`BALANCE` = Balance of Contract + `GENM/BILLING` = Solar Material); there is no `BILL` task. `MAPPING_ROWS` and `docs/integrations/acumatica-budget-push.md` already reflected this; three stale spots did not, and are now corrected:

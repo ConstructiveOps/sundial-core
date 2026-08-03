@@ -977,6 +977,31 @@ Reserved / out of scope for now:
 
 ---
 
+## D-046: Auth email via Supabase Custom SMTP (Amazon SES); invite-first provisioning
+
+**Date:** 2026-08-03
+**Status:** Decided (config steps pending Tim; frontend flip staged behind them)
+
+**Context:** The provisioning incident (D-044 surface, incident 2026-07-29) was root-caused to Supabase's **built-in** email sender not delivering to external recipients and being hard rate-limited. That broke both `inviteUserByEmail` (invites) and `resetPasswordForEmail` (resets). As a stopgap the create UI defaulted to a temp-password mode (no email) and disabled the invite radio.
+
+Re-investigation on 2026-08-03 with **live data** established what was NOT broken, correcting the incident's working hypothesis:
+- **Tenant binding is intact for every user, including invite-created ones.** `sundial-user-admin` force-stamps `Client__c = identity.tenantId` (fail-closed `NO_TENANT`) since its first commit. Live query of `tmurphy5213+inviteuser1` and all invite users showed `Client__c = harmon`. The reported "invite users miss their tenant binding → can't load Sales" was disproven.
+- `scripts/verify-provisioning-e2e.mjs` proves the whole chain green against prod: create → temp-password login → `/auth/me` resolves tenant=harmon → `GET /sf/customer` returns 200 with 31,576 tenant-scoped records → forced change → re-login → old password rejected.
+- The one genuinely broken class was **email delivery** (invites + resets) plus a few stray records (orphan auth users, one never-onboarded user) — see recovery.
+
+SES is now verified and out of sandbox for `sundialcrm.com` (us-west-1), sender `harmon@sundialcrm.com`.
+
+**Decision:**
+1. **Point Supabase Auth at SES via Custom SMTP** (`email-smtp.us-west-1.amazonaws.com`, port 465, SES SMTP credentials, sender `harmon@sundialcrm.com`). This fixes invite AND reset delivery in one move. Steps + exact values: `docs/integrations/auth-email-ses.md`. This is distinct from `lib/email.js` (SES SDK), which remains for *application* transactional email — the two do not overlap.
+2. **Invite-first provisioning.** With delivery working, the create UI defaults to **Send email invite** (invited users set their own password on `/reset-password`); the temp-password path stays as an explicit fallback. Invite links land on `PORTAL_BASE_URL/reset-password` (defaults to `https://harmon-crm.vercel.app`, the real prod URL); resets land on `window.location.origin/reset-password`. Both must be in the Supabase redirect allowlist (Site URL + Redirect URLs).
+
+**Consequences:**
+- **Deployment ordering is load-bearing:** the frontend invite-default flip must ship only *after* the SMTP + redirect-allowlist config is live and the manual invite test passes, or new users get undeliverable invites.
+- Recovery is email-independent (`scripts/recover-provisioning.mjs`, fix-in-place temp passwords), so it does not block on the SMTP work.
+- No backend code change is required for auth email (it's Supabase config); the only backend addition is `sfDeleteRecord` in `lib/salesforce.js` for e2e-verify teardown.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

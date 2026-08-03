@@ -60,8 +60,11 @@ const SF_API_VERSION = "v60.0";
 // Contract_Date__c and falls back to CreatedDate (3,025 of 4,545 solar rows have no
 // Contract_Date__c). Only applied when the cache table has a `created_date` column.
 const CREATED_DATE_SOURCE = {
-  solar: ["Contract_Date__c", "CreatedDate"],
-  customer: ["CreatedDate"],
+  solar: ["Sunbase_Created_Date__c", "Contract_Date__c", "CreatedDate"],
+  // CUSTOMER list/board orders by MOST-RECENTLY-UPDATED (Harmon's daily working
+  // set at the top). Sunbase_Last_Updated__c is the migrated Sunbase mod-date;
+  // falls back to the created date, then CreatedDate, for the ~266 rows without one.
+  customer: ["Sunbase_Last_Updated__c", "Sunbase_Created_Date__c", "CreatedDate"],
   roofing: ["CreatedDate"],
   po: ["CreatedDate"],
   user: ["CreatedDate"],

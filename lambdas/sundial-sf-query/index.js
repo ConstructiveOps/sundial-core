@@ -93,6 +93,42 @@ function repRestrictFor(objectKey, identity) {
   return { sfField, value: TEMP_SALES_REP_NAME };
 }
 
+// --- Server-side search (?q=) ----------------------------------------------
+// Case-insensitive substring across an object's name columns, tenant-scoped,
+// capped at SEARCH_CAP results (the response still carries the FULL match total).
+// cache[] = cache columns for the cache-path ILIKE; sf[] = the equivalent
+// Salesforce fields for the Sales-Rep live path. Only allowlisted here; anything
+// else (po/user) has no name search.
+const SEARCH_CAP = 200;
+const SEARCH_FIELDS = {
+  customer: {
+    cache: ["first_name", "last_name", "name", "customer_name"],
+    sf: ["First_Name__c", "Last_Name__c", "Name"],
+  },
+  solar: {
+    cache: ["project_name", "customer_name_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"],
+  },
+  roofing: {
+    cache: ["project_name", "customer_name_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"], // rep path unused for roofing
+  },
+};
+
+// Sanitize a raw ?q= term. Returns a cleaned term (>= 2 chars) or null. Escapes by
+// RESTRICTING to name-safe characters — drops every ILIKE/SOQL metacharacter
+// (% _ " ( ) , \ / etc.), so neither an ILIKE wildcard nor a SOQL/PostgREST break
+// can be injected. Apostrophe is KEPT (O'Brien) and is escaped per-path: SOQL via
+// soqlEscapeString, and the cache path double-quotes the ILIKE value.
+function sanitizeSearchTerm(q) {
+  if (q == null) return null;
+  const cleaned = String(q)
+    .replace(/[^A-Za-z0-9 .&'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length >= 2 ? cleaned : null;
+}
+
 // First non-empty source value for a record (the COALESCE), or null.
 function resolveCreatedDate(record, sources) {
   for (const name of sources || []) {
@@ -620,6 +656,51 @@ async function handleSingleRead(ctx) {
   return jsonResponse(200, cors, { source: "salesforce", record: mapped });
 }
 
+// --- Server-side cache search (non-rep callers) ----------------------------
+// ILIKE '%term%' across the object's cache name columns, tenant-scoped, ordered
+// like the normal list, capped at SEARCH_CAP. Searches the WHOLE tenant cache;
+// count:"exact" returns the full match total even though only SEARCH_CAP rows come
+// back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
+// double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors }) {
+  const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
+  if (cols.length === 0) {
+    return jsonResponse(200, cors, {
+      source: "cache", count: 0, total: 0, limit: SEARCH_CAP, offset: 0, hasMore: false, records: [],
+    });
+  }
+  const orExpr = cols.map((c) => `${c}.ilike."%${term}%"`).join(",");
+  let cq = supabase
+    .from(cacheTable)
+    .select("*", { count: "exact" })
+    .eq("client_sf_id", tenantId)
+    .or(orExpr);
+  if (columnSet.has("created_date")) {
+    cq = cq
+      .order("created_date", { ascending: false, nullsFirst: false })
+      .order("sf_id", { ascending: true });
+  } else {
+    cq = cq.order("sf_id", { ascending: true });
+  }
+  cq = cq.range(0, SEARCH_CAP - 1);
+  const { data, count, error } = await cq;
+  if (error) {
+    console.error("cache search error:", error.message);
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  const records = data || [];
+  const total = count ?? records.length;
+  return jsonResponse(200, cors, {
+    source: "cache",
+    count: records.length,
+    total,
+    limit: SEARCH_CAP,
+    offset: 0,
+    hasMore: total > records.length,
+    records,
+  });
+}
+
 // --- LIST read (server-side paginated) -------------------------------------
 // Cache-first, tenant-scoped, PAGED. Inputs: ?limit= (page size, bounded by
 // MAX_LIMIT) & ?offset= (start row). Returns a page PLUS the exact `total` across
@@ -628,7 +709,7 @@ async function handleSingleRead(ctx) {
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, qs, cors } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, qs, cors } =
     ctx;
 
   // Pagination inputs. limit = PAGE SIZE (not a dataset cap); offset = start row.
@@ -667,15 +748,35 @@ async function handleListRead(ctx) {
     }
   }
 
+  // Server-side search term (?q=), sanitized; null when absent/too short/unsupported.
+  const searchTerm = searchFields ? sanitizeSearchTerm(qs.q) : null;
+
   // TEMP Sales Rep guard: the authoritative rep field isn't cached, so a restricted
   // rep's list is served LIVE from Salesforce (COUNT + paged SELECT, offset clamped
   // at the SOQL 2000 cap) filtered to the rep — bypassing the cache entirely. Any
-  // caller ?field=&value= filter is preserved (ANDed with the rep clause).
+  // caller ?field=&value= filter is preserved (ANDed with the rep clause). A ?q=
+  // search adds a SOQL name LIKE ON TOP of the rep clause (never widens the rep's
+  // set) and caps at SEARCH_CAP from the first page.
   if (repRestrict) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
       createdDateSources, cors, selectFields, selectList,
-      filterFieldName, filterValue, limit, offset, repRestrict,
+      filterFieldName, filterValue,
+      limit: searchTerm ? SEARCH_CAP : limit,
+      offset: searchTerm ? 0 : offset,
+      repRestrict,
+      searchTerm,
+      searchSfFields: searchTerm ? searchFields.sf : null,
+    });
+  }
+
+  // Non-rep server-side search: ILIKE across the cache name columns, tenant-scoped,
+  // capped at SEARCH_CAP (response still carries the full match total). Searches the
+  // WHOLE tenant cache, not just a loaded page.
+  if (searchTerm) {
+    return await handleCacheSearch({
+      supabase, cacheTable, columnSet, tenantId,
+      searchCacheCols: searchFields.cache, term: searchTerm, cors,
     });
   }
 
@@ -814,16 +915,26 @@ async function listColdCacheFallback(ctx) {
   const {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, limit, offset, repRestrict,
+    searchTerm, searchSfFields,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
   // TEMP Sales Rep guard: AND the authoritative rep field (applies to both the
-  // COUNT and the paged SELECT below, so total + rows are rep-scoped).
+  // COUNT and the paged SELECT below, so total + rows are rep-scoped). The search
+  // clause is ANDed AFTER this, so a rep's search can only NARROW their own set —
+  // never reach another rep's records.
   if (repRestrict) {
     where += ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`;
   }
   if (filterFieldName) {
     where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
+  }
+  // ?q= name search: OR of LIKE '%term%' across the object's SF name fields, ANDed
+  // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.
+  if (searchTerm && Array.isArray(searchSfFields) && searchSfFields.length) {
+    const t = soqlEscapeString(searchTerm);
+    const likes = searchSfFields.map((f) => `${f} LIKE '%${t}%'`).join(" OR ");
+    where += ` AND (${likes})`;
   }
 
   // Exact total for the pager (aggregate COUNT(Id) returns one row {c:N}).
@@ -1246,6 +1357,8 @@ export const handler = async (event) => {
         CREATED_DATE_SOURCE[objectKey] ?? DEFAULT_CREATED_DATE_SOURCE,
       // TEMP Sales Rep hard-restrict (null for every other role/object).
       repRestrict: repRestrictFor(objectKey, identity),
+      // Name columns + SF fields this object supports for ?q= search (null if none).
+      searchFields: SEARCH_FIELDS[objectKey] ?? null,
       cors,
     };
 

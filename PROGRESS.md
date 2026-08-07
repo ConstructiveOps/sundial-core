@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-08-07 — Acumatica ProjectBudget: WRITE PATH built (Gate 5b satisfied), Stages 1–5
+
+Built the Layer-2 write path on `feat/budget-push-write` in reviewable stages (Gate 5a data + Gate 5b sign-off both satisfied). Not yet deployed — live proof-out per the runbook in `docs/integrations/acumatica-budget-push.md` is Tim's next step.
+
+- **Stage 1 — `writeBudgetLines`:** replaced the hard guard. FRESH scaffold read (guids never cached), re-match, then abort-before-any-PUT on 0 lines / match problems / unresolved income. Per group: sum `amountField`(s) (composites via `+`, computed BALANCE income via `-`), skip-zero for expense lines, income always written, `OriginalBudgetedQty` only for HOUR lines with a real hours source. 429/5xx exponential-backoff retry; `dryRun` computes without any PUT.
+- **Income sources resolved:** `GENM/BILLING` ← `Total_Material_Budget__c`; `BALANCE` ← computed `Contract_Amount__c − Total_Material_Budget__c`. Contract field verified as `Contract_Amount__c` (used by `budgetCalc.js`, the budget handler, the test fixture, and the mapping sheet) — not the look-alike `Contract_Amount_2__c`. Dry-run vs R269999: both income lines resolve (BALANCE flagged computed), 15 groups, 0 problems.
+- **Stage 2 — handler modes:** HTTP `POST /projects/{recordId}/budget/push` (JWT → tenant-scoped load, gates → 409, set `Budget_Push_Status__c='Pushing'`, async self-invoke, return 202) + async worker (read values → `writeBudgetLines` → one SF write-back PATCH: `Pushed`/`Failed`, `Budget_Pushed_At__c`, `Budget_Finalized__c=true` on success only). Reconcile mode unchanged. Added a read-only `dryRunWrite` direct-invoke mode for the runbook.
+- **Stage 3 — SF metadata:** `salesforce/budget-push-fields/` Workbench package adds `Budget_Push_Status__c` (restricted picklist Pushing/Pushed/Failed), `Budget_Pushed_At__c` (DateTime), `Budget_Push_Error__c` (LongTextArea). Existing `Budget_Calc_Status__c` / `Budget_Finalized__c` / `Acumatica_Project_ID__c` verified present on the live describe.
+- **Stage 4 — route:** `scripts/wire-budget-push-route.ps1`, cloned from the recalc wire script (idempotent; only the `push` resource is new). Unrun.
+- **Stage 5 — docs:** ADR **D-049** (direct-call trigger, relay dropped), this log, TASKS, the integration doc (write path + gates + dry-run + re-push + **live-test runbook**), and the budget fields added to `docs/salesforce-schema.md`.
+- **Dependency:** `@aws-sdk/client-lambda` (self-invoke) committed via selective staging (`package.json` + `package-lock.json`, client-lambda hunks only); concurrent foreign WIP left uncommitted. **IAM:** `SelfInvokeBudgetPush` (`lambda:InvokeFunction` on self) required before the worker can self-invoke — Tim adding.
+
 ## 2026-08-07 — Acumatica ProjectBudget: InventoryID blocker RESOLVED (Gate 5a) via live R269999 harvest
 
 Corrected `MAPPING_ROWS` from the live scaffold of the canonical sandbox project **R269999** (customer `C001311112`) — read-only reconcile, no writes. Branch `feat/budget-mapping-inventoryids`; not deployed (draft for review).

@@ -135,6 +135,17 @@ Examples:
 
 ---
 
+**Budget / Acumatica push fields** (used by `lambdas/sundial-acumatica-budget-push`; verified present on the live describe 2026-08-07 except the three `Budget_Push_*`, which the `salesforce/budget-push-fields/` Workbench package adds):
+
+- `Contract_Amount__c` — Currency. The contract value. Feeds the two income budget lines: `GENM/BILLING` income = `Total_Material_Budget__c`, `BALANCE` income = `Contract_Amount__c − Total_Material_Budget__c` (the two sum to the contract). Distinct from the legacy look-alike `Contract_Amount_2__c`, which the budget system does not use.
+- `Total_Material_Budget__c` — Currency. Material budget; the `GENM/MATERIAL` expense line and the `GENM/BILLING` income line.
+- `Acumatica_Project_ID__c` — Text. The Acumatica `ProjectID` the push targets (e.g. `R269999`). Required before a push.
+- `Budget_Calc_Status__c` — Picklist. Must be `Calculated` for the push gate to pass.
+- `Budget_Finalized__c` — Checkbox. Set `true` by the worker on the first successful push; left `true` on re-pushes.
+- `Budget_Push_Status__c` — Restricted picklist `Pushing` / `Pushed` / `Failed`. `Pushing` on the HTTP request; `Pushed`/`Failed` by the async worker. *(Added by the budget-push-fields package.)*
+- `Budget_Pushed_At__c` — Datetime. Stamped on a successful push. *(Added by the package.)*
+- `Budget_Push_Error__c` — Long Text Area (32768). Abort/failed-line reason; cleared on success. *(Added by the package.)*
+
 ### `Sundial_Roofing__c`
 
 **Purpose:** Roofing projects. Used for roofing-only work (residential or commercial), and as the linked reroof record when a solar project includes a reroof.

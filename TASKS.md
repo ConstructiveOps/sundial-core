@@ -71,15 +71,15 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [x] Gate 2 numeric verify via scripted HOLLAND TEST record (seeded in-Lambda; see PROGRESS.md)
 - [ ] Task 2: run `scripts/wire-budget-recalc-route.ps1` against the prod API Gateway (needs go-ahead — live change)
 - [ ] Task 3: wire the confirmed Platform-Event relay (EventBridge rule or SQS mapping) + Lambda invoke permission
-- [ ] Task 5: build the ProjectBudget GUID-write path — **data unblocked 2026-08-07** (Gate 5a done); now gated on **Gate 5b sign-off** (see below), then implement `writeBudgetLines`
+- [x] Task 5: built the ProjectBudget GUID-write path (`writeBudgetLines`) on `feat/budget-push-write` — Stages 1–5 done; deploy + wire + FLS + IAM + live test pending (runbook in `docs/integrations/acumatica-budget-push.md`).
 - [ ] Portal budget UI per `../harmon-crm/docs/Sundial_Solar_Fields_by_Section.xlsx` (FRONTEND — not a backend task; fields render in the portal, not a SF layout)
 
 ### Blocked on Harmon / confirmation
 - [x] ~~**Acumatica mapping: no `InventoryID` column**~~ → **RESOLVED 2026-08-07 (Gate 5a)** via a live reconcile harvest of ProjectID `R269999`. The sheet's old "AccountGroup" column was actually the InventoryID; real AccountGroup is BILLING/LABOR/OTHER/MATERIAL. `MAPPING_ROWS` + `docs/Sundial_Solar_Budget_Fields.xlsx` + the integration doc now carry the full 4-part key. Clean matched-run: 18 rows → 15 groups → 0 problems. (Note: `RESIDENTAL` is the Acumatica misspelling — kept intentionally.)
 - [x] ~~Income code BILL~~ → resolved: income is TWO lines (`BALANCE` + `GENM`/BILLING), `BILL` removed. `DLR` confirmed as the Dealer-fee line.
 - [x] ~~**Geo commission task code unconfirmed**~~ → **resolved to `APPT COM`** (LABOR·SALESCOMM) from role semantics, and ~~Audit+QA `GENA`~~ → resolved to the LABOR·RESIDENTAL line (internal labor, UOM=HOUR). Both wired into `MAPPING_ROWS`.
-- [!] **Harmon finance sign-off on Geo → `APPT COM`** required before the FIRST production ProjectBudget write (Gate 5b; `PENDING_HARMON_SIGNOFF`).
-- [ ] **Gate 5b before building `writeBudgetLines`:** clean reconcile run vs R269999 (done ✔) + Harmon APPT COM sign-off + Tim approves the hand-proven write plan.
+- [x] **Harmon finance sign-off on Geo → `APPT COM`** received (Gate 5b) 2026-08-07 — clears `PENDING_HARMON_SIGNOFF` for the first production write.
+- [x] **Gate 5b satisfied 2026-08-07:** clean reconcile vs R269999 ✔ + Harmon APPT COM sign-off ✔ + Tim-approved write plan ✔ — `writeBudgetLines` built (Stages 1–5).
 - [!] **Milestone trigger fields** for the recalc Flow (Audit Completed, Design Review Finalized, …) — Harmon's final list; append as formula `fInputChangedC` and Activate the Flow.
 - [!] **§9 workbook quirks** (8) in `docs/budget-calculator-design.md` — implemented as the sheet behaves; each a one-line change in `budgetCalc.js` pending a Harmon finance yes/no.
 - [ ] **Confirm the Platform-Event relay mechanism** actually deployed (Event Relay vs SQS) — repo has no live SF→AWS relay yet.

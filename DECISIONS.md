@@ -1002,6 +1002,27 @@ SES is now verified and out of sandbox for `sundialcrm.com` (us-west-1), sender 
 
 ---
 
+## D-049 — Budget push triggered by a direct portal API call (relay/SQS dropped from this path)
+
+**Date:** 2026-08-07
+**Status:** Accepted
+
+**Context:** Budget Layer 2 (`lambdas/sundial-acumatica-budget-push`) writes the calculated budget onto a project's existing Acumatica `ProjectBudget` lines. The original Layer-2 sketch triggered via the general outbound pattern — a Salesforce record-triggered Flow → Platform Event → relay → SQS → consumer.
+
+**Decision:** For the budget push, trigger the write **directly** from the portal **"Update Budget"** button via `POST /projects/{recordId}/budget/push` on the Sundial REST API. The Flow → Platform Event → relay → SQS chain is **dropped from this path**. The HTTP request validates the gates and returns **202** immediately; the actual write runs in an **async self-invoke** of the same Lambda (`InvocationType: Event`), because a fresh scaffold read plus up to ~15 PUTs with retry can exceed API Gateway's ~29 s synchronous ceiling.
+
+**Rationale:**
+- The push is a **user action on one record**, not a data-change reaction — a synchronous request/ack fits better than an eventual queue drain, and gives the user immediate gate feedback (`409` with a reason code) instead of a silent enqueue.
+- One fewer moving part (no Flow, no Platform Event, no relay/SQS wiring) for a path that must be hand-proven per project during rollout.
+- Re-push is idempotent (update-by-GUID), so SQS's at-least-once delivery guarantee buys nothing here.
+
+**Consequences:**
+- The execution role needs `lambda:InvokeFunction` on its own ARN (`SelfInvokeBudgetPush`) for the self-invoke.
+- There is **no janitor** for a worker hard-death mid-run, so status can stick on `Pushing`; the UI must treat `Pushing` as non-blocking and rely on idempotent re-push to clear it (see the runbook in `docs/integrations/acumatica-budget-push.md`).
+- The relay/SQS pattern **may return** for a future *recalc-triggered* push (a data-change reaction) — a different trigger from this user-action path, not a reversal of this decision.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

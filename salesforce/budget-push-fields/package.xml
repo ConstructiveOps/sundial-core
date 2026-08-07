@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: adds three status fields to Sundial_Solar__c for the Acumatica
+  budget-push write path (Stage 3):
+    - Budget_Push_Status__c  (restricted picklist: Pushing / Pushed / Failed)
+    - Budget_Pushed_At__c     (DateTime)
+    - Budget_Push_Error__c    (Long Text Area, 32768)
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. Additive: no existing field
+  is touched. After deploy, grant the Sundial integration-user profile Edit FLS on
+  all three (see README.md).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Solar__c.Budget_Push_Status__c</members>
+        <members>Sundial_Solar__c.Budget_Pushed_At__c</members>
+        <members>Sundial_Solar__c.Budget_Push_Error__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

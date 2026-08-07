@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Budget-push status fields written by lambdas/sundial-acumatica-budget-push:
+    - Budget_Push_Status__c: set to 'Pushing' on the HTTP request, then 'Pushed' or
+      'Failed' by the async worker. RESTRICTED picklist — the code only ever writes
+      these three literals, so restricting blocks bad data.
+    - Budget_Pushed_At__c:   stamped (ISO datetime) on a successful push.
+    - Budget_Push_Error__c:  the abort reason / failed-line summary on failure;
+      cleared (null) on success. markFailed() slices messages to 32000 chars.
+  These sit alongside the existing Budget_Calc_Status__c / Budget_Finalized__c /
+  Acumatica_Project_ID__c (verified present on the live Solar describe 2026-08-07).
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Budget_Push_Status__c</fullName>
+        <externalId>false</externalId>
+        <label>Budget Push Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Pushing</fullName>
+                    <default>false</default>
+                    <label>Pushing</label>
+                </value>
+                <value>
+                    <fullName>Pushed</fullName>
+                    <default>false</default>
+                    <label>Pushed</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Budget_Pushed_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Budget Pushed At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Budget_Push_Error__c</fullName>
+        <externalId>false</externalId>
+        <label>Budget Push Error</label>
+        <length>32768</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+</CustomObject>

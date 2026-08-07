@@ -1,5 +1,16 @@
 # Sundial — Progress Log
 
+## 2026-08-07 — Acumatica ProjectBudget: InventoryID blocker RESOLVED (Gate 5a) via live R269999 harvest
+
+Corrected `MAPPING_ROWS` from the live scaffold of the canonical sandbox project **R269999** (customer `C001311112`) — read-only reconcile, no writes. Branch `feat/budget-mapping-inventoryids`; not deployed (draft for review).
+
+- **Root correction:** the mapping sheet's "AccountGroup" column actually held the **InventoryID**. The real AccountGroup is `BILLING`/`LABOR`/`OTHER`/`MATERIAL`. So commission lines are `LABOR·SALESCOMM`; the two `BURDENEXR` lines differ by InventoryID (`SALESCOMM` commission-burden vs `RESIDENTAL` labor-burden).
+- **`MAPPING_ROWS`** now carry the full 4-part key verbatim from the harvest. **Verified clean matched-run against R269999: 18 rows → 15 groups → 0 problems** (SLPC 2→1 and GENO 3→1 sums collapse correctly).
+- **`RESIDENTAL`** is the Acumatica-side misspelling — kept intentionally (a "correction" to RESIDENTIAL would break every match). `<N/A>` is a literal InventoryID value; matcher compares raw literals (confirmed — no trim/normalize).
+- **Resolutions:** Geo commission → `APPT COM` (`LABOR·SALESCOMM`, appointment-setter flat commission) — **pending Harmon finance sign-off before first production write** (`PENDING_HARMON_SIGNOFF`). Audit+QA `GENA` → the `LABOR·RESIDENTAL` internal-labor line (UOM=HOUR, `GENA_Hours__c`).
+- **Moved together (one commit):** `MAPPING_ROWS` (`lambdas/sundial-acumatica-budget-push/index.js`), `docs/Sundial_Solar_Budget_Fields.xlsx` (added real `AccountGroup` column, renamed the mislabeled one to `InventoryID`, filled both for all 17 rows), `docs/integrations/acumatica-budget-push.md` (reconciliation table + RESIDENTAL warning + resolutions + canonical test pair + reconcile invoke procedure + Gate 5b), TASKS.md.
+- **Write path stays hard-guarded.** Throw message updated: no remaining data blockers; gated on **Gate 5b** (clean matched-run ✔ + Harmon APPT COM sign-off + Tim-approved write plan).
+
 ## 2026-08-03 — Provisioning: end-to-end fix + live re-diagnosis (auth email via SES, D-046)
 
 Re-opened the provisioning breakage with **live diagnostics** against prod Supabase + Salesforce. Key correction to the incident's working hypothesis:

@@ -2,8 +2,9 @@
 
 > Consumer: `lambdas/sundial-acumatica-budget-push/`. Populates the values on a
 > project's **existing** template-scaffolded `ProjectBudget` lines from the Sundial
-> budget outputs. **Status: read + reconcile scaffolding only — the write path is
-> hard-guarded off pending two confirmations (see Blockers).**
+> budget outputs. **Status: read + reconcile scaffolding only. Gate 5a (data) is
+> DONE — mapping keys reconciled to the live R269999 scaffold (2026-08-07). The
+> write path stays hard-guarded, now gated on Gate 5b sign-off (see below).**
 
 ## Trigger chain (per CLAUDE.md queue pattern)
 
@@ -54,24 +55,83 @@ RS template already created the budget lines when the project was created.
 - **Dealer fee** — `DLR` is the Dealer-fee line (confirmed; resolves one "(confirm)").
   Send only when > 0.
 
-## 🚧 Remaining blocker — resolve at Gate 5a before any write
+## ✅ Gate 5a — RESOLVED (live harvest of R269999, 2026-08-07)
 
-- **The mapping tab has NO `InventoryID` column** (columns: Budget Line, ProjectTaskID,
-  AccountGroup, Type, Amount Source, Qty Source, Notes). Without `InventoryID` the
-  4-part key is not unique — `SLPC` (Sales Rep + Overhead) and `BURDENEXR` (by account
-  group) collide, and the sum-grouping can't tell "same line, sum" (GENO) from
-  "different lines" (SLPC). **InventoryID (and the income account groups / amount
-  splits) must be read from the live scaffold and filled in** before the write path is
-  safe. Until then `matchMappingToLines` flags every row missing a key part.
+The blocker was that the mapping sheet's **"AccountGroup" column actually held the
+InventoryID.** A read-only reconcile of the canonical sandbox project **R269999**
+(38 scaffolded lines) gave the true 4-part key per line. Two corrections fell out:
 
-## Still unconfirmed (config map, never guessed)
+- **The REAL `AccountGroup` is `BILLING` / `LABOR` / `OTHER` / `MATERIAL`** — the
+  commission lines are `AccountGroup=LABOR` with `InventoryID=SALESCOMM` (not
+  `AccountGroup=SALESCOMM`). `InventoryID` is what separates the two `BURDENEXR`
+  lines: `SALESCOMM` (Commission Burden) vs `RESIDENTAL` (Labor Burden).
+- **⚠️ `RESIDENTAL` is the Acumatica-side spelling** (missing the second "I"). It is
+  intentionally kept misspelled in `MAPPING_ROWS` and this sheet — **do not
+  "correct" it** or every `RESIDENTAL` line fails to match. `<N/A>` is a **literal**
+  `InventoryID` value (compared as the literal string).
 
-- **Geo commission task code** — the sheet shows none (`UNCONFIRMED.geoCommissionTaskId = null`).
+### Reconciliation table (all 18 code rows → full 4-part key)
 
-## Gate 5a reconciliation (read-only, run first)
+| Mapping row(s) | ProjectTaskID | AccountGroup | InventoryID | Type |
+|---|---|---|---|---|
+| Income – Balance of Contract | BALANCE | BILLING | `<N/A>` | Income |
+| Income – Solar Material | GENM | BILLING | `<N/A>` | Income |
+| Dealer Fee | DLR | OTHER | `<N/A>` | Expense |
+| Sales Rep + Overhead Commission (sum) | SLPC | LABOR | SALESCOMM | Expense |
+| Sales Manager Commission | SLMC | LABOR | SALESCOMM | Expense |
+| **Geo Commission** | **APPT COM** | LABOR | SALESCOMM | Expense |
+| Commission Burden | BURDENEXR | LABOR | SALESCOMM | Expense |
+| **Audit + QA Labor** | **GENA** | LABOR | RESIDENTAL | Expense |
+| Roofing Labor | ROOFCOM | LABOR | RESIDENTAL | Expense |
+| S1 / S2 / S3 Install Labor | S1 / S2 / S3 | LABOR | RESIDENTAL | Expense |
+| Labor Burden | BURDENEXR | LABOR | RESIDENTAL | Expense |
+| Total Material | GENM | MATERIAL | `<N/A>` | Expense |
+| Other Material + CO Fee + Permit (sum) | GENO | OTHER | `<N/A>` | Expense |
 
-Invoke the consumer in reconcile mode with `{ "recordId": "<Sundial_Solar__c Id>" }`
-(or `{ "acumaticaProjectId": "<id>" }`). It returns every existing scaffolded line
-keyed by the full natural key + its GUID `id`, plus the mapping-match result
-(matched vs problems). Confirm all 17 mapping rows each resolve to exactly one line —
-**no writes happen in this mode.**
+A clean matched-run against R269999: **18 rows → 15 groups → 0 problems** (the SLPC
+2→1 and GENO 3→1 sums collapse into one scaffold line each).
+
+### Two resolutions (with rationale)
+
+- **`GENA` "Audit + QA Labor" → `LABOR · RESIDENTAL · Expense`.** `GENA` matched two
+  scaffold lines: the internal-labor line (`LABOR·RESIDENTAL`, UOM=HOUR) and an
+  outside-services line (`OTHER·AUDIT SVCS`). Resolved to the **labor** line —
+  internal employee audit/QA labor, qty from `GENA_Hours__c`, UOM=HOUR, consistent
+  with the other labor lines. Confirmed.
+- **Geo commission → `APPT COM` (`LABOR · SALESCOMM · Expense`).** Confirmed from
+  role semantics: `APPT COM` = appointment-setter flat commission (Geo's role).
+  **⏳ Harmon finance sign-off required before the first PRODUCTION push** (Gate 5b;
+  `PENDING_HARMON_SIGNOFF` in the code).
+
+## Canonical sandbox test pair
+
+- **ProjectID `R269999`** (Acumatica BizRun sandbox) with customer **`C001311112`** —
+  created via the proven Layer-1 push. This is the reference project for reconcile
+  runs and, later, the first hand-proven write. Full harvest kept at
+  `scratchpad/R269999-reconcile.json`.
+
+## Reconcile invoke (read-only — run before any write; no writes happen in this mode)
+
+The Lambda takes the event **as the payload directly** (not an API Gateway body) and
+requires **no JWT** — it's an internal, unauthenticated read. Payload:
+`{ "acumaticaProjectId": "R269999" }` (or `{ "recordId": "<Sundial_Solar__c Id>" }`,
+which resolves `Acumatica_Project_ID__c`). Per repo convention (payload via file):
+
+```powershell
+'{ "acumaticaProjectId": "R269999" }' | Out-File -FilePath payload.json -Encoding ascii -NoNewline
+aws lambda invoke --function-name sundial-acumatica-budget-push --region us-west-1 `
+  --cli-binary-format raw-in-base64-out --payload file://payload.json out.json
+Get-Content out.json
+```
+
+Response carries every scaffold line keyed by the full natural key + GUID `id`, the
+`mappingMatch` (matched vs problems), and a `gate5b` checklist. **Confirm all rows
+match with 0 problems.**
+
+## Gate 5b — sign-off before the write path is built
+
+The write path (`writeBudgetLines`) stays hard-guarded. Before it is implemented:
+1. A reconcile run against R269999 shows **all rows matched, 0 problems** (done ✔).
+2. **Harmon finance signs off** on the Geo → `APPT COM` mapping.
+3. **Tim approves the hand-proven write plan** (which line each amount/qty targets,
+   the skip-zero rule, income-line handling) before any code writes to Acumatica.

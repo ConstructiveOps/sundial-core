@@ -1,29 +1,30 @@
 // sundial-acumatica-budget-push — Acumatica ProjectBudget population (Layer 2).
 //
-// STATUS: READ + RECONCILE SCAFFOLDING ONLY. The GUID-write path is intentionally
-// NOT finalized and is hard-guarded off (see writeBudgetLines) pending TWO items
-// the reconciliation on a live TEST project must resolve first:
-//   (A) The mapping tab (docs/Sundial_Solar_Budget_Fields.xlsx » Acumatica Mapping)
-//       carries NO InventoryID column. The match key ProjectTaskID+AccountGroup+
-//       InventoryID+Type is therefore NOT unique on the mapping side — SLPC (x2),
-//       GENO (x3), BURDENEXR (x2) collide without it. InventoryID must be added to
-//       the mapping before any write. See docs/integrations/acumatica-budget-push.md.
-//   (B) The Geo commission task code is unconfirmed (UNCONFIRMED.geoCommissionTaskId
-//       is null) — its scaffold line cannot be matched until the code is supplied.
+// STATUS: READ + RECONCILE SCAFFOLDING ONLY. The GUID-write path is still hard-
+// guarded off (see writeBudgetLines) — but the DATA BLOCKERS ARE RESOLVED.
 //
-// Income is CONFIRMED (Gate 5a): TWO lines — BALANCE (Balance of Contract) and
-// GENM/BILLING (Solar Material), both Type=Income. There is NO "BILL" task.
+// Gate 5a (data) — DONE 2026-08-07 via a live harvest of the canonical sandbox
+// project R269999 (customer C001311112; see scratchpad/R269999-reconcile.json and
+// docs/integrations/acumatica-budget-push.md):
+//   (A) InventoryIDs harvested. The sheet's old "AccountGroup" column was actually
+//       the InventoryID; the REAL AccountGroup is BILLING/LABOR/OTHER/MATERIAL.
+//       MAPPING_ROWS below now carry the full 4-part key verbatim from the scaffold.
+//   (B) Geo commission -> APPT COM (LABOR · SALESCOMM · Expense), confirmed from
+//       role semantics. Harmon finance sign-off still required before the first
+//       PRODUCTION write (PENDING_HARMON_SIGNOFF).
+//
+// Income is TWO lines — BALANCE (Balance of Contract) and GENM/BILLING (Solar
+// Material), both Type=Income, both InventoryID <N/A>. There is NO "BILL" task.
 //
 // WHAT THIS DOES NOW (safe, read-only): given a Salesforce Sundial_Solar__c record
 // (or an Acumatica ProjectID), read the EXISTING scaffolded ProjectBudget lines
 // (GET $filter, URL-encoded) and return them keyed by the full natural key + GUID
-// `id` — the raw material for the Gate 5a reconciliation table. It does NOT create,
-// update, or delete anything in Acumatica.
+// `id` — the reconciliation table. It does NOT create, update, or delete anything.
 //
-// The eventual write path (Layer 2, after Gate 5a): match each of the 17 mapping
-// rows to EXACTLY ONE existing line by ProjectTaskID+AccountGroup+InventoryID+Type,
-// then PUT /ProjectBudget/{id} updating OriginalBudgetedAmount (+ OriginalBudgetedQty
-// / UOM=HOUR on labor lines). Updates by GUID — never key-upsert, never insert.
+// The eventual write path (Layer 2, after Gate 5b sign-off): match each mapping row
+// to EXACTLY ONE existing line by ProjectTaskID+AccountGroup+InventoryID+Type, then
+// PUT /ProjectBudget/{id} updating OriginalBudgetedAmount (+ OriginalBudgetedQty /
+// UOM=HOUR on labor lines). Updates by GUID — never key-upsert, never insert.
 
 import { getAcumaticaEntity } from "../../lib/acumatica.js";
 import { sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
@@ -31,44 +32,59 @@ import { sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
 const SOLAR_SF_OBJECT = "Sundial_Solar__c";
 
-// --- The mapping rows (from the Acumatica Mapping tab) ----------------------
-// NOTE: 18 rows here vs. the sheet's 17 data rows — the single sheet income row is
-// split into TWO code rows (BALANCE + GENM/BILLING) per Gate 5a, hence the +1.
-// inventoryId is null for EVERY row because the mapping tab has no InventoryID
-// column (blocker A). Filling these in is a prerequisite to the write path — the
-// matcher fails loudly while they are null. amountField/hours are informational
-// here (used by the write path later). "(confirm)" codes are isolated in
-// UNCONFIRMED so they are never guessed.
-export const UNCONFIRMED = {
-  // Sheet shows no task code for the Geo commission row — confirm with finance.
-  geoCommissionTaskId: null, // TODO(Harmon): Geo commission task code — DO NOT GUESS
-  // Dealer fee resolved: DLR is the Dealer-fee line (per the scaffold reference).
+// --- The mapping rows (Acumatica Mapping tab, RECONCILED to the live R269999
+// scaffold on 2026-08-07) ---------------------------------------------------
+// Each row carries the TRUE 4-part natural key: taskId + accountGroup + inventoryId
+// + type, taken VERBATIM from the harvested ProjectBudget lines
+// (scratchpad/R269999-reconcile.json; table in docs/integrations/acumatica-budget-push.md).
+//
+// KEY CORRECTION: the sheet's old "AccountGroup" column actually held the
+// InventoryID. The REAL AccountGroup is BILLING / LABOR / OTHER / MATERIAL — so the
+// commission lines are AccountGroup=LABOR with InventoryID=SALESCOMM (NOT
+// AccountGroup=SALESCOMM as the sheet implied). InventoryID is what separates the
+// two BURDENEXR lines (SALESCOMM commission-burden vs RESIDENTAL labor-burden).
+//
+// (!) "RESIDENTAL" IS THE ACUMATICA-SIDE SPELLING (missing the second "I"). It is
+// intentionally misspelled here to match the live InventoryID EXACTLY — DO NOT
+// "correct" it to RESIDENTIAL, or every RESIDENTAL line will fail to match.
+//
+// "<N/A>" is a LITERAL InventoryID value on those lines (not null/absent). The
+// matcher compares it as the literal string, so it must stay exactly "<N/A>".
+//
+// 18 rows vs. the sheet's 17: income is split into TWO code rows (BALANCE + GENM/
+// BILLING). Intentional SUMS into one scaffold line: the two SLPC rows (Sales Rep +
+// Overhead) and the three GENO rows (Other Material + CO Fee + Permit).
+
+// The one item still needing a human YES before the FIRST production write (Gate 5b):
+export const PENDING_HARMON_SIGNOFF = {
+  // Geo commission -> APPT COM (LABOR · SALESCOMM · Expense). Confirmed from role
+  // semantics (appointment-setter flat commission); the code + full key are wired
+  // into MAPPING_ROWS below, but Harmon finance must sign off before the first
+  // PRODUCTION ProjectBudget push.
+  geoCommissionTaskId: "APPT COM",
 };
 
 export const MAPPING_ROWS = [
-  // line, taskId, accountGroup, type, inventoryId, amountField, hoursField, note
-  // INCOME = TWO lines (there is NO BILL task; it was removed). Both are Income;
-  // GENM/BILLING/Income is DISTINCT from GENM/MATERIAL/Expense (material cost)
-  // via AccountGroup + Type, so the 4-part key separates them. Account groups,
-  // InventoryIDs, and the amount split come from the live scaffold at Gate 5a.
-  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: null, type: "Income", inventoryId: null, amountField: null, hoursField: null, note: "Income 1 of 2. Amount source + AccountGroup + InventoryID TBD from live scaffold (Gate 5a)." },
-  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: null, amountField: null, hoursField: null, note: "Income 2 of 2. GENM/BILLING/Income (not the GENM/MATERIAL cost line). Amount source + InventoryID TBD (Gate 5a)." },
-  { line: "Dealer Fee", taskId: "DLR", accountGroup: null, type: "Expense", inventoryId: null, amountField: "Dealer_Fee__c", hoursField: null, note: "DLR is the Dealer-fee line (confirmed). Only send when > 0. AccountGroup/InventoryID from scaffold." },
-  { line: "Sales Rep Commission", taskId: "SLPC", accountGroup: "SALESCOMM", type: "Expense", inventoryId: null, amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, note: "SLPC collides with Overhead row — InventoryID required to disambiguate." },
-  { line: "Sales Manager Commission", taskId: "SLMC", accountGroup: "SALESCOMM", type: "Expense", inventoryId: null, amountField: "Sales_Mgr_Commission_Amt__c", hoursField: null },
-  { line: "Geo Commission", taskId: null, accountGroup: "SALESCOMM", type: "Expense", inventoryId: null, amountField: "Geo_Commission_Amount__c", hoursField: null, note: "Task code unconfirmed (UNCONFIRMED.geoCommissionTaskId)." },
-  { line: "Overhead Commission", taskId: "SLPC", accountGroup: "SALESCOMM", type: "Expense", inventoryId: null, amountField: "Overhead_Commission_Amt__c", hoursField: null, note: "SLPC collides with Sales Rep row — InventoryID required." },
-  { line: "Commission Burden", taskId: "BURDENEXR", accountGroup: "SALESCOMM", type: "Expense", inventoryId: null, amountField: "Commission_Burden_Amt__c", hoursField: null, note: "BURDENEXR collides with Labor Burden — differs by account group." },
-  { line: "Audit + QA Labor", taskId: "GENA", accountGroup: "LABOR", type: "Expense", inventoryId: null, amountField: "Audit_Labor_Cost__c+QA_Labor_Cost__c", hoursField: "GENA_Hours__c", note: "UOM=HOUR." },
-  { line: "Roofing Labor", taskId: "ROOFCOM", accountGroup: "LABOR", type: "Expense", inventoryId: null, amountField: "Roofing_Labor_Cost__c", hoursField: null },
-  { line: "S1 Install Labor", taskId: "S1", accountGroup: "LABOR", type: "Expense", inventoryId: null, amountField: "S1_Labor_Cost__c", hoursField: "S1_Hours__c" },
-  { line: "S2 Install Labor", taskId: "S2", accountGroup: "LABOR", type: "Expense", inventoryId: null, amountField: "S2_Labor_Cost__c", hoursField: "S2_Hours__c" },
-  { line: "S3 Labor (Battery + Adders)", taskId: "S3", accountGroup: "LABOR", type: "Expense", inventoryId: null, amountField: "S3_Labor_Cost__c", hoursField: "S3_Hours__c" },
-  { line: "Labor Burden", taskId: "BURDENEXR", accountGroup: "(RESIDENTIAL)", type: "Expense", inventoryId: null, amountField: "Total_Labor_Burden_Budget__c", hoursField: null, note: "BURDENEXR collides with Commission Burden — differs by account group." },
-  { line: "Total Material", taskId: "GENM", accountGroup: "MATERIAL", type: "Expense", inventoryId: null, amountField: "Total_Material_Budget__c", hoursField: null },
-  { line: "Other Material", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: null, amountField: "Total_Other_Budget__c", hoursField: null, note: "GENO collides with CO Fee + Permit — InventoryID required." },
-  { line: "Constructive Ops Fee", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: null, amountField: "Constructive_Ops_Fee__c", hoursField: null, note: "GENO collision." },
-  { line: "Permit Pass-Through", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: null, amountField: "Permit_Pass_Through_Cost__c", hoursField: null, note: "GENO collision." },
+  // line, taskId, accountGroup, type, inventoryId, amountField, hoursField, note.
+  // Full 4-part key verbatim from the R269999 harvest.
+  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: null, hoursField: null, note: "Income 1 of 2. BALANCE/BILLING/Income, InventoryID <N/A>. Amount source TBD from the budget calc." },
+  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: null, hoursField: null, note: "Income 2 of 2. GENM/BILLING/Income — distinct from GENM/MATERIAL cost via AccountGroup+Type. Amount source TBD." },
+  { line: "Dealer Fee", taskId: "DLR", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Dealer_Fee__c", hoursField: null, note: "DLR/OTHER/<N/A>. Only send when > 0." },
+  { line: "Sales Rep Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, note: "Sums with Overhead Commission into the single SLPC/LABOR/SALESCOMM line." },
+  { line: "Sales Manager Commission", taskId: "SLMC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Mgr_Commission_Amt__c", hoursField: null },
+  { line: "Geo Commission", taskId: "APPT COM", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Geo_Commission_Amount__c", hoursField: null, note: "Confirmed from role semantics (appointment-setter flat commission); Harmon sign-off required before first PRODUCTION push (PENDING_HARMON_SIGNOFF)." },
+  { line: "Overhead Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Overhead_Commission_Amt__c", hoursField: null, note: "Sums with Sales Rep Commission into the single SLPC/LABOR/SALESCOMM line." },
+  { line: "Commission Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Commission_Burden_Amt__c", hoursField: null, note: "BURDENEXR/LABOR/SALESCOMM — InventoryID SALESCOMM separates it from Labor Burden (RESIDENTAL)." },
+  { line: "Audit + QA Labor", taskId: "GENA", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Audit_Labor_Cost__c+QA_Labor_Cost__c", hoursField: "GENA_Hours__c", note: "Labor line GENA/LABOR/RESIDENTAL, UOM=HOUR, qty from GENA_Hours__c. NOT the GENA/OTHER/AUDIT SVCS outside-services line — this is internal employee audit/QA labor." },
+  { line: "Roofing Labor", taskId: "ROOFCOM", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Roofing_Labor_Cost__c", hoursField: null },
+  { line: "S1 Install Labor", taskId: "S1", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S1_Labor_Cost__c", hoursField: "S1_Hours__c" },
+  { line: "S2 Install Labor", taskId: "S2", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S2_Labor_Cost__c", hoursField: "S2_Hours__c" },
+  { line: "S3 Labor (Battery + Adders)", taskId: "S3", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S3_Labor_Cost__c", hoursField: "S3_Hours__c" },
+  { line: "Labor Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Total_Labor_Burden_Budget__c", hoursField: null, note: "BURDENEXR/LABOR/RESIDENTAL — InventoryID RESIDENTAL separates it from Commission Burden (SALESCOMM)." },
+  { line: "Total Material", taskId: "GENM", accountGroup: "MATERIAL", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null },
+  { line: "Other Material", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Other_Budget__c", hoursField: null, note: "Sums with CO Fee + Permit into the single GENO/OTHER/<N/A> line." },
+  { line: "Constructive Ops Fee", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Constructive_Ops_Fee__c", hoursField: null, note: "Sums into the GENO/OTHER/<N/A> line." },
+  { line: "Permit Pass-Through", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Permit_Pass_Through_Cost__c", hoursField: null, note: "Sums into the GENO/OTHER/<N/A> line." },
 ];
 
 // Unwrap an Acumatica field value ({ value: x } or scalar).
@@ -173,12 +189,15 @@ export function matchMappingToLines(mappingRows, lines) {
 }
 
 // HARD GUARD: the write path is not built. It throws so nothing can accidentally
-// push. Do NOT implement until Gate 5a confirms the reconciliation table, the
-// mapping InventoryIDs are filled in, and the geo commission task code is confirmed.
+// push. Gate 5a (data) is DONE — MAPPING_ROWS carry the full 4-part keys from the
+// R269999 harvest. The remaining gate is Gate 5b (sign-off), NOT more data.
 export async function writeBudgetLines() {
   throw new Error(
     "BLOCKED: ProjectBudget write path is intentionally not implemented. " +
-      "Resolve mapping InventoryIDs + geo commission task code (Gate 5a) first."
+      "Data blockers are RESOLVED (InventoryIDs + geo commission harvested from " +
+      "R269999, 2026-08-07). Gated on Gate 5b sign-off: a clean matched-run against " +
+      "R269999 (all rows matched, 0 problems) AND a hand-proven write plan approved " +
+      "by Tim (incl. Harmon sign-off on the APPT COM geo mapping) before implementing."
   );
 }
 
@@ -220,9 +239,12 @@ export const handler = async (event) => {
       lineCount: lines.length,
       lines, // full existing scaffold, keyed by natural key + GUID (Gate 5a table)
       mappingMatch: { matchedCount: matched.length, matched, problems },
-      blockers: [
-        "Mapping tab has no InventoryID column — matcher will report all 17 rows as problems until filled in.",
-        "Geo commission task code is unconfirmed (UNCONFIRMED.geoCommissionTaskId is null).",
+      // Data blockers resolved from the R269999 harvest (2026-08-07). What remains
+      // before a PRODUCTION write is Gate 5b sign-off, not more data.
+      gate5b: [
+        "Confirm this run shows all mapping rows matched with 0 problems.",
+        "Harmon finance sign-off on the Geo commission -> APPT COM (LABOR/SALESCOMM) mapping.",
+        "Tim approves the hand-proven write plan before writeBudgetLines is implemented.",
       ],
     };
   } catch (err) {

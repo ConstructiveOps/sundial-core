@@ -80,6 +80,71 @@ Examples:
 - `Client__c` — Lookup to `Sundial_Tenant__c` (tenant anchor) for sharing scope
 - `Notes__c` — Long text
 
+**Design Request fields (Aurora integration — D-047).** The Design Request lives on the **Customer**, not on a project: no `Sundial_Solar__c` record exists at design-request time (one is created only after the proposal is done and docs are signed). `POST /customers/{recordId}/design-request/submit` reads these fresh at submit time. Verified against the live describe 2026-08-03 unless noted.
+
+- `Project_Type__c` — Picklist: Solar Only, Battery and Solar, Battery Only
+- `Existing_Solar_System__c` — Checkbox
+- `Existing_Panel_Count__c` — Number
+- `Design_Turnaround__c` — Picklist: **In Home**, Within 2 Hours, Next Day
+- `Proposed_Panel_Type__c` — Picklist (5 panel SKUs)
+- `Inverter_Type__c` — Picklist (24 inverter SKUs)
+- `Battery_Type__c` — Picklist: Tesla Powerwall 3, FranklinWH aPower2, Enphase IQ, SolarEdge, Other
+- `Battery_Quantity__c` — Number
+- `For_Profit_PPW__c` — Text(50)
+- `Annual_Usage_kWh__c` — Number
+- `Utility_Company__c` — Picklist (AZ utilities)
+- `Appointment_DateTime__c` — Datetime
+- `Proposed_Panel_Count__c` — Number
+- `Offset_Requested__c` — Text(50)
+- `Financing_Type__c` — Picklist: Cash, Loan, Lease
+- `Financing_Partner__c` — Picklist: Aurora, Cash, Credit Human, Enfin, GoodLeap, ICCU, Lightreach, Mosaic, Other, Sungage, Sunlight
+- `Term__c` — **Multi-select** picklist: 5yr, 10yr, 15yr, 20yr, 25yr (values come back semicolon-joined)
+- `APR__c` — Percent
+- `Design_Notes__c` — Long textarea — **DOES NOT EXIST YET**; to be created. The Lambda filters its field list against the live describe, so it is skipped until then and picked up automatically after.
+- `Jan_Usage_kW__c` … `Dec_Usage_kW__c` — Number ×12, calendar order. These feed Aurora's consumption profile (`monthly_energy`, index 0 = January) — never reorder them.
+- `Sent_to_Aurora__c` — **Datetime** (set to submit time; the *project-creation* idempotency marker)
+- `Aurora_Project_ID__c` — Text(150), **External ID** (`externalId: true`, verified 2026-08-07). Written back after the Aurora project is created, and the upsert key for dealer-originated auto-creates (D-049).
+- `Design_Request_Email_Sent__c` — Datetime — **DOES NOT EXIST YET**; to be created. Stamped only when the design-manager notification actually lands. Deliberately **separate** from `Sent_to_Aurora__c`: Aurora project creation must be once-only, but the notification (which *is* the design request, since Aurora has no API for it) must stay retryable, or a failed email would leave an Aurora project that the design team never hears about. Describe-guarded — until it exists, re-submits keep re-sending. See D-047.
+
+Only identity, address, and the 12 monthly usage values reach Aurora's API; every other field above travels to the design manager by email, because no Aurora endpoint accepts them. See `docs/integrations/aurora-api-reference.md`.
+
+**Aurora inbound / signed-agreement fields (D-048).** Written by the `sundial-aurora-inbound` worker when Aurora's `agreement_status_changed` webhook reports `signed`. All on the **Customer** — no `Sundial_Solar__c` exists at signature time.
+
+Existing (verified by describe 2026-08-03):
+- `Proposal_Amount__c` — Currency ← `financing.system_price`
+- `Contract_Price_Per_Watt__c` — Currency ← `system_price / system_size_stc` (Watts), 2dp
+- `Financing_Type__c` — Picklist ← `financing_option` (loans→Loan, cash→Cash, lease→Lease; `ppa`/`levelized_ppa` have no match and are left unset + reported)
+- `Financing_Partner__c` — Picklist ← `financier.provider`, matched case-insensitively against the live picklist; unmatched is left unset, never coerced to "Other"
+- `Down_Payment_Amount__c` — Currency ← `down_payment` (loans only)
+- `Final_System_Size_kW__c` — Number ← `system_size_stc / 1000`, 2dp
+- `Final_Panel_Count__c` — Number ← sum of `bill_of_materials` quantity where `component_type = modules`
+- `First_Year_kW_Production__c` — Number ← `energy_production.annual`. **⚠️ The label says kW; the value is kWh.** Aurora reports annual production in kWh and that is the number written — the field label is the inaccurate part. Renaming it is a separate cleanup.
+- `Contract_Signed_Date__c`, `Sold_Date__c` — **Date** ← webhook **receipt** time as the America/Phoenix calendar date. Aurora's agreement object has **no `signed_at`** and the webhook carries no timestamp, so receipt time is the signing timestamp of record.
+- `Loan_Term_Years__c` — Number ← `loans[0].duration_months / 12` (loans only)
+- `Monthly_Payment__c` — Currency ← `monthly_payment_first_month` (loans) or `monthly_payment` (lease/ppa)
+
+**DO NOT EXIST YET** — to be created (TASKS.md); the worker drops each from every query and PATCH until it does, and reports the gap in the notification email:
+- `Aurora_Agreement_ID__c` — Text(100). Which agreement the status below refers to.
+- `Aurora_Agreement_Status__c` — Picklist: `sent`, `viewed`, `signed`, `cancel-pending`, `canceled`, `declined`, `error`. Updated by **every** status event, guarded by a precedence rank so a late `viewed` can't regress a `signed`. The negative terminal values (`canceled`, `cancel-pending`, `declined`) are confirmed against Aurora before being applied, so a real post-signature cancellation **does** overwrite `signed` while a stale one does not (D-048 amendment).
+- `Aurora_Agreement_Status_At__c` — Datetime. When that status was received.
+- `Aurora_Proposal_Link__c` — URL(255) ← `proposal.proposal_link` (a link into Aurora's web app; there is no PDF from that endpoint).
+- `Aurora_Signed_Email_Sent__c` — Datetime. Set only when the signed-agreement notification actually lands; it is the "signed processing completed" marker that makes a duplicate event a no-op and a partial run resumable. Same contract as `Design_Request_Email_Sent__c`.
+
+The signed PDF is stored at `SUNDIAL/{customerId}/{agreementId}-signed-agreement.pdf` (deterministic, so a duplicate overwrites) and mirrored to Dropbox by the existing sync.
+
+**Dealer-origination fields (D-049).** Written when a **signed** Aurora agreement arrives for a project no customer carries and the project has no `external_provider_id` — a third-party dealer's deal, originated entirely inside Aurora. The record is created by **upsert on `Aurora_Project_ID__c`**, which is what makes duplicate deliveries and concurrent workers converge on one record.
+
+**DO NOT EXIST YET** — to be created (TASKS.md); describe-guarded, so the import succeeds without them and reports the gap:
+- `Aurora_Dealer_Name__c` — Text(255). The dealer, resolved from the Aurora project's `partner_id` via List Partners (an Aurora "partner" is an external business user group = the dealer firm); falls back to the owning user's name via Retrieve User, then to the raw id.
+- `Aurora_Import_Notes__c` — Long Text(32768). Everything Aurora returned that has no field of its own, as `key: value` lines under an `Auto-created from Aurora signed agreement <id> on <ISO date>` header: raw property address, country, salutation, mailing address, project type/status/tags, `partner_id` / `owner_id` / `team_id`, an out-of-picklist state, a skipped lead source or status/stage value.
+
+Fields populated on an auto-created record (all existing): `Name` (from `customer_first_name`/`customer_last_name`, falling back to the Aurora project name, then `Aurora Project <id>`), `First_Name__c`, `Last_Name__c`, `Primary_Email__c`, `Primary_Phone__c`, `Street__c` / `City__c` / `Postal_Code__c` (from `location.property_address_components`), `State__c`, `Active__c` = true, `Client__c` (the tenant, resolved from `SUNDIAL_TENANT_SLUG`), and `Aurora_Project_ID__c` (the upsert key).
+
+Pipeline position (Tim's decision, 2026-08-07): `Status__c` = **`Customer`** and `Stage__c` = **`Sold - Pending Review`**. Both values exist in the org today (verified by describe 2026-08-07). `Status__c` is the load-bearing one — the org default is **`Lead`**, so without it a closed dealer sale would sit in the CRM as a lead. `Stage__c` parks the record in a review queue, which is right: these are built from Aurora data alone.
+
+- `Lead_Source__c` needs a new picklist value **`Aurora - Third-Party Dealer`** (TASKS.md). The org's ~200-value list has no generic Aurora entry today, so the field is left unset with a warning rather than misattributing the sale to an existing partner value.
+- Every picklist the import writes (`State__c`, `Lead_Source__c`, `Status__c`, `Stage__c`) goes through the same match-or-skip guard: matched case-insensitively, written in the **org's** canonical casing (their `State__c` list contains the typo `Il`, so a literal `IL` would otherwise fail), and — if the value has been renamed or removed — left unset with a warning and the intended value recorded in `Aurora_Import_Notes__c`. An invalid picklist value fails the entire insert, and a signed contract is not worth losing over a renamed picklist entry.
+
 **Relationships:**
 - One-to-many with `Sundial_Solar__c`, `Sundial_Roofing__c`, `Sundial_Commercial__c`, `Sundial_Service__c`
 - One-to-many with standard `Asset` records (installed systems via custom lookup field on Asset)

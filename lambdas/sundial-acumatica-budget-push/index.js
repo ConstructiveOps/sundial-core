@@ -27,10 +27,25 @@
 // UOM=HOUR on labor lines). Updates by GUID — never key-upsert, never insert.
 
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
-import { sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
+import { sfQuery, soqlEscapeString, sfUpdateRecord } from "../../lib/salesforce.js";
+import { resolveIdentity } from "../../lib/identity.js";
+import {
+  corsHeaders,
+  normalizeHeaders,
+  jsonResponse,
+  mapIdentityError,
+  httpMethod,
+} from "../../lib/http.js";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
 const SOLAR_SF_OBJECT = "Sundial_Solar__c";
+
+// The portal "Update Budget" button hits POST /projects/{recordId}/budget/push,
+// which returns 202 immediately and hands the work to an async self-invoke of THIS
+// same function (InvocationType Event). The runtime always sets these two env vars.
+const SELF_FUNCTION_NAME = process.env.AWS_LAMBDA_FUNCTION_NAME;
+const lambda = new LambdaClient({ region: process.env.AWS_REGION || "us-west-1" });
 
 // --- The mapping rows (Acumatica Mapping tab, RECONCILED to the live R269999
 // scaffold on 2026-08-07) ---------------------------------------------------
@@ -327,6 +342,11 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
     const hasQty = g.uom === "HOUR" && g.hoursFields.length > 0;
     const amount = sumFields(g.amountFields, budgetValues);
     const qty = hasQty ? sumFields(g.hoursFields, budgetValues) : null;
+    // "computed" = the amount is DERIVED, not a plain field/sum — i.e. any spec uses
+    // subtraction (BALANCE = Contract_Amount__c - Total_Material_Budget__c). Surfaced
+    // in dry-run so a reviewer can see which lines are calculated vs. read straight.
+    const computed = g.amountFields.some((s) => s.includes("-"));
+    const amountExpr = computed ? g.amountFields.join(" + ") : null;
 
     // Skip-zero: expense lines at 0 are left as-is; income is always written.
     if (!isIncome && amount === 0) {
@@ -342,6 +362,7 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
       results.push({
         key: g.key, lineId: g.lineId, action: "would_write",
         amount, ...(hasQty ? { qty } : {}), uom: g.uom, type: g.type, rows: g.rows,
+        ...(computed ? { computed: true, amountExpr } : {}),
         ...(isIncome && g.amountFields.length === 0 ? { needsAmountSource: true } : {}),
       });
       continue;
@@ -379,10 +400,203 @@ async function projectIdForRecord(recordId) {
   return rows && rows.length ? rows[0].Acumatica_Project_ID__c : null;
 }
 
-// --- handler: RECONCILE (read-only) ----------------------------------------
+// --- handler: dispatch by invocation shape ---------------------------------
+// Three ways this Lambda is entered:
+//   1. Async worker self-invoke  -> event.__worker === true   (handleWorker)
+//   2. API Gateway HTTP request  -> event.requestContext etc. (handleHttp)
+//   3. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
+// The reconcile path is UNCHANGED from before; HTTP + worker are the write path.
+function isHttpEvent(event) {
+  return !!(
+    event &&
+    (event.requestContext || event.httpMethod || event.routeKey || event.rawPath)
+  );
+}
+
+export const handler = async (event) => {
+  if (event && event.__worker === true) return handleWorker(event);
+  if (isHttpEvent(event)) return handleHttp(event);
+  return handleReconcile(event);
+};
+
+// --- HTTP: POST /projects/{recordId}/budget/push ---------------------------
+// Validates the gates, flips Budget_Push_Status__c to 'Pushing', fires the async
+// worker, and returns 202. Never does the Acumatica writes on the HTTP leg (API
+// Gateway caps at ~29s; the worker gets the full function timeout).
+async function handleHttp(event) {
+  const method = httpMethod(event);
+  const headers = normalizeHeaders(event?.headers);
+  const cors = corsHeaders(headers["origin"]);
+
+  if (method === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+  if (method !== "POST") {
+    return jsonResponse(405, cors, { error: "method_not_allowed", code: "METHOD_NOT_ALLOWED" });
+  }
+
+  const pp = event?.pathParameters || {};
+  const recordId = pp.recordId ? decodeURIComponent(pp.recordId) : null;
+  if (!recordId || !/^[a-zA-Z0-9]{15,18}$/.test(recordId)) {
+    return jsonResponse(400, cors, {
+      error: "invalid_record_id",
+      code: "INVALID_RECORD_ID",
+      message: "Path must carry a Sundial_Solar__c record id.",
+    });
+  }
+
+  // Auth — tenant derived ONLY from the verified token.
+  let identity;
+  try {
+    identity = await resolveIdentity(headers["authorization"]);
+  } catch (err) {
+    const m = mapIdentityError(err?.code);
+    if (m) return jsonResponse(m.status, cors, m.body);
+    throw err;
+  }
+  const tenantId = identity.tenantId;
+  if (!tenantId) return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+
+  // Load the project TENANT-SCOPED with the two gate inputs + the linked customer's
+  // Acumatica-sync flag. Not owned / missing is indistinguishable -> 404.
+  const soql =
+    `SELECT Id, Acumatica_Project_ID__c, Budget_Calc_Status__c, ` +
+    `Sundial_Customer__r.Synced_to_Acumatica__c ` +
+    `FROM ${SOLAR_SF_OBJECT} ` +
+    `WHERE Id = '${soqlEscapeString(recordId)}' ` +
+    `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`;
+  const rows = await sfQuery(soql);
+  if (!rows || rows.length === 0) {
+    return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
+  const rec = rows[0];
+  const acumaticaProjectId = String(rec.Acumatica_Project_ID__c || "").trim();
+  const calcStatus = rec.Budget_Calc_Status__c;
+  const customerSynced = rec.Sundial_Customer__r?.Synced_to_Acumatica__c === true;
+
+  // Gate 1: only push CALCULATED numbers — never Pending/Error/blank.
+  if (calcStatus !== "Calculated") {
+    return jsonResponse(409, cors, {
+      error: "budget_not_calculated",
+      code: "BUDGET_NOT_CALCULATED",
+      message: `Budget_Calc_Status__c is '${calcStatus || "(blank)"}', must be 'Calculated'.`,
+    });
+  }
+  // Gate 2: the Acumatica project + budget scaffold must already exist (Layer 1).
+  if (!customerSynced) {
+    return jsonResponse(409, cors, {
+      error: "customer_not_synced",
+      code: "CUSTOMER_NOT_SYNCED",
+      message: "Linked customer is not Synced_to_Acumatica__c=true; the Acumatica project/budget scaffold must exist first.",
+    });
+  }
+  // Gate 3: need the project id to target.
+  if (!acumaticaProjectId) {
+    return jsonResponse(409, cors, {
+      error: "no_acumatica_project",
+      code: "NO_ACUMATICA_PROJECT",
+      message: "Acumatica_Project_ID__c is blank; cannot target a ProjectBudget.",
+    });
+  }
+
+  // Flip to 'Pushing' so the UI reflects in-flight state, then fire the worker.
+  try {
+    await sfUpdateRecord(SOLAR_SF_OBJECT, recordId, { Budget_Push_Status__c: "Pushing" });
+  } catch (err) {
+    console.error("budget-push: could not set Pushing status:", err?.message || String(err));
+    return jsonResponse(502, cors, { error: "sf_update_failed", code: "SF_UPDATE_FAILED" });
+  }
+
+  try {
+    await lambda.send(
+      new InvokeCommand({
+        FunctionName: SELF_FUNCTION_NAME,
+        InvocationType: "Event", // async, fire-and-forget
+        Payload: Buffer.from(
+          JSON.stringify({ __worker: true, recordId, acumaticaProjectId, tenantId })
+        ),
+      })
+    );
+  } catch (err) {
+    console.error("budget-push: self-invoke failed:", err?.message || String(err));
+    // Roll the status back so the UI isn't stuck on 'Pushing'.
+    try {
+      await sfUpdateRecord(SOLAR_SF_OBJECT, recordId, {
+        Budget_Push_Status__c: "Failed",
+        Budget_Push_Error__c: "Async worker could not be started: " + (err?.message || String(err)),
+      });
+    } catch {}
+    return jsonResponse(502, cors, { error: "worker_invoke_failed", code: "WORKER_INVOKE_FAILED" });
+  }
+
+  return jsonResponse(202, cors, {
+    status: "Pushing",
+    recordId,
+    acumaticaProjectId,
+    message: "Budget push started.",
+  });
+}
+
+// --- Async worker: the actual read -> match -> write, then SF write-back -----
+// Runs off the API Gateway clock. Reads the budget field values, writes the
+// ProjectBudget lines, then records the outcome on the Solar record in ONE PATCH.
+// Budget_Finalized__c is set true ONLY on success (idempotent — re-pushes leave it
+// true). On any failure/abort it records the reason and leaves Finalized untouched.
+async function handleWorker(event) {
+  const { recordId, acumaticaProjectId, tenantId } = event;
+  try {
+    // Pull exactly the fields the mapping references (tenant-scoped defense-in-depth).
+    const fields = budgetFieldNames();
+    const soql =
+      `SELECT ${fields.join(", ")} FROM ${SOLAR_SF_OBJECT} ` +
+      `WHERE Id = '${soqlEscapeString(recordId)}'` +
+      (tenantId ? ` AND Client__c = '${soqlEscapeString(tenantId)}'` : "") +
+      ` LIMIT 1`;
+    const rows = await sfQuery(soql);
+    if (!rows || rows.length === 0) {
+      await markFailed(recordId, "Record not found or not owned by tenant during worker read.");
+      return { ok: false, error: "record_not_found" };
+    }
+
+    const result = await writeBudgetLines(acumaticaProjectId, rows[0]);
+
+    if (result.ok) {
+      await sfUpdateRecord(SOLAR_SF_OBJECT, recordId, {
+        Budget_Push_Status__c: "Pushed",
+        Budget_Pushed_At__c: new Date().toISOString(),
+        Budget_Push_Error__c: null,
+        Budget_Finalized__c: true, // first success finalizes; re-push leaves it true
+      });
+    } else {
+      const failedKeys = (result.results || [])
+        .filter((r) => r.action === "failed")
+        .map((r) => `${r.key}(${r.status})`)
+        .join(", ");
+      const errMsg = result.aborted
+        ? `aborted:${result.aborted} ${result.message || ""}`.trim()
+        : `${result.summary?.failed || 0} line(s) failed: ${failedKeys}`;
+      await markFailed(recordId, errMsg);
+    }
+    return result;
+  } catch (err) {
+    console.error("budget-push worker error:", err?.message || String(err));
+    try {
+      await markFailed(recordId, "worker exception: " + (err?.message || String(err)));
+    } catch {}
+    return { ok: false, error: "worker_exception", message: err?.message || String(err) };
+  }
+}
+
+// Record a failed push. Budget_Finalized__c is deliberately NOT touched here.
+async function markFailed(recordId, message) {
+  await sfUpdateRecord(SOLAR_SF_OBJECT, recordId, {
+    Budget_Push_Status__c: "Failed",
+    Budget_Push_Error__c: String(message).slice(0, 32000),
+  });
+}
+
+// --- RECONCILE (read-only) -------------------------------------------------
 // Input: { recordId } (Sundial_Solar__c) or { acumaticaProjectId }. Returns the
 // existing lines + the mapping match result for the Gate 5a table. No writes.
-export const handler = async (event) => {
+async function handleReconcile(event) {
   const body =
     event && typeof event === "object" && !event.Records ? event : {};
   let acumaticaProjectId = body.acumaticaProjectId || null;
@@ -420,4 +634,4 @@ export const handler = async (event) => {
     console.error("acumatica-budget-push reconcile error:", err?.message || String(err));
     return { ok: false, error: "server_error", message: err?.message || String(err) };
   }
-};
+}

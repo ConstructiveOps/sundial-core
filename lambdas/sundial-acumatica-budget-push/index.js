@@ -401,10 +401,11 @@ async function projectIdForRecord(recordId) {
 }
 
 // --- handler: dispatch by invocation shape ---------------------------------
-// Three ways this Lambda is entered:
-//   1. Async worker self-invoke  -> event.__worker === true   (handleWorker)
-//   2. API Gateway HTTP request  -> event.requestContext etc. (handleHttp)
-//   3. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
+// Ways this Lambda is entered:
+//   1. Async worker self-invoke  -> event.__worker === true    (handleWorker)
+//   2. Dry-run write (direct)    -> event.dryRunWrite === true (handleDryRunWrite)
+//   3. API Gateway HTTP request  -> event.requestContext etc.  (handleHttp)
+//   4. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
 // The reconcile path is UNCHANGED from before; HTTP + worker are the write path.
 function isHttpEvent(event) {
   return !!(
@@ -415,9 +416,46 @@ function isHttpEvent(event) {
 
 export const handler = async (event) => {
   if (event && event.__worker === true) return handleWorker(event);
+  if (event && event.dryRunWrite === true) return handleDryRunWrite(event);
   if (isHttpEvent(event)) return handleHttp(event);
   return handleReconcile(event);
 };
+
+// --- Dry-run write (direct invoke, READ-ONLY) ------------------------------
+// Payload: { dryRunWrite:true, recordId:"<Sundial_Solar__c Id>" } (preferred — pulls
+// the record's real budget values), or { dryRunWrite:true, acumaticaProjectId:"R269999" }
+// (project only; values default to 0). Computes every per-line amount/qty exactly as a
+// real push would and returns them WITHOUT any PUT and WITHOUT any SF write-back. The
+// runbook's pre-push check. No gates — it's a read.
+async function handleDryRunWrite(event) {
+  try {
+    let acumaticaProjectId = event.acumaticaProjectId || null;
+    let budgetValues = {};
+    if (event.recordId) {
+      const fields = budgetFieldNames();
+      const soql =
+        `SELECT Acumatica_Project_ID__c, ${fields.join(", ")} FROM ${SOLAR_SF_OBJECT} ` +
+        `WHERE Id = '${soqlEscapeString(event.recordId)}' LIMIT 1`;
+      const rows = await sfQuery(soql);
+      if (!rows || rows.length === 0) return { ok: false, error: "record_not_found" };
+      budgetValues = rows[0];
+      acumaticaProjectId =
+        acumaticaProjectId || String(rows[0].Acumatica_Project_ID__c || "").trim();
+    }
+    if (!acumaticaProjectId) {
+      return {
+        ok: false,
+        error: "no_project_id",
+        message: "Provide recordId (with Acumatica_Project_ID__c set) or acumaticaProjectId.",
+      };
+    }
+    const result = await writeBudgetLines(acumaticaProjectId, budgetValues, { dryRun: true });
+    return { mode: "dry_run_write", ...result };
+  } catch (err) {
+    console.error("budget-push dry-run error:", err?.message || String(err));
+    return { ok: false, error: "server_error", message: err?.message || String(err) };
+  }
+}
 
 // --- HTTP: POST /projects/{recordId}/budget/push ---------------------------
 // Validates the gates, flips Budget_Push_Status__c to 'Pushing', fires the async

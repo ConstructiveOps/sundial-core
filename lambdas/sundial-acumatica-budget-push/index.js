@@ -26,7 +26,7 @@
 // PUT /ProjectBudget/{id} updating OriginalBudgetedAmount (+ OriginalBudgetedQty /
 // UOM=HOUR on labor lines). Updates by GUID — never key-upsert, never insert.
 
-import { getAcumaticaEntity } from "../../lib/acumatica.js";
+import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
@@ -67,8 +67,8 @@ export const PENDING_HARMON_SIGNOFF = {
 export const MAPPING_ROWS = [
   // line, taskId, accountGroup, type, inventoryId, amountField, hoursField, note.
   // Full 4-part key verbatim from the R269999 harvest.
-  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: null, hoursField: null, note: "Income 1 of 2. BALANCE/BILLING/Income, InventoryID <N/A>. Amount source TBD from the budget calc." },
-  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: null, hoursField: null, note: "Income 2 of 2. GENM/BILLING/Income — distinct from GENM/MATERIAL cost via AccountGroup+Type. Amount source TBD." },
+  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Contract_Amount__c-Total_Material_Budget__c", hoursField: null, note: "Income 1 of 2. BALANCE/BILLING/Income, InventoryID <N/A>. Amount = contract value net of the material billing (which posts to GENM/BILLING) so the two income lines sum to Contract_Amount__c." },
+  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null, note: "Income 2 of 2. GENM/BILLING/Income — distinct from GENM/MATERIAL cost via AccountGroup+Type. Material billed to the customer at cost (Total_Material_Budget__c, same value as the GENM/MATERIAL expense line)." },
   { line: "Dealer Fee", taskId: "DLR", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Dealer_Fee__c", hoursField: null, note: "DLR/OTHER/<N/A>. Only send when > 0." },
   { line: "Sales Rep Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, note: "Sums with Overhead Commission into the single SLPC/LABOR/SALESCOMM line." },
   { line: "Sales Manager Commission", taskId: "SLMC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Mgr_Commission_Amt__c", hoursField: null },
@@ -180,25 +180,194 @@ export function matchMappingToLines(mappingRows, lines) {
     matched.push({
       key,
       lineId: hits[0].id,
+      uom: hits[0].uom, // scaffold line UOM; HOUR lines also get an OriginalBudgetedQty
+      type: rows[0].type, // Income lines are ALWAYS written (no skip-zero)
       rows: rows.map((r) => r.line),
       summed: rows.length > 1, // multiple mapping rows -> summed into this one line
       amountFields: rows.map((r) => r.amountField).filter(Boolean),
+      hoursFields: rows.map((r) => r.hoursField).filter(Boolean),
     });
   }
   return { matched, problems };
 }
 
-// HARD GUARD: the write path is not built. It throws so nothing can accidentally
-// push. Gate 5a (data) is DONE — MAPPING_ROWS carry the full 4-part keys from the
-// R269999 harvest. The remaining gate is Gate 5b (sign-off), NOT more data.
-export async function writeBudgetLines() {
-  throw new Error(
-    "BLOCKED: ProjectBudget write path is intentionally not implemented. " +
-      "Data blockers are RESOLVED (InventoryIDs + geo commission harvested from " +
-      "R269999, 2026-08-07). Gated on Gate 5b sign-off: a clean matched-run against " +
-      "R269999 (all rows matched, 0 problems) AND a hand-proven write plan approved " +
-      "by Tim (incl. Harmon sign-off on the APPT COM geo mapping) before implementing."
-  );
+// --- Budget field resolution ------------------------------------------------
+function numOf(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+// Evaluate a field expression against record values. Supports + and - across field
+// names — e.g. "Audit_Labor_Cost__c+QA_Labor_Cost__c" or
+// "Contract_Amount__c-Total_Material_Budget__c" (BALANCE income). Field API names
+// contain no + or -, so splitting on them is safe. Missing/blank fields count as 0.
+function evalFieldExpr(spec, values) {
+  let total = 0;
+  for (const term of String(spec).match(/[+-]?[^+-]+/g) || []) {
+    const t = term.trim();
+    if (!t) continue;
+    let sign = 1;
+    let name = t;
+    if (name[0] === "+") name = name.slice(1).trim();
+    else if (name[0] === "-") { sign = -1; name = name.slice(1).trim(); }
+    total += sign * numOf(values?.[name]);
+  }
+  return total;
+}
+
+// Every distinct Sundial_Solar__c field referenced by MAPPING_ROWS (amount + hours
+// sources; +/- expressions split), so a caller can SELECT exactly these.
+export function budgetFieldNames() {
+  const names = new Set();
+  for (const r of MAPPING_ROWS) {
+    if (r.amountField)
+      for (const f of r.amountField.split(/[+-]/)) {
+        const n = f.trim();
+        if (n) names.add(n);
+      }
+    if (r.hoursField) names.add(r.hoursField.trim());
+  }
+  return [...names];
+}
+
+// Sum a list of amount-field specs (each may be an A+B or A-B expression).
+function sumFields(fieldSpecs, values) {
+  let total = 0;
+  for (const spec of fieldSpecs || []) total += evalFieldExpr(spec, values);
+  return round2(total);
+}
+
+// PUT one ProjectBudget line, with exponential backoff on 429 / 5xx (transient).
+// A non-429 4xx is a real rejection — do not retry. Never retries a success.
+const WRITE_MAX_ATTEMPTS = 4;
+async function putBudgetLineWithRetry(body) {
+  let lastStatus = 0;
+  let lastText = "";
+  for (let attempt = 1; attempt <= WRITE_MAX_ATTEMPTS; attempt++) {
+    const res = await putAcumaticaEntity(PROJECT_BUDGET_ENTITY, body);
+    if (res.ok) return { ok: true, status: res.status };
+    lastStatus = res.status;
+    lastText = (res.text || "").slice(0, 300);
+    const transient = res.status === 429 || res.status >= 500;
+    if (transient && attempt < WRITE_MAX_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 500 * 2 ** (attempt - 1))); // 0.5s,1s,2s
+      continue;
+    }
+    break;
+  }
+  return { ok: false, status: lastStatus, text: lastText };
+}
+
+// Write the budget outputs onto the project's EXISTING scaffolded ProjectBudget
+// lines. Re-reads the scaffold FRESH in this run (guids never cached/stale),
+// re-matches, and ABORTS LOUDLY before any PUT on: 0 scaffold lines, any match
+// problem (a key hitting ≠ 1 line), or an income line with no amount source.
+//
+// Per matched group: amount = sum of its amountField(s) (composites split);
+// expense lines whose amount is 0 are SKIPPED (left as-is); income lines are ALWAYS
+// written. HOUR lines (per the live scaffold UOM) also write OriginalBudgetedQty
+// from their hours source. Re-push is SAFE BY CONSTRUCTION — every write is an
+// idempotent update-by-GUID of an existing line (no inserts, deterministic values).
+//
+// dryRun computes every per-line amount/qty and returns them WITHOUT any PUT.
+//
+// @param {string} acumaticaProjectId
+// @param {object} budgetValues - { <Sundial_Solar__c field>: number } (see budgetFieldNames)
+// @param {{ dryRun?: boolean }} [opts]
+export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = {}) {
+  const { dryRun = false } = opts;
+
+  // 1) FRESH scaffold read — guids come from THIS run only.
+  const lines = await readProjectBudgetLines(acumaticaProjectId);
+  if (lines.length === 0) {
+    return {
+      ok: false,
+      aborted: "no_scaffolded_lines",
+      acumaticaProjectId,
+      message: "ProjectBudget returned 0 lines — never create lines from scratch.",
+    };
+  }
+
+  // 2) Re-match against the fresh read. Any key not matching exactly one line
+  //    aborts BEFORE any PUT.
+  const { matched, problems } = matchMappingToLines(MAPPING_ROWS, lines);
+  if (problems.length > 0) {
+    return { ok: false, aborted: "match_problems", acumaticaProjectId, problems };
+  }
+
+  // 3) Income lines are always written, so their amount source must exist. Refuse
+  //    a real write that would otherwise post 0 to an income line.
+  const incomeNoSource = matched
+    .filter((g) => g.type === "Income" && g.amountFields.length === 0)
+    .map((g) => g.rows.join(" + "));
+  if (incomeNoSource.length > 0 && !dryRun) {
+    return {
+      ok: false,
+      aborted: "income_amount_source_unresolved",
+      acumaticaProjectId,
+      message:
+        "Income line(s) have no amountField in MAPPING_ROWS; refusing to write 0 to income. " +
+        "Fill the amount source for: " + incomeNoSource.join(", "),
+    };
+  }
+
+  // 4) Per group: compute, then (dry-run record | PUT).
+  const results = [];
+  let written = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const g of matched) {
+    const isIncome = g.type === "Income";
+    // Write OriginalBudgetedQty only when the line has an actual hours source in the
+    // mapping (GENA/S1/S2/S3). HOUR lines with no source (ROOFCOM piece-rate, Labor
+    // Burden) get amount only — we never overwrite the scaffold qty with a bogus 0.
+    const hasQty = g.uom === "HOUR" && g.hoursFields.length > 0;
+    const amount = sumFields(g.amountFields, budgetValues);
+    const qty = hasQty ? sumFields(g.hoursFields, budgetValues) : null;
+
+    // Skip-zero: expense lines at 0 are left as-is; income is always written.
+    if (!isIncome && amount === 0) {
+      skipped++;
+      results.push({ key: g.key, lineId: g.lineId, action: "skip_zero", amount: 0, uom: g.uom, type: g.type, rows: g.rows });
+      continue;
+    }
+
+    const body = { id: g.lineId, OriginalBudgetedAmount: { value: amount } };
+    if (hasQty) body.OriginalBudgetedQty = { value: qty };
+
+    if (dryRun) {
+      results.push({
+        key: g.key, lineId: g.lineId, action: "would_write",
+        amount, ...(hasQty ? { qty } : {}), uom: g.uom, type: g.type, rows: g.rows,
+        ...(isIncome && g.amountFields.length === 0 ? { needsAmountSource: true } : {}),
+      });
+      continue;
+    }
+
+    console.log(
+      `budget-push PUT ${g.key} guid=${g.lineId} amount=${amount}` +
+        (hasQty ? ` qty=${qty}` : "")
+    );
+    const put = await putBudgetLineWithRetry(body);
+    if (put.ok) {
+      written++;
+      results.push({ key: g.key, lineId: g.lineId, action: "written", amount, ...(hasQty ? { qty } : {}), uom: g.uom, status: put.status });
+    } else {
+      failed++;
+      results.push({ key: g.key, lineId: g.lineId, action: "failed", amount, status: put.status, error: put.text });
+    }
+  }
+
+  return {
+    ok: failed === 0,
+    dryRun,
+    acumaticaProjectId,
+    summary: { matchedGroups: matched.length, written, skipped, failed },
+    results,
+  };
 }
 
 // Resolve an Acumatica ProjectID from a Sundial_Solar__c record id (read-only).

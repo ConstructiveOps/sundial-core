@@ -41,7 +41,7 @@ All third-party costs (Salesforce licenses, AWS, Supabase, Vercel, FullCalendar 
 | Commercial Solar | Sunbase | Sundial (Commercial Solar module) |
 | Field Documentation | SiteCapture (basic plan) | Continue using SiteCapture; integrate later if plan supports API |
 | Accounting | Acumatica | Keep — integrate via REST API |
-| Design/Proposals | Aurora Solar | Keep — integrate later (Phase 3+) |
+| Design/Proposals | Aurora Solar | Keep — integrated (design-request push + agreement webhook). All Aurora integration runs on `Sundial_Customer__c`, never on a project object (D-047) |
 | Marketing/Lead Capture | Nonstop Automation | Keep — integrate via webhooks |
 | Document Storage | Dropbox | Keep as mirror — AWS S3 is primary, Dropbox receives copy-back for Harmon's ownership comfort |
 

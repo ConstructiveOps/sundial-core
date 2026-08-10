@@ -91,7 +91,9 @@ See DECISIONS.md D-043 for the access model.
 - `{object}` — short Sundial object name resolved through a fixed allowlist (Phase 1: `solar`, `customer`, `roofing`, `po`, `user`). Off-allowlist values are rejected with `400 OBJECT_NOT_ALLOWED`. See DECISIONS.md D-035 for the allowlist → Salesforce object → cache table mapping.
 
 **Query string parameters:**
-- `limit` — Page size (default 50, **max 500**). This is the size of ONE page, not a cap on the dataset — use `offset` to page through everything.
+- `limit` — Page size (default **500**, **max 5000**). This is the size of ONE page, not a cap on the dataset — use `offset` to page through everything. Values above the max clamp to 5000; `0`, negative and non-numeric values fall back to the default. At 5000 the 31.6k-row customer sweep is 7 requests instead of 64 (see the G2 note below).
+  - The **5000 cap applies to the cache path only.** The live-Salesforce list paths — cold cache, and the TEMP Sales-Rep restrict — keep the original **500** cap, because SOQL `OFFSET` is hard-capped at 2000 and those paths write back every row they return.
+  - The cap's real ceiling is Lambda's **6 MB response limit**: 5000 customer rows is ~4.4 MB of JSON. Solar's entire 4,476-row set returns in one request at 3.65 MB.
 - `offset` — Start row for the page (default 0). Server-side paginated: the response includes `total` (exact count of all matching rows) and `hasMore`.
 - `field` / `value` — Optional single-field filter (string/picklist; a numeric/boolean value may error). A `Client__c` filter from the caller is ignored — tenant scoping is forced.
 - `forceFresh` — reserved (not yet honored on the list path).
@@ -108,6 +110,10 @@ See DECISIONS.md D-043 for the access model.
 **Implementation status:** Built, deployed, and verified end to end against the live org (31,948-row customer set paged correctly with `total`). Cache miss falls through to Salesforce and writes back; an immediate repeat serves `source: "cache"`.
 
 > **Cache completeness:** the cache is kept complete by `sundial-cache-sync` (incremental on a schedule; **full resync** via `{ "mode": "full" }` after a bulk load — see below). The shared `sfQuery` follows the Salesforce query locator (`nextRecordsUrl`) to exhaustion, so neither the sync nor a Salesforce fallback is silently truncated at the 2000-row REST page limit.
+
+> **PostgREST "Max Rows" (why a page over 1000 still works):** Supabase enforces a per-request row ceiling — **1000 by default — and silently truncates past it**: asking PostgREST for 5000 rows returns `206` with 1000 rows and *no error*. Raising this endpoint's own cap alone would therefore have shipped a page size the cache layer quietly ignored. The list read splits any page larger than 1000 into consecutive `.range()` sub-requests (one exact count, on the first), so it returns the full page regardless of the dashboard setting. Raising "Max Rows" in Supabase → Settings → API collapses this back to a single round trip; it does not change correctness.
+
+> **⚠️ AWS Lambda concurrency quota (the G2 root cause):** this account's **"Concurrent executions" quota in us-west-1 is 10**, not the AWS default of 1000, and it is shared by all 32 functions. Invocations past it are rejected with `TooManyRequestsException` *before the function runs*, and API Gateway surfaces that as **`500 {"message": "Internal server error"}` in ~65 ms with no CloudWatch log line and no `Errors` metric**. That generic body is API Gateway's, not ours (this Lambda returns `{"error":"server_error"}`) — so if you ever see it with no matching log entry, suspect the quota, not the code. Diagnose with `ConcurrentExecutions` (Max) and `Throttles` in CloudWatch, and `aws service-quotas get-service-quota --service-code lambda --quota-code L-B99A9384 --region us-west-1`.
 
 #### `GET /sf/{object}/{id}`
 
@@ -266,6 +272,57 @@ The frontend then PUTs the file bytes directly to `uploadUrl` (does not go throu
 
 **Response:** 204 No Content on success.
 
+#### `POST /projects/{customerId}/files/copy-to-solar`
+
+**Lambda:** `sundial-list-files`
+**Purpose:** Backs the "Create Project" button. Copies every file in the **Customer's** S3 folder into the newly created **Solar project's** folder, so the new project starts with the customer's documents attached. Server-side S3 `CopyObject` — bytes never pass through the Lambda.
+
+**Path parameters:**
+- `{customerId}` — a **`Sundial_Customer__c`** record ID (15 or 18 char).
+
+> **Gateway variable name:** the resource is registered as `/projects/{recordId}/files/copy-to-solar` because `/projects/{recordId}` already exists (budget recalc) and API Gateway forbids sibling path variables with different names (see *Path Variable Notes*). The URL callers use is unchanged — the id in that position is a **customer** id.
+
+**Auth:** Supabase JWT (`Authorization: Bearer <jwt>`), verified in-Lambda via `resolveIdentity`. Both the customer read and the resolved solar project are tenant-scoped (`Client__c = <caller tenant>`, D-035); a missing or cross-tenant customer returns 404.
+
+**Request body:** none required (send `{}`).
+
+**Destination resolution — never client-supplied.** The target is read server-side from the customer's `Linked_Solar_Project__c`. That is the *only* destination; no request input can redirect the copy. If the field is empty → `400 NO_LINKED_PROJECT` (create the Solar project first). If it points outside the caller's tenant (bad data) → `400 LINKED_PROJECT_NOT_ACCESSIBLE`, nothing copied.
+
+**Behavior:**
+- Copies `SUNDIAL/{customerId}/*` → `SUNDIAL/{solarRecordId}/*`, preserving filenames **and** any nested subfolder path. Folder-placeholder keys are skipped.
+- **Zero files is a success:** `200 { "copied": 0 }`.
+- **Idempotent:** destination keys are deterministic, so a re-run overwrites in place rather than duplicating. Re-running is the supported recovery after a partial failure.
+- **Per-object fault isolation:** one object failing does not abort the batch — the rest still copy and the failures come back in `failed[]` (the call is still a 200).
+- Copies are also registered in Supabase `sundial_file_metadata` (category `Copied from Customer`) **best-effort**. The deployed Files tab lists straight from S3, so files appear regardless; this only keeps the documented metadata-backed design (D-029) in sync, mirroring the budget snapshot writer. A Supabase outage cannot fail the copy.
+
+**Response (200):**
+```json
+{
+  "customerId": "a1P7y00000AUo6TEAT",
+  "solarRecordId": "a1Q7y00000JDmqHEAT",
+  "copied": 3,
+  "failedCount": 0,
+  "files": [{ "fileName": "contract.pdf", "key": "SUNDIAL/a1Q.../contract.pdf", "size": 39 }],
+  "failed": [],
+  "metadataRegistered": 3
+}
+```
+`publicUrl` is deliberately **not** returned — the caller already sees these files on the customer, and the response should not hand out solar-prefixed links (the TEMP Sales Rep solar-files restriction guards those).
+
+**Errors:** 400 (`INVALID_RECORD_ID`, `NO_LINKED_PROJECT`, `LINKED_PROJECT_NOT_ACCESSIBLE`), 401 (no/invalid token), 403 (`NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 500 (`server_error`).
+
+**IAM:** needs `s3:ListBucket` on `sfsolproj` plus `GetObject`/`PutObject` on `sfsolproj/SUNDIAL/*`. Verified 2026-08-03 — `sundial-lambda-execution-role` has `AmazonS3FullAccess` attached, so **no IAM change was required**.
+
+**Smoke test:** `node scripts/verify-copy-to-solar-e2e.mjs` — creates a throwaway customer + linked solar project + portal user + S3 objects, exercises the live route, and deletes everything (teardown is verified, not assumed). Unit tests: `lambdas/sundial-list-files/test.js` (`npm test`).
+
+```bash
+# Manual equivalent (token from the portal's session):
+curl -i -X POST \
+  "https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/projects/<CUSTOMER_ID>/files/copy-to-solar" \
+  -H "Authorization: Bearer <SUPABASE_JWT>" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
 ---
 
 ### Budget
@@ -309,29 +366,74 @@ The Lambda also sets `Budget_Calc_Status__c = 'Calculated'`, `Budget_Last_Calcul
 
 ### Design Request
 
-#### `POST /projects/{recordId}/design-request/submit`
+#### `POST /customers/{recordId}/design-request/submit`
 
 **Lambda:** `sundial-aurora-push`
-**Purpose:** The "Submit Design Request" button on the Solar Design Request Form tab. Server-side, it resolves the Solar record's linked customer (`Sundial_Customer__c` lookup) and pushes that customer to Aurora Solar — creates the Aurora project and pushes the 12-month consumption profile, then writes `Aurora_Project_ID__c` + `Sent_to_Aurora__c` back to the customer. **Idempotent:** a customer that already has an `Aurora_Project_ID__c` returns `already_pushed` (never a second project).
+**Purpose:** The "Submit Design Request" button on the **Customer** record's Design Request Form tab. It pushes the customer to Aurora Solar (creates the Aurora project + 12-month consumption profile), writes `Sent_to_Aurora__c` + `Aurora_Project_ID__c` back to the customer, and emails the design manager the **full Design Request field set**.
+
+> **Why the customer, not a project:** no `Sundial_Solar__c` record exists at design-request time — a Solar project is created only after the proposal is done and the docs are signed. All Aurora integration operates on `Sundial_Customer__c`. See **D-047** (supersedes the earlier `/projects/{solarId}/…` route, which was wired but never used by any frontend and has been removed).
+
+**Idempotency — two separate guarantees.** Project creation is **once-only**; notification delivery is **independently retryable**:
+
+| Marker | Meaning | Effect on re-submit |
+|---|---|---|
+| `Sent_to_Aurora__c` / `Aurora_Project_ID__c` | An Aurora project was created | Never creates a second one. Ever. |
+| `Design_Request_Email_Sent__c` | A notification actually **landed** | Only this suppresses the email |
+
+Because Aurora has no design-request API, **the email *is* the design request**. If both facts shared one marker, a first submit whose email failed (SES error, env not yet configured) would leave an Aurora project stamped as submitted with nobody notified, and every re-submit would return `already_submitted` — no recovery path from inside the product. So a re-submit whose notification never landed **re-sends it** (same payload, fields re-read fresh) and returns `email.sent: true, resend: true`, making no Aurora calls at all. See D-047.
 
 **Path parameters:**
-- `{recordId}` — **`Sundial_Solar__c`** record ID (15 or 18 char). The customer is resolved from it server-side; the frontend never sends a customer id.
+- `{recordId}` — **`Sundial_Customer__c`** record ID (15 or 18 char).
 
-**Auth:** Supabase JWT (`Authorization: Bearer <jwt>`), verified in-Lambda via `resolveIdentity`. Both the Solar read and the customer read/write are tenant-scoped (`Client__c = <caller tenant>`, D-035); a missing/cross-tenant Solar id returns 404.
+**Auth:** Supabase JWT (`Authorization: Bearer <jwt>`), verified in-Lambda via `resolveIdentity`. The customer read and write-back are tenant-scoped (`Client__c = <caller tenant>`, D-035); a missing or cross-tenant id returns 404 (indistinguishable, by design).
 
-**Request body:** none required (send `{}`). The path carries the record id.
+**Request body:** none required (send `{}`). The path carries the record id, and **every field value is read fresh from Salesforce at submit time** — nothing in the body is trusted beyond the route itself.
+
+**What goes where.** Aurora's project-create API accepts only customer identity + site address; the consumption endpoint accepts the 12 monthly usage values. **None** of the Design Request form fields have an Aurora API home, so the notification email is their delivery channel (the design manager keys them into Aurora). Full mapping: `docs/integrations/aurora-api-reference.md`.
+
+| Data | Aurora API | Email |
+|---|---|---|
+| `Name`, `First_Name__c`, `Last_Name__c`, `Primary_Email__c`, `Primary_Phone__c` | ✅ `customer_*` | ✅ |
+| `Street__c`, `City__c`, `State__c`, `Postal_Code__c` | ✅ `location.property_address` (one geocodable line) | ✅ |
+| `Jan_Usage_kW__c` … `Dec_Usage_kW__c` | ✅ `consumption_profile.monthly_energy[12]` | ✅ (compact summary line) |
+| `Project_Type__c`, `Existing_Solar_System__c`, `Existing_Panel_Count__c`, `Design_Turnaround__c`, `Proposed_Panel_Type__c`, `Inverter_Type__c`, `Battery_Type__c`, `Battery_Quantity__c`, `For_Profit_PPW__c`, `Annual_Usage_kWh__c`, `Utility_Company__c`, `Appointment_DateTime__c`, `Proposed_Panel_Count__c`, `Offset_Requested__c`, `Financing_Type__c`, `Financing_Partner__c`, `Term__c`, `APR__c`, `Design_Notes__c` | ❌ not accepted by any Aurora endpoint | ✅ **email only** |
+
+The email field list is filtered against the live `Sundial_Customer__c` describe (5-min TTL cache), so a field the org doesn't have yet is skipped rather than breaking the SOQL. Two fields are in that state today:
+- **`Design_Notes__c`** — that row is simply absent from the email until it is created in Salesforce.
+- **`Design_Request_Email_Sent__c`** — until it exists there is nowhere to record delivery, so the route cannot tell a delivered notification from an undelivered one. It resolves that ambiguity toward **re-sending** (silence is the failure being guarded against), reporting `email.tracking: "unavailable"`. In practice the button doubles as a manual "re-send the design request" until the field is created. Neither field needs a code change or redeploy when created.
 
 **Response shape (200):**
 ```json
-{ "status": "pushed", "auroraProjectId": "43bfd824-…", "recordId": "<customer id>", "solarRecordId": "<solar id>", "consumption": "pushed" }
+{
+  "status": "pushed",
+  "auroraProjectId": "43bfd824-…",
+  "recordId": "<customer id>",
+  "consumption": "sent",
+  "email": { "sent": true, "messageId": "…", "recipients": { "to": 1, "cc": 1 } }
+}
 ```
-- `status` is one of `pushed`, `already_pushed`, or `pushed_writeback_failed` (Aurora project created but the SF write-back failed — non-retryable, the id is in the body so it isn't lost). `recordId` is the resolved **customer** id; `solarRecordId` echoes the path id.
+- `status` is one of `pushed`, `already_pushed`, or `pushed_writeback_failed` (Aurora project created but the SF write-back failed — non-retryable, the id is in the body so it isn't lost).
+- `consumption` is `sent`, `skipped_no_data`, or `failed`.
+- `already_pushed` also carries `sentToAurora`, and `notifiedAt` when a notification had already landed.
 
-**Errors:** 400 (`INVALID_RECORD_ID`; `NO_LINKED_CUSTOMER` — the Solar project has no linked customer; `MISSING_SITE_ADDRESS`), 401 (no/invalid token), 403 (`NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 502 (`aurora_create_failed`).
+**The `email` object:**
 
-**Forward-compat (SES):** the same submit will additionally email the sales manager once `lib/email.js` + SES are live. That is an **additive** step inside the handler (a marked seam right before the success return) — it adds an `email` key to the response and does **not** change this route or its request contract.
+| Key | When | Meaning |
+|---|---|---|
+| `sent` | always | Did a notification go out on this call |
+| `messageId`, `recipients: { to, cc }` | `sent: true` | SES message id; recipient **counts** (addresses are never returned or logged) |
+| `resend` | `true` on a recovery re-send | This was a re-submit whose earlier notification never landed. No Aurora calls were made. |
+| `reason` | `sent: false` | `email_not_configured`, `no_recipient_configured`, `already_submitted` (a notification already landed), or the SES error |
+| `tracking: "unavailable"` | when `Design_Request_Email_Sent__c` doesn't exist | Delivery can't be recorded, so re-submits keep re-sending |
+| `trackingWriteFailed: true` | rare | The email sent but stamping the marker failed; worst case a later re-submit sends one duplicate |
 
-**Also supported (manual, not the button):** the legacy body-based call `POST` with `{ "object": "customer", "recordId": "<customer id>", "retryConsumptionOnly"?: true }` still works for a direct customer push / consumption resend.
+**Email is always non-fatal** — a failed notification never fails the push, the email is still sent when the Salesforce write-back fails (the request *was* submitted), and a failure never marks the request as notified, so it stays recoverable by re-submitting.
+
+**Errors:** 400 (`INVALID_RECORD_ID`, `MISSING_SITE_ADDRESS`), 401 (no/invalid token), 403 (`NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 502 (`aurora_create_failed`).
+
+**Also supported (manual, not the button):** the body-based call `POST` with `{ "object": "customer", "recordId": "<customer id>", "retryConsumptionOnly"?: true }` still works for a direct customer push / consumption resend. It sends no email.
+
+**Tests:** `lambdas/sundial-aurora-push/test.js` (`npm test`) — happy path, re-submit after a successful notification (no email) vs. after a failed one (re-sends, no Aurora call), missing customer, cross-tenant rejection, CC set/unset, write-back failure, SES failure, and the describe guard when `Design_Request_Email_Sent__c` is absent.
 
 ---
 
@@ -398,6 +500,38 @@ Updates whitelisted fields on one tenant user. Body may contain `firstName`, `la
 
 ### Webhooks
 
+#### `GET /webhooks/aurora/agreement-status`
+
+**Lambda:** `sundial-aurora-webhook` (doorbell) → SQS `sundial-aurora-inbound` → `sundial-aurora-inbound` (worker)
+**Purpose:** Receives Aurora's `agreement_status_changed` webhook. The doorbell **only** authenticates, validates, enqueues, and acks; all retrieval and write-back happens in the worker. Full setup runbook: `docs/integrations/aurora-inbound.md`. Design rationale: **D-048**, extended by **D-049**.
+
+> **Why a doorbell:** Aurora counts a delivery as failed if we don't respond within **10 seconds**, and ~48h of failures **auto-disables the subscription**. The four retrievals + signed-PDF generation cannot fit in that budget.
+
+**Authentication:** shared secret in the `X-Aurora-Webhook-Token` header, constant-time compared in-Lambda against `webhook_token` from Secrets Manager (`sundial/aurora/webhook` if present, else `sundial/aurora/api`; cached 5 min so the token is rotatable without a redeploy). **No Supabase JWT and no API Gateway authorizer** — the caller is a machine with no portal user. A missing or wrong token is a 401 before anything else happens.
+
+**Query parameters** (all five must be in Aurora's `url_template`; `PROJECT_ID`/`AGREEMENT_ID`/`STATUS` are required):
+- `project_id` — the Aurora project; resolves the customer via `Aurora_Project_ID__c`
+- `design_id` — required for the `signed` path (design summary, proposal, financing)
+- `agreement_id` — the agreement whose status changed
+- `financing_id` — **empty when no financing option was selected**; the worker then skips the financing retrieval entirely (requesting it would 404)
+- `status` — `sent` | `viewed` | `signed` | `cancel-pending` | `canceled` | `declined` | `error` (the subscription takes **all** of them)
+
+**Responses:**
+| Code | When | Why it matters |
+|---|---|---|
+| 200 | enqueued | Aurora considers the delivery successful |
+| 400 | missing `project_id`/`agreement_id`/`status` | not retryable by Aurora; nothing enqueued |
+| 401 | missing/invalid token | the only gate on a public endpoint |
+| 500 | **enqueue failed or `AURORA_INBOUND_QUEUE_URL` unset** | **deliberate** — a 5xx drives Aurora's retry ladder so the event isn't lost. Acking an event we failed to queue would silently drop a signed contract. |
+
+**Worker behavior (not an HTTP route):** every status updates the agreement tracking fields on `Sundial_Customer__c`, deduped on `(agreement_id, status)` with a precedence rank so a late `viewed` cannot regress a `signed`. The negative terminal statuses (`canceled`, `cancel-pending`, `declined`) are **confirmed with a fresh `GET /agreements/{id}`** before precedence is applied: if Aurora agrees the agreement is dead it is applied even over a recorded `signed` and a cancellation email is sent; if Aurora still says `signed` the event is dropped as stale (D-048 amendment). A `signed` event additionally retrieves the agreement (confirming Aurora still says signed — if the re-read shows a dead agreement it records Aurora's status and sends the same cancellation notification instead), design summary, default proposal, and financing; writes the mapped fields; stores the signed PDF at `SUNDIAL/{customerId}/{agreementId}-signed-agreement.pdf`; and emails the design manager once. Failures report `batchItemFailures`, so SQS redrives to `sundial-aurora-inbound-dlq` after 5 receives; permanent classes (ambiguous/mismatched customer, missing `design_id`, any Aurora **403 = endpoint not provisioned for our key**) are logged with a `PERMANENT` marker.
+
+**Dealer origination (D-049):** a **signed** event for an Aurora project no customer carries no longer dead-letters — the worker fetches Retrieve Project and either **creates** the customer (dealer-originated: no `external_provider_id`) or **repairs** the missing `Aurora_Project_ID__c` on our own customer (provider id that resolves). Unmatched **non-signed** events create nothing and are dropped quietly unless they carry a provider id. See the runbook's dealer-origination table.
+
+**Env:** `AURORA_INBOUND_QUEUE_URL` (doorbell, required); `EMAIL_FROM` + `DESIGN_REQUEST_NOTIFY_TO` / `DESIGN_REQUEST_NOTIFY_CC` and `SUNDIAL_TENANT_SLUG` (worker).
+
+**Tests:** `lambdas/sundial-aurora-webhook/test.js` (14) and `lambdas/sundial-aurora-inbound/test.js` (55), via `npm test`.
+
 #### `POST /webhooks/acumatica`
 
 **Lambda:** `sundial-acumatica-webhook`
@@ -434,23 +568,58 @@ Quick reference of which Lambda handles which routes:
 | `sundial-auth-proxy` | GET /auth/me |
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
-| `sundial-list-files` | GET /files/by-record/{recordId} |
+| `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
 | `sundial-download-file` | GET /files/by-id/{fileId}/download |
 | `sundial-delete-file` | DELETE /files/by-id/{fileId} |
 | `sundial-budget` | POST /projects/{recordId}/budget/recalc |
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
-| `sundial-aurora-push` | POST /projects/{recordId}/design-request/submit |
+| `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
+| `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:
 
 | Lambda | Trigger | Purpose |
 |---|---|---|
+| `sundial-aurora-inbound` | SQS (`sundial-aurora-inbound`, DLQ after 5) | Processes Aurora agreement-status events: retrievals, `Sundial_Customer__c` write-back, signed PDF to S3, design-manager email, dealer-origination auto-create (D-048/D-049) |
 | `sundial-acumatica-push` | SQS (sundial-acumatica-outbound) | Outbound calls to Acumatica with rate-limit handling |
 | `sundial-dropbox-sync` | S3 PUT events on `constructive-sundial-files` | Mirrors uploaded files to Harmon's Dropbox |
 | `sundial-cache-invalidator` | Salesforce Platform Events (Phase 2+) | Propagates out-of-band Salesforce changes to the cache |
+
+---
+
+## Lambda Environment Variables
+
+Config that must not live in code (addresses, domains, regions) is set per-Lambda as an environment variable. Secrets stay in Secrets Manager — **never** put credentials here.
+
+| Variable | Lambda(s) | Required | Purpose |
+|---|---|---|---|
+| `DESIGN_REQUEST_NOTIFY_TO` | `sundial-aurora-push`, `sundial-aurora-inbound` | **Yes** (for the email step) | The design manager who receives the Design Request notification **and** the signed-agreement / cancellation notifications. Accepts a comma- or semicolon-separated list. If unset, the work still succeeds and the result reports `no_recipient_configured`. |
+| `DESIGN_REQUEST_NOTIFY_CC` | `sundial-aurora-push`, `sundial-aurora-inbound` | No | The director (or anyone else) CC'd on those notifications. Same list format. When unset, **no Cc header is sent at all**. |
+| `AURORA_INBOUND_QUEUE_URL` | `sundial-aurora-webhook` | **Yes** | The SQS queue the Aurora doorbell enqueues to. If unset the doorbell returns **500 on purpose** so Aurora retries rather than the event being acked into a void. |
+| `SUNDIAL_TENANT_SLUG` | `sundial-aurora-inbound` | No (defaults `harmon`) | Tenant slug resolved to the `Sundial_Tenant__c` record id for `Client__c` on auto-created dealer customers (D-049). Same identity as `VITE_TENANT_ID` and the S3 prefix. |
+| `EMAIL_FROM` | any sender (`sundial-aurora-push`, `sundial-aurora-inbound`, …) | Yes to send | Verified SES From address, e.g. `Sundial <no-reply@sundialcrm.com>`. Until it is set, `lib/email.js` reports "not configured" and senders skip the email instead of failing. |
+| `EMAIL_REPLY_TO` | any sender | No | Default Reply-To. |
+| `SES_REGION` | any sender | No | Region the SES identity is verified in (defaults to `us-west-1`). |
+| `EMAIL_CONFIG_SET` | any sender | No | SES configuration set for bounce/complaint tracking. |
+| `PORTAL_BASE_URL` | `sundial-user-admin` | No | Base URL for invite links (defaults to `https://harmon-crm.vercel.app`). Set to the client's real domain at go-live. |
+
+Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
+
+```powershell
+# Check what's there first
+aws lambda get-function-configuration --function-name sundial-aurora-push `
+  --region us-west-1 --query 'Environment.Variables'
+
+aws lambda update-function-configuration `
+  --function-name sundial-aurora-push `
+  --region us-west-1 `
+  --environment "Variables={EMAIL_FROM=Sundial <no-reply@sundialcrm.com>,DESIGN_REQUEST_NOTIFY_TO=designmanager@harmonelectric.net,DESIGN_REQUEST_NOTIFY_CC=director@harmonelectric.net}"
+```
+
+The sending Lambda's execution role also needs `ses:SendEmail` for the email step to succeed.
 
 ---
 

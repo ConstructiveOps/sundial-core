@@ -1,21 +1,35 @@
 // sundial-aurora-push — on-demand push of a Sundial Customer to Aurora Solar.
 //
 // Handles:
+//   POST /customers/{recordId}/design-request/submit   (recordId = Sundial_Customer__c Id)
+//        The "Submit Design Request" button. EVERYTHING Aurora-related in Sundial
+//        operates on Sundial_Customer__c: at design-request time no Sundial_Solar__c
+//        record exists yet (a Solar project is created only after the proposal is
+//        done and docs are signed). See D-047.
 //   POST /aurora/push   body { "object": "customer", "recordId": "<Sundial_Customer__c Id>" }
+//        Manual/retry entry (also supports retryConsumptionOnly).
 //
 // WHAT IT DOES (in order):
 //   1. Reads the Sundial_Customer__c record, TENANT-SCOPED (Id + Client__c). A
-//      missing or cross-tenant id is indistinguishable -> 404.
-//   2. IDEMPOTENCY GUARD: if Aurora_Project_ID__c is already set, it does NOT
-//      create a second Aurora project (Aurora projects are REAL, production
-//      records) -> returns already_pushed and stops.
+//      missing or cross-tenant id is indistinguishable -> 404. The record is read
+//      FRESH at submit time — no field value is ever taken from the request body.
+//   2. IDEMPOTENCY GUARD: if Sent_to_Aurora__c or Aurora_Project_ID__c is already
+//      set, it does NOT create a second Aurora project (Aurora projects are REAL,
+//      production records) -> returns already_pushed with the existing id.
+//      PROJECT CREATION is once-only; NOTIFICATION is separately retryable — see
+//      EMAIL_SENT_FIELD. A re-submit whose notification never landed re-sends it.
 //   3. Creates an Aurora project (POST .../projects) with the customer's identity,
 //      SITE address, and external_provider_id = the Salesforce record Id (the
 //      cross-reference that lets Aurora point back at Sundial).
 //   4. Pushes the 12 monthly usage values as an ordered Jan..Dec array to the
 //      project's consumption profile (skipped, not failed, when all 12 are empty).
-//   5. Writes the new Aurora project id back to Salesforce (Aurora_Project_ID__c +
-//      Sent_to_Aurora__c), TENANT-SCOPED.
+//   5. Writes back to Salesforce (Sent_to_Aurora__c = now, Aurora_Project_ID__c).
+//   6. Design-request route only: emails the design manager the FULL Design Request
+//      field set, then stamps Design_Request_Email_Sent__c. Aurora's API accepts
+//      none of those form fields, so the email is their only delivery channel —
+//      see designRequest.js for the split and docs/integrations/aurora-api-reference.md
+//      for Aurora's request surface. Best-effort: an email failure never fails the
+//      push, and leaves the request re-sendable via a re-submit.
 //
 // CORE ISOLATION GUARANTEE (mirrors sf-query / sf-update): the tenant is derived
 // ONLY from the verified token (resolveIdentity -> tenantId = the Salesforce
@@ -47,6 +61,10 @@ import {
 } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
 import { getSecret } from "../../lib/secrets.js";
+import {
+  ALL_EMAIL_FIELD_NAMES,
+  sendDesignRequestNotification,
+} from "./designRequest.js";
 
 const SF_API_VERSION = "v60.0";
 
@@ -56,11 +74,18 @@ const AURORA_SECRET_NAME = "sundial/aurora/api";
 // Only "customer" is a valid push source in this build. Anything else -> 400.
 const SUPPORTED_OBJECT = "customer";
 const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
-// The Solar project object. The "Submit Design Request" button posts a Solar
-// record id; we resolve its linked customer (the Sundial_Customer__c lookup field,
-// same name) and push THAT customer to Aurora.
-const SOLAR_SF_OBJECT = "Sundial_Solar__c";
-const SOLAR_CUSTOMER_LOOKUP = "Sundial_Customer__c"; // lookup field ON the Solar obj
+
+// DATETIME stamped the first time the design-request notification actually LANDS.
+// This is deliberately SEPARATE from Sent_to_Aurora__c, and the reason matters:
+// because Aurora has no design-request API, the email IS the design request. If the
+// two shared one marker, a first submit whose email failed (SES down, env not yet
+// configured) would leave the customer stamped as "submitted" with nobody notified,
+// and every re-submit would short-circuit to already_submitted — an Aurora project
+// with no design request behind it and no way to recover from inside the product.
+// Splitting them makes project creation strictly once-only while leaving NOTIFICATION
+// independently retryable: re-submit until it sends. Describe-guarded, so this all
+// works before the field exists (see notes on the resend path below).
+const EMAIL_SENT_FIELD = "Design_Request_Email_Sent__c";
 
 // The 12 monthly usage fields in CALENDAR ORDER Jan..Dec. This order is the
 // contract for Aurora's monthly_energy array (index 0 = January), so it must
@@ -80,8 +105,9 @@ const USAGE_FIELDS = [
   "Dec_Usage_kW__c",
 ];
 
-// Fields read from the customer record. Id + Name are always needed (Id ->
-// external_provider_id + write-back target; Name -> project name fallback).
+// Fields read from the customer record on EVERY route. Id + Name are always needed
+// (Id -> external_provider_id + write-back target; Name -> project name fallback).
+// Sent_to_Aurora__c and Aurora_Project_ID__c drive the idempotency guard.
 const CUSTOMER_SELECT_FIELDS = [
   "Id",
   "Name",
@@ -95,6 +121,7 @@ const CUSTOMER_SELECT_FIELDS = [
   "Postal_Code__c",
   ...USAGE_FIELDS,
   "Aurora_Project_ID__c",
+  "Sent_to_Aurora__c",
 ];
 
 // --- CORS (mirrors the other Lambdas; this route is POST/OPTIONS) -----------
@@ -330,12 +357,24 @@ async function sendConsumption(aurora, auroraProjectId, rec) {
   return { consumption: "failed", consumptionError };
 }
 
-// --- Salesforce describe (module-scope cached) -----------------------------
-// Used only at write-back time to learn the type of Sent_to_Aurora__c (boolean
-// vs datetime) and to confirm both write-back fields exist before we PATCH.
-const describeCache = new Map();
+// --- Salesforce describe (module-scope cached, with TTL) -------------------
+// Two uses: (a) at write-back time, to learn the type of Sent_to_Aurora__c
+// (boolean vs datetime) and confirm both write-back fields exist before we PATCH;
+// (b) on the design-request route, to build the SELECT from only the Design Request
+// fields the org actually has (Design_Notes__c is not created yet — selecting a
+// non-existent field would 400 the whole submit).
+//
+// TTL per D-045: a cached describe goes stale when fields are added or FLS changes,
+// and a warm container would keep omitting a newly-created field indefinitely. Five
+// minutes bounds that without a redeploy.
+const DESCRIBE_TTL_MS = 5 * 60 * 1000;
+const describeCache = new Map(); // sfObject -> { meta, fetchedAt }
+
 async function getRawDescribe(sfObject) {
-  if (describeCache.has(sfObject)) return describeCache.get(sfObject);
+  const cached = describeCache.get(sfObject);
+  if (cached && Date.now() - cached.fetchedAt < DESCRIBE_TTL_MS) {
+    return cached.meta;
+  }
   async function run(forceRefresh) {
     const { access_token, instance_url } = await getSalesforceToken({
       forceRefresh,
@@ -347,8 +386,74 @@ async function getRawDescribe(sfObject) {
   if (resp.status === 401) resp = await run(true);
   if (!resp.ok) throw new Error(`describe ${sfObject} failed (${resp.status})`);
   const meta = await resp.json();
-  describeCache.set(sfObject, meta);
+  describeCache.set(sfObject, { meta, fetchedAt: Date.now() });
   return meta;
+}
+
+// The set of field API names (lowercased) the object actually has.
+function describeFieldNameSet(describe) {
+  return new Set((describe.fields || []).map((f) => f.name.toLowerCase()));
+}
+
+// Remembers the last "missing fields" signature so the warning below is logged on
+// change only, not on every single submit.
+let lastMissingWarning = null;
+
+// Resolve which of the optional design-request fields (email display fields +
+// EMAIL_SENT_FIELD) exist on the object, returning them in the object's canonical
+// casing so the SELECT is exact. Fields the org doesn't have yet (Design_Notes__c,
+// and Design_Request_Email_Sent__c until it's created) are dropped — the submit
+// still succeeds.
+function resolveOptionalFields(describe) {
+  const byLower = new Map(
+    (describe.fields || []).map((f) => [f.name.toLowerCase(), f])
+  );
+  const present = [];
+  const missing = [];
+  for (const api of [...ALL_EMAIL_FIELD_NAMES, EMAIL_SENT_FIELD]) {
+    const match = byLower.get(api.toLowerCase());
+    if (match) present.push(match.name);
+    else missing.push(api);
+  }
+  const signature = missing.join(",");
+  if (missing.length > 0 && signature !== lastMissingWarning) {
+    console.warn(
+      `design-request: ${CUSTOMER_SF_OBJECT} has no field(s) ${missing.join(
+        ", "
+      )} — see the notification-tracking note in index.js.`
+    );
+  }
+  lastMissingWarning = signature;
+  // The tracking field's canonical name (null when the org doesn't have it yet).
+  const trackingField =
+    present.find((n) => n.toLowerCase() === EMAIL_SENT_FIELD.toLowerCase()) ||
+    null;
+  return { present, missing, trackingField };
+}
+
+// Stamp "the design manager has actually been notified" on the customer. Called only
+// after a notification genuinely lands. Best-effort: a failure here means the next
+// re-submit re-sends the email (a duplicate notification), which is strictly better
+// than the alternative failure mode — silence.
+async function markEmailSent(trackingField, recordId) {
+  if (!trackingField) return { ok: false, reason: "field_absent" };
+  try {
+    const resp = await sfPatch(CUSTOMER_SF_OBJECT, recordId, {
+      [trackingField]: new Date().toISOString(),
+    });
+    if (resp.ok) return { ok: true };
+    const text = await resp.text();
+    console.error(
+      `design-request: ${trackingField} write failed (${resp.status}) for ${recordId}: ${text}`
+    );
+    return { ok: false, reason: text };
+  } catch (e) {
+    const reason = e?.message || String(e);
+    console.error(
+      `design-request: ${trackingField} write threw for ${recordId}: ${reason}`
+    );
+    return { ok: false, reason };
+  }
 }
 
 // --- Salesforce write (REST PATCH) with one 401 refresh/retry --------------
@@ -404,16 +509,17 @@ function buildWritebackFields(describe, auroraProjectId) {
   return out;
 }
 
-// Detect the Solar-triggered "Submit Design Request" route:
-//   POST /projects/{recordId}/design-request/submit   (recordId = Sundial_Solar__c Id)
-// Returns the Solar record id when on that route, else null (the body-based
-// customer push). The linked customer is resolved server-side in the handler.
-function extractDesignRequestSolarId(event) {
+// Detect the "Submit Design Request" route:
+//   POST /customers/{recordId}/design-request/submit  (recordId = Sundial_Customer__c Id)
+// Returns the CUSTOMER record id when on that route, else null (the body-based push).
+// There is no project-side variant: no Sundial_Solar__c record exists at design-
+// request time (D-047), so the customer id is the only id the caller can send.
+function extractDesignRequestCustomerId(event) {
   const path = event?.rawPath || event?.path || "";
   if (!/\/design-request\/submit\/?$/.test(path)) return null;
   const pp = event?.pathParameters || {};
   if (pp.recordId) return decodeURIComponent(pp.recordId);
-  const m = path.match(/\/projects\/([^/]+)\/design-request\/submit\/?$/);
+  const m = path.match(/\/customers\/([^/]+)\/design-request\/submit\/?$/);
   return m ? decodeURIComponent(m[1]) : null;
 }
 
@@ -436,15 +542,15 @@ export const handler = async (event) => {
 
   try {
     // --- Input: two routes, one push -----------------------------------------
-    // (a) Design-request route: POST /projects/{solarId}/design-request/submit —
-    //     the "Submit Design Request" button. We resolve the Solar record's linked
-    //     customer server-side (tenant-scoped) and push THAT customer.
+    // (a) Design-request route: POST /customers/{customerId}/design-request/submit —
+    //     the "Submit Design Request" button. The path id IS the customer id; every
+    //     value we send is read fresh from that record (never from the body).
     // (b) Body route (existing): POST body { object:"customer", recordId, ... } —
     //     direct customer push / manual / retry.
-    const solarRecordId = extractDesignRequestSolarId(event);
-    const viaDesignRequest = solarRecordId !== null;
+    const designRequestCustomerId = extractDesignRequestCustomerId(event);
+    const viaDesignRequest = designRequestCustomerId !== null;
 
-    let recordId; // the CUSTOMER id we ultimately push (resolved from Solar in (a))
+    let recordId; // the CUSTOMER id we push
     let retryConsumptionOnly = false;
 
     if (!viaDesignRequest) {
@@ -477,12 +583,15 @@ export const handler = async (event) => {
       // Optional "resend consumption" mode: (re)send the consumption profile to an
       // EXISTING Aurora project only — never creates one. Body route only.
       retryConsumptionOnly = body.retryConsumptionOnly === true;
-    } else if (!/^[a-zA-Z0-9]{15,18}$/.test(solarRecordId)) {
+    } else if (!/^[a-zA-Z0-9]{15,18}$/.test(designRequestCustomerId)) {
       return jsonResponse(400, cors, {
         error: "invalid_record_id",
         code: "INVALID_RECORD_ID",
-        message: "Design request requires a Salesforce Solar record id in the path.",
+        message:
+          "Design request requires a Salesforce Customer record id in the path.",
       });
+    } else {
+      recordId = designRequestCustomerId;
     }
 
     // --- Auth: tenant derived ONLY from the verified token ------------------
@@ -499,38 +608,28 @@ export const handler = async (event) => {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
     }
 
-    // --- Design-request: resolve the Solar record's linked customer, TENANT-
-    //     SCOPED, and push that customer. A Solar project outside the tenant or
-    //     missing -> 404; one with no linked customer -> 400 (Aurora needs the
-    //     customer/site). This is the ONLY added Salesforce read on this path.
+    // --- Design-request: widen the SELECT to the notification-email field set.
+    //     Resolved against the live describe so a field the org doesn't have yet
+    //     (Design_Notes__c) is dropped instead of 400-ing the whole query. A
+    //     describe failure here throws -> 500, which is safe: it happens BEFORE any
+    //     Aurora call, so nothing can be half-created.
+    let selectFields = CUSTOMER_SELECT_FIELDS;
+    let availableFields = null; // lowercased field names, for the email builder
+    let trackingField = null; // canonical EMAIL_SENT_FIELD name, or null if absent
     if (viaDesignRequest) {
-      const solarSoql =
-        `SELECT Id, ${SOLAR_CUSTOMER_LOOKUP} FROM ${SOLAR_SF_OBJECT} ` +
-        `WHERE Id = '${soqlEscapeString(solarRecordId)}' ` +
-        `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
-        `LIMIT 1`;
-      const solarRows = await sfQuery(solarSoql);
-      if (!solarRows || solarRows.length === 0) {
-        return jsonResponse(404, cors, {
-          error: "not_found",
-          code: "RECORD_NOT_FOUND",
-        });
-      }
-      const customerId = cleanStr(solarRows[0][SOLAR_CUSTOMER_LOOKUP]);
-      if (!customerId) {
-        return jsonResponse(400, cors, {
-          error: "no_linked_customer",
-          code: "NO_LINKED_CUSTOMER",
-          message:
-            "This Solar project has no linked customer, so it can't be sent to Aurora.",
-        });
-      }
-      recordId = customerId;
+      const describe = await getRawDescribe(CUSTOMER_SF_OBJECT);
+      availableFields = describeFieldNameSet(describe);
+      const resolved = resolveOptionalFields(describe);
+      trackingField = resolved.trackingField;
+      // Dedupe — the identity fields overlap CUSTOMER_SELECT_FIELDS.
+      selectFields = [...new Set([...CUSTOMER_SELECT_FIELDS, ...resolved.present])];
     }
 
     // --- 1) Read the customer, TENANT-SCOPED (Id + Client__c) ---------------
+    // Fresh read at submit time: every value pushed to Aurora and shown in the
+    // email comes from here, never from the request body.
     const soql =
-      `SELECT ${CUSTOMER_SELECT_FIELDS.join(", ")} FROM ${CUSTOMER_SF_OBJECT} ` +
+      `SELECT ${selectFields.join(", ")} FROM ${CUSTOMER_SF_OBJECT} ` +
       `WHERE Id = '${soqlEscapeString(recordId)}' ` +
       `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
       `LIMIT 1`;
@@ -544,6 +643,12 @@ export const handler = async (event) => {
     }
     const rec = records[0];
     const existingAuroraId = cleanStr(rec.Aurora_Project_ID__c);
+    // Sent_to_Aurora__c is a DATETIME (verified by describe): a non-empty value
+    // means "already submitted". Either marker counts, so a re-submit can never
+    // create a second production Aurora project even if only one of the two
+    // write-back fields landed.
+    const alreadySubmitted =
+      existingAuroraId !== "" || cleanStr(rec.Sent_to_Aurora__c) !== "";
 
     // --- RETRY-CONSUMPTION-ONLY path (guarded) ------------------------------
     // Only (re)send the consumption profile to the record's EXISTING Aurora
@@ -576,13 +681,55 @@ export const handler = async (event) => {
     }
 
     // --- 2) IDEMPOTENCY: already pushed? Do NOT create a second project -----
-    if (existingAuroraId !== "") {
-      return jsonResponse(200, cors, {
+    // Project creation is strictly once-only. NOTIFICATION is not: the two are
+    // tracked separately (see EMAIL_SENT_FIELD) so a re-submit can recover a
+    // notification that never landed.
+    if (alreadySubmitted) {
+      const base = {
         status: "already_pushed",
-        auroraProjectId: existingAuroraId,
+        auroraProjectId: existingAuroraId || null,
         recordId: rec.Id,
-        ...(viaDesignRequest ? { solarRecordId } : {}),
+        sentToAurora: rec.Sent_to_Aurora__c ?? null,
+      };
+      if (!viaDesignRequest) return jsonResponse(200, cors, base);
+
+      // Has a notification EVER landed for this customer? When the tracking field
+      // doesn't exist on the org yet, we cannot know — and we choose to re-send
+      // rather than assume success, because the failure we're guarding against is
+      // the design team never hearing about a submitted request. Until the field
+      // is created, this route doubles as a manual "re-send the design request"
+      // button (flagged as tracking: "unavailable" in the response).
+      const alreadyNotified =
+        trackingField !== null && cleanStr(rec[trackingField]) !== "";
+
+      if (alreadyNotified) {
+        return jsonResponse(200, cors, {
+          ...base,
+          notifiedAt: rec[trackingField],
+          email: { sent: false, reason: "already_submitted" },
+        });
+      }
+
+      // Recovery re-send. Same payload, all values re-read fresh above. NO Aurora
+      // calls happen on this path — nothing is created, nothing is re-pushed.
+      const resent = await sendDesignRequestNotification({
+        rec,
+        auroraProjectId: existingAuroraId,
+        monthlyEnergy: buildMonthlyEnergy(rec).monthlyEnergy,
+        availableFields,
       });
+      const email = { ...resent, resend: true };
+      if (resent.sent) {
+        const marked = await markEmailSent(trackingField, rec.Id);
+        if (!marked.ok) {
+          // Not fatal: worst case the next re-submit sends a duplicate.
+          if (marked.reason === "field_absent") email.tracking = "unavailable";
+          else email.trackingWriteFailed = true;
+        }
+      } else if (trackingField === null) {
+        email.tracking = "unavailable";
+      }
+      return jsonResponse(200, cors, { ...base, email });
     }
 
     // --- Aurora config + build the create-project body ----------------------
@@ -729,6 +876,34 @@ export const handler = async (event) => {
       );
     }
 
+    // --- 6) NOTIFY the design manager (design-request route only) -----------
+    // Carries the FULL Design Request field set — Aurora's API accepts none of
+    // those fields, so this email is how they actually reach the design team.
+    // Sent even when the write-back failed: the request WAS submitted and the
+    // design manager must not be the one who pays for a Salesforce hiccup.
+    // Strictly best-effort — sendDesignRequestNotification never throws, and a
+    // failure here no longer closes the door: EMAIL_SENT_FIELD stays empty, so a
+    // re-submit re-sends (see the idempotency branch above).
+    let email = null;
+    if (viaDesignRequest) {
+      email = await sendDesignRequestNotification({
+        rec,
+        auroraProjectId,
+        consumption,
+        monthlyEnergy: buildMonthlyEnergy(rec).monthlyEnergy,
+        availableFields,
+      });
+      if (email.sent) {
+        const marked = await markEmailSent(trackingField, rec.Id);
+        if (!marked.ok) {
+          if (marked.reason === "field_absent") email.tracking = "unavailable";
+          else email.trackingWriteFailed = true;
+        }
+      } else if (trackingField === null) {
+        email.tracking = "unavailable";
+      }
+    }
+
     if (writebackFailed) {
       // Loud, non-retryable partial success: the id is in the body so it is not
       // lost, and the caller knows the Salesforce link must be repaired.
@@ -738,26 +913,19 @@ export const handler = async (event) => {
         recordId: rec.Id,
         consumption,
         ...(consumptionError ? { consumptionError } : {}),
+        ...(email ? { email } : {}),
         writebackError,
       });
     }
 
-    // --- FUTURE (SES, D-045-adjacent): when this was a Design Request submit
-    //     (viaDesignRequest), notify the sales manager by email HERE, once
-    //     lib/email.js + SES are live. It's an ADDITIVE step — send after the
-    //     Aurora push succeeds and add an `email: { sent, ... }` key to the
-    //     response below. No API/route reshape needed; the frontend contract
-    //     (POST .../design-request/submit) and the fields it already reads stay
-    //     the same. Keep the email non-fatal to the push (mirror writeback).
-
-    // --- 6) SUCCESS ---------------------------------------------------------
+    // --- 7) SUCCESS ---------------------------------------------------------
     return jsonResponse(200, cors, {
       status: "pushed",
       auroraProjectId,
       recordId: rec.Id,
       consumption,
       ...(consumptionError ? { consumptionError } : {}),
-      ...(viaDesignRequest ? { solarRecordId } : {}),
+      ...(email ? { email } : {}),
     });
   } catch (err) {
     console.error("aurora-push unexpected error:", err?.message || String(err));

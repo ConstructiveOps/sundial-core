@@ -673,7 +673,7 @@ These lookups are populated automatically when a service ticket is created for a
 ## D-032: Aurora and Roofr Integrations via Zapier (Out of Sundial Build Scope)
 
 **Date:** 2026-06
-**Status:** Decided
+**Status:** ~~Decided~~ — **SUPERSEDED by D-047 (2026-08-03) for the Aurora half.** Aurora is now a first-class, in-build Sundial integration (`sundial-aurora-push`, `sundial-aurora-webhook`, `docs/integrations/aurora-api-reference.md`), not a Zapier flow. The Roofr half of this decision still stands.
 
 **Context:** The signed SOW mentions Aurora integration for project creation and Roofr for roofing budget generation. Need to clarify whether these are built into Sundial or handled externally.
 
@@ -974,6 +974,214 @@ Reserved / out of scope for now:
 **Consequences:** One extra describe call per object per 5-min window per warm container — negligible vs. the API budget, and describe is not tenant-scoped so it's shared across all callers. Does not change the fail-closed whole-PATCH rejection (that stays — it's correct; the fix is keeping the writability data fresh, not weakening the gate).
 
 **Note (security, related):** `Utility_Password__c` is a **plaintext** SF string field (not encrypted, not mirrored into the Supabase cache). Storing real utility-portal passwords in the clear is a posture worth revisiting (Shield Platform Encryption or off-platform secret storage) — tracked separately, not part of this ADR.
+
+---
+
+## D-046: Auth email via Supabase Custom SMTP (Amazon SES); invite-first provisioning
+
+**Date:** 2026-08-03
+**Status:** Decided (config steps pending Tim; frontend flip staged behind them)
+
+**Context:** The provisioning incident (D-044 surface, incident 2026-07-29) was root-caused to Supabase's **built-in** email sender not delivering to external recipients and being hard rate-limited. That broke both `inviteUserByEmail` (invites) and `resetPasswordForEmail` (resets). As a stopgap the create UI defaulted to a temp-password mode (no email) and disabled the invite radio.
+
+Re-investigation on 2026-08-03 with **live data** established what was NOT broken, correcting the incident's working hypothesis:
+- **Tenant binding is intact for every user, including invite-created ones.** `sundial-user-admin` force-stamps `Client__c = identity.tenantId` (fail-closed `NO_TENANT`) since its first commit. Live query of `tmurphy5213+inviteuser1` and all invite users showed `Client__c = harmon`. The reported "invite users miss their tenant binding → can't load Sales" was disproven.
+- `scripts/verify-provisioning-e2e.mjs` proves the whole chain green against prod: create → temp-password login → `/auth/me` resolves tenant=harmon → `GET /sf/customer` returns 200 with 31,576 tenant-scoped records → forced change → re-login → old password rejected.
+- The one genuinely broken class was **email delivery** (invites + resets) plus a few stray records (orphan auth users, one never-onboarded user) — see recovery.
+
+SES is now verified and out of sandbox for `sundialcrm.com` (us-west-1), sender `harmon@sundialcrm.com`.
+
+**Decision:**
+1. **Point Supabase Auth at SES via Custom SMTP** (`email-smtp.us-west-1.amazonaws.com`, port 465, SES SMTP credentials, sender `harmon@sundialcrm.com`). This fixes invite AND reset delivery in one move. Steps + exact values: `docs/integrations/auth-email-ses.md`. This is distinct from `lib/email.js` (SES SDK), which remains for *application* transactional email — the two do not overlap.
+2. **Invite-first provisioning.** With delivery working, the create UI defaults to **Send email invite** (invited users set their own password on `/reset-password`); the temp-password path stays as an explicit fallback. Invite links land on `PORTAL_BASE_URL/reset-password` (defaults to `https://harmon-crm.vercel.app`, the real prod URL); resets land on `window.location.origin/reset-password`. Both must be in the Supabase redirect allowlist (Site URL + Redirect URLs).
+
+**Consequences:**
+- **Deployment ordering is load-bearing:** the frontend invite-default flip must ship only *after* the SMTP + redirect-allowlist config is live and the manual invite test passes, or new users get undeliverable invites.
+- Recovery is email-independent (`scripts/recover-provisioning.mjs`, fix-in-place temp passwords), so it does not block on the SMTP work.
+- No backend code change is required for auth email (it's Supabase config); the only backend addition is `sfDeleteRecord` in `lib/salesforce.js` for e2e-verify teardown.
+
+---
+
+## D-047: Aurora Design Request runs on the Customer module, not the Solar module
+
+**Date:** 2026-08-03
+**Status:** Decided — **supersedes D-032 (Aurora half)** and the 2026-07-30 solar-route decision recorded in PROGRESS.md ("Aurora 'Submit Design Request' (built + wired)" / TASKS.md), which specified `POST /projects/{solarId}/design-request/submit` with server-side Solar→Customer resolution.
+
+**Context:** The design-request route shipped on 2026-07-30 took a `Sundial_Solar__c` id in the path and resolved the record's linked customer server-side. That route is **unusable in the real business flow**: at design-request time **no `Sundial_Solar__c` record exists**. A Solar project is created only *after* the proposal comes back and the documents are signed — the design request is precisely the step that produces the proposal. The route was wired and verified end-to-end against a hand-made Solar record, which is why the gap wasn't caught: the test data existed, the business precondition did not. Nothing in the frontend ever referenced it, so no client was ever exposed to it.
+
+Two other things forced the shape of this decision:
+1. **Aurora accepts almost none of the form.** A live read of Aurora's documented request surface (`docs/integrations/aurora-api-reference.md`) confirms project-create takes only `external_provider_id`, `name`, `status`, `location.property_address`, and the optional `customer_*` identity fields; the consumption endpoint takes the 12 monthly values. There is **no Aurora endpoint that accepts a design request** — panel SKU, inverter SKU, turnaround, battery, financing, offset, notes have no API home at all, and our key is provisioned for none.
+2. **A live describe of `Sundial_Customer__c` (2026-08-03)** confirmed all 19 Design Request fields exist on the Customer object with one exception: **`Design_Notes__c` does not exist yet**. `Term__c` is a *multi*-select picklist, and `Design_Turnaround__c`'s first value is "In Home" (not "In House").
+
+**Decision:**
+1. **All Aurora integration operates on `Sundial_Customer__c`.** The route is `POST /customers/{recordId}/design-request/submit`, where `{recordId}` is a Customer id. The `/projects/{recordId}/design-request/...` route is **deleted** from API Gateway (`scripts/wire-design-request-route.ps1 -RemoveLegacy`), along with its Lambda invoke permission. `/projects/{recordId}/budget/recalc` is untouched.
+2. **Server-side sourcing.** Nothing but the record id is taken from the caller. Every value pushed to Aurora or shown in the email is read fresh from Salesforce at submit time, tenant-scoped on `Client__c` (D-035); a missing or cross-tenant id is an indistinguishable 404.
+3. **Project creation is once-only; notification delivery is independently retryable.** Two markers, not one:
+   - `Sent_to_Aurora__c` (DATETIME) / `Aurora_Project_ID__c` — an Aurora project exists. Either one means **never create a second**, full stop.
+   - `Design_Request_Email_Sent__c` (DATETIME, **new field**) — a notification actually **landed**. Only this suppresses the email.
+
+   On a re-submit: if a notification previously succeeded → `already_pushed` + `email.sent: false, reason: "already_submitted"` (today's behavior, plus `notifiedAt`). If it never succeeded → **send it now** (same payload, fields re-read fresh) and return `email.sent: true, resend: true`, with **no Aurora calls on either path**.
+4. **The email IS the delivery channel for the form.** Since Aurora accepts none of the 19 Design Request fields, the notification to the design manager carries the *complete* field set (Aurora-accepted or not) and is how that data reaches Aurora at all — a human keys it in. Recipients are env-driven: `DESIGN_REQUEST_NOTIFY_TO` (required) and `DESIGN_REQUEST_NOTIFY_CC` (optional; no Cc header when unset), matching `lib/email.js`'s existing `EMAIL_FROM` pattern.
+5. **Email is best-effort, never fatal — and never self-sealing.** A missing recipient, unconfigured SES, or a rejected send leaves the push at `status: "pushed"` with `email.sent: false` and a reason, and leaves `Design_Request_Email_Sent__c` **unstamped** so a re-submit recovers it. It is still sent when the Salesforce write-back fails — the request *was* submitted, and the design team shouldn't pay for a Salesforce hiccup.
+6. **The email field list is describe-filtered** (5-min TTL cache, per D-045). A field the org doesn't have — `Design_Notes__c` and `Design_Request_Email_Sent__c` today — is dropped from the SELECT rather than 400-ing the whole submit, and starts flowing automatically once created. No code change needed. While the tracking field is absent, delivery cannot be recorded, so the route resolves the ambiguity toward **re-sending** (reported as `email.tracking: "unavailable"`): silence is the failure mode being guarded against, and a duplicate notification is the cheaper error.
+
+**Alternatives considered:**
+- *Keep the Solar route and create a stub Solar record at design-request time* — rejected: it inverts the real pipeline, pollutes the Solar pipeline with records that may never become projects, and makes Solar stage metrics meaningless.
+- *Accept the form values in the request body* — rejected: it would let a caller submit values that don't match the record of truth, and the email would document a design request that Salesforce disagrees with.
+- *Re-send the email on every duplicate submit* — rejected: once a notification has landed, a re-submit is a double click, not a new request, and a second copy sends the design manager chasing work they already have. Hence the marker: re-send only when nothing ever landed.
+- *One marker for both facts (`Sent_to_Aurora__c` alone)* — **rejected as a trap** (caught in review before first deploy). It couples "the project exists" to "someone was told", so a first submit whose email failed would stamp the customer as submitted with nobody notified, and every re-submit would short-circuit to `already_submitted` forever: an Aurora project with no design request behind it and no in-product recovery. The extra field is the cheapest way to keep the two guarantees independent.
+- *Reuse an existing field to track delivery* — rejected after checking the live describe: `Confirmation_Sent__c` (boolean) and `Proposal_Sent_Date__c` both carry unrelated business meaning, and overloading either would corrupt whatever reads them.
+
+**Consequences:**
+- The frontend "Submit Design Request" button belongs on the **Customer** record's Design Request Form tab, and posts a Customer id. (Separate harmon-crm task; nothing referenced the old route, so there is no migration.)
+- The email step is **live but inert** until `EMAIL_FROM` + `DESIGN_REQUEST_NOTIFY_TO` are set on `sundial-aurora-push` and the role has `ses:SendEmail` — it logs and reports `email_not_configured` in the meantime. Vars documented in `docs/api-endpoints.md`.
+- Two fields to create on `Sundial_Customer__c`: **`Design_Notes__c`** (long textarea) so notes reach the design manager, and **`Design_Request_Email_Sent__c`** (datetime, writable by the integration user) so delivery can be recorded. Until the latter exists, a re-submit re-sends the notification every time — correct but chatty.
+- If Aurora ever provisions a design-ordering API, fields move from the email block to the payload in `designRequest.js` — the route contract does not change.
+
+---
+
+## D-048: Aurora inbound is doorbell + queue + worker; signed agreements land on the Customer
+
+**Date:** 2026-08-04
+**Status:** Decided (built + tested; not deployed, Aurora subscription not created)
+**Related:** extends D-047 (all Aurora integration runs on `Sundial_Customer__c`), follows the D-007 Acumatica queue pattern.
+
+**Context:** Aurora's `agreement_status_changed` webhook is the trigger for pulling a signed contract's data into Sundial (design results, financing, proposal link, and the signed PDF). Three constraints in Aurora's contract shape the design:
+1. **A 10-second response deadline.** A slower response counts as a failed delivery and enters a retry ladder (30s, 5m, 30m, 3h, 20h); ~48h of consistent failure **auto-disables the subscription**. Four retrievals plus PDF generation and download cannot fit in that budget.
+2. **Duplicates are possible and ordering is NOT guaranteed** — a `signed` can arrive before a `viewed`.
+3. **403 means "not provisioned for our API key"**, not an auth bug — permanent until Aurora's account team changes it.
+
+**Decision:**
+1. **Doorbell + SQS + worker.** `sundial-aurora-webhook` authenticates (shared secret, constant-time compare, no Supabase JWT — the caller is a machine), validates minimally, enqueues to `sundial-aurora-inbound`, and acks. It performs **no** Salesforce or Aurora I/O. `sundial-aurora-inbound` (SQS-triggered) does everything slow. **A failed enqueue returns 5xx on purpose** — that is what drives Aurora's retry ladder; a 200 there would silently drop a signed contract.
+2. **Everything writes to `Sundial_Customer__c`.** No `Sundial_Solar__c` exists at signature time and this pipeline must never create one (D-047).
+3. **Two idempotency layers.** Status writes dedupe on `(agreement_id, status)` and obey a precedence rank (`sent`<`viewed`<`cancel-pending`<`declined`/`canceled`/`error`<`signed`), so a late `viewed` cannot regress a `signed`. The signed work is gated on `Aurora_Signed_Email_Sent__c`: set means fully processed (a duplicate does nothing), unset means a partial run is **resumed**. Each step is independently idempotent — the field PATCH replays harmlessly, the PDF key is deterministic (overwrite, not duplicate), the email is marker-gated.
+4. **Customer resolution is by Aurora project id, cross-checked.** `Aurora_Project_ID__c` finds the record; the design's `external_provider_id` (our SF id) is compared against it. No match, multiple matches, or a mismatch is **permanent** — dead-letter rather than write a signed contract onto a guessed customer.
+5. **Error classification drives the DLQ.** Permanent (no/ambiguous customer match, provider-id mismatch, missing `design_id` on signed, any Aurora 403) is logged with a `PERMANENT` marker; retryable is everything else. Both report `batchItemFailures` so SQS redrives to `sundial-aurora-inbound-dlq` per `maxReceiveCount=5` — bounded, not an infinite loop.
+6. **New Salesforce fields behind the describe guard.** `Aurora_Agreement_ID__c`, `Aurora_Agreement_Status__c`, `Aurora_Agreement_Status_At__c`, `Aurora_Proposal_Link__c`, `Aurora_Signed_Email_Sent__c` don't exist yet; the worker drops absent fields from every SELECT and PATCH and reports the gap in the notification email. Same pattern as `Design_Notes__c` (D-047). Existing fields carrying other business meaning were **not** overloaded.
+7. **Receipt time is the signing timestamp.** The agreement object has no `signed_at` and the webhook carries none, so `Contract_Signed_Date__c` / `Sold_Date__c` come from webhook receipt time, converted to the **America/Phoenix** calendar date (a UTC date would file an evening signature a day late). Stamped at the doorbell so a queue backlog can't drift it.
+8. **Unmappable picklist values are reported, never guessed.** `ppa`/`levelized_ppa` have no honest match in `Financing_Type__c` (Cash|Loan|Lease), and an unknown `financier.provider` is not coerced to "Other" — that would erase which lender it actually was. Both are left unset and surfaced in the email.
+
+**Alternatives considered:**
+- *Do the retrievals inline in the webhook handler* — rejected: it cannot fit in 10 seconds, and the failure mode is Aurora disabling our subscription.
+- *Filter the subscription to `signed` only* (what the reference previously said) — rejected: every status is cheap and makes the pipeline observable; only `signed` triggers retrieval anyway. The stale line is corrected in `aurora-api-reference.md`.
+- *Overload an existing field for agreement status* — rejected per the explicit instruction and general principle: `Confirmation_Sent__c` / `Proposal_Sent_Date__c` mean other things.
+- *Trust the webhook's status blindly* — rejected for `signed`: the worker re-reads the agreement, and if Aurora says it is no longer signed it records **Aurora's** status and skips the signed-only work.
+
+**Known limitation — RESOLVED 2026-08-04, see the amendment below.** ~~A genuine post-signature cancellation is indistinguishable from an out-of-order delivery (no status timestamp anywhere in Aurora's contract), so a `canceled` after `signed` is ignored by the precedence rule and needs manual handling.~~
+
+**Consequences:**
+- New infrastructure Tim must create by hand: the SQS queue + DLQ (redrive `maxReceiveCount=5`, visibility 180s), the `sundial-aurora-inbound` Lambda (60s/512MB), the event-source mapping **with `ReportBatchItemFailures`** (without it SQS ignores partial-batch failures and deletes the batch), and `AURORA_INBOUND_QUEUE_URL` on the doorbell. Runbook: `docs/integrations/aurora-inbound.md`.
+- The doorbell's shared-secret cache gained a 5-minute TTL so the token can be rotated without a redeploy — previously it was cached for the container's life.
+- `lib/aurora.js` (retrieval client) and `lib/sqs.js` (enqueue/parse) are new shared modules; `lib/salesforce.js` gained `describeObject` so the describe guard isn't copy-pasted per Lambda.
+
+### Amendment (2026-08-04): post-signature cancellations are confirmed with Aurora, not inferred
+
+The limitation above is closed. Ordering could never settle "genuinely canceled after signing" vs. "stale `canceled` delivered late", so the worker **stops inferring and asks**.
+
+On any **negative terminal** status — `canceled`, `cancel-pending`, `declined` — the worker re-reads the agreement from Aurora *before* applying precedence:
+- **Aurora reports the negative status** → it is real. Applied **even over a recorded `signed`** (precedence bypassed, because order is no longer what we're reasoning from), `Aurora_Agreement_Status_At__c` stamped, and a **cancellation notification** sent to the same recipients as the signed one — subject flagged `AFTER SIGNING` when it contradicts a recorded signature, since downstream work may already be moving on a dead contract. Aurora's value wins even when it differs from the webhook's (a `cancel-pending` event on an agreement Aurora has already moved to `canceled` records `canceled`).
+- **Aurora still reports `signed`** → the event really was stale. Dropped exactly as before: nothing written, nothing sent.
+- Any other current status falls through to the ordinary precedence rules.
+
+The **`signed` path is unified with this**: that path already re-read the agreement to confirm the signature, so when the re-read shows a dead agreement it records Aurora's status *and* sends the same cancellation notification, with the same `AFTER SIGNING` flag when it contradicts a recorded signature. A dead contract is announced however Sundial found out about it — via a `canceled` event or via the re-read on a `signed` one. Both paths gate the email on the status actually changing, so a redelivered event on an already-canceled record does not re-alarm.
+
+**Deliberately narrow:** `error` is **not** in the set — it signals a delivery/processing fault, not that the contract is dead, so it stays rank-governed and triggers no re-read. Exact duplicates short-circuit *before* the re-read, so a redelivered `canceled` costs no Aurora call and sends no second email. The notification is gated on the status actually changing, which is what prevents repeats — no additional marker field was needed.
+
+**Cost:** one extra Aurora `GET /agreements/{id}` per non-duplicate negative terminal event — rare, and the correctness it buys is a contract that cannot silently stay "signed" in Sundial after being canceled in Aurora. A 403 while confirming is treated like any other 403: permanent, dead-lettered, never guessed.
+
+---
+
+## D-049 — Budget push triggered by a direct portal API call (relay/SQS dropped from this path)
+
+**Date:** 2026-08-07
+**Status:** Accepted
+
+**Context:** Budget Layer 2 (`lambdas/sundial-acumatica-budget-push`) writes the calculated budget onto a project's existing Acumatica `ProjectBudget` lines. The original Layer-2 sketch triggered via the general outbound pattern — a Salesforce record-triggered Flow → Platform Event → relay → SQS → consumer.
+
+**Decision:** For the budget push, trigger the write **directly** from the portal **"Update Budget"** button via `POST /projects/{recordId}/budget/push` on the Sundial REST API. The Flow → Platform Event → relay → SQS chain is **dropped from this path**. The HTTP request validates the gates and returns **202** immediately; the actual write runs in an **async self-invoke** of the same Lambda (`InvocationType: Event`), because a fresh scaffold read plus up to ~15 PUTs with retry can exceed API Gateway's ~29 s synchronous ceiling.
+
+**Rationale:**
+- The push is a **user action on one record**, not a data-change reaction — a synchronous request/ack fits better than an eventual queue drain, and gives the user immediate gate feedback (`409` with a reason code) instead of a silent enqueue.
+- One fewer moving part (no Flow, no Platform Event, no relay/SQS wiring) for a path that must be hand-proven per project during rollout.
+- Re-push is idempotent (update-by-GUID), so SQS's at-least-once delivery guarantee buys nothing here.
+
+**Consequences:**
+- The execution role needs `lambda:InvokeFunction` on its own ARN (`SelfInvokeBudgetPush`) for the self-invoke.
+- There is **no janitor** for a worker hard-death mid-run, so status can stick on `Pushing`; the UI must treat `Pushing` as non-blocking and rely on idempotent re-push to clear it (see the runbook in `docs/integrations/acumatica-budget-push.md`).
+- The relay/SQS pattern **may return** for a future *recalc-triggered* push (a data-change reaction) — a different trigger from this user-action path, not a reversal of this decision.
+
+---
+
+## D-049: Dealer-originated Aurora deals auto-create the Customer on `signed`
+
+**Date:** 2026-08-07
+**Status:** Decided (built + tested; not deployed, no live Aurora calls made)
+**Supersedes:** the flat `NO_CUSTOMER_MATCH` dead-letter rule in D-048 §4. Customer resolution by Aurora project id is unchanged; what happens when it finds *nothing* is what changed.
+
+**Context:** Harmon works with third-party dealers who originate deals **entirely inside Aurora**, in Harmon's own tenant. Their `agreement_status_changed` events already reach our webhook, but no `Sundial_Customer__c` exists — the Sundial design request that normally creates the Aurora project never happened. Under D-048 every one of those dead-lettered, so a dealer's *sold contract* landed in the DLQ instead of the CRM, and their pre-sale traffic filled the DLQ with noise.
+
+**Verification first (Aurora's public reference, 2026-08-07)** — three findings shaped the design:
+1. **Retrieve Project** (`GET /tenants/{t}/projects/{id}`) returns everything needed to build a customer: `customer_first_name` / `_last_name` / `_email` / `_phone` / `_salutation`, `name`, `external_provider_id`, `status`, `tags[]`, `project_type`, `created_at`, and `location.property_address` + `location.property_address_components.{street_address, city, region, postal_code, country}`. **The components are nested under `location`**, not top-level as first assumed.
+2. **Dealer attribution is resolvable to a NAME**, contrary to the "maybe only ids" expectation. The project carries `partner_id`, `owner_id`, and `team_id`; Aurora **partners are external business user groups** — users assigned to one see only that partner's projects — which is exactly Harmon's dealer concept. `GET /tenants/{t}/partners` returns `{ id, name }` (no single-partner GET, so we list and cache), and `GET /tenants/{t}/users/{id}` names the owning person as a fallback.
+3. `Aurora_Project_ID__c` is **already flagged External ID** (`externalId: true`, `idLookup: true`) — so an atomic upsert is available.
+
+**Decision:**
+1. **Branch on `external_provider_id`, not on absence alone.** Unmatched **signed** → Retrieve Project, then: absent provider id = genuine dealer origination → **CREATE**; present and resolves (in-tenant) = our own deal whose design-request write-back failed → **REPAIR** the link and continue, creating nothing; present but unresolvable = `PROVIDER_ID_MISMATCH` → DLQ. Never guess.
+2. **Only `signed` creates.** Harmon wants customers for deals that actually sell. Unmatched non-signed events are **dropped quietly** (info log, no DLQ, no retry) — they are normal dealer pipeline traffic. The exception: an unmatched non-signed event that *does* carry a provider id is our own broken deal and still dead-letters.
+3. **Idempotent by construction — upsert, not select-then-create.** The create is a Salesforce upsert keyed on `Aurora_Project_ID__c`. A SELECT-then-create has a race window that duplicate deliveries and concurrent workers *will* eventually hit, producing two customers for one Aurora project; the external id makes Salesforce the uniqueness authority instead. Ambiguity (300 Multiple Choices) dead-letters rather than looping.
+4. **Every mapped field is describe-guarded, and nothing retrieved is discarded.** A missing optional value never fails the creation of a customer who has just signed. `State__c` is written only on a real picklist match (case-insensitively, in the org's canonical casing — the org's list contains the typo "Il"); the `Lead_Source__c` value `Aurora - Third-Party Dealer` does not exist in the org's ~200-value picklist, so it is skipped with a warning. Both the unmatched state and the skipped lead source, plus raw address, country, salutation, mailing address, tags, and all attribution ids, land in `Aurora_Import_Notes__c`.
+5. **Attribution never blocks an import.** 403 on List Partners / Retrieve User degrades to the raw id in `Aurora_Dealer_Name__c` plus a warning. A 403 on **Retrieve Project**, by contrast, is fatal to the feature and dead-letters loudly as `AURORA_NOT_PROVISIONED`.
+6. **Tenant comes from configuration, not a hardcoded id.** `SUNDIAL_TENANT_SLUG` (default `harmon`) resolves to the `Sundial_Tenant__c` record id, matching the slug identity already used by `VITE_TENANT_ID`, the S3 prefix, and `client-config.ts` (D-034). Owner stays the integration user — no `OwnerId` write.
+7. **The record is marked as machine-built.** The signed-agreement email leads with "This customer was AUTO-CREATED from a dealer-originated Aurora project (dealer: …)" so nobody mistakes it for a qualified Sundial lead.
+
+**Alternatives considered:**
+- *Create on any status* — rejected per Harmon: it would fill the CRM with dealers' unsold pipeline.
+- *SELECT then create* — rejected: the race is real under duplicate delivery, and the External ID flag was already there.
+- *Backfill the earlier statuses after creating* — rejected: the events were already dropped and Aurora exposes no status history. Auto-created records simply start at `signed`; documented, not hidden.
+- *Default `Lead_Source__c` to an existing value like "Other"* — rejected: it would misattribute a dealer sale. Skipped and reported instead.
+- *Leave `Status__c` / `Stage__c` to the org defaults* — this was the initial position (they are required-with-a-default, so the insert succeeds either way, and the pipeline position is a business call). **Tim decided 2026-08-07:** `Status__c` = `Customer`, `Stage__c` = `Sold - Pending Review`. `Status__c` turned out to be load-bearing rather than cosmetic — the org default is **`Lead`**, so leaving it would have parked closed dealer sales in the CRM as leads. `Stage__c` gives the review these records need an actual queue. Both go through the same match-or-skip picklist guard as everything else, so a renamed value degrades to a warning instead of failing a signed contract's import.
+
+**Consequences:**
+- Three Salesforce to-dos (TASKS.md): `Aurora_Dealer_Name__c` (Text 255), `Aurora_Import_Notes__c` (Long Text 32768), and the `Lead_Source__c` picklist value. Until they exist the import still succeeds and reports the gap.
+- Auto-created customers carry only what Aurora knows — no Sundial design request, no Harmon qualification — so they need review. The email says so.
+- The post-signature cancellation logic (D-048 amendment) works on these records with no special-casing: by the time a cancellation arrives the customer exists like any other.
+- ### Amendment (2026-08-10): the signed pipeline position applies to every signed agreement
+
+The `Status__c` = `Customer` / `Stage__c` = `Sold - Pending Review` decision above was originally scoped to **auto-created** dealer customers. It now applies to **every** `signed` event, including a pre-existing customer matched by `Aurora_Project_ID__c`. Aurora's `signed` means exactly that in Sundial regardless of how the customer got there, and the split was arbitrary from the business's point of view.
+
+**This makes the Stage write the notification mechanism, not a status flag.** Harmon has Salesforce alerts triggering off `Sold - Pending Review`, which is why the SES email channel is being left unconfigured on purpose. Two consequences follow:
+- A renamed or removed picklist value doesn't just lose a field — **the alerts silently stop firing**. The skip warning says so in those words.
+- Both paths now build these fields from one shared helper (`customerCreate.js » buildSignedPipelineFields`) so the auto-create and matched-customer paths cannot drift apart.
+
+Deliberately unchanged: non-signed statuses don't move the pipeline, a confirmed cancellation does not promote a dead contract, and a `signed` event Aurora contradicts on re-read records Aurora's status only. **Also unchanged and worth knowing:** a cancellation *after* signing records `canceled` but does **not** roll `Status__c`/`Stage__c` back — the alert has already fired and the unwind is a human job (tracked in TASKS.md).
+
+**Known edge:** if the project reports no `external_provider_id` but the *design* reports one, Aurora's own objects disagree. Since the customer has been created by then, dead-lettering would strand it — the worker warns loudly (email + log) and flags a possible duplicate instead.
+
+---
+
+## D-050: List page size is capped at 5000 on the cache path, with paging pushed down into the Lambda
+
+**Date:** 2026-08-10
+**Context:** punchlist G2 — the Sales list threw intermittent 500s under concurrent paged loads.
+
+**The 500s were not ours.** The AWS account's Lambda **"Concurrent executions" quota in us-west-1 is 10** (the unraised new-account limit; AWS default is 1000), shared across all 32 functions. Throttled invocations are rejected before the function starts and API Gateway renders that as `500 {"message": "Internal server error"}`. Recorded here because the failure signature is genuinely misleading and will otherwise be re-diagnosed as a code bug: **no CloudWatch log line, `Errors` metric flat at 0, ~65 ms response, and a body that is not the one this Lambda emits** (`{"error":"server_error"}`). Diagnose with `ConcurrentExecutions` (Max) + `Throttles`, and `service-quotas get-service-quota --quota-code L-B99A9384`.
+
+**Decision:** the list endpoint's cache-path page cap goes **500 → 5000**, default 500 when `limit` is absent.
+
+**Why a cap raise is the right response to a concurrency ceiling.** The old cap forced 64 round trips to sweep 31.6k customers. Page size and concurrency pressure are the same variable seen from two ends — cutting the sweep to 7 requests removes the burst that collided with the ceiling, and it is the half we control. Raising the quota is the other half, and it is Tim's console action, not a code change. Neither substitutes for the other.
+
+**5000 is bounded by Lambda's 6 MB response limit**, not by preference: 5000 customer rows is ~4.4 MB of JSON. That is the number to re-derive against if the cap is ever revisited or a wider cache table is added.
+
+**Paging is pushed down into the Lambda rather than delegated to a dashboard setting.** Supabase's PostgREST "Max Rows" is **1000 and silently truncates** — a 5000-row request returns `206` with 1000 rows and no error. A clamp raise alone would therefore have advertised a page size the cache layer quietly ignored, which is a worse failure than the one being fixed because it is invisible. `fetchCacheRange()` splits any page over 1000 into consecutive `.range()` sub-requests (exact count on the first only). **The endpoint is correct at any "Max Rows" value**; raising it in the dashboard is a performance optimization that collapses 5 sub-requests to 1, never a correctness prerequisite.
+
+**The raise is cache-path only.** The live-Salesforce list paths — cold-cache fallback and the TEMP Sales-Rep restrict (D-035 lineage) — keep the original 500 cap via `SF_LIVE_MAX_LIMIT`. SOQL `OFFSET` is hard-capped at 2000 and those paths write back every row they return, so a 5000-row page there buys nothing and risks the timeout.
+
+**Consequences that a 10x page forced, each measured rather than assumed:**
+- A fully-stale 5000-row page is 25 `IN()` chunks against Salesforce. Sequentially that measured **~35s, past the 30s function timeout**. Chunks now run 5 at a time (`REFETCH_CONCURRENCY`) — 13.2s worst case. **This coupling is load-bearing: raising the cap further without revisiting the refresh fan-out reintroduces the timeout.**
+- That fan-out let a cold container fire 5 simultaneous JWT bearer requests for one integration user, so `getSalesforceToken` coalesces concurrent refreshes onto a single in-flight request. It is **cleared on settle, both success and failure** — a rejected promise left in module scope would turn one transient auth blip into a permanently broken warm container.
+- Cache upsert and delete-detection are batched, so a max-size page is never one ~4 MB PostgREST write or an over-length `.in()` URL.
+
+**Rejected:** raising "Max Rows" in Supabase and relying on it (silent truncation returns the moment the setting is changed back or a new project is stood up from this base — and sundial-core is copied to stand up tenants). Reserving concurrency for `sundial-sf-query` (with only 10 account-wide it would starve the other 31 functions).
 
 ---
 

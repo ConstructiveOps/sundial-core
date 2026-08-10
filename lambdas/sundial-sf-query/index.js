@@ -54,13 +54,80 @@ const SF_API_VERSION = "v60.0";
 // standard CreatedDate. Mirrors sundial-cache-sync. Only used when the cache table
 // has a `created_date` column.
 const CREATED_DATE_SOURCE = {
-  solar: ["Contract_Date__c", "CreatedDate"],
-  customer: ["CreatedDate"],
+  solar: ["Sunbase_Created_Date__c", "Contract_Date__c", "CreatedDate"],
+  // CUSTOMER list/board orders by MOST-RECENTLY-UPDATED (Harmon's daily working
+  // set at the top). Sunbase_Last_Updated__c is the migrated Sunbase mod-date;
+  // falls back to the created date, then CreatedDate, for the ~266 rows without one.
+  customer: ["Sunbase_Last_Updated__c", "Sunbase_Created_Date__c", "CreatedDate"],
   roofing: ["CreatedDate"],
   po: ["CreatedDate"],
   user: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
+
+// ===========================================================================
+// TEMP — Sales Rep hard-restrict (remove when the per-user visibility feature
+// ships; see TASKS.md "Sales Rep visibility"). Harmon has exactly ONE Sales Rep,
+// Dennis Alessandro. Until proper visibility lands, a caller whose
+// Hierarchy_Level__c === "Sales Rep" is server-side limited to Dennis's own
+// records, filtered on the AUTHORITATIVE Salesforce rep field.
+//
+// The authoritative field is NOT in the cache (the cache's `sales_rep_name` is a
+// different, formula-derived field that is blank/other for Dennis's 3,511
+// customers), so a restricted rep's list + single + full reads BYPASS the cache
+// and query Salesforce live. Only `customer` and `solar` are gated (see note in
+// TASKS.md re: roofing). No other role is affected.
+const TEMP_SALES_REP_HIERARCHY = "Sales Rep";
+const TEMP_SALES_REP_NAME = "Dennis Alessandro";
+const TEMP_SALES_REP_FIELD = {
+  customer: "Sunbase_Sales_Rep__c",
+  solar: "Sales_Representative__c",
+};
+// Returns { sfField, value } when the caller is the restricted Sales Rep AND this
+// object is gated; else null (no restriction). Because Harmon has a single rep,
+// the rep NAME is hardcoded rather than read from the user record.
+function repRestrictFor(objectKey, identity) {
+  if (identity?.user?.hierarchyLevel !== TEMP_SALES_REP_HIERARCHY) return null;
+  const sfField = TEMP_SALES_REP_FIELD[objectKey];
+  if (!sfField) return null; // roofing/po/user not gated by this temp guard
+  return { sfField, value: TEMP_SALES_REP_NAME };
+}
+
+// --- Server-side search (?q=) ----------------------------------------------
+// Case-insensitive substring across an object's name columns, tenant-scoped,
+// capped at SEARCH_CAP results (the response still carries the FULL match total).
+// cache[] = cache columns for the cache-path ILIKE; sf[] = the equivalent
+// Salesforce fields for the Sales-Rep live path. Only allowlisted here; anything
+// else (po/user) has no name search.
+const SEARCH_CAP = 200;
+const SEARCH_FIELDS = {
+  customer: {
+    cache: ["first_name", "last_name", "name", "customer_name"],
+    sf: ["First_Name__c", "Last_Name__c", "Name"],
+  },
+  solar: {
+    cache: ["project_name", "customer_name_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"],
+  },
+  roofing: {
+    cache: ["project_name", "customer_name_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"], // rep path unused for roofing
+  },
+};
+
+// Sanitize a raw ?q= term. Returns a cleaned term (>= 2 chars) or null. Escapes by
+// RESTRICTING to name-safe characters — drops every ILIKE/SOQL metacharacter
+// (% _ " ( ) , \ / etc.), so neither an ILIKE wildcard nor a SOQL/PostgREST break
+// can be injected. Apostrophe is KEPT (O'Brien) and is escaped per-path: SOQL via
+// soqlEscapeString, and the cache path double-quotes the ILIKE value.
+function sanitizeSearchTerm(q) {
+  if (q == null) return null;
+  const cleaned = String(q)
+    .replace(/[^A-Za-z0-9 .&'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length >= 2 ? cleaned : null;
+}
 
 // First non-empty source value for a record (the COALESCE), or null.
 function resolveCreatedDate(record, sources) {
@@ -73,11 +140,34 @@ function resolveCreatedDate(record, sources) {
 
 // List pagination. The client sends ?limit= & ?offset= (both optional). limit is
 // the PAGE SIZE (not a cap on the dataset) — real server-side paging returns a
-// `total` so the frontend can render a pager / load-more. Defaults keep a small
-// first page; MAX_LIMIT bounds any single page so a caller can't ask for 40k rows
-// in one request (that's what paging is for).
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 500;
+// `total` so the frontend can render a pager / load-more. MAX_LIMIT bounds any
+// single page so a caller can't ask for the whole 32k-row table in one request
+// (that's what paging is for).
+//
+// WHY 5000 (G2): the old 500-row cap forced the frontend into 64 sequential round
+// trips to sweep the 31.6k-row customer set. Under a paged burst that pushed the
+// account past its Lambda concurrency ceiling and requests were throttled into
+// 500s (see HARMON_PHASE1_PUNCHLIST.md G2). At 5000/page the same sweep is 7
+// requests. 5000 rows of the customer cache is ~4.3 MB of JSON — inside Lambda's
+// 6 MB response limit, which is the real ceiling on how far this can be raised.
+const DEFAULT_LIMIT = 500;
+const MAX_LIMIT = 5000;
+
+// The LIVE-Salesforce list path (listColdCacheFallback: cold cache, and the TEMP
+// Sales-Rep restrict) keeps the ORIGINAL 500 cap. SOQL has its own paging limits
+// (OFFSET is hard-capped at 2000) and that path writes every row it returns into
+// the cache, so the raised cap is deliberately CACHE-PATH ONLY.
+const SF_LIVE_MAX_LIMIT = 500;
+
+// PostgREST (Supabase) enforces a per-request row ceiling — the project's "Max
+// Rows" API setting, 1000 by default — and SILENTLY TRUNCATES past it: a request
+// for 5000 rows comes back 206 with 1000 rows and no error. Raising our own
+// MAX_LIMIT alone would therefore have shipped a page size the cache layer quietly
+// ignored. fetchCacheRange() below splits any read larger than this into
+// consecutive .range() sub-requests, so the endpoint returns the full page whatever
+// the dashboard setting happens to be. Raising "Max Rows" in the Supabase dashboard
+// collapses this back to a single round trip; it does not change correctness.
+const POSTGREST_PAGE_SIZE = 1000;
 
 // --- Read-time cache freshness ---------------------------------------------
 // A cache row is trustworthy on read only if BOTH: is_stale is false/null AND it
@@ -436,21 +526,98 @@ function isRowFresh(row, nowMs) {
   return nowMs - syncedMs <= CACHE_TTL_MS;
 }
 
+// Read `limit` rows starting at `offset` from a cache table, transparently
+// splitting the read into POSTGREST_PAGE_SIZE-sized .range() sub-requests so the
+// caller always gets the page size it asked for (see POSTGREST_PAGE_SIZE for why).
+//
+// `makeQuery(withCount)` must return a FRESH query builder each call — a
+// supabase-js builder is single-use — with all filters/ordering applied but NO
+// .range(). The exact `total` is requested on the FIRST sub-request only: it is a
+// separate server-side COUNT, so asking for it once per sub-request would multiply
+// the cost for a number that cannot change within one read.
+//
+// Stops early when a sub-request returns fewer rows than asked (end of data), and
+// surfaces the first error rather than a partial page, matching the previous
+// single-request behavior.
+async function fetchCacheRange(makeQuery, offset, limit) {
+  const rows = [];
+  let total = null;
+  let start = offset;
+  let remaining = limit;
+  let first = true;
+
+  while (remaining > 0) {
+    const take = Math.min(remaining, POSTGREST_PAGE_SIZE);
+    const { data, count, error } = await makeQuery(first).range(
+      start,
+      start + take - 1
+    );
+    if (error) return { rows, total, error };
+    if (first && count != null) total = count;
+
+    const batch = data || [];
+    rows.push(...batch);
+    first = false;
+
+    // Short read == no more matching rows past this point.
+    if (batch.length < take) break;
+    start += batch.length;
+    remaining -= batch.length;
+  }
+
+  return { rows, total, error: null };
+}
+
+// Upsert cache rows in bounded batches. A fully-stale 5000-row page would
+// otherwise be one ~4 MB PostgREST request; chunking keeps each write ordinary.
+// Best-effort by contract: a cache-write failure is logged, never fails the read.
+async function upsertCacheRows(supabase, cacheTable, rows, label) {
+  for (let i = 0; i < rows.length; i += POSTGREST_PAGE_SIZE) {
+    const batch = rows.slice(i, i + POSTGREST_PAGE_SIZE);
+    try {
+      const { error } = await supabase
+        .from(cacheTable)
+        .upsert(batch, { onConflict: "sf_id" });
+      if (error) console.error(`cache upsert error (${label}):`, error.message);
+    } catch (e) {
+      console.error(`cache upsert threw (${label}):`, e?.message || String(e));
+    }
+  }
+}
+
 // Re-fetch specific records by Id from Salesforce, using the cache-backed field
 // SELECT. TENANT ISOLATION (defense in depth): Client__c is always in the WHERE
 // even though we also constrain by Id — a cross-tenant Id can never be returned.
 // The Id list is chunked so a large stale set never builds an oversized IN()/SOQL.
+//
+// Chunks run REFETCH_CONCURRENCY at a time. Strictly sequential chunks were fine
+// at a 500-row page (3 chunks) but not at 5000 (25 chunks): at the ~1.5s per chunk
+// measured against this org that is ~35s of Salesforce round trips, past the
+// function's 30s timeout. Bounded waves keep a fully-stale max-size page inside the
+// timeout without hammering the Salesforce API.
+const REFETCH_CONCURRENCY = 5;
 async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
-  const out = [];
+  const chunks = [];
   for (let i = 0; i < ids.length; i += REFETCH_ID_CHUNK_SIZE) {
-    const chunk = ids.slice(i, i + REFETCH_ID_CHUNK_SIZE);
-    const quoted = chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ");
-    const soql =
-      `SELECT ${selectList} FROM ${sfObject} ` +
-      `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-      `AND Id IN (${quoted})`;
-    const recs = await sfQuery(soql);
-    if (recs && recs.length) out.push(...recs);
+    chunks.push(ids.slice(i, i + REFETCH_ID_CHUNK_SIZE));
+  }
+
+  const out = [];
+  for (let i = 0; i < chunks.length; i += REFETCH_CONCURRENCY) {
+    const wave = chunks.slice(i, i + REFETCH_CONCURRENCY);
+    const results = await Promise.all(
+      wave.map((chunk) => {
+        const quoted = chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ");
+        const soql =
+          `SELECT ${selectList} FROM ${sfObject} ` +
+          `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+          `AND Id IN (${quoted})`;
+        return sfQuery(soql);
+      })
+    );
+    for (const recs of results) {
+      if (recs && recs.length) out.push(...recs);
+    }
   }
   return out;
 }
@@ -468,7 +635,7 @@ async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
 // Id = '<id>' AND Client__c = '<tenantId>', with tenantId derived ONLY from the
 // verified token. A record owned by another tenant returns 404, never data.
 async function handleSingleReadFull(ctx) {
-  const { sfObject, id, tenantId, cors } = ctx;
+  const { sfObject, id, tenantId, repRestrict, cors } = ctx;
 
   // Every queryable field (compound/base64 already excluded by getQueryableFields).
   // We do NOT narrow to cache-backed columns — returning the fields the cache
@@ -476,11 +643,18 @@ async function handleSingleReadFull(ctx) {
   const { fields } = await getQueryableFields(sfObject);
   const selectList = fields.map((f) => f.name).join(", ");
 
+  // TEMP Sales Rep guard: a restricted rep must not load another rep's record by
+  // id — add the authoritative rep field to the WHERE so a non-matching id yields
+  // 0 rows -> 404, identical to a cross-tenant miss.
+  const repClause = repRestrict
+    ? ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`
+    : "";
   const soql =
     `SELECT ${selectList} FROM ${sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
-    `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
-    `LIMIT 1`;
+    `AND Client__c = '${soqlEscapeString(tenantId)}'` +
+    repClause +
+    ` LIMIT 1`;
   const records = await sfQuery(soql);
 
   // Missing or cross-tenant -> 404.
@@ -505,7 +679,7 @@ async function handleSingleReadFull(ctx) {
 
 // --- SINGLE-RECORD read ----------------------------------------------------
 async function handleSingleRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, cors, full } =
+  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, repRestrict, cors, full } =
     ctx;
 
   // ?full=true -> all-fields, cache-bypassing detail read (see handleSingleReadFull).
@@ -515,27 +689,37 @@ async function handleSingleRead(ctx) {
   //    Do NOT filter is_stale in the query — fetch the row and decide freshness
   //    in code (isRowFresh) so a stale OR time-aged row falls through to a
   //    Salesforce refresh below instead of being served outdated.
-  const { data: cached, error: cacheErr } = await supabase
-    .from(cacheTable)
-    .select("*")
-    .eq("sf_id", id)
-    .eq("client_sf_id", tenantId)
-    .limit(1)
-    .maybeSingle();
-  if (cacheErr) console.error("cache read error (single):", cacheErr.message);
-  if (cached && isRowFresh(cached, Date.now())) {
-    return jsonResponse(200, cors, { source: "cache", record: cached });
+  //    TEMP Sales Rep guard: SKIP the cache shortcut for a restricted rep — a
+  //    cache row cannot prove rep ownership (the rep field isn't cached), so we
+  //    always verify against Salesforce with the rep field in the WHERE below.
+  if (!repRestrict) {
+    const { data: cached, error: cacheErr } = await supabase
+      .from(cacheTable)
+      .select("*")
+      .eq("sf_id", id)
+      .eq("client_sf_id", tenantId)
+      .limit(1)
+      .maybeSingle();
+    if (cacheErr) console.error("cache read error (single):", cacheErr.message);
+    if (cached && isRowFresh(cached, Date.now())) {
+      return jsonResponse(200, cors, { source: "cache", record: cached });
+    }
   }
 
-  // b. Missing OR stale/aged -> refresh from Salesforce (cache-backed fields).
-  //    TENANT FILTER: AND Client__c = '<escaped tenantId>'
+  // b. Missing OR stale/aged (or a restricted rep) -> read from Salesforce.
+  //    TENANT FILTER: AND Client__c = '<escaped tenantId>'. TEMP rep guard adds
+  //    the authoritative rep field so another rep's record returns 0 rows -> 404.
   const { fields } = await getQueryableFields(sfObject);
   const { selectFields, selectList } = buildCacheSelect(fields, columnSet, createdDateSources);
+  const repClause = repRestrict
+    ? ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`
+    : "";
   const soql =
     `SELECT ${selectList} FROM ${sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
-    `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
-    `LIMIT 1`;
+    `AND Client__c = '${soqlEscapeString(tenantId)}'` +
+    repClause +
+    ` LIMIT 1`;
   const records = await sfQuery(soql);
 
   // c. Missing or cross-tenant -> 404.
@@ -572,6 +756,51 @@ async function handleSingleRead(ctx) {
   return jsonResponse(200, cors, { source: "salesforce", record: mapped });
 }
 
+// --- Server-side cache search (non-rep callers) ----------------------------
+// ILIKE '%term%' across the object's cache name columns, tenant-scoped, ordered
+// like the normal list, capped at SEARCH_CAP. Searches the WHOLE tenant cache;
+// count:"exact" returns the full match total even though only SEARCH_CAP rows come
+// back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
+// double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors }) {
+  const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
+  if (cols.length === 0) {
+    return jsonResponse(200, cors, {
+      source: "cache", count: 0, total: 0, limit: SEARCH_CAP, offset: 0, hasMore: false, records: [],
+    });
+  }
+  const orExpr = cols.map((c) => `${c}.ilike."%${term}%"`).join(",");
+  let cq = supabase
+    .from(cacheTable)
+    .select("*", { count: "exact" })
+    .eq("client_sf_id", tenantId)
+    .or(orExpr);
+  if (columnSet.has("created_date")) {
+    cq = cq
+      .order("created_date", { ascending: false, nullsFirst: false })
+      .order("sf_id", { ascending: true });
+  } else {
+    cq = cq.order("sf_id", { ascending: true });
+  }
+  cq = cq.range(0, SEARCH_CAP - 1);
+  const { data, count, error } = await cq;
+  if (error) {
+    console.error("cache search error:", error.message);
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  const records = data || [];
+  const total = count ?? records.length;
+  return jsonResponse(200, cors, {
+    source: "cache",
+    count: records.length,
+    total,
+    limit: SEARCH_CAP,
+    offset: 0,
+    hasMore: total > records.length,
+    records,
+  });
+}
+
 // --- LIST read (server-side paginated) -------------------------------------
 // Cache-first, tenant-scoped, PAGED. Inputs: ?limit= (page size, bounded by
 // MAX_LIMIT) & ?offset= (start row). Returns a page PLUS the exact `total` across
@@ -580,7 +809,7 @@ async function handleSingleRead(ctx) {
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, qs, cors } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, qs, cors } =
     ctx;
 
   // Pagination inputs. limit = PAGE SIZE (not a dataset cap); offset = start row.
@@ -619,35 +848,84 @@ async function handleListRead(ctx) {
     }
   }
 
+  // Server-side search term (?q=), sanitized; null when absent/too short/unsupported.
+  const searchTerm = searchFields ? sanitizeSearchTerm(qs.q) : null;
+
+  // TEMP Sales Rep guard: the authoritative rep field isn't cached, so a restricted
+  // rep's list is served LIVE from Salesforce (COUNT + paged SELECT, offset clamped
+  // at the SOQL 2000 cap) filtered to the rep — bypassing the cache entirely. Any
+  // caller ?field=&value= filter is preserved (ANDed with the rep clause). A ?q=
+  // search adds a SOQL name LIKE ON TOP of the rep clause (never widens the rep's
+  // set) and caps at SEARCH_CAP from the first page.
+  if (repRestrict) {
+    return await listColdCacheFallback({
+      supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
+      createdDateSources, cors, selectFields, selectList,
+      filterFieldName, filterValue,
+      // LIVE Salesforce path — keeps the original 500 cap (SF_LIVE_MAX_LIMIT); the
+      // raised MAX_LIMIT is cache-path only.
+      limit: searchTerm ? SEARCH_CAP : Math.min(limit, SF_LIVE_MAX_LIMIT),
+      offset: searchTerm ? 0 : offset,
+      repRestrict,
+      searchTerm,
+      searchSfFields: searchTerm ? searchFields.sf : null,
+    });
+  }
+
+  // Non-rep server-side search: ILIKE across the cache name columns, tenant-scoped,
+  // capped at SEARCH_CAP (response still carries the full match total). Searches the
+  // WHOLE tenant cache, not just a loaded page.
+  if (searchTerm) {
+    return await handleCacheSearch({
+      supabase, cacheTable, columnSet, tenantId,
+      searchCacheCols: searchFields.cache, term: searchTerm, cors,
+    });
+  }
+
   // b. Cache-first PAGED fetch WITH exact total. TENANT FILTER: client_sf_id.
-  //    - count:"exact" returns the FULL matching total regardless of .range().
+  //    - count:"exact" returns the FULL matching total regardless of the range.
   //    - ORDER BY created_date DESC (newest first) with NULLS LAST, then sf_id as a
   //      stable tiebreaker. created_date doesn't change on re-sync, so a row can't
   //      jump between pages; the sf_id tiebreaker keeps rows with equal/NULL dates
   //      in a deterministic order (no dup/skip under pagination). Backed by the
   //      (client_sf_id, created_date DESC NULLS LAST, sf_id) index.
   //    - is_stale is NOT filtered: stale rows stay on the page and get refreshed.
-  let cq = supabase
-    .from(cacheTable)
-    .select("*", { count: "exact" })
-    .eq("client_sf_id", tenantId);
-  if (filterColumn && columnSet.has(filterColumn)) {
-    cq = cq.eq(filterColumn, filterValue);
-  }
-  // Order newest-first by created_date WHEN the cache actually has that column;
-  // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
-  // and self-healing while the created_date column/backfill is rolled out — a
-  // missing column would otherwise error the cache query and dump every list onto
-  // the slow Salesforce cold path.
-  if (columnSet.has("created_date")) {
-    cq = cq
-      .order("created_date", { ascending: false, nullsFirst: false })
-      .order("sf_id", { ascending: true });
-  } else {
-    cq = cq.order("sf_id", { ascending: true });
-  }
-  cq = cq.range(offset, offset + limit - 1);
-  const { data: pageRows, count: total, error: cacheErr } = await cq;
+  //    - The read goes through fetchCacheRange, which splits a page larger than
+  //      PostgREST's "Max Rows" ceiling into consecutive sub-requests. The ordering
+  //      is deterministic (created_date DESC, sf_id ASC), so consecutive ranges
+  //      concatenate into exactly the page a single request would have returned.
+  //
+  //    makeCacheQuery returns a FRESH builder per sub-request (supabase-js builders
+  //    are single-use) with identical filters + ordering; only the first asks for
+  //    the exact count.
+  const makeCacheQuery = (withCount) => {
+    let q = supabase
+      .from(cacheTable)
+      .select("*", withCount ? { count: "exact" } : {})
+      .eq("client_sf_id", tenantId);
+    if (filterColumn && columnSet.has(filterColumn)) {
+      q = q.eq(filterColumn, filterValue);
+    }
+    // Order newest-first by created_date WHEN the cache actually has that column;
+    // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
+    // and self-healing while the created_date column/backfill is rolled out — a
+    // missing column would otherwise error the cache query and dump every list onto
+    // the slow Salesforce cold path.
+    if (columnSet.has("created_date")) {
+      q = q
+        .order("created_date", { ascending: false, nullsFirst: false })
+        .order("sf_id", { ascending: true });
+    } else {
+      q = q.order("sf_id", { ascending: true });
+    }
+    return q;
+  };
+
+  const {
+    rows: pageRows,
+    total,
+    error: cacheErr,
+  } = await fetchCacheRange(makeCacheQuery, offset, limit);
   if (cacheErr) console.error("cache read error (list):", cacheErr.message);
 
   // c. Cold cache for this tenant/object (nothing cached yet) -> page-aware SF
@@ -656,7 +934,9 @@ async function handleListRead(ctx) {
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-      selectFields, selectList, filterFieldName, filterValue, limit, offset,
+      selectFields, selectList, filterFieldName, filterValue,
+      // LIVE Salesforce path — original 500 cap, as above.
+      limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
     });
   }
 
@@ -695,26 +975,23 @@ async function handleListRead(ctx) {
       refreshedBySfId.set(sfId, mapped);
     }
 
-    // Write refreshed rows back (best-effort — a cache-write failure != read fail).
+    // Write refreshed rows back (best-effort — a cache-write failure != read fail),
+    // batched so a full max-size page isn't one oversized PostgREST request.
     if (refreshedRows.length > 0) {
-      try {
-        const { error: upErr } = await supabase
-          .from(cacheTable)
-          .upsert(refreshedRows, { onConflict: "sf_id" });
-        if (upErr) console.error("cache upsert error (list refresh):", upErr.message);
-      } catch (e) {
-        console.error("cache upsert threw (list refresh):", e?.message || String(e));
-      }
+      await upsertCacheRows(supabase, cacheTable, refreshedRows, "list refresh");
     }
 
     // Delete-detection: orphaned cache rows (gone from SF), tenant-scoped, best-effort.
-    if (deletedIds.length > 0) {
+    // Chunked: .in() serializes every id into the request URL, so a large orphan set
+    // on a max-size page would otherwise build a URL past PostgREST's length limit.
+    for (let i = 0; i < deletedIds.length; i += POSTGREST_PAGE_SIZE) {
+      const batch = deletedIds.slice(i, i + POSTGREST_PAGE_SIZE);
       try {
         const { error: delErr } = await supabase
           .from(cacheTable)
           .delete()
           .eq("client_sf_id", tenantId)
-          .in("sf_id", deletedIds);
+          .in("sf_id", batch);
         if (delErr) console.error("cache delete error (list refresh):", delErr.message);
       } catch (e) {
         console.error("cache delete threw (list refresh):", e?.message || String(e));
@@ -753,12 +1030,27 @@ async function handleListRead(ctx) {
 async function listColdCacheFallback(ctx) {
   const {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-    selectFields, selectList, filterFieldName, filterValue, limit, offset,
+    selectFields, selectList, filterFieldName, filterValue, limit, offset, repRestrict,
+    searchTerm, searchSfFields,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
+  // TEMP Sales Rep guard: AND the authoritative rep field (applies to both the
+  // COUNT and the paged SELECT below, so total + rows are rep-scoped). The search
+  // clause is ANDed AFTER this, so a rep's search can only NARROW their own set —
+  // never reach another rep's records.
+  if (repRestrict) {
+    where += ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`;
+  }
   if (filterFieldName) {
     where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
+  }
+  // ?q= name search: OR of LIKE '%term%' across the object's SF name fields, ANDed
+  // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.
+  if (searchTerm && Array.isArray(searchSfFields) && searchSfFields.length) {
+    const t = soqlEscapeString(searchTerm);
+    const likes = searchSfFields.map((f) => `${f} LIKE '%${t}%'`).join(" OR ");
+    where += ` AND (${likes})`;
   }
 
   // Exact total for the pager (aggregate COUNT(Id) returns one row {c:N}).
@@ -1179,6 +1471,10 @@ export const handler = async (event) => {
       tenantSlug,
       createdDateSources:
         CREATED_DATE_SOURCE[objectKey] ?? DEFAULT_CREATED_DATE_SOURCE,
+      // TEMP Sales Rep hard-restrict (null for every other role/object).
+      repRestrict: repRestrictFor(objectKey, identity),
+      // Name columns + SF fields this object supports for ?q= search (null if none).
+      searchFields: SEARCH_FIELDS[objectKey] ?? null,
       cors,
     };
 

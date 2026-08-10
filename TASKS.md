@@ -2,6 +2,8 @@
 
 Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
+Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2, E1.
+
 ## List pagination + cache backfill (fix: "exactly 50" bug, 2026-07-28)
 
 - [x] `sfQuery` follows `nextRecordsUrl` to exhaustion (`lib/salesforce.js`) — removes the silent 2000-row truncation on every read

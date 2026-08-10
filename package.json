@@ -5,7 +5,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "deploy": "echo \"Use .\\\\deploy.ps1 <function-name> on Windows\""
+    "deploy": "echo \"Use .\\\\deploy.ps1 <function-name> on Windows\"",
+    "test": "node --experimental-test-module-mocks --test lambdas/sundial-aurora-push/test.js lambdas/sundial-list-files/test.js lambdas/sundial-aurora-webhook/test.js lambdas/sundial-aurora-inbound/test.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.1"
@@ -15,6 +16,7 @@
     "@aws-sdk/client-s3": "^3.1083.0",
     "@aws-sdk/client-secrets-manager": "^3.1075.0",
     "@aws-sdk/client-sesv2": "^3.1099.0",
+    "@aws-sdk/client-sqs": "^3.1102.0",
     "@aws-sdk/s3-request-presigner": "^3.1083.0",
     "@supabase/supabase-js": "^2.108.2",
     "exceljs": "^4.4.0",

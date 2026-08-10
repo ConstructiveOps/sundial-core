@@ -21,6 +21,73 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param, EventBridge schedule for incremental `sundial-cache-sync`
 
 
+## Aurora inbound — agreement webhook → queue → worker (built 2026-08-04, D-048)
+
+- [x] **Doorbell** `sundial-aurora-webhook`: all five subscription attributes, shared-secret gate (constant-time, 5-min token TTL so rotation needs no redeploy), enqueue to SQS, **5xx on enqueue failure** to drive Aurora's retry ladder. No SF/Aurora I/O — it must answer inside Aurora's 10s deadline.
+- [x] **Worker** `sundial-aurora-inbound` (SQS): all statuses update agreement tracking (deduped, precedence-ranked); `signed` also retrieves agreement/design/proposal/financing, writes the mapping to `Sundial_Customer__c`, stores the signed PDF, and emails the design manager once. Partial-batch failures → DLQ; permanent classes logged with a `PERMANENT` marker.
+- [x] `lib/aurora.js`, `lib/sqs.js`, `lib/salesforce.js » describeObject`; 37 tests (14 + 23), all green.
+- [x] Docs: `docs/integrations/aurora-inbound.md` (runbook), api-endpoints, salesforce-schema, aurora-api-reference (**corrected** the stale "filters to signed"), D-048.
+- [ ] **Create 5 fields on `Sundial_Customer__c`** (the pipeline runs without them — the describe guard drops them and the worker reports the gap — but the data is lost until they exist):
+  - `Aurora_Agreement_ID__c` — Text(100)
+  - `Aurora_Agreement_Status__c` — Picklist: `sent`, `viewed`, `signed`, `cancel-pending`, `canceled`, `declined`, `error`
+  - `Aurora_Agreement_Status_At__c` — Datetime
+  - `Aurora_Proposal_Link__c` — URL(255)
+  - `Aurora_Signed_Email_Sent__c` — Datetime. **Most important of the five:** it is the "signed processing completed" marker. Without it the duplicate guard can't persist, so a duplicate `signed` delivery re-sends the notification.
+  - Grant FLS to the integration user (and the portal perm set for anything users should see).
+- [ ] **Infrastructure (hand-created, per `docs/integrations/aurora-inbound.md` Part B):** SQS `sundial-aurora-inbound` + `-dlq` (redrive `maxReceiveCount=5`, visibility 180s ≥ the worker's 60s timeout); Lambda `sundial-aurora-inbound` (Node 22 / arm64 / 60s / 512MB / `sundial-lambda-execution-role`); event-source mapping **with `ReportBatchItemFailures`** (without it SQS ignores partial-batch failures and deletes the whole batch); `AURORA_INBOUND_QUEUE_URL` on the doorbell; `EMAIL_FROM` + `DESIGN_REQUEST_NOTIFY_TO` on the worker. Verify the role has `sqs:SendMessage` / `ReceiveMessage` / `DeleteMessage` / `GetQueueAttributes`.
+- [ ] **Deploy:** `.\deploy.ps1 sundial-aurora-webhook` and `.\deploy.ps1 sundial-aurora-inbound`; the route is already live (`scripts/wire-aurora-webhook-route.ps1` is idempotent).
+- [ ] **Create the Aurora subscription** (Tim, Aurora console — `aurora-inbound.md` Part C): `agreement_status_changed`, **ALL** statuses, GET, the five-attribute `url_template`, and the `X-Aurora-Webhook-Token` header.
+- [x] **Post-signature cancellation gap CLOSED (2026-08-04, D-048 amendment):** `canceled` / `cancel-pending` / `declined` are now confirmed with a fresh `GET /agreements/{id}` before precedence is applied — Aurora's current status wins over a recorded `signed` (and sends a cancellation email), while an event Aurora contradicts is dropped as stale. `error` stays rank-governed; exact duplicates short-circuit before the re-read. The `signed` path is unified with it: a signed event whose re-read shows a dead agreement records Aurora's status and sends the same notification. 13 tests cover both branches.
+- [ ] **Operational note (not a code gap):** a confirmed cancellation after signing is now recorded and emailed automatically, but anything already started off the signed contract (project creation, scheduling, commissions) still has to be unwound by hand.
+- [ ] Nice-to-have: migrate `sundial-aurora-push` onto `lib/aurora.js` (it still has its own inline Aurora config/fetch + describe cache) so there's one Aurora client.
+
+## Aurora dealer origination — auto-create the Customer on signed (built 2026-08-07, D-049)
+
+- [x] **Unmatched signed Aurora projects now branch** instead of dead-lettering: no `external_provider_id` → **create** the customer from Retrieve Project (upsert on the `Aurora_Project_ID__c` External ID, so duplicates/concurrency converge on one record); provider id that resolves → **repair** the missing link on our own customer and continue; provider id that doesn't resolve → `PROVIDER_ID_MISMATCH` → DLQ.
+- [x] **Unmatched non-signed events dropped quietly** (no DLQ) — dealer pre-sale traffic. Still dead-lettered when they carry a provider id (our own broken deal).
+- [x] Dealer attribution: `partner_id` → partner **name** via List Partners, falling back to `owner_id` → user name via Retrieve User, then the raw id. A 403 on either degrades to raw ids — it never fails an import. A 403 on **Retrieve Project** is a loud `AURORA_NOT_PROVISIONED` dead-letter (the feature depends on it).
+- [x] `lib/aurora.js » getProject/listPartners/getUser`, `lib/salesforce.js » sfUpsertRecord`, `lambdas/sundial-aurora-inbound/customerCreate.js`; 21 new tests (103 repo-wide, green). Docs: aurora-api-reference (Retrieve Project surface as specced), aurora-inbound (branch table + dealer operating note), salesforce-schema, D-049.
+- [ ] **Create 2 fields on `Sundial_Customer__c`** (imports succeed without them; the values are just lost and the gap is reported in the signed email):
+  - `Aurora_Dealer_Name__c` — Text(255). Which dealer sold it.
+  - `Aurora_Import_Notes__c` — Long Text Area(32768). Everything Aurora returned that has no field of its own (raw address, country, salutation, mailing address, partner/owner/team ids, tags, out-of-picklist values).
+  - Grant FLS to the integration user; surface both on the Customer layout so the office can see a record was machine-built.
+- [ ] **Add the `Lead_Source__c` picklist value `Aurora - Third-Party Dealer`.** Until it exists, auto-created records have **no lead source** (the code refuses to misattribute the sale to one of the ~200 existing partner values) and the intended value is recorded in the import notes.
+- [x] **Pipeline position decided (Tim, 2026-08-07):** auto-created dealer customers get `Status__c` = `Customer` and `Stage__c` = `Sold - Pending Review`. Both values verified present in the org; both written through the same match-or-skip picklist guard (if either is ever renamed/removed, it's skipped with a warning and noted in `Aurora_Import_Notes__c` — exactly like `Lead_Source__c`). Note `Status__c` matters: the org default is **`Lead`**, so without this a closed dealer sale would have looked like a lead.
+- [ ] **Review process:** auto-created customers carry only what Aurora knows — no Sundial design request, no Harmon qualification. `Stage__c = Sold - Pending Review` is the queue to work from, and the signed email flags them and names the dealer; decide who checks them and when.
+- [ ] Note for whoever wires the Aurora subscription: dealer deals' `sent`/`viewed` events arrive **before** the customer exists and are dropped, so auto-created records start at `signed`. Earlier statuses are not backfilled (accepted, D-049).
+
+## Create Project — copy Customer files to the Solar project (shipped 2026-08-03)
+
+- [x] **`POST /projects/{customerId}/files/copy-to-solar`** → `sundial-list-files`. Server-side S3 `CopyObject` of `SUNDIAL/{customerId}/*` → `SUNDIAL/{solarId}/*`; destination read from `Linked_Solar_Project__c` server-side only (empty → 400 `NO_LINKED_PROJECT`; cross-tenant link → 400, fail closed). Zero files = 200, idempotent re-run, per-object failures isolated in `failed[]`. Copy helper: `lib/file-access.js » copyRecordFiles`.
+- [x] Deployed: `.\deploy.ps1 sundial-list-files` + `scripts/wire-copy-files-route.ps1` (route live on prod).
+- [x] Verified live end-to-end (`scripts/verify-copy-to-solar-e2e.mjs`, 17/17 checks, self-cleaning with verified teardown) + 13 unit tests.
+- [x] IAM checked: role has `AmazonS3FullAccess`, so `ListBucket`/`Get`/`PutObject` on `sfsolproj/SUNDIAL/*` are covered — **no IAM change needed**.
+- [ ] Frontend (harmon-crm, separate): call this right after the Create Project step succeeds; surface `failed[]` if non-empty.
+- [ ] Nice-to-have: tighten the execution role from `AmazonS3FullAccess` to a `sfsolproj/SUNDIAL/*`-scoped policy (unrelated to this endpoint; it's the whole role).
+- [ ] Fix the same latent AWS-CLI quoting bugs in `wire-budget-recalc-route.ps1` and `wire-user-admin-routes.ps1` (`--api-key-required $false` → `--no-api-key-required`; comma-containing map values + MOCK template via no-BOM JSON files; add `Assert-LastExitOk`). Their routes are already live, so nothing is broken today — but a re-run would fail confusingly, and the script would print SUCCESS anyway. Already fixed in `wire-copy-files-route.ps1` and `wire-design-request-route.ps1`.
+
+## Cache delete-pruning gap — deleted SF records ghost in the cache (found 2026-08-03)
+
+Deleting a record in Salesforce does **not** reliably remove its cache row. Today the only pruning is opportunistic and read-time; there is no reconciliation job.
+
+What exists now:
+- `sundial-sf-query` **list** path only: a row that is BOTH on a page someone actually requests AND already stale (`is_stale === true` or `last_synced_at` older than the 10-min `CACHE_TTL_MS`) gets re-fetched by Id; if Salesforce doesn't return it, the row is deleted (`lambdas/sundial-sf-query/index.js:871`).
+- `sundial-cache-sync` has **no** delete detection at all — by design, documented at `lambdas/sundial-cache-sync/index.js:22`. Its SOQL only sees records that still exist, so deletions are invisible to both incremental and full-resync modes. A **full resync does not shrink the cache** — it only upserts.
+- `sundial-sf-query` **single-record** path returns 404 when the record is gone but leaves the cache row in place (`index.js:626`).
+
+Why it ghosts:
+- A fresh row (synced within the TTL) is served straight from cache and never verified, so a just-deleted record keeps appearing on lists.
+- A row on a page nobody ever loads (deep pages, filtered-out stages) is never checked at all.
+- Migrated-then-deleted records are the worst case: high volume, rarely viewed individually, so nothing ever triggers the read-time check. Counts (`total`) stay inflated too.
+
+- [ ] **Add delete-pruning to `sundial-cache-sync`.** Options, cheapest first:
+  - Salesforce `queryAll` / `/sobjects/{obj}/deleted?start=&end=` (Deleted Records API, 15-day window) on each incremental run → delete matching `sf_id`s. Cheap, but only covers the last 15 days, so it must be paired with the reconciliation pass below.
+  - Reconciliation pass on full resync: collect every `Id` returned from Salesforce for the object, then delete cache rows for that `client_sf_id` whose `sf_id` is not in that set. Must be scoped per tenant and must only run when the SF fetch completed cleanly — a partial/failed fetch would otherwise wipe good rows.
+  - Do NOT gate on `is_stale`/TTL: the ghost rows are the fresh-looking ones.
+- [ ] Delete the cache row on the single-record 404 path (`index.js:626`) — tenant-scoped, best-effort, mirroring the list path.
+- [ ] Interim manual remedy: delete by `sf_id` directly in Supabase (done once for solar `a1Q7y00000JD2WxEAL`, 2026-08-03).
+
+
 ## User Management Backend (D-044)
 
 - [x] `sundial-user-admin` Lambda — GET/POST `/admin/users`, PATCH `/admin/users/{id}`; Super-Admin-gated, tenant-scoped, fail-safe create + compensating delete, Supabase ban on deactivate, self-deactivation guard
@@ -41,9 +108,11 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [!] **Wire AWS SES** (shared `lib/email.js` scaffolded 2026-07-30; `@aws-sdk/client-sesv2` added; NOT wired to any feature). Blockers/steps: (a) create + verify the sending domain identity — recommended `mail.constructiveoperations.com` — and add the DKIM CNAMEs + SPF/DMARC; (b) request SES production access (out of sandbox); (c) grant the Lambda role `ses:SendEmail` and set `EMAIL_FROM`/`SES_REGION` env vars on senders. Consumers waiting on this: **Design Request → email the design manager** (now BUILT in `sundial-aurora-push`, D-047 — it degrades to `email.sent: false, reason: "email_not_configured"` until `EMAIL_FROM` + `DESIGN_REQUEST_NOTIFY_TO` are set) and **@-mention alerts**. NOTE: **Supabase Auth invite/reset no longer waits on this SDK path** — it goes through Supabase Custom SMTP → SES instead (D-046, `docs/integrations/auth-email-ses.md`), which is independent of `lib/email.js`.
 - [x] **Utility Password save failure (D-045):** describe-cache TTL (5 min) in sundial-sf-update + sundial-sf-query; redeployed. Root cause was stale FLS in the cached describe after the budget perm set assignment.
 - [x] ~~**Aurora "Submit Design Request" endpoint:** `POST /projects/{solarId}/design-request/submit`~~ — **superseded 2026-08-03 (D-047):** no `Sundial_Solar__c` exists at design-request time, so that route was unusable. Re-plumbed to `POST /customers/{recordId}/design-request/submit` on `Sundial_Customer__c`.
-- [x] **Aurora Design Request on the Customer module (D-047):** customer-id route as the mainline, Solar resolution removed, idempotency on `Sent_to_Aurora__c`, describe-filtered field set, design-manager notification email carrying the full form (Aurora accepts none of it). 15 tests green (`npm test`). **Built + tested, NOT deployed.**
+- [x] **Aurora Design Request on the Customer module (D-047):** customer-id route as the mainline, Solar resolution removed, describe-filtered field set, design-manager notification email carrying the full form (Aurora accepts none of it). Project creation once-only (`Sent_to_Aurora__c`/`Aurora_Project_ID__c`); notification separately retryable (`Design_Request_Email_Sent__c`) so a failed email can be recovered by re-submitting. 21 tests green (`npm test`). **Built + tested, NOT deployed.**
 - [ ] **Deploy the Design Request re-route:** `.\deploy.ps1 sundial-aurora-push` → `.\scripts\wire-design-request-route.ps1` (also deletes the legacy `/projects/.../design-request` resource) → set `EMAIL_FROM`, `DESIGN_REQUEST_NOTIFY_TO`, optional `DESIGN_REQUEST_NOTIFY_CC` on the Lambda + `ses:SendEmail` on the role (see `docs/api-endpoints.md` → Lambda Environment Variables).
-- [ ] **Create `Design_Notes__c`** (long textarea) on `Sundial_Customer__c` — it's the one Design Request field the object doesn't have (live describe 2026-08-03). The Lambda drops it from the SELECT until it exists and picks it up automatically after (no redeploy).
+- [ ] **Create two fields on `Sundial_Customer__c`** (live describe 2026-08-03 says neither exists; the Lambda drops each from the SELECT until it does and picks it up automatically after — no redeploy):
+  - `Design_Notes__c` — long textarea; the one Design Request form field the object lacks.
+  - `Design_Request_Email_Sent__c` — **datetime**, writable by the integration user. Records that the design-manager notification actually landed. **Until it exists, every re-submit re-sends the notification** (deliberate — see D-047: silence is the worse failure), so create it before the button goes to users.
 - [ ] Frontend (harmon-crm, separate): "Submit Design Request" button on the **Customer** record's Design Request Form tab, posting the Customer id to `/customers/{recordId}/design-request/submit`.
 - [ ] **Design Request Form fields (new SF fields):** Workbench package pending Tim's field-existence markup of `Fields_by_Section.xlsx` (picklists, multiselect Sales Type, datetime, text/number) + FLS on integration + user perm sets. Note the Design Request set itself now lives on **`Sundial_Customer__c`** (verified present 2026-08-03), not `Sundial_Solar__c`.
 

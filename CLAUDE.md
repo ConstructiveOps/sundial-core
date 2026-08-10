@@ -381,7 +381,15 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
 
 ### Git Workflow
 
-- `main` is production
+- **`master` is the mainline in THIS repo (sundial-core) — not `main`.** Deployed code
+  lives on the pushed mainline, never on a local-only branch: merge and push `master`
+  in the same pass that deploys.
+  - Note the asymmetry: the **harmon-crm** repo's mainline is **`main`**. Two repos,
+    two names — check which one you are in before merging.
+  - History: this repo briefly had an orphan `main` holding only a README, unrelated to
+    `master` (no common ancestor). It was the GitHub default branch, which made tooling
+    and `git log main` point at an empty tree. The README was ported onto `master` and
+    `main` retired.
 - Feature branches: `feature/sundial-customer-object`, `feature/acumatica-customer-sync`, etc.
 - Descriptive commit messages
 - Claude Code handles Git, Tim reviews and approves

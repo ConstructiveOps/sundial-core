@@ -1,5 +1,30 @@
 # Sundial — Progress Log
 
+## 2026-08-10 — G2 intermittent 500s: the root cause was an AWS quota, not our code; list page cap 500 → 5000
+
+**The Sales list's intermittent 500s under concurrent paged loads were AWS Lambda throttling.** This account's **"Concurrent executions" quota in us-west-1 is 10**, not the AWS default of 1000 — the unraised new-account limit, shared across all 32 functions. The 11th simultaneous invocation is rejected with `TooManyRequestsException` *before the function starts*, and API Gateway renders that as `500 {"message": "Internal server error"}`.
+
+The tell was in the body all along: that text is API Gateway's, and `sundial-sf-query` returns `{"error":"server_error"}`. The 500s were never ours. Confirming metrics: `ConcurrentExecutions` Max pegged at exactly **10.0**, `Throttles` at 20/16/41/14 per minute under real frontend traffic, **`Errors` flat 0.0**, and zero matching log lines. Reproduced deterministically — 12 parallel `limit=500` at varied offsets, **exactly 10 succeed and 2 fail, every round**. That also explains the frontend's 63–71 ms failures (no DB work happens), random failing offsets, and success on retry.
+
+**Both connection hypotheses in the handoff were wrong, and worth recording so nobody re-opens them.** The Lambda reaches Supabase through `@supabase/supabase-js` — **PostgREST over HTTPS**. There is no `pg` connection and no pool to exhaust. The client, the Secrets Manager parse, the Salesforce token and the JWKS set were already module-scope cached and reused across warm invokes.
+
+**The page cap was the disease, and it is now 5000** (default 500 when `limit` is absent; was 50). At 500 the frontend needed 64 round trips to sweep 31.6k customers, which is what pushed it past a ceiling of 10 in the first place. At 5000 the sweep is **7 requests**.
+
+Raising the clamp alone would not have worked. **Supabase's "Max Rows" is 1000 and silently truncates** — PostgREST answers a 5000-row request with `206`, 1000 rows, and no error, so the endpoint would have advertised a page size the cache layer quietly ignored. The list read now splits any page over 1000 into consecutive `.range()` sub-requests (exact count on the first only). It is correct whatever the dashboard setting is; raising "Max Rows" just collapses it to one round trip.
+
+Three consequences of a 10x page also had to be handled, all found by measuring rather than guessing:
+- A fully-stale 5000-row page is 25 `IN()` chunks against Salesforce. Sequentially that measured **~35s — past the 30s timeout**. Chunks now run 5 at a time; worst case measured **13.2s**.
+- That fan-out meant a cold container could fire 5 simultaneous JWT bearer requests for the same integration user, so `getSalesforceToken` now coalesces concurrent refreshes onto one in-flight request — cleared on settle, so a transient auth failure can't poison a warm container.
+- The cache write-back is batched, so a max-size page isn't one ~4 MB PostgREST upsert or an over-length `.in()` delete URL.
+
+**The live-Salesforce list paths deliberately keep the old 500 cap** (cold-cache fallback, TEMP Sales-Rep restrict): SOQL `OFFSET` is hard-capped at 2000 and those paths write back every row they return. The raise is cache-path only.
+
+Verified end to end: `limit=5000` → 5000 rows / 5000 unique ids; `limit=9999` clamps to 5000; `0`/negative/absent → 500; `offset=0` vs `offset=5000` overlap **zero** ids. Full sweep = 7 requests (5000×6 + 1600 = 31,600), and a **7-wide burst × 2 rounds ran 14 requests with 0 failures**. Every object fits Lambda's 6 MB response limit — customer ~4.4 MB worst case, solar's whole 4,476-row set in one 3.65 MB request. Deployed to prod.
+
+**Not fixed by this work, and it should not be mistaken for fixed:** the quota is still 10. A 12-wide burst still loses 2 requests, confirmed after deploy. The 7-request sweep fits under 10 with headroom so the Sales list is safe, but the ceiling is real and shared with every other Lambda. Raising it is a Service Quotas request Tim files (punchlist G2a); Supabase "Max Rows" is G2b.
+
+**Assessed, not built:** server-side status counts for the frontend's tab badges. It is *not* the trivial aggregate it looks like — PostgREST aggregates are **disabled** on this project (`select=stage,count()` → `PGRST123 "Use of aggregate functions is not allowed"`), so it needs a tenant-scoped Postgres RPC plus a route wire. Logged as punchlist G2c.
+
 ## 2026-08-10 — Signed = Customer / Sold - Pending Review on every path; lost agreement replayed
 
 **Manual replay of a lost signed agreement** (`4b65bf63…`, project `e46b9ccd…`). Two recoveries changed the result:

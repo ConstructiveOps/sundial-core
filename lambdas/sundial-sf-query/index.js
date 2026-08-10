@@ -140,11 +140,34 @@ function resolveCreatedDate(record, sources) {
 
 // List pagination. The client sends ?limit= & ?offset= (both optional). limit is
 // the PAGE SIZE (not a cap on the dataset) — real server-side paging returns a
-// `total` so the frontend can render a pager / load-more. Defaults keep a small
-// first page; MAX_LIMIT bounds any single page so a caller can't ask for 40k rows
-// in one request (that's what paging is for).
-const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 500;
+// `total` so the frontend can render a pager / load-more. MAX_LIMIT bounds any
+// single page so a caller can't ask for the whole 32k-row table in one request
+// (that's what paging is for).
+//
+// WHY 5000 (G2): the old 500-row cap forced the frontend into 64 sequential round
+// trips to sweep the 31.6k-row customer set. Under a paged burst that pushed the
+// account past its Lambda concurrency ceiling and requests were throttled into
+// 500s (see HARMON_PHASE1_PUNCHLIST.md G2). At 5000/page the same sweep is 7
+// requests. 5000 rows of the customer cache is ~4.3 MB of JSON — inside Lambda's
+// 6 MB response limit, which is the real ceiling on how far this can be raised.
+const DEFAULT_LIMIT = 500;
+const MAX_LIMIT = 5000;
+
+// The LIVE-Salesforce list path (listColdCacheFallback: cold cache, and the TEMP
+// Sales-Rep restrict) keeps the ORIGINAL 500 cap. SOQL has its own paging limits
+// (OFFSET is hard-capped at 2000) and that path writes every row it returns into
+// the cache, so the raised cap is deliberately CACHE-PATH ONLY.
+const SF_LIVE_MAX_LIMIT = 500;
+
+// PostgREST (Supabase) enforces a per-request row ceiling — the project's "Max
+// Rows" API setting, 1000 by default — and SILENTLY TRUNCATES past it: a request
+// for 5000 rows comes back 206 with 1000 rows and no error. Raising our own
+// MAX_LIMIT alone would therefore have shipped a page size the cache layer quietly
+// ignored. fetchCacheRange() below splits any read larger than this into
+// consecutive .range() sub-requests, so the endpoint returns the full page whatever
+// the dashboard setting happens to be. Raising "Max Rows" in the Supabase dashboard
+// collapses this back to a single round trip; it does not change correctness.
+const POSTGREST_PAGE_SIZE = 1000;
 
 // --- Read-time cache freshness ---------------------------------------------
 // A cache row is trustworthy on read only if BOTH: is_stale is false/null AND it
@@ -503,21 +526,98 @@ function isRowFresh(row, nowMs) {
   return nowMs - syncedMs <= CACHE_TTL_MS;
 }
 
+// Read `limit` rows starting at `offset` from a cache table, transparently
+// splitting the read into POSTGREST_PAGE_SIZE-sized .range() sub-requests so the
+// caller always gets the page size it asked for (see POSTGREST_PAGE_SIZE for why).
+//
+// `makeQuery(withCount)` must return a FRESH query builder each call — a
+// supabase-js builder is single-use — with all filters/ordering applied but NO
+// .range(). The exact `total` is requested on the FIRST sub-request only: it is a
+// separate server-side COUNT, so asking for it once per sub-request would multiply
+// the cost for a number that cannot change within one read.
+//
+// Stops early when a sub-request returns fewer rows than asked (end of data), and
+// surfaces the first error rather than a partial page, matching the previous
+// single-request behavior.
+async function fetchCacheRange(makeQuery, offset, limit) {
+  const rows = [];
+  let total = null;
+  let start = offset;
+  let remaining = limit;
+  let first = true;
+
+  while (remaining > 0) {
+    const take = Math.min(remaining, POSTGREST_PAGE_SIZE);
+    const { data, count, error } = await makeQuery(first).range(
+      start,
+      start + take - 1
+    );
+    if (error) return { rows, total, error };
+    if (first && count != null) total = count;
+
+    const batch = data || [];
+    rows.push(...batch);
+    first = false;
+
+    // Short read == no more matching rows past this point.
+    if (batch.length < take) break;
+    start += batch.length;
+    remaining -= batch.length;
+  }
+
+  return { rows, total, error: null };
+}
+
+// Upsert cache rows in bounded batches. A fully-stale 5000-row page would
+// otherwise be one ~4 MB PostgREST request; chunking keeps each write ordinary.
+// Best-effort by contract: a cache-write failure is logged, never fails the read.
+async function upsertCacheRows(supabase, cacheTable, rows, label) {
+  for (let i = 0; i < rows.length; i += POSTGREST_PAGE_SIZE) {
+    const batch = rows.slice(i, i + POSTGREST_PAGE_SIZE);
+    try {
+      const { error } = await supabase
+        .from(cacheTable)
+        .upsert(batch, { onConflict: "sf_id" });
+      if (error) console.error(`cache upsert error (${label}):`, error.message);
+    } catch (e) {
+      console.error(`cache upsert threw (${label}):`, e?.message || String(e));
+    }
+  }
+}
+
 // Re-fetch specific records by Id from Salesforce, using the cache-backed field
 // SELECT. TENANT ISOLATION (defense in depth): Client__c is always in the WHERE
 // even though we also constrain by Id — a cross-tenant Id can never be returned.
 // The Id list is chunked so a large stale set never builds an oversized IN()/SOQL.
+//
+// Chunks run REFETCH_CONCURRENCY at a time. Strictly sequential chunks were fine
+// at a 500-row page (3 chunks) but not at 5000 (25 chunks): at the ~1.5s per chunk
+// measured against this org that is ~35s of Salesforce round trips, past the
+// function's 30s timeout. Bounded waves keep a fully-stale max-size page inside the
+// timeout without hammering the Salesforce API.
+const REFETCH_CONCURRENCY = 5;
 async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
-  const out = [];
+  const chunks = [];
   for (let i = 0; i < ids.length; i += REFETCH_ID_CHUNK_SIZE) {
-    const chunk = ids.slice(i, i + REFETCH_ID_CHUNK_SIZE);
-    const quoted = chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ");
-    const soql =
-      `SELECT ${selectList} FROM ${sfObject} ` +
-      `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-      `AND Id IN (${quoted})`;
-    const recs = await sfQuery(soql);
-    if (recs && recs.length) out.push(...recs);
+    chunks.push(ids.slice(i, i + REFETCH_ID_CHUNK_SIZE));
+  }
+
+  const out = [];
+  for (let i = 0; i < chunks.length; i += REFETCH_CONCURRENCY) {
+    const wave = chunks.slice(i, i + REFETCH_CONCURRENCY);
+    const results = await Promise.all(
+      wave.map((chunk) => {
+        const quoted = chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ");
+        const soql =
+          `SELECT ${selectList} FROM ${sfObject} ` +
+          `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+          `AND Id IN (${quoted})`;
+        return sfQuery(soql);
+      })
+    );
+    for (const recs of results) {
+      if (recs && recs.length) out.push(...recs);
+    }
   }
   return out;
 }
@@ -762,7 +862,9 @@ async function handleListRead(ctx) {
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
       createdDateSources, cors, selectFields, selectList,
       filterFieldName, filterValue,
-      limit: searchTerm ? SEARCH_CAP : limit,
+      // LIVE Salesforce path — keeps the original 500 cap (SF_LIVE_MAX_LIMIT); the
+      // raised MAX_LIMIT is cache-path only.
+      limit: searchTerm ? SEARCH_CAP : Math.min(limit, SF_LIVE_MAX_LIMIT),
       offset: searchTerm ? 0 : offset,
       repRestrict,
       searchTerm,
@@ -781,34 +883,49 @@ async function handleListRead(ctx) {
   }
 
   // b. Cache-first PAGED fetch WITH exact total. TENANT FILTER: client_sf_id.
-  //    - count:"exact" returns the FULL matching total regardless of .range().
+  //    - count:"exact" returns the FULL matching total regardless of the range.
   //    - ORDER BY created_date DESC (newest first) with NULLS LAST, then sf_id as a
   //      stable tiebreaker. created_date doesn't change on re-sync, so a row can't
   //      jump between pages; the sf_id tiebreaker keeps rows with equal/NULL dates
   //      in a deterministic order (no dup/skip under pagination). Backed by the
   //      (client_sf_id, created_date DESC NULLS LAST, sf_id) index.
   //    - is_stale is NOT filtered: stale rows stay on the page and get refreshed.
-  let cq = supabase
-    .from(cacheTable)
-    .select("*", { count: "exact" })
-    .eq("client_sf_id", tenantId);
-  if (filterColumn && columnSet.has(filterColumn)) {
-    cq = cq.eq(filterColumn, filterValue);
-  }
-  // Order newest-first by created_date WHEN the cache actually has that column;
-  // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
-  // and self-healing while the created_date column/backfill is rolled out — a
-  // missing column would otherwise error the cache query and dump every list onto
-  // the slow Salesforce cold path.
-  if (columnSet.has("created_date")) {
-    cq = cq
-      .order("created_date", { ascending: false, nullsFirst: false })
-      .order("sf_id", { ascending: true });
-  } else {
-    cq = cq.order("sf_id", { ascending: true });
-  }
-  cq = cq.range(offset, offset + limit - 1);
-  const { data: pageRows, count: total, error: cacheErr } = await cq;
+  //    - The read goes through fetchCacheRange, which splits a page larger than
+  //      PostgREST's "Max Rows" ceiling into consecutive sub-requests. The ordering
+  //      is deterministic (created_date DESC, sf_id ASC), so consecutive ranges
+  //      concatenate into exactly the page a single request would have returned.
+  //
+  //    makeCacheQuery returns a FRESH builder per sub-request (supabase-js builders
+  //    are single-use) with identical filters + ordering; only the first asks for
+  //    the exact count.
+  const makeCacheQuery = (withCount) => {
+    let q = supabase
+      .from(cacheTable)
+      .select("*", withCount ? { count: "exact" } : {})
+      .eq("client_sf_id", tenantId);
+    if (filterColumn && columnSet.has(filterColumn)) {
+      q = q.eq(filterColumn, filterValue);
+    }
+    // Order newest-first by created_date WHEN the cache actually has that column;
+    // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
+    // and self-healing while the created_date column/backfill is rolled out — a
+    // missing column would otherwise error the cache query and dump every list onto
+    // the slow Salesforce cold path.
+    if (columnSet.has("created_date")) {
+      q = q
+        .order("created_date", { ascending: false, nullsFirst: false })
+        .order("sf_id", { ascending: true });
+    } else {
+      q = q.order("sf_id", { ascending: true });
+    }
+    return q;
+  };
+
+  const {
+    rows: pageRows,
+    total,
+    error: cacheErr,
+  } = await fetchCacheRange(makeCacheQuery, offset, limit);
   if (cacheErr) console.error("cache read error (list):", cacheErr.message);
 
   // c. Cold cache for this tenant/object (nothing cached yet) -> page-aware SF
@@ -817,7 +934,9 @@ async function handleListRead(ctx) {
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-      selectFields, selectList, filterFieldName, filterValue, limit, offset,
+      selectFields, selectList, filterFieldName, filterValue,
+      // LIVE Salesforce path — original 500 cap, as above.
+      limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
     });
   }
 
@@ -856,26 +975,23 @@ async function handleListRead(ctx) {
       refreshedBySfId.set(sfId, mapped);
     }
 
-    // Write refreshed rows back (best-effort — a cache-write failure != read fail).
+    // Write refreshed rows back (best-effort — a cache-write failure != read fail),
+    // batched so a full max-size page isn't one oversized PostgREST request.
     if (refreshedRows.length > 0) {
-      try {
-        const { error: upErr } = await supabase
-          .from(cacheTable)
-          .upsert(refreshedRows, { onConflict: "sf_id" });
-        if (upErr) console.error("cache upsert error (list refresh):", upErr.message);
-      } catch (e) {
-        console.error("cache upsert threw (list refresh):", e?.message || String(e));
-      }
+      await upsertCacheRows(supabase, cacheTable, refreshedRows, "list refresh");
     }
 
     // Delete-detection: orphaned cache rows (gone from SF), tenant-scoped, best-effort.
-    if (deletedIds.length > 0) {
+    // Chunked: .in() serializes every id into the request URL, so a large orphan set
+    // on a max-size page would otherwise build a URL past PostgREST's length limit.
+    for (let i = 0; i < deletedIds.length; i += POSTGREST_PAGE_SIZE) {
+      const batch = deletedIds.slice(i, i + POSTGREST_PAGE_SIZE);
       try {
         const { error: delErr } = await supabase
           .from(cacheTable)
           .delete()
           .eq("client_sf_id", tenantId)
-          .in("sf_id", deletedIds);
+          .in("sf_id", batch);
         if (delErr) console.error("cache delete error (list refresh):", delErr.message);
       } catch (e) {
         console.error("cache delete threw (list refresh):", e?.message || String(e));

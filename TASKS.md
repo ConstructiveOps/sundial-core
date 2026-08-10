@@ -20,6 +20,23 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 - [ ] **Frontend (harmon-crm, separate session):** send `limit`/`offset`, consume `total`/`hasMore`, add pager or load-more; boards fetch per-stage counts + lazy-load cards (must NOT pull 40k); Dashboard use aggregates not a 50-row page. See the bug report for the exact file/line changes.
 - [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param, EventBridge schedule for incremental `sundial-cache-sync`
 
+## G2 — intermittent 500s under concurrent paged loads (root-caused + page cap raised 2026-08-10)
+
+Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2a–G2d.
+
+- [x] **Root cause: the AWS Lambda "Concurrent executions" quota is 10** (default 1000), us-west-1, shared by all 32 functions. Throttled invokes never reach the function; API Gateway returns `500 {"message": "Internal server error"}` in ~65 ms with no log line and `Errors` = 0. Reproduced deterministically (12 parallel → exactly 10 pass).
+- [x] Ruled out: Supabase pool exhaustion and per-invoke client construction. The Lambda talks to Supabase via **PostgREST over HTTPS** (no `pg`, no pool); client/secrets/SF-token/JWKS were already module-scope cached.
+- [x] **Cache-path page cap 500 → 5000** (`MAX_LIMIT`), default 500 when `limit` is absent (was 50); over-cap clamps, `0`/negative/absent fall back. Sweep 64 → 7 requests.
+- [x] **Internal PostgREST paging** (`fetchCacheRange`) — Supabase "Max Rows" is 1000 and **silently truncates**, so the clamp raise alone would have been a lie. Splits pages >1000 into consecutive `.range()` calls, one exact count.
+- [x] **Bounded-parallel stale refresh** (5 concurrent `IN()` chunks) — sequential measured ~35s on a fully-stale 5000-row page, past the 30s timeout; now 13.2s worst case.
+- [x] Batched cache upsert/delete; **Salesforce token stampede guard** in `lib/salesforce.js` (concurrent cold callers share one JWT round trip, cleared on settle).
+- [x] Live-Salesforce list paths (cold cache, TEMP Sales-Rep restrict) keep the original 500 cap — SOQL `OFFSET` caps at 2000.
+- [x] Verified: 5000 rows/5000 unique ids, zero cross-page overlap, 7-wide burst × 2 rounds = 0 failures, all objects under Lambda's 6 MB response limit.
+- [ ] **TIM (console, G2a): raise the Lambda concurrency quota 10 → 1000** in Service Quotas (us-west-1, `L-B99A9384`). **This is the actual root cause and it is still live** — >10 simultaneous invocations anywhere in the account still 500.
+- [ ] **TIM (console, G2b): raise Supabase "Max Rows" 1000 → 5000** (Settings → API). Optional perf only; the Lambda is correct without it.
+- [ ] **Frontend (harmon-crm, separate session, G2d):** bump the `pageSize` constant to 5000 — `listAllRecords` already accepts it. One line.
+- [ ] **G2c: `GET /sf/{object}/counts?by=stage`** — server-side status counts so tab badges stay correct during partial loads. **Assessed: not a trivial aggregate.** PostgREST aggregates are disabled on this project (`select=stage,count()` → `PGRST123`), so it needs a tenant-scoped Postgres RPC (`group by`) + an API Gateway route wire (`scripts/wire-*.ps1` pattern). Small but real — awaiting Tim's green light.
+
 
 ## Aurora inbound — agreement webhook → queue → worker (built 2026-08-04, D-048)
 

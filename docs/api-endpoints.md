@@ -91,7 +91,9 @@ See DECISIONS.md D-043 for the access model.
 - `{object}` — short Sundial object name resolved through a fixed allowlist (Phase 1: `solar`, `customer`, `roofing`, `po`, `user`). Off-allowlist values are rejected with `400 OBJECT_NOT_ALLOWED`. See DECISIONS.md D-035 for the allowlist → Salesforce object → cache table mapping.
 
 **Query string parameters:**
-- `limit` — Page size (default 50, **max 500**). This is the size of ONE page, not a cap on the dataset — use `offset` to page through everything.
+- `limit` — Page size (default **500**, **max 5000**). This is the size of ONE page, not a cap on the dataset — use `offset` to page through everything. Values above the max clamp to 5000; `0`, negative and non-numeric values fall back to the default. At 5000 the 31.6k-row customer sweep is 7 requests instead of 64 (see the G2 note below).
+  - The **5000 cap applies to the cache path only.** The live-Salesforce list paths — cold cache, and the TEMP Sales-Rep restrict — keep the original **500** cap, because SOQL `OFFSET` is hard-capped at 2000 and those paths write back every row they return.
+  - The cap's real ceiling is Lambda's **6 MB response limit**: 5000 customer rows is ~4.4 MB of JSON. Solar's entire 4,476-row set returns in one request at 3.65 MB.
 - `offset` — Start row for the page (default 0). Server-side paginated: the response includes `total` (exact count of all matching rows) and `hasMore`.
 - `field` / `value` — Optional single-field filter (string/picklist; a numeric/boolean value may error). A `Client__c` filter from the caller is ignored — tenant scoping is forced.
 - `forceFresh` — reserved (not yet honored on the list path).
@@ -108,6 +110,10 @@ See DECISIONS.md D-043 for the access model.
 **Implementation status:** Built, deployed, and verified end to end against the live org (31,948-row customer set paged correctly with `total`). Cache miss falls through to Salesforce and writes back; an immediate repeat serves `source: "cache"`.
 
 > **Cache completeness:** the cache is kept complete by `sundial-cache-sync` (incremental on a schedule; **full resync** via `{ "mode": "full" }` after a bulk load — see below). The shared `sfQuery` follows the Salesforce query locator (`nextRecordsUrl`) to exhaustion, so neither the sync nor a Salesforce fallback is silently truncated at the 2000-row REST page limit.
+
+> **PostgREST "Max Rows" (why a page over 1000 still works):** Supabase enforces a per-request row ceiling — **1000 by default — and silently truncates past it**: asking PostgREST for 5000 rows returns `206` with 1000 rows and *no error*. Raising this endpoint's own cap alone would therefore have shipped a page size the cache layer quietly ignored. The list read splits any page larger than 1000 into consecutive `.range()` sub-requests (one exact count, on the first), so it returns the full page regardless of the dashboard setting. Raising "Max Rows" in Supabase → Settings → API collapses this back to a single round trip; it does not change correctness.
+
+> **⚠️ AWS Lambda concurrency quota (the G2 root cause):** this account's **"Concurrent executions" quota in us-west-1 is 10**, not the AWS default of 1000, and it is shared by all 32 functions. Invocations past it are rejected with `TooManyRequestsException` *before the function runs*, and API Gateway surfaces that as **`500 {"message": "Internal server error"}` in ~65 ms with no CloudWatch log line and no `Errors` metric**. That generic body is API Gateway's, not ours (this Lambda returns `{"error":"server_error"}`) — so if you ever see it with no matching log entry, suspect the quota, not the code. Diagnose with `ConcurrentExecutions` (Max) and `Throttles` in CloudWatch, and `aws service-quotas get-service-quota --service-code lambda --quota-code L-B99A9384 --region us-west-1`.
 
 #### `GET /sf/{object}/{id}`
 

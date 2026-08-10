@@ -1159,6 +1159,32 @@ Deliberately unchanged: non-signed statuses don't move the pipeline, a confirmed
 
 ---
 
+## D-050: List page size is capped at 5000 on the cache path, with paging pushed down into the Lambda
+
+**Date:** 2026-08-10
+**Context:** punchlist G2 — the Sales list threw intermittent 500s under concurrent paged loads.
+
+**The 500s were not ours.** The AWS account's Lambda **"Concurrent executions" quota in us-west-1 is 10** (the unraised new-account limit; AWS default is 1000), shared across all 32 functions. Throttled invocations are rejected before the function starts and API Gateway renders that as `500 {"message": "Internal server error"}`. Recorded here because the failure signature is genuinely misleading and will otherwise be re-diagnosed as a code bug: **no CloudWatch log line, `Errors` metric flat at 0, ~65 ms response, and a body that is not the one this Lambda emits** (`{"error":"server_error"}`). Diagnose with `ConcurrentExecutions` (Max) + `Throttles`, and `service-quotas get-service-quota --quota-code L-B99A9384`.
+
+**Decision:** the list endpoint's cache-path page cap goes **500 → 5000**, default 500 when `limit` is absent.
+
+**Why a cap raise is the right response to a concurrency ceiling.** The old cap forced 64 round trips to sweep 31.6k customers. Page size and concurrency pressure are the same variable seen from two ends — cutting the sweep to 7 requests removes the burst that collided with the ceiling, and it is the half we control. Raising the quota is the other half, and it is Tim's console action, not a code change. Neither substitutes for the other.
+
+**5000 is bounded by Lambda's 6 MB response limit**, not by preference: 5000 customer rows is ~4.4 MB of JSON. That is the number to re-derive against if the cap is ever revisited or a wider cache table is added.
+
+**Paging is pushed down into the Lambda rather than delegated to a dashboard setting.** Supabase's PostgREST "Max Rows" is **1000 and silently truncates** — a 5000-row request returns `206` with 1000 rows and no error. A clamp raise alone would therefore have advertised a page size the cache layer quietly ignored, which is a worse failure than the one being fixed because it is invisible. `fetchCacheRange()` splits any page over 1000 into consecutive `.range()` sub-requests (exact count on the first only). **The endpoint is correct at any "Max Rows" value**; raising it in the dashboard is a performance optimization that collapses 5 sub-requests to 1, never a correctness prerequisite.
+
+**The raise is cache-path only.** The live-Salesforce list paths — cold-cache fallback and the TEMP Sales-Rep restrict (D-035 lineage) — keep the original 500 cap via `SF_LIVE_MAX_LIMIT`. SOQL `OFFSET` is hard-capped at 2000 and those paths write back every row they return, so a 5000-row page there buys nothing and risks the timeout.
+
+**Consequences that a 10x page forced, each measured rather than assumed:**
+- A fully-stale 5000-row page is 25 `IN()` chunks against Salesforce. Sequentially that measured **~35s, past the 30s function timeout**. Chunks now run 5 at a time (`REFETCH_CONCURRENCY`) — 13.2s worst case. **This coupling is load-bearing: raising the cap further without revisiting the refresh fan-out reintroduces the timeout.**
+- That fan-out let a cold container fire 5 simultaneous JWT bearer requests for one integration user, so `getSalesforceToken` coalesces concurrent refreshes onto a single in-flight request. It is **cleared on settle, both success and failure** — a rejected promise left in module scope would turn one transient auth blip into a permanently broken warm container.
+- Cache upsert and delete-detection are batched, so a max-size page is never one ~4 MB PostgREST write or an over-length `.in()` URL.
+
+**Rejected:** raising "Max Rows" in Supabase and relying on it (silent truncation returns the moment the setting is changed back or a new project is stood up from this base — and sundial-core is copied to stand up tenants). Reserving concurrency for `sundial-sf-query` (with only 10 account-wide it would starve the other 31 functions).
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

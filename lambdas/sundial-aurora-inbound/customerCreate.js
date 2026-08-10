@@ -31,16 +31,54 @@ export const F_IMPORT_NOTES = "Aurora_Import_Notes__c";
 // generic Aurora one), so the field is skipped with a warning until Tim adds it.
 export const DEALER_LEAD_SOURCE = "Aurora - Third-Party Dealer";
 
-// Where a dealer-originated signed deal lands in the pipeline (Tim's call,
-// 2026-08-07). Both values are present in the org today (verified by describe), but
-// they go through the same match-or-skip guard as every other picklist: a value that
-// disappears from the org must degrade to a warning, never fail the import of a
-// signed contract.
+// Where a SIGNED deal lands in the pipeline. Aurora's `signed` status translates to
+// exactly these two values in Sundial (Tim, 2026-08-10) — for EVERY signed event,
+// whether the customer was auto-created from a dealer project or already existed
+// with a matching Aurora_Project_ID__c. Harmon's Salesforce alerts trigger off the
+// Stage, so this write is the notification mechanism, not a cosmetic status.
 //
-// Status__c matters more than it looks: the org default is "Lead", so WITHOUT this
-// a closed dealer sale would sit in the CRM as a lead.
-export const DEALER_STATUS = "Customer";
-export const DEALER_STAGE = "Sold - Pending Review";
+// Status__c matters more than it looks: the org default is "Lead", so without this
+// a closed sale would sit in the CRM as a lead.
+//
+// Both go through the same match-or-skip guard as every other picklist: a value that
+// is renamed or removed in the org must degrade to a warning, never fail the
+// processing of a signed contract.
+export const SIGNED_STATUS = "Customer";
+export const SIGNED_STAGE = "Sold - Pending Review";
+
+/**
+ * The pipeline fields every signed event writes, resolved against the live describe.
+ * Shared by the auto-create path and the matched/repaired-customer path so the two
+ * can never drift apart.
+ *
+ * @param {{ has:(n:string)=>boolean, picklistValues:(n:string)=>string[] }} schema
+ * @returns {{ fields: object, warnings: string[], notes: string[] }}
+ */
+export function buildSignedPipelineFields(schema) {
+  const fields = {};
+  const warnings = [];
+  const notes = [];
+  for (const [field, wanted] of [
+    ["Status__c", SIGNED_STATUS],
+    ["Stage__c", SIGNED_STAGE],
+  ]) {
+    if (!schema.has(field)) {
+      warnings.push(`Salesforce has no field ${field} — "${wanted}" not written.`);
+      notes.push(`${field} (field missing): ${wanted}`);
+      continue;
+    }
+    const matched = matchPicklist(wanted, schema.picklistValues(field));
+    if (matched) {
+      fields[field] = matched;
+    } else {
+      warnings.push(
+        `${field} has no "${wanted}" value in this org — left unset. Add the picklist value (see TASKS.md); Harmon's Salesforce alerts key off this Stage, so they will NOT fire until it exists.`
+      );
+      notes.push(`${field} (not in picklist): ${wanted}`);
+    }
+  }
+  return { fields, warnings, notes };
+}
 
 // Which tenant these records belong to. Resolved from the tenant SLUG rather than a
 // hardcoded Salesforce id: the id is deploy-specific, the slug is the same identity
@@ -299,28 +337,12 @@ export function buildCustomerFields({
   set("Client__c", tenantId);
   set(F_DEALER_NAME, dealerName);
 
-  // Pipeline position for a dealer-originated signed deal. Same match-or-skip
-  // treatment as Lead_Source__c / State__c: an unmatched value is left unset,
-  // warned about, and written to the notes rather than risking the whole insert.
-  for (const [field, wanted] of [
-    ["Status__c", DEALER_STATUS],
-    ["Stage__c", DEALER_STAGE],
-  ]) {
-    if (!schema.has(field)) {
-      warnings.push(`Salesforce has no field ${field} — "${wanted}" not written.`);
-      noteExtras.push(`${field} (field missing): ${wanted}`);
-      continue;
-    }
-    const matched = matchPicklist(wanted, schema.picklistValues(field));
-    if (matched) {
-      set(field, matched);
-    } else {
-      warnings.push(
-        `${field} has no "${wanted}" value in this org — left unset. Add the picklist value (see TASKS.md) so dealer-originated deals land in the right place.`
-      );
-      noteExtras.push(`${field} (not in picklist): ${wanted}`);
-    }
-  }
+  // Pipeline position — identical to what a matched customer gets on `signed`,
+  // via the one shared helper so the two paths can't drift.
+  const pipeline = buildSignedPipelineFields(schema);
+  Object.assign(fields, pipeline.fields);
+  warnings.push(...pipeline.warnings);
+  noteExtras.push(...pipeline.notes);
 
   const notes = buildImportNotes({ project, agreementId, receivedAt, extras: noteExtras });
   set(F_IMPORT_NOTES, notes);

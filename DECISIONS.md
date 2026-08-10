@@ -1145,7 +1145,17 @@ The **`signed` path is unified with this**: that path already re-read the agreem
 - Three Salesforce to-dos (TASKS.md): `Aurora_Dealer_Name__c` (Text 255), `Aurora_Import_Notes__c` (Long Text 32768), and the `Lead_Source__c` picklist value. Until they exist the import still succeeds and reports the gap.
 - Auto-created customers carry only what Aurora knows — no Sundial design request, no Harmon qualification — so they need review. The email says so.
 - The post-signature cancellation logic (D-048 amendment) works on these records with no special-casing: by the time a cancellation arrives the customer exists like any other.
-- **Known edge:** if the project reports no `external_provider_id` but the *design* reports one, Aurora's own objects disagree. Since the customer has been created by then, dead-lettering would strand it — the worker warns loudly (email + log) and flags a possible duplicate instead.
+- ### Amendment (2026-08-10): the signed pipeline position applies to every signed agreement
+
+The `Status__c` = `Customer` / `Stage__c` = `Sold - Pending Review` decision above was originally scoped to **auto-created** dealer customers. It now applies to **every** `signed` event, including a pre-existing customer matched by `Aurora_Project_ID__c`. Aurora's `signed` means exactly that in Sundial regardless of how the customer got there, and the split was arbitrary from the business's point of view.
+
+**This makes the Stage write the notification mechanism, not a status flag.** Harmon has Salesforce alerts triggering off `Sold - Pending Review`, which is why the SES email channel is being left unconfigured on purpose. Two consequences follow:
+- A renamed or removed picklist value doesn't just lose a field — **the alerts silently stop firing**. The skip warning says so in those words.
+- Both paths now build these fields from one shared helper (`customerCreate.js » buildSignedPipelineFields`) so the auto-create and matched-customer paths cannot drift apart.
+
+Deliberately unchanged: non-signed statuses don't move the pipeline, a confirmed cancellation does not promote a dead contract, and a `signed` event Aurora contradicts on re-read records Aurora's status only. **Also unchanged and worth knowing:** a cancellation *after* signing records `canceled` but does **not** roll `Status__c`/`Stage__c` back — the alert has already fired and the unwind is a human job (tracked in TASKS.md).
+
+**Known edge:** if the project reports no `external_provider_id` but the *design* reports one, Aurora's own objects disagree. Since the customer has been created by then, dead-lettering would strand it — the worker warns loudly (email + log) and flags a possible duplicate instead.
 
 ---
 

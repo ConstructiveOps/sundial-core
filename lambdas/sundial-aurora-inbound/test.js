@@ -452,6 +452,82 @@ test("signed happy path: all four retrievals, field write-back, PDF, and email",
   assert.ok(!ctx.soqlSeen.join(" ").includes("Sundial_Solar__c"));
 });
 
+test("signed on an EXISTING matched customer sets Status/Stage too", async () => {
+  resetCtx();
+  const res = await handler(sqsEvent());
+
+  assert.deepEqual(res.batchItemFailures, []);
+  const f = mergedFields();
+  // Aurora `signed` means exactly this in Sundial — Harmon's SF alerts key off it.
+  assert.equal(f.Status__c, "Customer");
+  assert.equal(f.Stage__c, "Sold - Pending Review");
+  assert.equal(f.Aurora_Agreement_Status__c, "signed");
+  assert.equal(ctx.upserts.length, 0, "an existing customer is updated, not re-created");
+});
+
+test("the REPAIRED-link path also gets Status/Stage", async () => {
+  resetCtx();
+  unmatched();
+  ctx.aurora.project = projectFixture({ external_provider_id: CUSTOMER_ID });
+  ctx.customerById = baseCustomer({ Aurora_Project_ID__c: null });
+
+  await handler(sqsEvent());
+  const f = mergedFields();
+  assert.equal(f.Status__c, "Customer");
+  assert.equal(f.Stage__c, "Sold - Pending Review");
+});
+
+test("matched + signed with Status/Stage values missing from the org -> skipped and warned", async () => {
+  resetCtx();
+  ctx.hasDealerStatusValue = false;
+  ctx.hasDealerStageValue = false;
+
+  const res = await handler(sqsEvent());
+  assert.deepEqual(res.batchItemFailures, [], "a renamed picklist must not fail a signed contract");
+  const f = mergedFields();
+  assert.equal(f.Status__c, undefined);
+  assert.equal(f.Stage__c, undefined);
+  // The warning has to say the alerts won't fire — that's the real consequence.
+  const warnings = ctx.emails[0].warnings.join(" ");
+  assert.match(warnings, /Stage__c has no "Sold - Pending Review" value/);
+  assert.match(warnings, /alerts key off this Stage/);
+});
+
+test("NON-signed statuses never touch Status/Stage", async () => {
+  resetCtx();
+  for (const status of ["sent", "viewed"]) {
+    ctx.updates = [];
+    await handler(sqsEvent({ status }));
+    const f = mergedFields();
+    assert.equal(f.Status__c, undefined, `${status} must not move the pipeline`);
+    assert.equal(f.Stage__c, undefined);
+  }
+});
+
+test("a confirmed cancellation does not set Status/Stage", async () => {
+  resetCtx();
+  ctx.customerRows = [
+    baseCustomer({ Aurora_Agreement_ID__c: AGREEMENT_ID, Aurora_Agreement_Status__c: "signed" }),
+  ];
+  ctx.aurora.agreement = { id: AGREEMENT_ID, status: "canceled" };
+
+  await handler(sqsEvent({ status: "canceled" }));
+  const f = mergedFields();
+  assert.equal(f.Aurora_Agreement_Status__c, "canceled");
+  assert.equal(f.Status__c, undefined, "a dead contract must not be promoted");
+  assert.equal(f.Stage__c, undefined);
+});
+
+test("a signed event Aurora contradicts does not set Status/Stage", async () => {
+  resetCtx();
+  ctx.aurora.agreement = { id: AGREEMENT_ID, status: "canceled" };
+
+  await handler(sqsEvent());
+  const f = mergedFields();
+  assert.equal(f.Status__c, undefined);
+  assert.equal(f.Stage__c, undefined);
+});
+
 test("empty FINANCING_ID: financing call skipped entirely, rest still written", async () => {
   resetCtx();
   const res = await handler(sqsEvent({ financing_id: null }));

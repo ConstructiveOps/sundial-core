@@ -1,5 +1,19 @@
 # Sundial — Progress Log
 
+## 2026-08-10 — Signed = Customer / Sold - Pending Review on every path; lost agreement replayed
+
+**Manual replay of a lost signed agreement** (`4b65bf63…`, project `e46b9ccd…`). Two recoveries changed the result:
+- **The real receipt time.** The original doorbell log still held it: `2026-08-07T16:56:40.736Z`. Injected straight to SQS rather than curling the doorbell, because the doorbell stamps `received_at = now` — which would have dated the contract 08-10. `Contract_Signed_Date__c` / `Sold_Date__c` are correctly 2026-08-07.
+- **The financing_id**, which the agreement object does not carry. Aurora has a **List Financings** endpoint (`GET /tenants/{t}/designs/{id}/financings`) our reference never documented; it returned the `selected_in_sales_mode: true` option, so the financing mapping ran instead of being skipped.
+
+**Premise correction:** this was *not* a dealer agreement. The customer (Nicholas Suwyn) was created 08-03 via the normal flow with Lead Source "Referral"; it dead-lettered on 08-05 only because `Aurora_Project_ID__c` hadn't been linked yet. It took the ordinary matched path — no auto-create.
+
+Written: 9 fields + a 1.47 MB signed PDF to S3. Skipped and reported: `Financing_Type__c` (Aurora says `levelized_ppa`; org picklist is Cash|Loan|Lease — refused to guess), `Financing_Partner__c` (`financier.provider` = **palmetto**, not in the picklist, though the financing is *named* "Lightreach Solar Lease" — worth resolving which is the real partner), and `Aurora_Agreement_ID__c` (field still doesn't exist). `Proposal_Amount__c` and `Contract_Price_Per_Watt__c` both wrote **0** — faithful to Aurora's `system_price: 0` on a $0-down levelized PPA, but it will read as a zero-dollar sale in any report keyed off that field; `Monthly_Payment__c` = 207.72 is the real economics. **The notification failed**: the Lambda role lacks `ses:SendEmail`.
+
+**Signed now sets the pipeline position on every path (Tim's call).** `Status__c` = `Customer` and `Stage__c` = `Sold - Pending Review` were previously written only on auto-created dealer records; they now apply to any `signed` event, including a pre-existing customer matched by `Aurora_Project_ID__c`. Both paths build the fields from one shared helper so they cannot drift. **This makes the Stage write the notification mechanism** — Harmon's Salesforce alerts trigger off it, which is why SES is being left unconfigured; the skip warning now says outright that a renamed picklist value stops those alerts firing. Non-signed statuses, confirmed cancellations, and Aurora-contradicted signed events deliberately do **not** move the pipeline. 6 new tests, 112 green, bundle clean — **not deployed**.
+
+**Flagged for a decision:** with email unconfigured, `Aurora_Signed_Email_Sent__c` never gets stamped, and that field is the "signed processing complete" marker. Every duplicate Aurora delivery will therefore re-run the whole signed path (4 retrievals, PDF re-download, repeat PATCH) — idempotent, so the data stays right, but wasteful and it may re-fire the SF alerts. See TASKS.md for the two fix options.
+
 ## 2026-08-07 — Dealer imports land as Customer / Sold - Pending Review; docs/ deletion recovered
 
 **Tim's decision on the flagged item:** auto-created dealer customers now get `Status__c` = `Customer` and `Stage__c` = `Sold - Pending Review`. Both values were describe-checked and exist in the org. `Status__c` turned out to matter more than it looked — **the org default is `Lead`**, so without setting it a closed dealer sale would have sat in the CRM as a lead. Both go through the same match-or-skip guard as `Lead_Source__c`/`State__c`: matched case-insensitively, written in the org's canonical casing, and if a value is ever renamed or removed it's skipped with a warning and recorded in `Aurora_Import_Notes__c` rather than failing a signed contract's import. Three new tests (both values missing, one missing, org-casing wins); 106 green.

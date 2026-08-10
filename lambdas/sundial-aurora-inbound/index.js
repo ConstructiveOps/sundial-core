@@ -4,6 +4,13 @@
 // acks inside Aurora's 10-second deadline. THIS Lambda does the slow work:
 //
 //   ALL statuses  -> update agreement-tracking state on Sundial_Customer__c
+//   signed        -> also sets the pipeline position: Status__c = "Customer" and
+//                    Stage__c = "Sold - Pending Review" (Tim, 2026-08-10). Aurora's
+//                    `signed` means exactly that in Sundial, for BOTH an
+//                    auto-created dealer customer and a pre-existing matched one.
+//                    Harmon's Salesforce alerts fire off that Stage, so this write
+//                    is the notification path — the email channel is deliberately
+//                    left unconfigured.
 //   signed        -> additionally:
 //                      a. GET agreement (confirm), design summary, default
 //                         proposal, financing (SKIPPED when FINANCING_ID is empty)
@@ -81,6 +88,7 @@ import {
 } from "../../lib/aurora.js";
 import {
   createCustomerFromAuroraProject,
+  buildSignedPipelineFields,
   resolveTenantId,
   EXTERNAL_ID_FIELD,
 } from "./customerCreate.js";
@@ -722,13 +730,25 @@ async function processEvent(evt) {
     };
   }
 
-  // Record the signed status alongside the mapped fields (separate PATCH so a
-  // describe-dropped tracking field can't take the business fields down with it).
+  // Record the signed status alongside the pipeline position. Aurora's `signed`
+  // translates to Status__c = Customer + Stage__c = Sold - Pending Review for EVERY
+  // signed event — auto-created dealer records already got these at insert, and a
+  // pre-existing matched customer gets them here, so the two paths agree. Harmon's
+  // Salesforce alerts trigger off that Stage, which makes this write the actual
+  // notification mechanism (the email channel is deliberately unconfigured).
+  //
+  // Separate PATCH from the business fields so a describe-dropped tracking field
+  // can't take the mapped financing/design values down with it.
+  const signedPipeline = buildSignedPipelineFields(schema);
+  if (signedPipeline.warnings.length > 0) {
+    result.warnings.push(...signedPipeline.warnings);
+  }
   const trackingFields = filterToExisting(
     {
       [F_AGREEMENT_ID]: evt.agreement_id,
       [F_AGREEMENT_STATUS]: "signed",
       [F_AGREEMENT_STATUS_AT]: evt.received_at,
+      ...signedPipeline.fields,
     },
     schema
   ).fields;

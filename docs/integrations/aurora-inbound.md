@@ -192,11 +192,22 @@ dead-letters rather than looping.
 Retrieve User; failing that, the raw id. Attribution never fails an import — a 403 on
 those endpoints degrades to raw ids plus a warning.
 
-**Where the record lands (Tim's decision, 2026-08-07):** `Status__c` = **`Customer`**
-and `Stage__c` = **`Sold - Pending Review`**. The first matters more than it looks —
-the org default for `Status__c` is **`Lead`**, so without it a closed dealer sale
-would sit in the CRM as a lead. The second parks the record where someone will
-actually look at it, which is the point: these are built from Aurora data alone.
+**Where the record lands (Tim, 2026-08-07; widened 2026-08-10):** `Status__c` =
+**`Customer`** and `Stage__c` = **`Sold - Pending Review`** — on **every** signed
+agreement, not just auto-created ones. A pre-existing customer matched by
+`Aurora_Project_ID__c` gets the same two values on its signed write-back, from the
+same shared helper, so the dealer and non-dealer paths cannot drift.
+
+The first matters more than it looks — the org default for `Status__c` is **`Lead`**,
+so without it a closed sale would sit in the CRM as a lead. **The second is the
+notification mechanism:** Harmon's Salesforce alerts fire off that Stage, which is
+why the SES email channel is deliberately left unconfigured. If `Sold - Pending
+Review` is ever renamed in the org, the write is skipped with a warning **and the
+alerts silently stop firing**.
+
+No other status moves the pipeline: a `sent`/`viewed` event doesn't, a confirmed
+cancellation doesn't promote a dead contract, and a `signed` event that Aurora
+contradicts on re-read records Aurora's status only.
 
 Every picklist the import writes (`State__c`, `Lead_Source__c`, `Status__c`,
 `Stage__c`) goes through the same match-or-skip guard — matched case-insensitively,

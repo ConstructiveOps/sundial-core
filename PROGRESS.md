@@ -21,9 +21,9 @@ Three consequences of a 10x page also had to be handled, all found by measuring 
 
 Verified end to end: `limit=5000` → 5000 rows / 5000 unique ids; `limit=9999` clamps to 5000; `0`/negative/absent → 500; `offset=0` vs `offset=5000` overlap **zero** ids. Full sweep = 7 requests (5000×6 + 1600 = 31,600), and a **7-wide burst × 2 rounds ran 14 requests with 0 failures**. Every object fits Lambda's 6 MB response limit — customer ~4.4 MB worst case, solar's whole 4,476-row set in one 3.65 MB request. Deployed to prod.
 
-**Not fixed by this work, and it should not be mistaken for fixed:** the quota is still 10. A 12-wide burst still loses 2 requests, confirmed after deploy. The 7-request sweep fits under 10 with headroom so the Sales list is safe, but the ceiling is real and shared with every other Lambda. Raising it is a Service Quotas request Tim files (punchlist G2a); Supabase "Max Rows" is G2b.
+**Not fixed by this work, and it should not be mistaken for fixed:** the quota is still 10. A 12-wide burst still loses 2 requests, confirmed after deploy. The 7-request sweep fits under 10 with headroom so the Sales list is safe, but the ceiling is real and shared with every other Lambda. Raising it is a Service Quotas request Tim files (punchlist **G2b**, which also covers the optional Supabase "Max Rows" bump).
 
-**Assessed, not built:** server-side status counts for the frontend's tab badges. It is *not* the trivial aggregate it looks like — PostgREST aggregates are **disabled** on this project (`select=stage,count()` → `PGRST123 "Use of aggregate functions is not allowed"`), so it needs a tenant-scoped Postgres RPC plus a route wire. Logged as punchlist G2c.
+**Assessed, not built:** server-side status counts for the frontend's tab badges. It is *not* the trivial aggregate it looks like — PostgREST aggregates are **disabled** on this project (`select=stage,count()` → `PGRST123 "Use of aggregate functions is not allowed"`), so it needs a tenant-scoped Postgres RPC plus a route wire. Logged as punchlist **G2c** and **deferred by Tim** — the banner disclosure is acceptable for Phase 1. When it is built, it is `stage` that drives the tab badges, not `status`.
 
 ## 2026-08-10 — Signed = Customer / Sold - Pending Review on every path; lost agreement replayed
 

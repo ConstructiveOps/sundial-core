@@ -2,7 +2,7 @@
 
 Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
-Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2a–G2d), E1.
+Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
 ## Sales Rep visibility (proper feature — replaces the TEMP guard below)
 
@@ -24,7 +24,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 ## G2 — intermittent 500s under concurrent paged loads (root-caused + page cap raised 2026-08-10)
 
-Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2a–G2d.
+Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2b / G2c (the punchlist's numbering is canonical).
 
 - [x] **Root cause: the AWS Lambda "Concurrent executions" quota is 10** (default 1000), us-west-1, shared by all 32 functions. Throttled invokes never reach the function; API Gateway returns `500 {"message": "Internal server error"}` in ~65 ms with no log line and `Errors` = 0. Reproduced deterministically (12 parallel → exactly 10 pass).
 - [x] Ruled out: Supabase pool exhaustion and per-invoke client construction. The Lambda talks to Supabase via **PostgREST over HTTPS** (no `pg`, no pool); client/secrets/SF-token/JWKS were already module-scope cached.
@@ -34,10 +34,10 @@ Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2a–G2d.
 - [x] Batched cache upsert/delete; **Salesforce token stampede guard** in `lib/salesforce.js` (concurrent cold callers share one JWT round trip, cleared on settle).
 - [x] Live-Salesforce list paths (cold cache, TEMP Sales-Rep restrict) keep the original 500 cap — SOQL `OFFSET` caps at 2000.
 - [x] Verified: 5000 rows/5000 unique ids, zero cross-page overlap, 7-wide burst × 2 rounds = 0 failures, all objects under Lambda's 6 MB response limit.
-- [ ] **TIM (console, G2a): raise the Lambda concurrency quota 10 → 1000** in Service Quotas (us-west-1, `L-B99A9384`). **This is the actual root cause and it is still live** — >10 simultaneous invocations anywhere in the account still 500.
-- [ ] **TIM (console, G2b): raise Supabase "Max Rows" 1000 → 5000** (Settings → API). Optional perf only; the Lambda is correct without it.
-- [ ] **Frontend (harmon-crm, separate session, G2d):** bump the `pageSize` constant to 5000 — `listAllRecords` already accepts it. One line.
-- [ ] **G2c: `GET /sf/{object}/counts?by=stage`** — server-side status counts so tab badges stay correct during partial loads. **Assessed: not a trivial aggregate.** PostgREST aggregates are disabled on this project (`select=stage,count()` → `PGRST123`), so it needs a tenant-scoped Postgres RPC (`group by`) + an API Gateway route wire (`scripts/wire-*.ps1` pattern). Small but real — awaiting Tim's green light.
+- [ ] **TIM (console, G2b): raise the Lambda concurrency quota 10 → 1000** in Service Quotas (us-west-1, `L-B99A9384`). **This is the actual root cause and it is still live** — >10 simultaneous invocations anywhere in the account still 500.
+- [ ] **TIM (console, G2b, same row): raise Supabase "Max Rows" 1000 → 5000** (Settings → API). Optional perf only; the Lambda is correct without it.
+- [x] **Frontend (harmon-crm):** `DEFAULT_PAGE_SIZE` in `src/lib/api.ts` is now 5000 (done same day by the frontend session). **This constant and `MAX_LIMIT` must stay in sync** — asking for more than the server serves is silently truncated to the server's cap, not an error.
+- [ ] **G2c: `GET /sf/{object}/counts?by=stage`** — server-side status counts so tab badges stay correct during partial loads. **Assessed: not a trivial aggregate.** PostgREST aggregates are disabled on this project (`select=stage,count()` → `PGRST123`), so it needs a tenant-scoped Postgres RPC (`group by`) + an API Gateway route wire (`scripts/wire-*.ps1` pattern). Small but real. **DEFERRED by Tim 2026-08-10** — with the 7-request sweep + retries, partial loads should be rare enough that the banner disclosure is acceptable for Phase 1; build it if Harmon actually hits it. **When we do: it is `stage` that drives the tab badges**, not `status`, and it would be the repo's first RPC.
 
 
 ## Aurora inbound — agreement webhook → queue → worker (built 2026-08-04, D-048)

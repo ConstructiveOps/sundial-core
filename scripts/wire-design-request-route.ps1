@@ -1,31 +1,44 @@
 <#
 .SYNOPSIS
-    Wires POST /projects/{recordId}/design-request/submit on the Sundial REST API
+    Wires POST /customers/{recordId}/design-request/submit on the Sundial REST API
     (API Gateway 5sktfwldh1, region us-west-1, stage prod) to the sundial-aurora-push
     Lambda, with a MOCK OPTIONS method for CORS and the Lambda invoke permission.
 
-    {recordId} here is a Sundial_Solar__c record id (the "Submit Design Request"
-    button on the Solar Design Request Form tab). The Lambda resolves the linked
-    customer server-side and pushes it to Aurora. (Later: also emails the sales
-    manager once SES is live - additive, no route change.)
+    Also REMOVES the superseded POST /projects/{recordId}/design-request/submit route
+    (see -RemoveLegacy below).
+
+    {recordId} here is a Sundial_Customer__c record id. ALL Aurora integration runs on
+    Sundial_Customer__c: at design-request time no Sundial_Solar__c record exists yet
+    (it is created only after the proposal is done and docs are signed) - D-047. The
+    Lambda reads the customer fresh, pushes it to Aurora, and emails the design manager
+    the full Design Request field set.
 
 .DESCRIPTION
     Idempotent: every step checks for the existing resource/method before creating.
-    Mirrors wire-budget-recalc-route.ps1 exactly (REST API v1, AWS_PROXY integration,
-    MOCK OPTIONS returning CORS headers). /projects/{recordId} already exists (created
-    by the budget route); Ensure-Resource reuses it and only adds design-request/submit.
+    Mirrors wire-budget-recalc-route.ps1 (REST API v1, AWS_PROXY integration, MOCK
+    OPTIONS returning CORS headers).
+
+    -RemoveLegacy (default ON) deletes the old /projects/{recordId}/design-request
+    subtree, which was wired but never referenced by any frontend. It leaves
+    /projects/{recordId} itself alone - the budget recalc route lives there.
 
     PRECONDITIONS (verified; the script stops if unmet):
       1. The sundial-aurora-push Lambda must already exist.
       2. Deploying to the PRODUCTION stage is a live change; prompts before the final
          create-deployment unless -Yes is passed.
 
+    AFTER WIRING, set the notification recipients on the Lambda (required for the
+    email step; see docs/api-endpoints.md > Lambda environment variables):
+      aws lambda update-function-configuration --function-name sundial-aurora-push `
+        --region us-west-1 --environment "Variables={EMAIL_FROM=...,DESIGN_REQUEST_NOTIFY_TO=...,DESIGN_REQUEST_NOTIFY_CC=...}"
+
 .EXAMPLE
     .\scripts\wire-design-request-route.ps1            # interactive, prompts before prod deploy
     .\scripts\wire-design-request-route.ps1 -Yes       # non-interactive
+    .\scripts\wire-design-request-route.ps1 -RemoveLegacy:$false   # keep the old route
 #>
 [CmdletBinding()]
-param([switch]$Yes)
+param([switch]$Yes, [bool]$RemoveLegacy = $true)
 
 # Continue (not Stop): the AWS CLI writes benign notices to stderr which PS 5.1
 # would otherwise turn into terminating errors. Every step is idempotent (resource
@@ -39,6 +52,30 @@ $Fn      = "sundial-aurora-push"
 $AcctId  = "891377232720"
 $FnArn   = "arn:aws:lambda:${Region}:${AcctId}:function:${Fn}"
 $IntegrationUri = "arn:aws:apigateway:${Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations"
+
+# --- AWS CLI quoting workarounds (see wire-copy-files-route.ps1 for the full note)
+#   1. `--api-key-required $false` renders as "False" and the CLI rejects it, so
+#      put-method silently no-ops and put-integration then fails. Use the flag form.
+#   2. The CLI's shorthand map parser splits on commas regardless of quoting, and
+#      PS 5.1's `Out-File -Encoding utf8` adds a BOM the CLI won't parse — so the
+#      MOCK template and CORS response params go through no-BOM JSON files.
+$TmpDir = Join-Path $env:TEMP "sundial-wire-design-request"
+New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+$MockTemplateFile = Join-Path $TmpDir "mock-template.json"
+$CorsParamsFile   = Join-Path $TmpDir "cors-response-params.json"
+$NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($MockTemplateFile, '{"application/json":"{\"statusCode\": 200}"}', $NoBom)
+[System.IO.File]::WriteAllText($CorsParamsFile, @'
+{
+  "method.response.header.Access-Control-Allow-Headers": "'Content-Type,Authorization'",
+  "method.response.header.Access-Control-Allow-Methods": "'OPTIONS,POST'",
+  "method.response.header.Access-Control-Allow-Origin": "'*'"
+}
+'@, $NoBom)
+
+function Assert-LastExitOk($what) {
+    if ($LASTEXITCODE -ne 0) { throw "$what failed (exit $LASTEXITCODE). Route is NOT wired." }
+}
 
 function Get-ChildResource($parentId, $pathPart) {
     $items = aws apigateway get-resources --rest-api-id $ApiId --region $Region --limit 500 --output json | ConvertFrom-Json
@@ -63,18 +100,19 @@ $root = (aws apigateway get-resources --rest-api-id $ApiId --region $Region --li
     Where-Object { $_.path -eq "/" } | Select-Object -First 1
 if (-not $root) { throw "Could not find root resource." }
 
-Write-Host "==> Ensuring resource path /projects/{recordId}/design-request/submit" -ForegroundColor Cyan
-$projects = Ensure-Resource $root.id "projects"
-$recordId = Ensure-Resource $projects "{recordId}"
-$dr       = Ensure-Resource $recordId "design-request"
-$submit   = Ensure-Resource $dr "submit"
+Write-Host "==> Ensuring resource path /customers/{recordId}/design-request/submit" -ForegroundColor Cyan
+$customers = Ensure-Resource $root.id "customers"
+$recordId  = Ensure-Resource $customers "{recordId}"
+$dr        = Ensure-Resource $recordId "design-request"
+$submit    = Ensure-Resource $dr "submit"
 
 # --- POST method + AWS_PROXY integration -------------------------------------
 Write-Host "==> POST method -> $Fn (AWS_PROXY)" -ForegroundColor Cyan
 aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $submit `
-    --http-method POST --authorization-type NONE --api-key-required $false 2>$null | Out-Null
+    --http-method POST --authorization-type NONE --no-api-key-required 2>$null | Out-Null
 aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $submit `
     --http-method POST --type AWS_PROXY --integration-http-method POST --uri $IntegrationUri | Out-Null
+Assert-LastExitOk "put-integration (POST)"
 aws apigateway put-method-response --rest-api-id $ApiId --region $Region --resource-id $submit `
     --http-method POST --status-code 200 `
     --response-parameters "method.response.header.Access-Control-Allow-Origin=false" 2>$null | Out-Null
@@ -84,21 +122,46 @@ Write-Host "==> OPTIONS method (MOCK CORS)" -ForegroundColor Cyan
 aws apigateway put-method --rest-api-id $ApiId --region $Region --resource-id $submit `
     --http-method OPTIONS --authorization-type NONE 2>$null | Out-Null
 aws apigateway put-integration --rest-api-id $ApiId --region $Region --resource-id $submit `
-    --http-method OPTIONS --type MOCK --request-templates '{\"application/json\":\"{\\\"statusCode\\\": 200}\"}' | Out-Null
+    --http-method OPTIONS --type MOCK --request-templates "file://$MockTemplateFile" | Out-Null
+Assert-LastExitOk "put-integration (OPTIONS MOCK)"
 aws apigateway put-method-response --rest-api-id $ApiId --region $Region --resource-id $submit `
     --http-method OPTIONS --status-code 200 `
     --response-parameters "method.response.header.Access-Control-Allow-Headers=false,method.response.header.Access-Control-Allow-Methods=false,method.response.header.Access-Control-Allow-Origin=false" 2>$null | Out-Null
 aws apigateway put-integration-response --rest-api-id $ApiId --region $Region --resource-id $submit `
     --http-method OPTIONS --status-code 200 `
-    --response-parameters "method.response.header.Access-Control-Allow-Headers='Content-Type,Authorization',method.response.header.Access-Control-Allow-Methods='OPTIONS,POST',method.response.header.Access-Control-Allow-Origin='*'" | Out-Null
+    --response-parameters "file://$CorsParamsFile" | Out-Null
+Assert-LastExitOk "put-integration-response (OPTIONS)"
 
 # --- Lambda invoke permission for this route ---------------------------------
 Write-Host "==> Lambda invoke permission (apigateway)" -ForegroundColor Cyan
-$srcArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/projects/*/design-request/submit"
+$srcArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/customers/*/design-request/submit"
 aws lambda add-permission --function-name $Fn --region $Region `
-    --statement-id "apigw-design-request-submit" --action "lambda:InvokeFunction" `
+    --statement-id "apigw-customer-design-request-submit" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn $srcArn 2>$null | Out-Null
 Write-Host "  (a 'ResourceConflictException' here just means the permission already exists - safe)" -ForegroundColor DarkGray
+
+# --- Remove the superseded /projects/{recordId}/design-request route ----------
+# Deleting the 'design-request' resource removes its children (submit + methods) too.
+# /projects/{recordId} itself is left alone - budget/recalc still hangs off it.
+if ($RemoveLegacy) {
+    Write-Host "==> Removing legacy /projects/{recordId}/design-request" -ForegroundColor Cyan
+    $projects = Get-ChildResource $root.id "projects"
+    if ($projects) {
+        $legacyRecordId = Get-ChildResource $projects "{recordId}"
+        if ($legacyRecordId) {
+            $legacyDr = Get-ChildResource $legacyRecordId "design-request"
+            if ($legacyDr) {
+                aws apigateway delete-resource --rest-api-id $ApiId --region $Region --resource-id $legacyDr | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-Host "  deleted legacy resource ($legacyDr)" -ForegroundColor Yellow }
+                else { Write-Host "  WARNING: delete-resource failed for $legacyDr - remove it by hand" -ForegroundColor Red }
+            } else { Write-Host "  legacy resource already absent" -ForegroundColor DarkGray }
+        }
+    }
+    # Drop the now-dangling invoke permission for the old path (safe if absent).
+    aws lambda remove-permission --function-name $Fn --region $Region `
+        --statement-id "apigw-design-request-submit" 2>$null | Out-Null
+    Write-Host "  (a 'ResourceNotFoundException' here just means it was already gone - safe)" -ForegroundColor DarkGray
+}
 
 # --- Deploy to prod (the live change) ----------------------------------------
 if (-not $Yes) {
@@ -107,5 +170,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Add POST /projects/{recordId}/design-request/submit -> $Fn" | Out-Null
-Write-Host "SUCCESS: route live at https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/projects/{recordId}/design-request/submit" -ForegroundColor Green
+    --description "Move design-request submit to POST /customers/{recordId}/design-request/submit -> $Fn" | Out-Null
+Assert-LastExitOk "create-deployment"
+Write-Host "SUCCESS: route live at https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/customers/{recordId}/design-request/submit" -ForegroundColor Green

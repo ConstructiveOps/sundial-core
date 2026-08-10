@@ -11,3 +11,19 @@ node_modules/
 # Transient deploy-time build artifact (sundial-budget): base64-embedded template
 # generated from template/budget-template.xlsx by prebuild.mjs. Never committed.
 lambdas/*/template.generated.js
+
+# Scratch files from hand-testing the API at the repo root (curl bodies, captured
+# responses, stderr dumps). auth.json in particular holds a PLAINTEXT LOGIN — it
+# must never be committed. Verified 2026-08-10: none of these has ever been
+# committed in this repo's history.
+#
+# Anchored with a leading slash so they only match at the REPO ROOT. These are
+# generic names (out.json, response.json), and an unanchored pattern would also
+# silently ignore a legitimately-named file in any subdirectory.
+/auth.json
+/out.json
+/payload.json
+/response.json
+
+# Transient scratch output, anywhere.
+*.tmp

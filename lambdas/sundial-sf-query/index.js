@@ -526,6 +526,89 @@ function isRowFresh(row, nowMs) {
   return nowMs - syncedMs <= CACHE_TTL_MS;
 }
 
+// --- LIST/SEARCH response projection (6 MB Lambda payload cap) -------------
+// Lambda hard-caps a response payload at 6,291,556 bytes. Past it the runtime
+// never delivers the response at all — it logs
+//   LAMBDA_RUNTIME Failed to post handler success response. Http response code: 413.
+//   {"errorType":"RequestEntityTooLarge"}
+// and API Gateway turns that into a 502. Note the cap applies to the SERIALIZED
+// RESPONSE OBJECT, not the body string: the body is a JSON string nested inside
+// {statusCode, headers, body}, so every quote in it is escaped a second time.
+// Measured on solar, that envelope adds ~9% on top of the body.
+//
+// Two reductions are applied to LIST and SEARCH rows only. Neither touches the
+// single-record read (the detail view legitimately needs every column) or the
+// live-Salesforce fallback paths.
+//
+// 1. Drop long-text columns (below). Cheap, but small: `notes` is only ~1.4% of
+//    the solar payload.
+// 2. Drop NULL-valued keys. This is the one that matters — 34.8% of the solar
+//    payload was `"column":null` spelled out for absent values. Measured, solar
+//    limit=5000: 6.14 MB payload (413) -> 4.04 MB. Dropping long text ALONE lands
+//    at 6.02 MB, still over the 6.00 MB cap, so it does not fix this on its own.
+//
+// Omitting nulls is safe because it is ALREADY the shape callers receive: rows
+// refreshed from Salesforce come from mapSfRecordToCacheRow, which has always
+// skipped null/undefined values, so every `source: "cache+salesforce"` page has
+// been serving null-omitted rows. An absent key and a null key behave identically
+// under `??`, `||` and optional chaining.
+//
+// The projection is applied ONLY when building the response array — never to the
+// rows the freshness partition reads, and never to what is written back to the
+// cache, so `notes` stays cached and intact for the detail view.
+const LIST_CONTROL_COLUMNS = [
+  "sf_id",
+  "client_sf_id",
+  "tenant_id",
+  "created_date",
+  "last_synced_at",
+  "is_stale",
+  "cache_version",
+];
+
+// A long-text column the list/board/filter UIs never read. Verified against the
+// harmon-crm frontend: the only `notes` references live in the DETAIL configs
+// (customer-detail-config.ts / solar-detail-config.ts) and SolarProjectDetailPage,
+// all of which read the single-record or ?full=true path — not the list.
+// Re-check that grep before widening this rule.
+function isExcludedListColumn(col) {
+  if (LIST_CONTROL_COLUMNS.includes(col)) return false; // control columns are never dropped
+  return col === "notes" || col.endsWith("_notes") || col.includes("findings");
+}
+
+// Explicit PostgREST select list for LIST/SEARCH reads: every cache column except
+// the excluded long-text ones. Falls back to "*" when column introspection came
+// back empty, so a failed OpenAPI fetch degrades to today's behavior rather than
+// selecting nothing.
+function buildListSelect(columnSet) {
+  if (!columnSet || columnSet.size === 0) return "*";
+  const cols = [];
+  for (const col of columnSet) {
+    if (!isExcludedListColumn(col)) cols.push(col);
+  }
+  // Belt-and-braces: guarantee the control columns the freshness partition and
+  // pagination depend on are present even if the exclusion rule ever changes.
+  for (const c of LIST_CONTROL_COLUMNS) {
+    if (columnSet.has(c) && !cols.includes(c)) cols.push(c);
+  }
+  return cols.length > 0 ? cols.join(",") : "*";
+}
+
+// Project ONE row for a list/search response: drop nulls and any excluded column.
+// Refreshed rows are re-checked for excluded columns because they are built from
+// Salesforce by mapSfRecordToCacheRow (which knows nothing about this projection)
+// rather than read through buildListSelect.
+function projectListRow(row) {
+  const out = {};
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+    if (value === null || value === undefined) continue;
+    if (isExcludedListColumn(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 // Read `limit` rows starting at `offset` from a cache table, transparently
 // splitting the read into POSTGREST_PAGE_SIZE-sized .range() sub-requests so the
 // caller always gets the page size it asked for (see POSTGREST_PAGE_SIZE for why).
@@ -770,9 +853,11 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
     });
   }
   const orExpr = cols.map((c) => `${c}.ilike."%${term}%"`).join(",");
+  // Explicit select (not "*") so long-text columns never enter a search response —
+  // see buildListSelect / the 6 MB payload note.
   let cq = supabase
     .from(cacheTable)
-    .select("*", { count: "exact" })
+    .select(buildListSelect(columnSet), { count: "exact" })
     .eq("client_sf_id", tenantId)
     .or(orExpr);
   if (columnSet.has("created_date")) {
@@ -788,7 +873,10 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
     console.error("cache search error:", error.message);
     return jsonResponse(500, cors, { error: "server_error" });
   }
-  const records = data || [];
+  // Drop null-valued keys before responding (see projectListRow). SEARCH_CAP is
+  // only 200 rows so this path was never the one blowing the payload cap, but the
+  // shape stays identical to the list path so callers see one row shape.
+  const records = (data || []).map(projectListRow);
   const total = count ?? records.length;
   return jsonResponse(200, cors, {
     source: "cache",
@@ -898,10 +986,15 @@ async function handleListRead(ctx) {
   //    makeCacheQuery returns a FRESH builder per sub-request (supabase-js builders
   //    are single-use) with identical filters + ordering; only the first asks for
   //    the exact count.
+  //    The select is EXPLICIT rather than "*" so long-text columns never leave the
+  //    database — see buildListSelect and the 6 MB payload note. The control
+  //    columns the freshness partition below reads (is_stale, last_synced_at,
+  //    cache_version, sf_id) are always included.
+  const listSelect = buildListSelect(columnSet);
   const makeCacheQuery = (withCount) => {
     let q = supabase
       .from(cacheTable)
-      .select("*", withCount ? { count: "exact" } : {})
+      .select(listSelect, withCount ? { count: "exact" } : {})
       .eq("client_sf_id", tenantId);
     if (filterColumn && columnSet.has(filterColumn)) {
       q = q.eq(filterColumn, filterValue);
@@ -1002,11 +1095,20 @@ async function handleListRead(ctx) {
   // f. Rebuild the page IN STABLE sf_id ORDER: fresh rows as-is, stale rows
   //    replaced by their refreshed version, deleted rows dropped. Order comes from
   //    the paged query (never reordered by refresh), so pages stay consistent.
+  //
+  //    projectListRow runs HERE — after the freshness partition has already read
+  //    is_stale/last_synced_at/cache_version off the untouched rows, and after the
+  //    FULL refreshed rows have been upserted to the cache. So the cache still
+  //    stores `notes` for the detail view; only the response drops it. Refreshed
+  //    rows especially need projecting: they come from Salesforce via
+  //    mapSfRecordToCacheRow and would otherwise smuggle the long-text columns
+  //    back into a list response.
   const deletedSet = new Set(deletedIds);
   const records = [];
   for (const row of pageRows) {
     if (deletedSet.has(row.sf_id)) continue;
-    records.push(refreshedBySfId.get(row.sf_id) || freshBySfId.get(row.sf_id) || row);
+    const chosen = refreshedBySfId.get(row.sf_id) || freshBySfId.get(row.sf_id) || row;
+    records.push(projectListRow(chosen));
   }
 
   const adjustedTotal = Math.max(0, (total ?? records.length) - deletedIds.length);

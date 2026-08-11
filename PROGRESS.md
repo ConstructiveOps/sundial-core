@@ -1,5 +1,23 @@
 # Sundial — Progress Log
 
+## 2026-08-10 — LIST reads blew Lambda's 6 MB response cap; rows are now projected (NOT DEPLOYED)
+
+`GET /sf/solar?limit=5000` was returning **502** on every attempt. CloudWatch showed nine `RequestEntityTooLarge` events — `LAMBDA_RUNTIME Failed to post handler success response. Http response code: 413. {"errorMessage":"Exceeded maximum allowed payload size (6291556 bytes)"}`. Fallout from raising `MAX_LIMIT` to 5000 earlier the same day; the 6 MB cap was always that decision's real ceiling (D-050) and solar crossed it.
+
+**Two things made this hard to see, both worth remembering.** The cap applies to the **serialized response object, not the body string** — the body is a JSON string nested inside `{statusCode, headers, body}`, so every quote is escaped a second time (~9% on solar). And **the same request passes or fails depending on cache freshness**: a stale page's rows are rebuilt from Salesforce by `mapSfRecordToCacheRow`, which omits null fields, while a fresh page serves cache rows with `"column":null` spelled out. My first test of `solar?limit=5000` returned 200 at 3.65 MB precisely *because* it was stale and refreshing; once those rows were fresh the identical request 502'd three times running.
+
+**The obvious fix does not work, and measuring said so before any code was written.** Excluding long-text columns takes solar from 6.14 MB to **6.02 MB — still over the 6.00 MB cap**. `notes` is only ~1.4% of that payload. What actually carries it is dropping **null-valued keys**, which were **34.8%** of the solar payload: 6.14 MB → **4.04 MB**. The premise that individual columns run 10–30 KB per row did not hold either — the fattest column in the customer cache averages ~105 bytes/row, and the cache tables have no `*_notes` or `*findings*` columns at all, only `notes`.
+
+Both reductions shipped, applied to **LIST and SEARCH only**: an explicit PostgREST select (`buildListSelect`) that keeps every control column, plus `projectListRow` dropping nulls and excluded columns. The projection runs **after** the freshness partition has read `is_stale`/`last_synced_at`/`cache_version` and **after** the full refreshed rows are upserted, so the cache still stores `notes` for the detail view — only the response drops it. Refreshed rows are projected too; they come from Salesforce and would otherwise smuggle long text back into a list.
+
+Untouched by design: the single-record read (the detail view needs every column) and the live-Salesforce fallback paths.
+
+**Null omission is not a new response shape** — every `source: "cache+salesforce"` page has served null-omitted rows since the cache was built, so callers already handle absent keys. It is now consistent across all list rows. Documented in api-endpoints.md as a contract, with the `??`/`||`/`?.` caveat.
+
+Guard checks before excluding anything: grepped the harmon-crm frontend — the only `notes` references are in `customer-detail-config.ts`, `solar-detail-config.ts` and `SolarProjectDetailPage.tsx`, all detail-path readers. No list, board, table or filter component touches it. Generated select lists verified against live PostgREST for all five cache tables (200, control columns intact). 112 tests green.
+
+**Not deployed — the operator runs `deploy.ps1`.**
+
 ## 2026-08-10 — G2 intermittent 500s: the root cause was an AWS quota, not our code; list page cap 500 → 5000
 
 **The Sales list's intermittent 500s under concurrent paged loads were AWS Lambda throttling.** This account's **"Concurrent executions" quota in us-west-1 is 10**, not the AWS default of 1000 — the unraised new-account limit, shared across all 32 functions. The 11th simultaneous invocation is rejected with `TooManyRequestsException` *before the function starts*, and API Gateway renders that as `500 {"message": "Internal server error"}`.

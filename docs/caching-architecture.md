@@ -85,12 +85,56 @@ For non-real-time cache maintenance:
 - **Cross-tenant operations:** When a schema change requires cache rebuild across all clients, EventBridge orchestrates the rollout.
 - **Retry queue:** Failed cache updates land in an SQS dead-letter queue; EventBridge triggers retry Lambdas on a schedule.
 
-### `sundial-cache-sync` — incremental sync + manual full resync
+### `sundial-cache-sync` — incremental sync, manual full resync, manual reconcile
 
-The `sundial-cache-sync` Lambda keeps the cache current. Two modes:
+The `sundial-cache-sync` Lambda keeps the cache current. Three modes:
 
 - **Incremental (default):** queries `WHERE SystemModstamp > <per-object watermark>` (bounded first-run lookback of 24h), ordered ascending, and advances the watermark to the batch's max modstamp. Meant for the EventBridge schedule. Suitable for an empty event `{}` (all objects) or `{ "object": "solar" }` (one).
 - **Full resync:** `{ "mode": "full" }` (optionally `+ "object"`) ignores the watermark window and pulls **every** record for the object(s). Use it to **backfill after a bulk data load** whose records fall outside the incremental window, or whenever a cache count has drifted below Salesforce. Idempotent (upsert on `sf_id`) — safe to re-run.
+- **Reconcile:** `{ "mode": "reconcile" }` — **deletes** cache rows whose Salesforce record no longer exists. Closes the deletion blind spot below. **Manual invoke only; not on any schedule.** See its own section.
+
+### ⚠️ The deletion blind spot — deletes never propagate
+
+**Neither sync mode ever removes a cache row, by construction.** Both are **upsert-only**, and a deleted Salesforce record simply stops appearing in the SOQL result — which is indistinguishable from "unchanged" to an upsert. There is no tombstone, and nothing subscribes to Salesforce delete events.
+
+A record deleted in Salesforce therefore lingers in the cache as a **ghost**: it stays in list and board views, and stays counted in the `total` a pager renders, until someone opens it and the read path 404s. Deleting the Salesforce record is *not* enough to make it disappear from the portal.
+
+Two things follow, and both matter operationally:
+
+1. **A full resync does not fix ghosts.** It is the natural instinct ("just re-pull everything") and it does nothing here — re-upserting every live record leaves the ghost row exactly where it is. Only reconcile removes it.
+2. **A purge is silent to open sessions.** There is no Realtime signal for a cache deletion — the invalidation triggers (portal write, Platform Event, TTL) all cover *changes*, not removals. Anyone with the list already on screen keeps seeing the ghost until their next fetch or reload. Purges are not user-visible in real time; plan comms accordingly if a purge matters to someone mid-session.
+
+### `mode: "reconcile"` — bulk ghost removal
+
+Reads every `sf_id` in an object's cache table, asks Salesforce **which of those ids still exist**, and deletes the rows it doesn't get back.
+
+```
+aws lambda invoke --function-name sundial-cache-sync --region us-west-1 \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"mode":"reconcile","object":"solar","dryRun":true}' out.json
+```
+
+| Input | Effect |
+|---|---|
+| `object` | One object key; omit to reconcile all five |
+| `dryRun: true` | Report ghosts (with up to 20 sample ids) and delete **nothing** — always run this first |
+| `force: true` | Override the mass-purge safety rail (below) |
+
+Returns per object: `{ cacheRows, checked, unverified, liveInSalesforce, ghosts, deleted, soqlQueries, status }`.
+
+**Design decisions worth not re-litigating:**
+
+- **The check runs cache → Salesforce, in batches, not "pull all Ids and diff."** The diff would cost fewer API calls, but it fails **catastrophically**: an incomplete or errored Salesforce result reads as "every row is a ghost" and empties the cache. Asking "do THESE ids still exist" fails safe — a batch that errors leaves its ids untouched and is reported as `unverified`, never deleted.
+- **Batch size is 400 ids.** The REST query endpoint is a `GET`, so the SOQL travels in the URL against Salesforce's ~16 KB cap; URL-encoding inflates each id to ~24 bytes, so 400 ≈ 9.6 KB with deliberate margin. Raising it risks a malformed query, not a slow one.
+- **API cost scales with cache size:** one SOQL per 400 cached rows — roughly **79 queries for the 31.6k customer cache**, ~12 for solar. That cost is the main reason this is manual-only.
+- **Plain `query`, not `queryAll`.** A soft-deleted record sitting in the Recycle Bin is gone from every read path, so it is correctly treated as a ghost.
+- **15- vs 18-char ids are normalized on the first 15 characters**, which are the unique key (the 18-char suffix is a checksum derived from them). The comparison stays **case-sensitive** — two distinct records can differ only by case in the 15-char form, which is precisely why the 18-char form exists. Deletes target the **exact stored value**, so rows in either form are removed correctly.
+- **Existence is the only test.** A record that still exists under a *different* `Client__c` is not a ghost; tenant moves are the upsert path's job.
+- **The watermark is never touched.** Reconcile is orthogonal to the incremental cursor and must never cause a window to be skipped.
+
+**Safety rail.** If **≥25 ghosts** are found **and** they exceed **20%** of the rows checked, reconcile refuses with `status: "refused_ghost_ratio"` and deletes nothing — that shape means something systemic (lost integration-user access, wrong object, changed permission set), not a real cleanup. Both conditions are required: a ratio alone would block ordinary small purges, since one ghost out of two rows is 50%. Re-run with `force: true` once the count has been eyeballed.
+
+**Not scheduled — deliberately.** This is the only destructive path in the Lambda and its API cost scales with cache size. Adding it to EventBridge should be an explicit decision, not a side effect of it existing.
 
 Both modes follow the Salesforce query locator (`nextRecordsUrl`) to exhaustion via the shared `sfQuery`, so a single run captures the whole result set — there is **no** 2000-row-per-run cap, and records that share a `SystemModstamp` can't be split across a REST page boundary and partially skipped.
 

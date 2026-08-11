@@ -16,12 +16,20 @@
 //     incremental window, or whenever the cache count has drifted below Salesforce.
 //     Idempotent (upsert on sf_id) — safe to re-run.
 //
-// Both modes now follow the Salesforce query locator to exhaustion (via sfQuery),
+//   - reconcile: invoke with { "mode": "reconcile" } (optionally + { "object": ... },
+//     { "dryRun": true }, { "force": true }) to DELETE cache rows whose Salesforce
+//     record no longer exists. MANUAL INVOKE ONLY — not on any schedule. This is the
+//     only destructive mode here; see reconcileObject for the safety rails.
+//
+// Both sync modes follow the Salesforce query locator to exhaustion (via sfQuery),
 // so a single run captures the whole result set rather than one 2000-row page.
 //
-// DELETE-DETECTION IS DEFERRED — a record deleted in Salesforce is NOT removed
-// from the cache by this job (a future v2 reconciliation pass, or the read-time
-// single-record 404 path, handles that).
+// DELETES DO NOT PROPAGATE ON THE SYNC PATH — by construction. Both incremental and
+// full are UPSERT-ONLY, and a deleted record simply stops appearing in the SOQL
+// result, which is indistinguishable from "unchanged" to an upsert. A record deleted
+// in Salesforce therefore lingers in the cache as a GHOST: still listed, still in
+// `total`, until someone opens it and the read path 404s. `mode: "reconcile"` is the
+// bulk sweep that removes them.
 //
 // TENANT CORRECTNESS: the Salesforce query is intentionally CROSS-TENANT (no
 // Client__c filter) BY DESIGN — the job refreshes every tenant. Each row is then
@@ -249,6 +257,171 @@ async function getExistingCacheVersions(supabase, table, sfIds) {
     for (const r of data || []) map.set(r.sf_id, r.cache_version ?? 0);
   }
   return map;
+}
+
+// --- Reconcile (delete-detection) tuning -----------------------------------
+// Ids per SOQL `Id IN (...)`. The REST query endpoint is a GET, so the whole SOQL
+// travels in the URL and Salesforce caps that around 16 KB. URL-encoding inflates
+// each id to ~24 bytes ('a1Q...' -> %27a1Q...%27%2C), so 400 ids is ~9.6 KB — a
+// deliberate margin under the cap. Raising this risks a 414/malformed query, not a
+// slow one.
+const RECONCILE_ID_CHUNK_SIZE = 400;
+// Cache ids read per PostgREST request (its "Max Rows" ceiling; it silently
+// truncates past this, so never raise without raising the dashboard setting too).
+const RECONCILE_CACHE_PAGE = 1000;
+// Ghost ids per DELETE. `.in()` serializes every id into the request URL.
+const RECONCILE_DELETE_CHUNK = 500;
+// SAFETY RAIL. If more than this fraction of an object's cache looks absent from
+// Salesforce, something systemic is wrong — the integration user lost read access,
+// the wrong object was targeted, a permission set changed — and the honest response
+// is to refuse rather than empty the cache. Override per-run with { force: true }
+// once the count has been eyeballed. A genuine ghost set is a handful of rows.
+const RECONCILE_MAX_GHOST_RATIO = 0.2;
+// ...but the ratio ALONE is the wrong test on a small cache: one ghost out of two
+// rows is 50% and perfectly ordinary, and the roofing cache currently holds a single
+// row where any ghost is 100%. The rail exists to catch a MASS wipeout, so it only
+// engages once the absolute count is big enough to be alarming. Below this, a purge
+// proceeds regardless of ratio.
+const RECONCILE_MIN_GHOSTS_FOR_RATIO_GUARD = 25;
+
+// Salesforce ids come in 15-char (case-sensitive) and 18-char (case-insensitive,
+// 3-char checksum suffix) forms, and BOTH are valid for the same record. The cache
+// may hold either depending on what wrote the row, and Salesforce always returns
+// 18. Comparing on the first 15 characters is the correct normalization: those 15
+// are the unique, case-sensitive key and the suffix is derived from them. The
+// comparison stays case-SENSITIVE on purpose — two distinct records can differ only
+// by case in the 15-char form, which is the very reason the 18-char form exists.
+function idKey(id) {
+  return String(id).slice(0, 15);
+}
+
+// Read every sf_id in a cache table, paged under PostgREST's row ceiling.
+// Returns the ids AS STORED, so deletes can target the exact stored value.
+async function fetchAllCacheIds(supabase, table) {
+  const ids = [];
+  for (let from = 0; ; from += RECONCILE_CACHE_PAGE) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("sf_id")
+      .range(from, from + RECONCILE_CACHE_PAGE - 1);
+    if (error) throw new Error(`cache id read failed (${table}): ${error.message}`);
+    const batch = data || [];
+    for (const r of batch) if (r.sf_id) ids.push(r.sf_id);
+    if (batch.length < RECONCILE_CACHE_PAGE) break; // short read -> end of table
+  }
+  return ids;
+}
+
+// --- RECONCILE: purge cache rows whose Salesforce record no longer exists ----
+// THE BLIND SPOT THIS CLOSES: both sync modes are UPSERT-ONLY. A record deleted in
+// Salesforce is never removed from the cache by them, so it lingers as a "ghost" —
+// still listed in the portal, still counted in `total` — until someone opens it and
+// the read path 404s. Reconcile is the sweep that removes them in bulk.
+//
+// DIRECTION OF THE CHECK MATTERS. We ask Salesforce "which of THESE cache ids still
+// exist" in batches, rather than pulling every Id and diffing. It costs more API
+// calls, but it FAILS SAFE: if a batch errors, those ids are simply left alone. The
+// diff approach would treat an incomplete Salesforce result as "everything is a
+// ghost" and delete a live cache — an unacceptable failure mode for a destructive
+// job.
+//
+// A record present in Salesforce under a DIFFERENT tenant is NOT a ghost — existence
+// is the only test here. Tenant moves are the upsert path's job.
+//
+// Deliberately does NOT touch the sync watermark: reconcile is orthogonal to the
+// incremental cursor and must never cause a window to be skipped.
+async function reconcileObject(supabase, objectKey, { dryRun = false, force = false } = {}) {
+  const entry = OBJECT_ALLOWLIST[objectKey];
+
+  const cacheIds = await fetchAllCacheIds(supabase, entry.cacheTable);
+  if (cacheIds.length === 0) {
+    return {
+      mode: "reconcile", status: "ok", cacheRows: 0, checked: 0,
+      liveInSalesforce: 0, ghosts: 0, deleted: 0, soqlQueries: 0, dryRun,
+    };
+  }
+
+  // Ask Salesforce which of these ids still exist, in URL-safe batches.
+  const liveKeys = new Set();
+  const unverifiedKeys = new Set(); // ids in a batch that errored — never deleted
+  let soqlQueries = 0;
+  for (let i = 0; i < cacheIds.length; i += RECONCILE_ID_CHUNK_SIZE) {
+    const chunk = cacheIds.slice(i, i + RECONCILE_ID_CHUNK_SIZE);
+    const quoted = chunk.map((id) => `'${String(id).replace(/'/g, "\\'")}'`).join(", ");
+    try {
+      // Plain query (NOT queryAll): a soft-deleted record sitting in the Recycle Bin
+      // is gone from every read path, so it should be treated as a ghost.
+      const rows = await sfQuery(`SELECT Id FROM ${entry.sfObject} WHERE Id IN (${quoted})`);
+      soqlQueries++;
+      for (const r of rows || []) liveKeys.add(idKey(r.Id));
+    } catch (e) {
+      soqlQueries++;
+      console.error(
+        `cache-sync reconcile: ${objectKey} batch at offset ${i} failed, leaving those ${chunk.length} id(s) alone:`,
+        e?.message || String(e)
+      );
+      for (const id of chunk) unverifiedKeys.add(idKey(id));
+    }
+  }
+
+  // A ghost is a cache id Salesforce did NOT return, and whose batch succeeded.
+  const ghosts = cacheIds.filter(
+    (id) => !liveKeys.has(idKey(id)) && !unverifiedKeys.has(idKey(id))
+  );
+  const checked = cacheIds.length - unverifiedKeys.size;
+
+  const base = {
+    mode: "reconcile",
+    cacheRows: cacheIds.length,
+    checked,
+    unverified: unverifiedKeys.size,
+    liveInSalesforce: liveKeys.size,
+    ghosts: ghosts.length,
+    soqlQueries,
+    dryRun,
+  };
+
+  // Safety rail — refuse a MASS purge unless explicitly forced. Both conditions
+  // must hold: a high proportion AND enough rows for that proportion to mean
+  // anything (see RECONCILE_MIN_GHOSTS_FOR_RATIO_GUARD).
+  const ratio = checked > 0 ? ghosts.length / checked : 0;
+  if (
+    !force &&
+    ghosts.length >= RECONCILE_MIN_GHOSTS_FOR_RATIO_GUARD &&
+    ratio > RECONCILE_MAX_GHOST_RATIO
+  ) {
+    console.error(
+      `cache-sync reconcile: ${objectKey} — ${ghosts.length}/${checked} rows ` +
+        `(${(ratio * 100).toFixed(1)}%) look absent from Salesforce, above the ` +
+        `${(RECONCILE_MAX_GHOST_RATIO * 100).toFixed(0)}% safety threshold. REFUSING to delete. ` +
+        `Verify the object and the integration user's access, then re-run with { "force": true } if correct.`
+    );
+    return { ...base, deleted: 0, status: "refused_ghost_ratio", ghostRatio: Number(ratio.toFixed(4)) };
+  }
+
+  if (ghosts.length === 0) return { ...base, deleted: 0, status: "ok" };
+  if (dryRun) return { ...base, deleted: 0, status: "ok_dry_run", sampleGhosts: ghosts.slice(0, 20) };
+
+  // Delete by the EXACT stored id so both 15- and 18-char rows are removed.
+  let deleted = 0;
+  for (let i = 0; i < ghosts.length; i += RECONCILE_DELETE_CHUNK) {
+    const chunk = ghosts.slice(i, i + RECONCILE_DELETE_CHUNK);
+    const { data, error } = await supabase
+      .from(entry.cacheTable)
+      .delete()
+      .in("sf_id", chunk)
+      .select("sf_id");
+    if (error) {
+      console.error(`cache-sync reconcile delete error (${objectKey}):`, error.message);
+      return { ...base, deleted, status: "error", error: error.message };
+    }
+    deleted += (data || []).length;
+  }
+
+  console.log(
+    `cache-sync reconcile: ${objectKey} purged ${deleted} ghost row(s) of ${cacheIds.length} cached.`
+  );
+  return { ...base, deleted, status: "ok" };
 }
 
 // --- Watermark state -------------------------------------------------------
@@ -494,6 +667,36 @@ export const handler = async (event) => {
   // Combine with { "object": "customer" } to full-resync one object. Safe to
   // re-run (idempotent upserts). Absent this flag, runs are incremental as before.
   const full = event?.mode === "full" || event?.full === true;
+
+  // RECONCILE (delete-detection): { "mode": "reconcile" }, optionally with
+  // { "object": ... }, { "dryRun": true } to report without deleting, and
+  // { "force": true } to override the mass-purge safety rail.
+  //
+  // MANUAL INVOKE ONLY — deliberately NOT on any EventBridge schedule. It is the
+  // only destructive path in this Lambda, and its API cost scales with cache size
+  // (one SOQL per 400 cached rows: ~79 queries for the 31.6k customer cache, ~12
+  // for solar). Adding it to a schedule is a decision to be made explicitly, not a
+  // side effect of it existing.
+  if (event?.mode === "reconcile") {
+    summary.mode = "reconcile";
+    summary.dryRun = event?.dryRun === true;
+    for (const objectKey of objectKeys) {
+      try {
+        summary.objects[objectKey] = await reconcileObject(supabase, objectKey, {
+          dryRun: event?.dryRun === true,
+          force: event?.force === true,
+        });
+      } catch (e) {
+        const msg = e?.message || String(e);
+        console.error(`cache-sync reconcile: object ${objectKey} failed:`, msg);
+        summary.objects[objectKey] = { mode: "reconcile", deleted: 0, status: "error", error: msg };
+      }
+    }
+    summary.finishedAt = new Date().toISOString();
+    console.log("cache-sync reconcile summary:", JSON.stringify(summary));
+    return summary;
+  }
+
   summary.mode = full ? "full" : "incremental";
 
   // Per-object try/catch so one object's failure doesn't abort the rest.

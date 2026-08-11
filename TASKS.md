@@ -22,6 +22,17 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **Frontend (harmon-crm, separate session):** send `limit`/`offset`, consume `total`/`hasMore`, add pager or load-more; boards fetch per-stage counts + lazy-load cards (must NOT pull 40k); Dashboard use aggregates not a 50-row page. See the bug report for the exact file/line changes.
 - [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param, EventBridge schedule for incremental `sundial-cache-sync`
 
+## Cache deletion blind spot + reconcile mode (2026-08-11, D-051)
+
+- [x] **Purged 5 ghost `Sundial_Solar__c` rows** from `sundial_solar_cache` (object resolved from the `a1Q` key prefix via live describe). All 5 verified `IsDeleted = true` in Salesforce first; 5 deleted, 0 remaining. No dependent rows in `asset_cache` / `sundial_po_cache` / `sundial_roofing_cache`.
+- [x] **`{ "mode": "reconcile" }` on `sundial-cache-sync`** (+ `object`, `dryRun`, `force`): reads the cache id set, asks Salesforce which ids still exist, deletes the rest. Fails safe — an errored batch leaves its ids alone (`unverified`), never deleted.
+- [x] Safety rail: refuse when **≥25 ghosts AND >20%** of rows checked; `force: true` overrides. Both conditions required (a ratio alone blocks ordinary small purges).
+- [x] 18 tests (130 total, green); caching-architecture.md documents the blind spot + the mode; D-051.
+- [ ] **DEPLOY `sundial-cache-sync`** — code is committed but NOT deployed (operator runs `deploy.ps1`).
+- [ ] **Do NOT add reconcile to any EventBridge schedule without asking.** It is the only destructive path in the Lambda, and its API cost scales with cache size (~79 SOQL for the 31.6k customer cache). Manual invoke only, by decision.
+- [ ] Always run `{"mode":"reconcile","object":"...","dryRun":true}` first and read the `ghosts` count before a live run.
+- [ ] Optional follow-up (not scoped): propagate deletes properly via Change Data Capture / tombstones so ghosts never accumulate. Rejected for now — needs org config + a new consumer, and deletes are rare and operator-driven (D-051).
+
 ## G2 — intermittent 500s under concurrent paged loads (root-caused + page cap raised 2026-08-10)
 
 Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2b / G2c (the punchlist's numbering is canonical).

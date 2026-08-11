@@ -1,5 +1,27 @@
 # Sundial — Progress Log
 
+## 2026-08-11 — Five cache ghosts purged; cache-sync gains a reconcile mode (NOT DEPLOYED)
+
+**The five ids were `Sundial_Solar__c`** — resolved from the `a1Q` key prefix via live global describe rather than assumed (`a1P` is Customer, `a1R` Roofing, `a1S` Commercial, `a1T` Service, `a1U` PO, `a1V` PO Credit, `a1O` User, `a1W` Tenant). Target table: `sundial_solar_cache`.
+
+Verified against Salesforce before deleting anything: all five return **`IsDeleted = true` via `queryAll`** and are absent from a normal query — deleted into the Recycle Bin, none still live, so all five were safe to purge. Nothing was skipped. All five cache rows were stored in **18-char** form (checked both forms). Rows backed up to the session scratchpad before deletion; **5 deleted, 0 remaining**.
+
+**Dependent references: none.** Three columns could point at a Solar record — `asset_cache.originating_solar_project_sf_id`, `sundial_po_cache.linked_solar_project_sf_id`, `sundial_roofing_cache.linked_solar_project_sf_id` — and all returned zero matches. The first two tables are empty entirely; roofing's single row references something else. Nothing cascaded.
+
+**Open portal sessions will not see this.** There is no Realtime signal for a cache purge — the invalidation triggers cover *changes*, not removals — so anyone with the Solar list already on screen keeps seeing the five until their next fetch or reload.
+
+**Made repeatable: `{ "mode": "reconcile" }` on `sundial-cache-sync`** (+ optional `object`, `dryRun`, `force`). It reads the cache's id set, asks Salesforce which of those ids still exist, and deletes the rest. **Manual invoke only — deliberately not scheduled** (see TASKS before anyone adds it).
+
+**Why it asks cache → Salesforce in batches rather than pulling all Ids and diffing:** the diff costs fewer API calls and fails catastrophically — an incomplete or errored Salesforce result reads as "every row is a ghost" and empties the cache. The batched existence check fails safe: a batch that errors leaves its ids alone and reports them as `unverified`. For a destructive job that trade is worth 79 queries on the 31.6k customer cache. Batch size is 400 because the REST query endpoint is a GET and the SOQL rides in the URL against Salesforce's ~16 KB cap.
+
+**The tests killed my first safety rail, which is the useful part of this entry.** I gated a mass purge on ghosts exceeding 20% of rows checked — and half the suite went red, because one ghost out of two rows is 50%. The roofing cache holds exactly one row, where any ghost is 100%. A ratio-only rail blocks precisely the ordinary small purges the feature exists for, while the mass-wipeout case it guards against is always high-volume. The rail now needs **both** ≥25 ghosts and >20%, with `force: true` to override.
+
+Also documented: the **deletion blind spot** in caching-architecture.md, including that a **full resync does not fix ghosts** — the natural instinct, and a no-op here, since re-upserting live records leaves the ghost untouched.
+
+18 new tests (130 total, all green) covering ghost removal, live rows untouched, 15-char cache id vs 18-char SF id in both directions, case-sensitive comparison, errored batches leaving ids alone, the rail refusing and `force` overriding, dry run, batching arithmetic, watermark untouched, and an unqualified invoke never deleting. D-051.
+
+**Not deployed — the operator runs `deploy.ps1`.**
+
 ## 2026-08-10 — LIST reads blew Lambda's 6 MB response cap; rows are now projected (NOT DEPLOYED)
 
 `GET /sf/solar?limit=5000` was returning **502** on every attempt. CloudWatch showed nine `RequestEntityTooLarge` events — `LAMBDA_RUNTIME Failed to post handler success response. Http response code: 413. {"errorMessage":"Exceeded maximum allowed payload size (6291556 bytes)"}`. Fallout from raising `MAX_LIMIT` to 5000 earlier the same day; the 6 MB cap was always that decision's real ceiling (D-050) and solar crossed it.

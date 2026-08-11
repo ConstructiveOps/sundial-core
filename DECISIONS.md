@@ -1185,6 +1185,31 @@ Deliberately unchanged: non-signed statuses don't move the pipeline, a confirmed
 
 ---
 
+## D-051: Cache deletes are reconciled on demand, not propagated
+
+**Date:** 2026-08-11
+**Context:** five deleted `Sundial_Solar__c` records kept appearing in the portal.
+
+**The blind spot, stated plainly:** both `sundial-cache-sync` modes are **upsert-only**, so a record deleted in Salesforce is never removed from the cache. A deleted record just stops appearing in the SOQL result, which an upsert cannot distinguish from "unchanged". There is no tombstone and nothing subscribes to Salesforce delete events. The row lingers as a **ghost** — listed in the portal and counted in `total` — until someone opens it and the read path 404s. Worth recording because the instinct when a cache looks wrong is to run a **full resync, and that does nothing here**: re-upserting every live record leaves the ghost exactly where it was.
+
+**Decision: reconcile on demand.** A third mode, `{ "mode": "reconcile" }`, reads the cache's id set, asks Salesforce which of those ids still exist, and deletes the rest.
+
+**Rejected — propagating deletes properly.** Salesforce can emit delete events (Change Data Capture, or a Flow writing tombstones), and that would keep the cache correct continuously. It needs org configuration, a new consumer, and a tombstone table, and deletions in this system are rare and operator-driven. Revisit if deletes ever become routine.
+
+**The check runs cache → Salesforce in batches, NOT "pull all Ids and diff."** The diff is cheaper in API calls and was rejected on failure mode: an incomplete or errored Salesforce result reads as "every row is a ghost" and would empty the cache. Asking "do THESE ids still exist" fails safe — an errored batch leaves its ids untouched and reports them as `unverified`. **For a destructive job, the cheaper algorithm with the catastrophic failure mode is the wrong one.**
+
+**Batch size 400** is set by the REST query endpoint being a `GET`: the SOQL rides in the URL against Salesforce's ~16 KB cap, and URL-encoding inflates each id to ~24 bytes. Cost is one SOQL per 400 cached rows (~79 queries for the 31.6k customer cache).
+
+**Safety rail:** ≥25 ghosts AND >20% of rows checked ⇒ refuse and delete nothing, overridable with `force: true`. **Both conditions are required.** A ratio alone was the first implementation and its own tests killed it: one ghost out of two rows is 50%, and the roofing cache holds a single row where any ghost is 100% — so a ratio-only rail blocks exactly the ordinary small purges this feature exists to serve, while the mass-wipeout case it is actually guarding against is always high-volume.
+
+**Manual invoke only, deliberately not scheduled.** It is the only destructive path in the Lambda and its API cost scales with cache size. Putting it on EventBridge is a decision to be made explicitly.
+
+**Id normalization is on the first 15 characters, case-SENSITIVE.** Those 15 are the unique key; the 18-char suffix is a checksum derived from them. Case sensitivity is load-bearing — two distinct records can differ only by case in the 15-char form, which is the entire reason the 18-char form exists. Deletes target the exact stored value so rows in either form are removed.
+
+**Known limitation, accepted:** a purge is **invisible to open portal sessions**. There is no Realtime signal for a cache deletion — the invalidation triggers all cover changes, not removals — so a user with the list already on screen keeps seeing the ghost until their next fetch or reload.
+
+---
+
 ## Open Decisions (Pending Information)
 
 These are decisions we will make after upcoming meetings or as Phase 1 development proceeds:

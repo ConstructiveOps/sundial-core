@@ -130,7 +130,7 @@ Why it ghosts:
 - [x] Deploy `sundial-user-admin` (`.\deploy.ps1 sundial-user-admin`)
 - [x] Run `scripts/wire-user-admin-routes.ps1` against the prod gateway (routes live)
 - [x] Verify end-to-end with a Super-Admin token — GET/POST/PATCH, 403 for non-super-admin, `USER_INACTIVE` on deactivated user's `/auth/me`, self-deactivation + `FIELD_NOT_ALLOWED` guards, compensating auth-user delete on SF failure
-- [x] Invite `redirectTo` → `<PORTAL_BASE_URL>/reset-password` (env var, defaults to `https://harmon-crm.vercel.app`); **at go-live set `PORTAL_BASE_URL` to Harmon's real domain**
+- [x] Invite `redirectTo` → `<PORTAL_BASE_URL>/reset-password` (env var). **Done at cutover (2026-08-13, D-053):** `PORTAL_BASE_URL=https://sundial.harmonelectric.net` set on `sundial-user-admin`; in-code default updated to match
 - [x] Ban/unban retry-hardened (`setSupabaseBan`, 3× backoff); flow logic re-verified with fresh login (deployed-API re-verify skipped per Tim)
 - [ ] Frontend (harmon-crm, separate): the Manage Users surface, gated on `superAdmin`
 - [x] **Provisioning incident (2026-07-29):** root-caused to Supabase built-in email non-delivery (not the user-admin work). Fixed email-independent (default to temp-password mode, disable invite); recovered this morning's 10 users in place; verify + recovery scripts added.
@@ -194,4 +194,20 @@ copy-for-new-tenant base stays tenant-agnostic:
 - [ ] **Tax zones** — `lib/acumatica-tax-zones.js` (Arizona retail zones) → per-tenant config.
 - [ ] **Acumatica mapping** — `sundial-acumatica-budget-push` `MAPPING_ROWS`/`UNCONFIRMED` + `sundial-acumatica-push` `CUSTOMER_CLASS="RESIDENT"` / template `"RS"` → per-tenant config.
 - [ ] **budgetCalc** — accepted as a per-tenant *forked* calc module (a materially different tenant budget sheet = different math, per D-038); optionally lift the adder catalog / hours-per-unit to config if tenants share the calc shape.
+- [ ] **Portal origin + invite base URL** — `sundial.harmonelectric.net` is now hardcoded in the CORS allowlist (six files) and as the `PORTAL_BASE_URL` in-code default (D-053). A second tenant needs both per-tenant; `PORTAL_BASE_URL` is already env-overridable, the CORS allowlist is not.
 - Already cleanly externalized (no work): secrets/tenant IDs (Secrets Manager), rate/catalog defaults (SF field-default metadata), per-project values (records), tenant isolation (`Client__c → Sundial_Tenant__c`, D-034).
+
+---
+
+## Portal domain cutover → `sundial.harmonelectric.net` (2026-08-13, D-053)
+
+- [x] Add `https://sundial.harmonelectric.net` to the CORS allowlist — `lib/http.js` + all five inline copies; `*.vercel.app` and `localhost:5173` retained
+- [x] Set `PORTAL_BASE_URL=https://sundial.harmonelectric.net` on `sundial-user-admin`; in-code default updated to match
+- [x] Redeploy all 12 affected Lambdas; verified live per-origin (new domain and vercel.app echoed, untrusted origin not reflected)
+- [x] Docs: `api-endpoints.md` (CORS + env table), `docs/integrations/auth-email-ses.md` (Parts C/D)
+- [ ] **Tim (Supabase dashboard):** add `https://sundial.harmonelectric.net` to Site URL + Redirect URLs (`/reset-password`, `/**`). Resets use `window.location.origin`, so they break on the new domain until this lands — not covered by any repo deploy
+- [ ] **Tim (Vercel):** attach the domain to the project and point DNS; keep `harmon-crm.vercel.app` as a redirect
+
+### Tech debt
+
+- [ ] **Consolidate CORS into `lib/http.js`.** Five Lambdas (`sundial-auth-proxy`, `sundial-sf-query`, `sundial-sf-update`, `sundial-acumatica-push`, `sundial-aurora-push`) carry inline copies of `STATIC_ALLOWED_ORIGINS`/`isAllowedOrigin`/`corsHeaders` instead of importing the shared module. This cutover changed one origin in **six** places; the harmon-crm task tracking it only knew about one of the five inline copies, so a drifted copy would have failed silently for whichever routes it serves. Replace the inline blocks with the `lib/http.js` import (watch the per-Lambda `Access-Control-Allow-Methods` differences — the shared version sends `GET, POST, DELETE, OPTIONS`) and redeploy. **Cleanup only — not urgent, do not bundle into feature work.**

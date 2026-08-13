@@ -17,12 +17,27 @@ All routes below are relative to this base URL.
 
 ## CORS
 
-Every resource has an OPTIONS method automatically added for CORS preflight. Allowed origins are configured at the bucket and gateway level to include:
+Every resource has an OPTIONS method automatically added for CORS preflight.
+**Preflight is answered by API Gateway itself** (it returns `Access-Control-Allow-Origin: *`),
+so an `OPTIONS` probe does *not* exercise the allowlist below — verify with a real
+`GET`/`POST` carrying an `Origin` header.
 
-- `https://*.vercel.app` (covers preview deploys and the production Vercel URL)
+Actual responses carry the Lambda's own CORS headers. Allowed origins:
+
+- `https://sundial.harmonelectric.net` (production portal domain)
+- `https://*.vercel.app` (preview deploys, and `harmon-crm.vercel.app`, retained as a redirect)
 - `http://localhost:5173` (local dev)
 
-When a custom production domain is added for Harmon, update the API Gateway CORS configuration to include it.
+An allowed origin is echoed back; anything else falls back to `http://localhost:5173`,
+so an untrusted origin is never reflected.
+
+⚠️ **The allowlist lives in six places.** `lib/http.js` is bundled into
+`sundial-user-admin`, `sundial-list-files`, `sundial-list-related-files`,
+`sundial-upload-file`, `sundial-delete-file`, `sundial-budget`, and
+`sundial-acumatica-budget-push`; five Lambdas carry their own inline copy —
+`sundial-auth-proxy`, `sundial-sf-query`, `sundial-sf-update`,
+`sundial-acumatica-push`, `sundial-aurora-push`. Adding an origin means editing all
+six and redeploying all twelve. (Consolidation is logged as tech debt in TASKS.md.)
 
 ---
 
@@ -484,7 +499,7 @@ Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
 }
 ```
 - `credentialMode: "invite"` emails a set-password link (with `redirectTo` → `<PORTAL_BASE_URL>/reset-password`); `"password"` creates the user with `tempPassword` (email pre-confirmed, `must_change_password` flag).
-- `PORTAL_BASE_URL` is a Lambda env var (defaults to `https://harmon-crm.vercel.app`). Set it to the client's real domain at go-live so invite links land on the live portal — a config change, no redeploy of code required.
+- `PORTAL_BASE_URL` is a Lambda env var, set to `https://sundial.harmonelectric.net` (the in-code default matches). Point it at the client's real domain per tenant — a config change, no redeploy of code required.
 - **Order** (fail-safe): duplicate-guard (409) → Supabase auth create (reuses an existing auth user by email if already registered) → `Sundial_User__c` create (force-stamps `Client__c`, sets the auth id). If the SF create fails after a *fresh* auth user was made, that auth user is deleted (compensating); if the delete also fails, the response includes `orphanAuthUser: true`.
 
 **Response (201):**
@@ -610,7 +625,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `EMAIL_REPLY_TO` | any sender | No | Default Reply-To. |
 | `SES_REGION` | any sender | No | Region the SES identity is verified in (defaults to `us-west-1`). |
 | `EMAIL_CONFIG_SET` | any sender | No | SES configuration set for bounce/complaint tracking. |
-| `PORTAL_BASE_URL` | `sundial-user-admin` | No | Base URL for invite links (defaults to `https://harmon-crm.vercel.app`). Set to the client's real domain at go-live. |
+| `PORTAL_BASE_URL` | `sundial-user-admin` | No | Base URL for invite links. Set to `https://sundial.harmonelectric.net` (D-053); in-code default matches. Point at the client's real domain per tenant. |
 
 Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
 

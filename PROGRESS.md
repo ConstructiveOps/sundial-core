@@ -1,5 +1,42 @@
 # Sundial — Progress Log
 
+## 2026-08-13 — Portal domain cutover to `sundial.harmonelectric.net` (D-053, DEPLOYED)
+
+**Two backend surfaces are domain-aware and neither follows a redirect:** the CORS
+allowlist and the invite-link base URL. Both are updated; `harmon-crm.vercel.app` and
+`localhost:5173` are retained, so nothing that worked before stopped working.
+
+**The allowlist lives in six files, not one.** `lib/http.js` is bundled into seven
+Lambdas, and five more carry their own inline copy of `STATIC_ALLOWED_ORIGINS` /
+`isAllowedOrigin` / `corsHeaders` — `sundial-auth-proxy`, `sundial-sf-query`,
+`sundial-sf-update`, `sundial-acumatica-push`, `sundial-aurora-push`. One origin, six
+edits, twelve redeploys. The harmon-crm task tracking this knew about **one** of the
+five inline copies, so following it would have left four Lambdas rejecting the new
+domain. Consolidation is now logged as tech debt.
+
+**`PORTAL_BASE_URL` set on `sundial-user-admin`, and the in-code default changed to
+match.** The function had **no `Environment` block at all** beforehand — worth knowing,
+because `update-function-configuration --environment` replaces the whole map and would
+have silently dropped any existing vars. Changing the default too means a lost env var
+now degrades to the same working link instead of the retired Vercel URL.
+
+**Preflight is a false oracle here.** `OPTIONS` is answered by API Gateway itself with
+`Access-Control-Allow-Origin: *`, so it passes for *any* origin — including one the
+Lambda rejects. Verification had to use real `GET`s carrying an `Origin` header, on both
+the inline path (`/auth/me`) and the shared-lib path (`/admin/users`,
+`/files/by-record/…`): new domain echoed, vercel.app echoed, localhost echoed, and
+`evil.example.com` falling back to localhost rather than being reflected.
+
+**A deploy-loop trap worth not repeating:** piping `deploy.ps1` through
+`*>&1 | Select-String` reported three false `FAILURE`s. Under
+`$ErrorActionPreference = "Stop"`, redirecting a native command's stderr in PowerShell
+5.1 wraps npm's ordinary funding/audit notices as `NativeCommandError` and terminates.
+The deploys had never reached AWS. Re-running without the redirection: 12/12 clean.
+
+**Still outside the repos (Tim):** Supabase Site URL + Redirect URLs must include the
+new origin — password resets use `window.location.origin`, so they break on the new
+domain until that lands — and the Vercel domain attachment + DNS.
+
 ## 2026-08-11 — Five cache ghosts purged; cache-sync gains a reconcile mode (NOT DEPLOYED)
 
 **The five ids were `Sundial_Solar__c`** — resolved from the `a1Q` key prefix via live global describe rather than assumed (`a1P` is Customer, `a1R` Roofing, `a1S` Commercial, `a1T` Service, `a1U` PO, `a1V` PO Credit, `a1O` User, `a1W` Tenant). Target table: `sundial_solar_cache`.

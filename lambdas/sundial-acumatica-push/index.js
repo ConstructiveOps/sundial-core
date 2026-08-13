@@ -78,7 +78,10 @@ const CUSTOMER_FIELDS = [
 ];
 
 // --- CORS (mirrors the other Lambdas; this route is POST/OPTIONS) -----------
-const STATIC_ALLOWED_ORIGINS = new Set(["http://localhost:5173"]);
+const STATIC_ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  "https://sundial.harmonelectric.net",
+]);
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;

@@ -46,6 +46,13 @@ const OBJECT_ALLOWLIST = {
   user: { sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
 };
 
+// A Salesforce Id is 15 or 18 case-sensitive alphanumerics. Used to shape-check
+// caller-supplied record ids (?parentId=) before they reach SOQL or PostgREST:
+// anything else is a malformed request, not a zero-result query, so it is
+// rejected rather than turned into a filter around garbage. The per-path
+// escapers still run — this refuses absurd input outright.
+const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
+
 const SF_API_VERSION = "v60.0";
 
 // Ordered source fields that populate each object's `created_date` cache column —
@@ -92,6 +99,32 @@ function repRestrictFor(objectKey, identity) {
   if (!sfField) return null; // roofing/po/user not gated by this temp guard
   return { sfField, value: TEMP_SALES_REP_NAME };
 }
+
+// --- Related-records parent filter (?parentId=) -----------------------------
+// Powers a record's related lists: GET /sf/solar?parentId=<customerSfId> returns
+// only that customer's solar projects. Registry-style so a future child object is
+// ONE entry here and needs no other code change.
+//
+//   sfField     — the Salesforce parent lookup, used by the LIVE SOQL path.
+//   cacheColumn — its cache column. Reference fields map as
+//                 sfFieldToColumn(): name minus __c, lowercased, + "_sf_id"
+//                 (Sundial_Customer__c -> sundial_customer_sf_id).
+//
+// An object absent from this map REJECTS ?parentId= with 400 rather than ignoring
+// it. Silently dropping the filter would answer a related-list request with the
+// tenant's ENTIRE table — the caller cannot tell the difference, so a typo would
+// read as "this customer owns every project". Fail loudly instead.
+//
+// `customer` has no entry on purpose: it is the parent, not a child.
+const PARENT_FILTER = {
+  solar: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
+  roofing: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
+};
+
+// ?parentId= is shape-validated with the existing SF_ID_RE (defined above for the
+// single-record route): 15 or 18 chars of [A-Za-z0-9]. Validating the shape means
+// the value is provably free of quote/metacharacters before it reaches SOQL or
+// PostgREST — the escapers still run, this just refuses absurd input outright.
 
 // --- Server-side search (?q=) ----------------------------------------------
 // Case-insensitive substring across an object's name columns, tenant-scoped,
@@ -848,7 +881,7 @@ async function handleSingleRead(ctx) {
 // count:"exact" returns the full match total even though only SEARCH_CAP rows come
 // back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
 // double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
-async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors }) {
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId }) {
   const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
   if (cols.length === 0) {
     return jsonResponse(200, cors, {
@@ -863,6 +896,11 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
     .select(buildListSelect(columnSet), { count: "exact" })
     .eq("client_sf_id", tenantId)
     .or(orExpr);
+  // Related-list scope: search WITHIN one parent's children. ANDed with the tenant
+  // filter and the name OR-group, so it can only narrow the result set.
+  if (parentId && parentColumn && columnSet.has(parentColumn)) {
+    cq = cq.eq(parentColumn, parentId);
+  }
   if (columnSet.has("created_date")) {
     cq = cq
       .order("created_date", { ascending: false, nullsFirst: false })
@@ -900,8 +938,29 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, qs, cors } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, parentFilter, qs, cors } =
     ctx;
+
+  // Related-list parent filter (?parentId=). Validated before anything else so a
+  // bad request never reaches Salesforce or the cache.
+  let parentId = null;
+  if (qs.parentId != null && String(qs.parentId).trim() !== "") {
+    if (!parentFilter) {
+      // This object has no parent lookup registered — see PARENT_FILTER.
+      return jsonResponse(400, cors, {
+        error: "parent_filter_unsupported",
+        code: "PARENT_FILTER_UNSUPPORTED",
+      });
+    }
+    const raw = String(qs.parentId).trim();
+    if (!SF_ID_RE.test(raw)) {
+      return jsonResponse(400, cors, {
+        error: "invalid_parent_id",
+        code: "INVALID_PARENT_ID",
+      });
+    }
+    parentId = raw;
+  }
 
   // Pagination inputs. limit = PAGE SIZE (not a dataset cap); offset = start row.
   let limit = parseInt(qs.limit, 10);
@@ -948,6 +1007,10 @@ async function handleListRead(ctx) {
   // caller ?field=&value= filter is preserved (ANDed with the rep clause). A ?q=
   // search adds a SOQL name LIKE ON TOP of the rep clause (never widens the rep's
   // set) and caps at SEARCH_CAP from the first page.
+  // A ?parentId= is ANDed on top of the rep clause, so a restricted rep browsing a
+  // customer's related list sees the INTERSECTION — their own projects for that
+  // customer — never another rep's. The rep clause is applied first and is never
+  // relaxed by any caller-supplied filter.
   if (repRestrict) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
@@ -958,6 +1021,32 @@ async function handleListRead(ctx) {
       limit: searchTerm ? SEARCH_CAP : Math.min(limit, SF_LIVE_MAX_LIMIT),
       offset: searchTerm ? 0 : offset,
       repRestrict,
+      parentSfField: parentId ? parentFilter.sfField : null,
+      parentId,
+      searchTerm,
+      searchSfFields: searchTerm ? searchFields.sf : null,
+    });
+  }
+
+  // The cache path can only enforce ?parentId= if the column actually exists. If it
+  // does not (schema not rolled out yet), fall through to the LIVE path with the
+  // parent clause in SOQL rather than serving an unfiltered page — the same
+  // fail-loudly reasoning as PARENT_FILTER. Note this deliberately differs from the
+  // generic ?field= filter above, which drops a non-cached column silently.
+  const parentColumnMissing =
+    parentId && !columnSet.has(parentFilter.cacheColumn);
+  if (parentColumnMissing) {
+    console.warn(
+      `parent filter column ${parentFilter.cacheColumn} absent from ${cacheTable}; serving live`
+    );
+    return await listColdCacheFallback({
+      supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
+      createdDateSources, cors, selectFields, selectList,
+      filterFieldName, filterValue,
+      limit: Math.min(limit, SF_LIVE_MAX_LIMIT),
+      offset,
+      parentSfField: parentFilter.sfField,
+      parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
     });
@@ -966,10 +1055,14 @@ async function handleListRead(ctx) {
   // Non-rep server-side search: ILIKE across the cache name columns, tenant-scoped,
   // capped at SEARCH_CAP (response still carries the full match total). Searches the
   // WHOLE tenant cache, not just a loaded page.
+  // A ?parentId= narrows the search to that parent's children (search within a
+  // related list), applied as an AND alongside the tenant scope.
   if (searchTerm) {
     return await handleCacheSearch({
       supabase, cacheTable, columnSet, tenantId,
       searchCacheCols: searchFields.cache, term: searchTerm, cors,
+      parentColumn: parentId ? parentFilter.cacheColumn : null,
+      parentId,
     });
   }
 
@@ -999,6 +1092,11 @@ async function handleListRead(ctx) {
       .from(cacheTable)
       .select(listSelect, withCount ? { count: "exact" } : {})
       .eq("client_sf_id", tenantId);
+    // Related-list scope, ANDed with the tenant filter. Column existence was
+    // checked above (parentColumnMissing), so this is always enforceable here.
+    if (parentId) {
+      q = q.eq(parentFilter.cacheColumn, parentId);
+    }
     if (filterColumn && columnSet.has(filterColumn)) {
       q = q.eq(filterColumn, filterValue);
     }
@@ -1027,10 +1125,19 @@ async function handleListRead(ctx) {
   // c. Cold cache for this tenant/object (nothing cached yet) -> page-aware SF
   //    fallback + populate. Rare now that cache-sync's full resync backfills, but
   //    kept so a brand-new tenant/object still returns data.
+  //
+  //    CAREFUL with ?parentId=: "zero rows" is the NORMAL answer for a customer with
+  //    no projects, and it is indistinguishable here from a genuinely cold cache. The
+  //    parent clause is therefore passed through, so the fallback re-asks Salesforce
+  //    for THAT PARENT's children and correctly returns an empty list — instead of
+  //    treating the empty related list as a cold cache and returning the tenant's
+  //    entire table. Same reasoning for the rep clause, which cannot reach here.
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
       selectFields, selectList, filterFieldName, filterValue,
+      parentSfField: parentId ? parentFilter.sfField : null,
+      parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
     });
@@ -1136,7 +1243,7 @@ async function listColdCacheFallback(ctx) {
   const {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, limit, offset, repRestrict,
-    searchTerm, searchSfFields,
+    parentSfField, parentId, searchTerm, searchSfFields,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
@@ -1146,6 +1253,14 @@ async function listColdCacheFallback(ctx) {
   // never reach another rep's records.
   if (repRestrict) {
     where += ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`;
+  }
+  // Related-list scope (?parentId=), ANDed AFTER the rep clause so it can only
+  // NARROW a restricted rep's set — a rep viewing a customer's related list gets
+  // their own projects for that customer, never another rep's. parentSfField comes
+  // from the PARENT_FILTER registry (never caller input) and parentId is shape-
+  // validated (SF_ID_RE) before it gets here; escaped anyway.
+  if (parentSfField && parentId) {
+    where += ` AND ${parentSfField} = '${soqlEscapeString(parentId)}'`;
   }
   if (filterFieldName) {
     where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
@@ -1580,6 +1695,9 @@ export const handler = async (event) => {
       repRestrict: repRestrictFor(objectKey, identity),
       // Name columns + SF fields this object supports for ?q= search (null if none).
       searchFields: SEARCH_FIELDS[objectKey] ?? null,
+      // Parent lookup backing ?parentId= related-list reads (null if this object
+      // is not a child of anything — ?parentId= is then a 400, not ignored).
+      parentFilter: PARENT_FILTER[objectKey] ?? null,
       cors,
     };
 

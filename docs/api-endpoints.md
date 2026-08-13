@@ -111,7 +111,34 @@ See DECISIONS.md D-043 for the access model.
   - The cap's real ceiling is Lambda's **6 MB response limit**: 5000 customer rows is ~4.4 MB of JSON. Solar's entire 4,476-row set returns in one request at 3.65 MB.
 - `offset` — Start row for the page (default 0). Server-side paginated: the response includes `total` (exact count of all matching rows) and `hasMore`.
 - `field` / `value` — Optional single-field filter (string/picklist; a numeric/boolean value may error). A `Client__c` filter from the caller is ignored — tenant scoping is forced.
+- `parentId` — **Related-records filter.** Returns only the children of one parent record, for a record's related list: `GET /sf/solar?parentId=<customerSfId>` is "this customer's solar projects". Composes with `limit`/`offset`, `q`, and `field`/`value`; the response shape is unchanged.
 - `forceFresh` — reserved (not yet honored on the list path).
+
+**`?parentId=` — supported objects and behavior**
+
+| `{object}` | Parent lookup (Salesforce) | Cache column |
+|---|---|---|
+| `solar` | `Sundial_Customer__c` | `sundial_customer_sf_id` |
+| `roofing` | `Sundial_Customer__c` | `sundial_customer_sf_id` |
+| `customer`, `po`, `user` | — (no parent registered) | — |
+
+Adding a child object is **one entry** in the `PARENT_FILTER` registry in
+`lambdas/sundial-sf-query/index.js` — no other code change. The cache column is
+`sfFieldToColumn()` of the lookup: API name minus `__c`, lowercased, plus `_sf_id`.
+
+- **Unsupported object → `400 PARENT_FILTER_UNSUPPORTED`.** Deliberately an error, not a silently ignored parameter: dropping the filter would answer a related-list request with the tenant's *entire* table, and the caller could not tell the difference.
+- **Malformed id → `400 INVALID_PARENT_ID`**, rejected before any cache or Salesforce query runs. Accepts 15- or 18-char Salesforce ids.
+- An **empty** `parentId` is treated as absent (unfiltered list), not as a bad id.
+- It only ever **narrows**. It is ANDed with the tenant scope and with the TEMP Sales-Rep restriction, so a restricted rep browsing a customer's related list sees the intersection — their own projects for that customer — never another rep's. The rep clause is applied first and is never relaxed by a caller filter.
+
+> **⚠️ Zero rows is a normal answer here, and it collides with the cold-cache path.**
+> A customer with no projects produces an empty cache result, which is
+> indistinguishable from "this tenant/object has nothing cached yet" — the trigger for
+> the live-Salesforce fallback. The parent clause is therefore carried into that
+> fallback's SOQL, so it re-asks Salesforce for *that parent's* children and correctly
+> returns an empty list. Without that, an empty related list would fall through and
+> return the tenant's whole table. Same reasoning applies to any future filter that can
+> legitimately match zero rows.
 
 **Paged response shape:**
 ```json

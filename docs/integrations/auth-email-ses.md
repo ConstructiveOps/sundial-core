@@ -1,6 +1,57 @@
 # Auth Email via Supabase Custom SMTP (Amazon SES)
 
-**Status:** setup guide — Tim performs the dashboard/console steps (Claude Code can't
+**Status:** ✅ LIVE as of 2026-08-12. Invite and password-reset email deliver through
+SES. Setup steps below remain the reference for standing up a new tenant.
+
+---
+
+## ⚠️ Read this first: how this broke, and the two traps
+
+Auth email was dead for weeks. The cause was a **single wrong field**, and both traps
+below are easy to fall into again on the next tenant.
+
+**Root cause: the SMTP username was never an SES credential.** Supabase held
+`aW5wLWt1NnhraHhzbjdmcTZ1cG9ybXNpbHQ3Nw==` — base64 for
+`inp-ku6xkhxsn7fq6upormsilt77`. An SES SMTP username is *always* the 20-character
+`AKIA…` access key ID. Neither the raw nor decoded form was AKIA-shaped, and neither
+matched any key in AWS account `891377232720`. Host, port, and sender were correct
+the whole time, which is exactly why repeated inspection kept missing it.
+
+**Trap 1 — a 200 from `/auth/v1/recover` does NOT mean mail was sent.** It means
+Supabase accepted the request. With custom SMTP *disabled*, the built-in sender
+returns 200 and then fails to deliver externally. During this incident a `535 → 200`
+transition was read as "auth fixed"; it was actually a toggle flip from a broken
+custom SMTP to the broken built-in sender. **The only trustworthy signal is SES
+itself:**
+
+```bash
+aws sesv2 get-account --region us-west-1 --query 'SendQuota.SentLast24Hours'
+aws cloudwatch get-metric-statistics --namespace AWS/SES --metric-name Send \
+  --start-time <T-1h> --end-time <now> --period 60 --statistics Sum --region us-west-1
+```
+
+Both lag ~2 minutes and are otherwise reliable. Zero sends means nothing reached SES,
+whatever Supabase reported.
+
+**Trap 2 — SMTP auth failing looks identical to SES being broken.** Bisect by sending
+around Supabase entirely before touching its config:
+
+1. `lib/email.js` (SES SDK) → tests identity, production access, delivery.
+2. A raw SMTP session → tests the credential, region salt, port, and TLS.
+
+If both pass and Supabase still fails, the problem is Supabase's config, not SES.
+`scripts/` has no committed harness for step 2; the throwaway used here connected with
+`node:tls` on 465 and `node:net` + STARTTLS on 587, then walked `EHLO → AUTH LOGIN →
+MAIL FROM → RCPT TO → DATA`, printing every server reply verbatim. Both ports work.
+
+**Also fixed nothing but worth knowing:** the domain's custom MAIL FROM is set to
+`mail.sundialcrm.com.sundialcrm.com` (doubled suffix, `HOST_NOT_FOUND`,
+`BehaviorOnMxFailure: USE_DEFAULT_VALUE`). Mail still flows on the `amazonses.com`
+fallback, but SPF alignment is broken. Fix or remove it if inbox placement suffers.
+
+---
+
+**Setup guide below** — Tim performs the dashboard/console steps (Claude Code can't
 reach the Supabase or SES consoles). Follow the parts **in order**.
 
 ## Why this exists
@@ -44,6 +95,28 @@ username/password from a small IAM user. Create them like this:
 > If you ever lose the password, you can't retrieve it — just create a new SMTP
 > credential and update Supabase.
 
+### Sanity check before you leave this step
+
+**The username you paste into Supabase must start with `AKIA` and be 20 characters.**
+If it doesn't, it isn't an SES credential and nothing will ever send — that was the
+entire root cause of the 2026-08 outage. Confirm the key belongs to *this* account:
+
+```bash
+aws iam list-users --query 'Users[].UserName' --output table
+aws iam list-access-keys --user-name <the-smtp-user> --output table
+```
+
+### Current credential (Harmon)
+
+IAM user **`sundial-ses-smtp`** in `891377232720`, inline policy `SesSmtpSending`
+granting `ses:SendRawEmail` + `ses:SendEmail` only. Username is its access key ID.
+
+The SMTP password is derived from the IAM secret, not the secret itself — a SigV4
+chain over fixed date `11111111`, service `ses`, terminal `aws4_request`, message
+`SendRawEmail`, prefixed with version byte `0x04`, base64-encoded. It is **salted with
+the region**, so a password minted for one region fails auth against another region's
+endpoint. If you rotate the key, re-derive rather than pasting the raw secret.
+
 ### Verify the sender is usable
 The sender for auth email is **`harmon@sundialcrm.com`**. Because the whole domain
 `sundialcrm.com` is a verified SES identity and out of sandbox, this address can send
@@ -66,13 +139,14 @@ Project: **`qfsdpkwxahakegjnyijj`** (the portal's Supabase project).
    | Sender email | `harmon@sundialcrm.com` |
    | Sender name | `Harmon Electric` |
    | Host | `email-smtp.us-west-1.amazonaws.com` |
-   | Port | `465` |
-   | Username | *(SES SMTP Username from Part A step 6)* |
+   | Port | `587` |
+   | Username | *(SES SMTP Username from Part A step 6 — must be `AKIA…`)* |
    | Password | *(SES SMTP Password from Part A step 6)* |
    | Minimum interval between emails | `60` seconds (default is fine) |
 
-   > Port 465 = implicit TLS and is the most reliable with SES. If Supabase reports a
-   > TLS/connection error on 465, switch to **587** (STARTTLS) — SES supports both.
+   > Both **587** (STARTTLS) and **465** (implicit TLS) were verified working against
+   > SES with a real SMTP session. Harmon runs 587. Either is fine; if one reports a
+   > TLS/connection error, switch to the other.
 
 4. **Save**.
 5. Raise the auth email rate limit: **Authentication** → **Rate Limits** → set
@@ -145,6 +219,26 @@ After Parts A–C:
 The end-to-end automated check in `scripts/verify-provisioning-e2e.mjs` (Step 5)
 exercises the *temp-password* path without needing email; the two manual checks above
 cover the *email* path.
+
+### Secure password change interacts with this
+
+The project has Supabase's secure password change enabled
+(`GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD`). Consequences:
+
+- **Password-session updates** (settings menu, and the mandatory first-login change
+  after a temp password) **must send `current_password`** or GoTrue returns 400
+  `current_password_required`. `ChangePasswordModal` does this.
+- **Recovery-session updates are exempt** — the invite and forgot-password links land
+  on `/reset-password` with a recovery token, so no current password is required.
+  Verified against the live project by minting and redeeming a recovery link, not
+  assumed from docs.
+- When mapping errors, key on `AuthError.code`, never the message: GoTrue returns
+  identical text for a *missing* and an *incorrect* current password, separated only
+  by `current_password_required` vs `current_password_invalid`.
+
+`verify-provisioning-e2e.mjs` asserts both directions — that the update succeeds with
+`current_password` and is rejected without it — so the control can't be turned off
+without the suite noticing.
 
 ---
 

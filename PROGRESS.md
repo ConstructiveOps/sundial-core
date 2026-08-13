@@ -343,3 +343,62 @@ and built the surrounding wiring. Design unchanged — deployment/integration on
 **Housekeeping:** moved `budget-lambda.zip` + `sundial-budget-deploy.zip` into git-tracked `artifacts/`; added `exceljs` to root deps.
 
 **Pending:** AWS function `sundial-budget` creation (Tim) → deploy → Gate 2 smoke test; prod API Gateway route deploy; relay wiring; the blocked-on-Harmon items in TASKS.md.
+
+## 2026-08-12 — Auth email delivery fixed (E1/E2 closed); secure password change wired
+
+**Root cause of the email outage:** the Supabase custom-SMTP **username** was never an
+SES credential. It held `aW5wLWt1NnhraHhzbjdmcTZ1cG9ybXNpbHQ3Nw==` — base64 for
+`inp-ku6xkhxsn7fq6upormsilt77` — where SES requires the 20-character `AKIA…` access key
+ID. Host, port, and sender were correct throughout, which is why repeated inspection
+kept missing it. SES itself was healthy the entire time.
+
+**Bisect that found it.** Sent around Supabase entirely before touching its config:
+a direct `lib/email.js` SDK send **delivered** (SES identity, production access, and
+delivery all fine; suppression list empty), then a raw SMTP session with a freshly
+minted credential authenticated and sent on **both** 465/implicit-TLS and
+587/STARTTLS. Everything below Supabase worked, which localized the fault to the one
+field nobody had checked against what SES actually expects.
+
+Two signals had been misread and cost weeks:
+- `200` from `/auth/v1/recover` was taken as proof of sending. It only means Supabase
+  accepted the request; with custom SMTP off, the built-in sender 200s and then fails
+  to deliver. The earlier `535 → 200` was a toggle flip between two broken paths.
+- "Zero sends in SES metrics" was nearly written off as lag. It isn't —
+  `SentLast24Hours` and CloudWatch update within ~2 min, confirmed against a
+  known-good send.
+
+**Fix.** Created IAM user `sundial-ses-smtp` (inline `SesSmtpSending`:
+`ses:SendRawEmail` + `ses:SendEmail`), derived the region-salted SMTP password, and
+verified it over real SMTP *before* it went into Supabase. After the swap,
+`/recover` went **500 → 200** with a matching SES Send + Delivery datapoint.
+
+**Second bug, found while verifying the first.** Supabase secure password change
+(`GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD`) is ON, so
+`updateUser({ password })` returned 400 `current_password_required`. This broke the
+settings-menu change and — worse — the **mandatory first-login change**, dead-ending
+every user provisioned by the temp-password fallback. `/reset-password` was unaffected:
+recovery-token sessions are exempt, verified by minting and redeeming a real recovery
+link rather than trusting the docs. `ChangePasswordModal` now collects and sends
+`current_password`, with error mapping keyed on `AuthError.code` — GoTrue returns
+identical text for a *missing* vs an *incorrect* current password, so message matching
+would have told users who mistyped to retype what they already typed.
+
+**Verification.**
+- `verify-provisioning-e2e.mjs` — 12/12 PASS, including a new negative check that the
+  update is still rejected *without* `current_password` (so the control can't be
+  switched off silently).
+- Full invite loop through the deployed API: `POST /admin/users` (invite mode) → 201 →
+  auth user created → link redeems → password set with no current password → login →
+  `/auth/me` resolves harmon → Sales list loads (total=3526). Invite email confirmed
+  **Delivered** in SES, zero bounces. All test records torn down; provisioning census
+  back to its exact baseline.
+
+**Shipped.** harmon-crm `main`: `ChangePasswordModal` fix + the gated invite-default
+flip (`ef97e61`), ungated now that delivery is proven. sundial-core `master`: e2e
+verifier update. Docs: D-052, `docs/integrations/auth-email-ses.md` rewritten with the
+root cause and the two traps, punchlist E1/E2 closed with E2a added.
+
+**Known, deliberately not fixed:** custom MAIL FROM on `sundialcrm.com` is
+`mail.sundialcrm.com.sundialcrm.com` (doubled suffix, `HOST_NOT_FOUND`). SES falls back
+to `amazonses.com` so mail flows, but SPF alignment is broken. Revisit if inbox
+placement suffers.

@@ -1224,3 +1224,63 @@ These are decisions we will make after upcoming meetings or as Phase 1 developme
 - **Custom PO field name and content.** Awaiting finance discovery.
 - **Acumatica template IDs and required field maps.** Awaiting finance discovery.
 - **Multi-tech visit junction object vs parallel visits.** Decide during service module build.
+
+---
+
+## D-052: Auth email runs on a dedicated SES SMTP IAM user, and SES metrics are the delivery oracle
+
+**Date:** 2026-08-12
+**Status:** Accepted
+
+### Context
+
+Supabase auth email (invites, password resets) never delivered. The failure resisted
+diagnosis for weeks because every *visible* signal looked healthy: the SMTP host, port,
+and sender in Supabase were all correct, and `/auth/v1/recover` returned 200.
+
+The actual cause was the SMTP **username**: Supabase held
+`aW5wLWt1NnhraHhzbjdmcTZ1cG9ybXNpbHQ3Nw==` (base64 for `inp-ku6xkhxsn7fq6upormsilt77`),
+which is not an SES credential in either form — an SES SMTP username is always the
+20-character `AKIA…` access key ID. It matched none of the five access keys in AWS
+account 891377232720, and no `ses-smtp-user` existed there at all.
+
+Two false signals extended the outage:
+
+1. **`200` from `/recover` was treated as proof of sending.** It only proves Supabase
+   accepted the request. With custom SMTP off, the built-in sender returns 200 and
+   then fails to deliver externally. The observed `535 → 200` transition was a toggle
+   flip between two broken paths, not an auth fix.
+2. **"No sends in SES metrics" was nearly dismissed as metric lag.** It is not lag:
+   `SentLast24Hours` and CloudWatch `AWS/SES` both update within ~2 minutes, confirmed
+   by watching a known-good send appear.
+
+### Decision
+
+1. **Auth email sends through a dedicated IAM user**, `sundial-ses-smtp`, with inline
+   policy `SesSmtpSending` (`ses:SendRawEmail` + `ses:SendEmail` only) — not a shared
+   admin key, and not a credential of unknown provenance. The SMTP password is
+   *derived* from the IAM secret (region-salted SigV4 chain), never the raw secret.
+2. **SES is the only accepted evidence of delivery.** `SentLast24Hours` plus CloudWatch
+   `Send`/`Delivery`/`Bounce` in the identity's region. A 2xx from Supabase is not
+   evidence and must not be recorded as such.
+3. **Diagnose email failures by bisecting around Supabase first** — an SDK send via
+   `lib/email.js`, then a raw SMTP session — before touching Supabase config. Each
+   isolates a distinct layer; together they localize the fault in two steps.
+4. **Verify the SMTP username is `AKIA`-shaped and belongs to the expected account**
+   as part of tenant setup. This one check would have caught the whole incident.
+
+### Consequences
+
+- New tenants get their own scoped SMTP user; rotation re-derives the password rather
+  than pasting a raw secret.
+- The credential can only send email, so exposure via Supabase config is bounded.
+- Costs one extra IAM user per tenant — acceptable against the diagnosis time lost here.
+- Custom MAIL FROM on `sundialcrm.com` is currently misconfigured
+  (`mail.sundialcrm.com.sundialcrm.com`, `HOST_NOT_FOUND`). SES falls back to
+  `amazonses.com` so mail flows, but SPF alignment is broken. Left as-is deliberately;
+  revisit if inbox placement suffers. Not part of this decision.
+
+### Related
+
+`docs/integrations/auth-email-ses.md` (setup + the two traps), D-046 (provisioning
+incident), `scripts/verify-provisioning-e2e.mjs`.

@@ -191,6 +191,60 @@ Project: **`qfsdpkwxahakegjnyijj`** (the portal's Supabase project).
 
 ---
 
+## Part B2 — Email templates (REQUIRED — the link shape is load-bearing)
+
+**Authentication → Emails → Templates.** Two templates need editing: **Reset Password**
+and **Invite user**.
+
+Supabase's default templates use `{{ .ConfirmationURL }}`, which points at Supabase's
+`/auth/v1/verify`. **That endpoint spends the one-time token on a GET**, so any mail
+scanner that prefetches the link burns it and the user sees "expired" (Trap 3 above).
+Point the links at our own page instead and carry the token unspent:
+
+**Reset Password:**
+
+```html
+<h2>Reset your password</h2>
+
+<p>We received a request to reset the password for your Sundial account.</p>
+
+<p>
+  <a href="{{ .RedirectTo }}?token_hash={{ .TokenHash }}&amp;type=recovery"
+     style="display:inline-block;padding:12px 22px;background:#0f172a;color:#ffffff;
+            text-decoration:none;border-radius:8px;font-weight:600;font-family:sans-serif">
+    Set a new password
+  </a>
+</p>
+
+<p style="color:#64748b;font-size:14px">
+  This link can only be used once. If you didn't request a password reset,
+  you can ignore this email — your password won't change.
+</p>
+```
+
+**Invite user:** identical, but `type=invite` and invite wording.
+
+Notes:
+
+- `&amp;` is intentional — the correct HTML form, and it survives fussy mail clients.
+- `{{ .RedirectTo }}` renders **only** if the target is in the Part C allowlist;
+  otherwise it comes out empty and the link breaks. To remove that dependency, hardcode
+  `https://sundial.harmonelectric.net/reset-password` — bulletproof in prod, breaks
+  local dev.
+- `{{ .RedirectTo }}` already includes the `/reset-password` path: invites get it from
+  the Lambda's `PORTAL_BASE_URL`, resets from `window.location.origin` in `LoginPage`.
+
+**Verify before clicking:** hover the button in the received email. Expect
+`https://sundial.harmonelectric.net/reset-password?token_hash=…&type=invite`. If it
+points at `…supabase.co/auth/v1/verify`, the template didn't save. If it starts with
+`?token_hash=`, `{{ .RedirectTo }}` was empty → fix the allowlist.
+
+> These templates are **load-bearing**. Reverting one to `{{ .ConfirmationURL }}`
+> silently reintroduces the prefetch bug, and it presents to users as an expired link,
+> not as a template problem.
+
+---
+
 ## Part C — URL Configuration (redirect allowlist)
 
 Invite and reset links only work if the redirect target is allowlisted. Supabase

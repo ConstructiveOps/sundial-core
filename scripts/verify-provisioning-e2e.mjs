@@ -8,7 +8,9 @@
 //   3. GET /auth/me -> tenant.clientId resolves to harmon      [tenant binding #1]
 //   4. GET /sf/customer -> 200 + records load                  [tenant binding #2:
 //      proves sf-query resolves the tenant and returns the Sales list]
-//   5. force-change: set new password + clear must_change_password flag
+//   5. force-change: set new password (with current_password — the project runs
+//      Supabase secure password change) + clear must_change_password flag, and
+//      assert the same call WITHOUT current_password is rejected
 //   6. re-login with the new password; flag cleared; old temp password rejected
 //   7. clean up (delete the auth user + the Sundial_User__c)
 //
@@ -110,12 +112,33 @@ try {
     check('Sales list is tenant-scoped & non-empty', (total ?? 0) > 0, `total=${total}`);
 
     // 5. force-change: new password + clear flag (what ChangePasswordModal does).
+    // current_password is REQUIRED: the project runs Supabase's secure password
+    // change (GOTRUE_SECURITY_UPDATE_PASSWORD_REQUIRE_CURRENT_PASSWORD), so a
+    // password-session update without it is rejected 400 current_password_required.
+    // Recovery-token sessions (invite / reset links) are exempt — that path is
+    // covered by the manual checks in docs/integrations/auth-email-ses.md.
     const upd = await fetch(`${cfg.url}/auth/v1/user`, {
       method: 'PUT',
       headers: { apikey, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: NEW_PW, data: { must_change_password: false } }),
+      body: JSON.stringify({
+        password: NEW_PW,
+        current_password: TEMP_PW,
+        data: { must_change_password: false },
+      }),
     });
-    check('set new password + clear must_change_password', upd.status === 200, `HTTP ${upd.status}`);
+    check('set new password + clear must_change_password', upd.status === 200,
+      `HTTP ${upd.status}${upd.status !== 200 ? ` ${await upd.clone().text()}` : ''}`);
+
+    // Guard the security control itself: omitting current_password must FAIL.
+    // If this ever passes, secure password change has been switched off and the
+    // modal's current-password field has quietly become decorative.
+    const noCurrent = await fetch(`${cfg.url}/auth/v1/user`, {
+      method: 'PUT',
+      headers: { apikey, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'SomeOtherPass789!' }),
+    });
+    check('password change WITHOUT current_password is rejected', noCurrent.status === 400,
+      `HTTP ${noCurrent.status}`);
   }
 
   // 6. re-login with new password; flag cleared; old temp rejected.

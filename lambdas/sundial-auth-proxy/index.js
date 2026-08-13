@@ -15,8 +15,12 @@ import { getSupabaseClient } from "../../lib/supabase.js";
 
 // --- CORS ------------------------------------------------------------------
 
-// localhost dev origin is static; Vercel deploys (preview + prod) match by host.
-const STATIC_ALLOWED_ORIGINS = new Set(["http://localhost:5173"]);
+// localhost dev origin + the production portal domain are static; Vercel deploys
+// (preview + prod, incl. the harmon-crm.vercel.app redirect) match by host.
+const STATIC_ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  "https://sundial.harmonelectric.net",
+]);
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;

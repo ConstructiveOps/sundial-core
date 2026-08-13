@@ -187,7 +187,10 @@ const REFETCH_ID_CHUNK_SIZE = 200;
 // cache can store is ever truncated, and it stays small regardless of object width.
 
 // --- CORS (mirrors auth-proxy) ---------------------------------------------
-const STATIC_ALLOWED_ORIGINS = new Set(["http://localhost:5173"]);
+const STATIC_ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  "https://sundial.harmonelectric.net",
+]);
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;

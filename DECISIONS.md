@@ -1284,3 +1284,61 @@ Two false signals extended the outage:
 
 `docs/integrations/auth-email-ses.md` (setup + the two traps), D-046 (provisioning
 incident), `scripts/verify-provisioning-e2e.mjs`.
+
+---
+
+## D-053: The portal's canonical domain is `sundial.harmonelectric.net`; the Vercel URL is retained as a redirect
+
+**Date:** 2026-08-13
+**Status:** Accepted
+
+### Context
+
+The portal was reached at `https://harmon-crm.vercel.app`, the Vercel-assigned
+production URL. Harmon moved it to a branded domain on their own DNS,
+`https://sundial.harmonelectric.net`, keeping the Vercel URL alive as a redirect so
+existing links and bookmarks do not break.
+
+Two backend surfaces are domain-aware and do not follow a redirect:
+
+1. **CORS.** The API echoes the caller's `Origin` only if it is allowlisted, and
+   otherwise falls back to `http://localhost:5173` — so an unlisted production origin
+   fails *every* API call, not just some. A redirect does not help: the browser sends
+   the new origin.
+2. **Invite links.** `sundial-user-admin` builds the set-password URL server-side from
+   `PORTAL_BASE_URL`, so invites keep pointing wherever that variable says.
+
+### Decision
+
+`sundial.harmonelectric.net` is the canonical portal origin.
+
+- It is added to the CORS static allowlist **alongside** `localhost:5173` and the
+  `*.vercel.app` host rule, which are retained. The vercel.app origin therefore still
+  passes CORS on its own, independent of the redirect.
+- `PORTAL_BASE_URL` is set explicitly on `sundial-user-admin`, and the **in-code
+  default is changed to match**. Previously the default was the vercel.app URL, so a
+  lost env var would silently regress invites to the retired domain; now the fallback
+  is the same working link.
+
+### Consequences
+
+- The allowlist lives in **six** files: `lib/http.js` (bundled into seven Lambdas) and
+  five inline copies (`sundial-auth-proxy`, `sundial-sf-query`, `sundial-sf-update`,
+  `sundial-acumatica-push`, `sundial-aurora-push`). Adding one origin meant editing six
+  files and redeploying twelve Lambdas. Consolidating the inline copies into
+  `lib/http.js` is logged as tech debt in TASKS.md — this cutover is the argument for it.
+- **Preflight does not exercise this.** API Gateway answers `OPTIONS` itself with
+  `Access-Control-Allow-Origin: *`, so a preflight probe passes for *any* origin,
+  including one the Lambda would reject. Verify a domain change with a real
+  `GET`/`POST` carrying an `Origin` header, never with `OPTIONS`.
+- **Supabase's redirect allowlist is a dashboard change and is not covered by a repo
+  deploy.** Password resets redirect to `window.location.origin + /reset-password`, so
+  they break the moment a user lands on the new domain until the origin is allowlisted
+  (Site URL + Redirect URLs). Same for the Vercel domain attachment and DNS.
+- The domain is now hardcoded per-tenant in shared backend code. `PORTAL_BASE_URL` is
+  env-overridable; the CORS allowlist is not. Logged under multi-tenant readiness.
+
+### Related
+
+`docs/integrations/auth-email-ses.md` (Parts C and D), `docs/api-endpoints.md` (CORS
+section + env var table), D-046 (provisioning), D-052 (auth email delivery).

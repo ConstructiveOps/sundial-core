@@ -51,12 +51,13 @@ const BAN_DURATION = "876000h";
 const DEFAULT_HIERARCHY_LEVEL = "Sales Rep";
 
 // Base URL of the portal. Invited users are redirected here to set their password.
-// Env-configurable so the go-live domain change (Harmon's real domain) is a Lambda
-// config update, not a code edit; defaults to the current Vercel prod URL.
-const PORTAL_BASE_URL = (process.env.PORTAL_BASE_URL || "https://harmon-crm.vercel.app").replace(/\/+$/, "");
+// Env-configurable so a domain change is a Lambda config update, not a code edit.
+// The default tracks the live portal domain (cutover from harmon-crm.vercel.app,
+// which now only redirects) so a lost env var still produces a working link.
+const PORTAL_BASE_URL = (process.env.PORTAL_BASE_URL || "https://sundial.harmonelectric.net").replace(/\/+$/, "");
 const RESET_PASSWORD_URL = `${PORTAL_BASE_URL}/reset-password`;
 
-// --- CORS (mirrors sundial-sf-update: localhost + *.vercel.app; GET/POST/PATCH) ---
+// --- CORS (shared lib/http.js: localhost + portal domain + *.vercel.app; GET/POST/PATCH) ---
 function corsHeaders(origin) {
   const allowOrigin = isAllowedOrigin(origin) ? origin : "http://localhost:5173";
   return {

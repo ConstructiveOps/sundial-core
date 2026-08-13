@@ -65,7 +65,10 @@ const SF_API_VERSION = "v60.0";
 const WRITE_BLOCKLIST = new Set(["id", "client__c", "ownerid", "recordtypeid"]);
 
 // --- CORS (mirrors the other Lambdas; adds POST/PATCH) ---------------------
-const STATIC_ALLOWED_ORIGINS = new Set(["http://localhost:5173"]);
+const STATIC_ALLOWED_ORIGINS = new Set([
+  "http://localhost:5173",
+  "https://sundial.harmonelectric.net",
+]);
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;

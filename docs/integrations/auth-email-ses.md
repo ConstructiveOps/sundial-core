@@ -164,42 +164,47 @@ Supabase Dashboard → **Authentication** → **URL Configuration**:
 
 | Field | Value |
 |---|---|
-| **Site URL** | `https://harmon-crm.vercel.app` |
-| **Redirect URLs** (add each) | `https://harmon-crm.vercel.app/reset-password` |
-| | `https://harmon-crm.vercel.app/**` |
+| **Site URL** | `https://sundial.harmonelectric.net` |
+| **Redirect URLs** (add each) | `https://sundial.harmonelectric.net/reset-password` |
+| | `https://sundial.harmonelectric.net/**` |
+| | `https://harmon-crm.vercel.app/**` *(retained: old domain now redirects)* |
 | | `http://localhost:5173/reset-password` *(local dev)* |
 | | `https://*.vercel.app/**` *(only if you test on Vercel preview deploys)* |
 
 Both flows land on `/reset-password`:
-- **Invite** redirect is built server-side from `PORTAL_BASE_URL` (defaults to
-  `https://harmon-crm.vercel.app`, which is correct — see Part D).
+- **Invite** redirect is built server-side from `PORTAL_BASE_URL` (see Part D).
 - **Reset** redirect is `window.location.origin + /reset-password` (the domain the
   user is on).
 
+> ⚠️ Because the reset flow follows `window.location.origin`, a portal domain change
+> breaks password resets the moment users land on the new domain — until the new
+> origin is in the allowlist above. The Supabase allowlist is a **dashboard** change;
+> it is not covered by any repo deploy (D-053).
+
 ---
 
-## Part D — `PORTAL_BASE_URL` on the invite Lambda (optional, already correct by default)
+## Part D — `PORTAL_BASE_URL` on the invite Lambda (set)
 
-The `sundial-user-admin` Lambda builds the invite link from `PORTAL_BASE_URL`. It is
-currently **unset**, so it falls back to the in-code default
-`https://harmon-crm.vercel.app` — which is the real prod URL, so invites already point
-to the right place.
+The `sundial-user-admin` Lambda builds the invite link from `PORTAL_BASE_URL`. As of
+the domain cutover (D-053) it is **set explicitly** to `https://sundial.harmonelectric.net`,
+and the in-code default matches, so a lost env var degrades to the same working link
+rather than the retired Vercel URL.
 
-Set it explicitly anyway (documents intent; makes a future domain change a config
-change, not a code edit). From the repo root:
+To re-apply or point it at a different tenant domain, from the repo root:
 
 ```powershell
 aws lambda update-function-configuration `
   --function-name sundial-user-admin `
   --region us-west-1 `
-  --environment "Variables={PORTAL_BASE_URL=https://harmon-crm.vercel.app}"
+  --environment "Variables={PORTAL_BASE_URL=https://sundial.harmonelectric.net}"
 ```
 
 > ⚠️ `update-function-configuration` **replaces** the entire Variables map. If the
 > function has other env vars, include them in the same command or they'll be dropped.
 > Check first with:
 > `aws lambda get-function-configuration --function-name sundial-user-admin --region us-west-1 --query 'Environment.Variables'`
-> (At time of writing it returned `null` — no other vars — so the command above is safe.)
+> (`PORTAL_BASE_URL` is the only variable this function reads; the map was `null`
+> before the cutover, so the command above was — and remains — safe.)
 
 ---
 

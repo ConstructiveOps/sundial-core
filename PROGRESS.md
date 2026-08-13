@@ -439,3 +439,44 @@ root cause and the two traps, punchlist E1/E2 closed with E2a added.
 `mail.sundialcrm.com.sundialcrm.com` (doubled suffix, `HOST_NOT_FOUND`). SES falls back
 to `amazonses.com` so mail flows, but SPF alignment is broken. Revisit if inbox
 placement suffers.
+
+### 2026-08-13 — Auth links reported "expired" on arrival; deliverability fixed
+
+Delivery worked, but invite/reset links failed on click — one at 5 minutes, one under
+a minute. **Not expiry:** a link redeemed at t=0 works and carries `expires_in=3600`.
+Recovery links are **single use**, and mail security scanners prefetch every URL in a
+message, so the scanner's GET spends the token and the human then gets
+`#error=access_denied&error_code=otp_expired`. Reproduced exactly by GETting a link
+once and then "clicking" it. Elapsed time was never the variable — which is why both
+attempts failed identically at very different delays.
+
+**Fix — deferred redemption.** `/reset-password` now accepts
+`?token_hash=…&type=recovery|invite` and redeems it (`verifyOtp`) **only on form
+submit**. Loading the page redeems nothing, so a fetch-only scanner *or* one that
+executes the JS cannot burn the link; only a human who types a password and clicks
+can. Verified: the token survived three prefetches, then verified (200) and set a
+password (200). Legacy hash-session arrivals still work for links already in inboxes.
+The token is stripped from the address bar after capture, and a spent token now lands
+on the invalid state rather than leaving the user retyping into a doomed form.
+
+**This is inert until the Supabase email templates emit the new shape** —
+`{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery|invite` — which is Tim's
+dashboard step. Templates are now load-bearing: reverting one to
+`{{ .ConfirmationURL }}` reintroduces the bug and presents as "expired link".
+
+**Deliverability.** Mail was landing in Junk. The apex SPF is Outlook-only
+(`-all`, no SES), and the custom MAIL FROM was `mail.sundialcrm.com.sundialcrm.com` —
+a doubled suffix that could never resolve — so SES fell back to `amazonses.com` and
+SPF passed without *aligning*. The DNS for `mail.sundialcrm.com` was already correct
+(MX → `feedback-smtp.us-west-1.amazonses.com`, TXT `v=spf1 include:amazonses.com
+~all`); only the SES side was wrong. Repointed → `MailFromDomainStatus: SUCCESS`. SPF
+now aligns, DKIM already passed, DMARC satisfied on both.
+
+**Outstanding (Tim):** `_dmarc.sundialcrm.com` publishes **two** conflicting DMARC
+records (`p=quarantine` and `p=none`). More than one is invalid — receivers treat the
+domain as having no policy. One must be deleted in GoDaddy DNS.
+
+**Corrections to the previous entry:** `PORTAL_BASE_URL` on `sundial-user-admin` was
+already set to `https://sundial.harmonelectric.net` (checked before touching it; no
+change made). That custom domain — not `harmon-crm.vercel.app` — is prod; both are
+live and serving.

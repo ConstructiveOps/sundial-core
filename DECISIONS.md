@@ -1275,10 +1275,31 @@ Two false signals extended the outage:
   than pasting a raw secret.
 - The credential can only send email, so exposure via Supabase config is bounded.
 - Costs one extra IAM user per tenant — acceptable against the diagnosis time lost here.
-- Custom MAIL FROM on `sundialcrm.com` is currently misconfigured
-  (`mail.sundialcrm.com.sundialcrm.com`, `HOST_NOT_FOUND`). SES falls back to
-  `amazonses.com` so mail flows, but SPF alignment is broken. Left as-is deliberately;
-  revisit if inbox placement suffers. Not part of this decision.
+
+### Addendum (same day): auth links must be redeemed on submit, not on load
+
+Once mail delivered, invite/reset links reported "expired" when clicked within
+seconds. Cause: recovery links are single-use and mail security scanners prefetch
+URLs, so the scanner spends the token before the human clicks. Reproduced directly.
+
+**Decision:** auth emails link to *our* `/reset-password` carrying
+`?token_hash=…&type=…`, and the page redeems via `verifyOtp` **on form submit only**.
+Loading the page must never redeem — that is what makes it immune, including to
+scanners that execute JavaScript. Auth emails must not link to Supabase's
+`/auth/v1/verify`, which spends the token on GET. The legacy hash-session path stays
+for links already in flight.
+
+**Consequence:** the email templates are now load-bearing. A template reverted to
+`{{ .ConfirmationURL }}` silently reintroduces the bug, and it presents as "expired
+link", not as a template problem.
+
+**Also fixed:** custom MAIL FROM on `sundialcrm.com` was
+`mail.sundialcrm.com.sundialcrm.com` (doubled suffix, never resolvable), so SPF passed
+on `amazonses.com` but did not align with the From domain. Repointed at
+`mail.sundialcrm.com`, whose DNS was already correct → `SUCCESS`; SPF now aligns and
+DMARC is satisfied on SPF and DKIM both. Still outstanding: `_dmarc.sundialcrm.com`
+publishes **two** conflicting records (`p=quarantine` and `p=none`), which receivers
+treat as no policy at all. Needs one deleted in GoDaddy DNS.
 
 ### Related
 

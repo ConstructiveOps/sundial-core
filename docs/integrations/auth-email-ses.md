@@ -44,10 +44,46 @@ If both pass and Supabase still fails, the problem is Supabase's config, not SES
 `node:tls` on 465 and `node:net` + STARTTLS on 587, then walked `EHLO → AUTH LOGIN →
 MAIL FROM → RCPT TO → DATA`, printing every server reply verbatim. Both ports work.
 
-**Also fixed nothing but worth knowing:** the domain's custom MAIL FROM is set to
-`mail.sundialcrm.com.sundialcrm.com` (doubled suffix, `HOST_NOT_FOUND`,
-`BehaviorOnMxFailure: USE_DEFAULT_VALUE`). Mail still flows on the `amazonses.com`
-fallback, but SPF alignment is broken. Fix or remove it if inbox placement suffers.
+**Trap 3 — a single-use link can be spent before the human clicks it.** Invite and
+reset links reported "expired" when clicked within seconds. Not an expiry problem: a
+link redeemed at t=0 works and is good for an hour. Recovery links are **single use**,
+and mail security scanners (Defender Safe Links, AV, spam filters) prefetch every URL
+in a message — so the scanner's GET spends the token and the human gets
+`#error=access_denied&error_code=otp_expired`. Junk-foldered mail is scanned hardest,
+which is why this showed up alongside the deliverability problem.
+
+The fix is **deferred redemption**: the email links to *our* page carrying
+`?token_hash=…&type=recovery|invite`, and `/reset-password` redeems it (`verifyOtp`)
+only on form submit. Loading the page redeems nothing, so neither a fetch-only scanner
+nor one that executes the JS can burn it. Verified: the token survived three
+prefetches, then verified and set a password. This requires the **email templates** to
+emit that shape:
+
+```
+{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=recovery   (Reset Password)
+{{ .RedirectTo }}?token_hash={{ .TokenHash }}&type=invite     (Invite user)
+```
+
+`{{ .RedirectTo }}` only renders if the target is in the Redirect URLs allowlist
+(Part C). Never point an auth email at Supabase's `/auth/v1/verify` again — that
+endpoint spends the token on GET, which is the whole problem.
+
+### Deliverability (`sundialcrm.com`)
+
+Mail was landing in Junk. Two real causes, one fixed here:
+
+- **SPF did not align.** The apex SPF is `v=spf1 include:spf.protection.outlook.com
+  -all` (Outlook only, no SES). SES was falling back to `amazonses.com` as the
+  envelope domain, so SPF *passed* but did not **align** with `sundialcrm.com`, which
+  is what DMARC checks. The custom MAIL FROM had been set to
+  `mail.sundialcrm.com.sundialcrm.com` — a doubled suffix that could never resolve.
+  **Fixed:** pointed it at `mail.sundialcrm.com`, whose DNS was already correct
+  (`MX → feedback-smtp.us-west-1.amazonses.com`, `TXT "v=spf1 include:amazonses.com
+  ~all"`). Now `MailFromDomainStatus: SUCCESS` — SPF aligns, DKIM already passed, so
+  DMARC is satisfied on both.
+- **Two conflicting DMARC records** at `_dmarc.sundialcrm.com` (`p=quarantine` and
+  `p=none`). Publishing more than one is invalid; receivers treat the domain as having
+  no usable policy. **Still outstanding** — needs one deleted in GoDaddy DNS.
 
 ---
 

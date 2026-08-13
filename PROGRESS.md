@@ -1,5 +1,41 @@
 # Sundial — Progress Log
 
+## 2026-08-13 — Related-records filter: `?parentId=` on the generic list endpoint (DEPLOYED)
+
+`GET /sf/solar?parentId=<customerSfId>` returns one customer's solar projects.
+Registry-style: `PARENT_FILTER` names the parent lookup and its cache column per
+object (solar and roofing today, both on `Sundial_Customer__c`), so a future child
+object is one entry. Response shape untouched.
+
+**The interesting bug was the one that never fired in testing: zero rows.** The list
+read falls back to a live Salesforce query when the cache returns no rows, on the
+assumption that an empty result means a cold cache. With a parent filter that
+assumption is wrong — *a customer with no projects is supposed to return nothing*, and
+it is indistinguishable from a cold cache at that point in the code. Left alone, an
+empty related list would have fallen through to the live path and returned the
+tenant's **entire table** — the worst possible answer, and one that looks like working
+software. The parent clause is now carried into the fallback's SOQL, so it re-asks
+Salesforce for that parent's children and correctly returns empty.
+
+**Composition with the TEMP Sales-Rep restrict** was the other requirement. That path
+already bypasses the cache (the authoritative rep field isn't cached), so the parent
+clause is ANDed onto the rep clause in SOQL — the rep clause is applied first and is
+never relaxed. A restricted rep opening a customer's related list gets the
+intersection: their own projects for that customer. Covered by a test that asserts no
+` OR ` ever appears in the generated WHERE.
+
+**Unsupported object → 400, not a silently ignored param.** `customer`/`po`/`user`
+have no parent registered. Ignoring `?parentId=` there would answer a related-list
+request with the whole table and the caller could not tell — same failure shape as the
+zero-row bug, so it fails loudly. Malformed ids are rejected before any query runs.
+
+**`sundial-sf-query` had no test file.** Added one (12 tests, now in `npm test`): the
+cache builder mock applies real filter semantics, so a dropped filter shows up as
+leaked rows rather than a passing assertion. Suite is 142.
+
+Deployed. **Not verified against live data** — that needs an authenticated token this
+session doesn't have; the deployed route answers and CORS is intact.
+
 ## 2026-08-13 — Portal domain cutover to `sundial.harmonelectric.net` (D-053, DEPLOYED)
 
 **Two backend surfaces are domain-aware and neither follows a redirect:** the CORS

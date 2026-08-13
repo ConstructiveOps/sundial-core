@@ -199,6 +199,19 @@ copy-for-new-tenant base stays tenant-agnostic:
 
 ---
 
+## Related records — `?parentId=` on `GET /sf/{object}` (2026-08-13)
+
+- [x] `PARENT_FILTER` registry (per-object parent lookup + cache column); `solar` and `roofing` on `Sundial_Customer__c`
+- [x] Enforced on all three read paths: cache paged, cache search (`?q=`), and live SOQL (cold cache + Sales-Rep restrict)
+- [x] Composes with the TEMP Sales-Rep restrict (ANDed after the rep clause — intersection only, never widens)
+- [x] Cold-cache fallback carries the parent clause (an empty related list must not fall through to the whole table)
+- [x] 400 on unsupported object / malformed id — never a silently ignored param
+- [x] First test file for `sundial-sf-query` (12 tests, wired into `npm test`); deployed
+- [ ] Verify against live data with an authenticated token (deployed but not functionally verified end to end)
+- [ ] Add `po` to the registry when a PO related list is needed (one entry: parent lookup + `<name>_sf_id` column)
+
+---
+
 ## Portal domain cutover → `sundial.harmonelectric.net` (2026-08-13, D-053)
 
 - [x] Add `https://sundial.harmonelectric.net` to the CORS allowlist — `lib/http.js` + all five inline copies; `*.vercel.app` and `localhost:5173` retained

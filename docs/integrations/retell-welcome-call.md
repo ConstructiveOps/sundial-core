@@ -3,8 +3,9 @@
 > The automated post-sale verification call. An AI voice agent phones the customer,
 > reads back the contract terms they signed, and records what they confirmed.
 >
-> Lambda: `lambdas/sundial-welcome-call` · Route: `POST /webhooks/retell` ·
-> Decision: **D-054** · **There is no portal UI for this feature.**
+> Lambda: `lambdas/sundial-welcome-call` · Routes: `POST /webhooks/retell`,
+> `POST /welcome-call/orphan-match` · Decision: **D-054** ·
+> **There is no portal UI for this feature.**
 
 ---
 
@@ -48,30 +49,36 @@ Retry Flow ─┴─► Sundial_Welcome_Call_Request__e   (ONE platform event, C
        Sundial_Customer__c ◄── SF update ── sundial-welcome-call (entry 2) ◄── POST /webhooks/retell
               │                                  │
        Supabase cache ◄── best effort ───────────┤
-       Realtime broadcast ◄───────────────────── │
-                                                 └──────────────────────────► Zapier Catch Hook
-                                                     (FIRST, always)            billing ledger
+       Realtime broadcast ◄───────────────────── ├──────────────────────────► Zapier Catch Hook
+                                                 │   (FIRST, always)            billing ledger
+       S3 sfsolproj ◄── recording ───────────────┘                                   │
+         SUNDIAL/{customerId}/…mp3                                                    │ orphan sweep
+         SUNDIAL/_orphan-welcome-calls/…mp3 ◄─── promote ─── (entry 3) ◄──────────────┘
+                                                POST /welcome-call/orphan-match
 ```
 
-One Lambda, two entry points, **told apart by the shape of the event**: an HTTP event
-carries `requestContext.http.method` (or `httpMethod`); nothing else does. That test
-is stable across every relay envelope, which matters because the relay is configured
-by hand and its exact shape is not fixed in code (same reasoning as
-[`budget-recalc-relay.md`](./budget-recalc-relay.md)).
+One Lambda, three entry points. The first split is **by the shape of the event**: an
+HTTP event carries `requestContext.http.method` (or `httpMethod`); nothing else does.
+That test is stable across every relay envelope, which matters because the relay is
+configured by hand and its exact shape is not fixed in code (same reasoning as
+[`budget-recalc-relay.md`](./budget-recalc-relay.md)). The two HTTP entry points are
+then split by **path**, and each carries its own shared-secret gate.
 
 ### Files
 
 | File | Role |
 |---|---|
-| `index.js` | Routing, HTTP concerns, signature gate |
+| `index.js` | Routing (event shape, then path), HTTP concerns, both auth gates |
 | `placeCall.js` | Entry point 1: fresh read, eligibility guard, dial, writeback |
 | `webhook.js` | Entry point 2: signature, ledger forward, outcome mapping, idempotency |
+| `recording.js` | Download, S3 archival, file-metadata registration, key construction |
+| `orphanMatch.js` | Entry point 3: promote a parked rep-form recording onto a record |
 | `format.js` | Pure: speech formatting, finance mapping, phone, Phoenix clock |
 | `fields.js` | Describe guard + logical-name → API-name candidates |
 | `writeback.js` | Salesforce → cache → Realtime, and the log-field read-modify-write |
 | `retell.js` | The `create-phone-call` client |
 | `config.js` | Env var / Secrets Manager resolution |
-| `test.js` | 52 tests (`npm test`) |
+| `test.js` | 76 tests (`npm test`) |
 
 ---
 
@@ -246,9 +253,21 @@ Retell stops retrying it.
    processing continues. **A forward failure never blocks the Salesforce writeback** —
    losing a ledger row is a billing correction; losing the verification result means a
    customer never gets called again.
-3. **If `call.metadata.sf_record_id` is absent, the forward was the whole job.** That
+3. **Archive the recording** (next section) — after the forward, before the writeback,
+   so the archived key can ride along in the log line the writeback is about to save.
+   One Salesforce write, not two.
+4. **If `call.metadata.sf_record_id` is absent, the forward was the whole job.** That
    is the rep-form case: a rep starts a call from a form, possibly for a customer with
    no Salesforce record yet. Ack 200, Salesforce is never even queried.
+
+> **The orphan path inverts steps 1 and 3, and only the orphan path.** For a rep-form
+> call the ledger row is the *only* trace of the call, and the sweep that later matches
+> it to a customer needs the recording's key — so there is nothing to put in the payload
+> unless the upload has already happened. The cost is that an orphan's ledger row waits
+> on a download bounded at 20 s. That is acceptable because the step cannot throw and
+> cannot skip the forward: a failed archival simply forwards without
+> `s3_recording_key`, which the sweep reads as "no recording to attach".
+
 
 > **Redelivery double-forwards.** Because the forward is unconditional and comes
 > first, a Retell redelivery posts to the Zap twice even though the Salesforce side is
@@ -308,6 +327,123 @@ same id, so the very first legitimate result would be discarded as a duplicate. 
 
 ---
 
+## Recording archival
+
+**Retell's `recording_url` expires.** That single fact is why this exists: without
+archiving, the URL in the Salesforce log works today and 404s exactly when someone
+needs it — when a customer disputes what they agreed to.
+
+The recording is downloaded server-side and written into the ordinary Sundial file
+convention in the `sfsolproj` bucket, which buys three surfaces with no extra code (see
+[`file-storage.md`](../file-storage.md)):
+
+- the portal **Files tab** on the customer record (it lists that prefix from S3)
+- **Salesforce**, via XFiles Pro reading the same prefix
+- **Harmon's Dropbox**, via the S3 PUT event on the same bucket
+
+Getting the key right *is* the integration.
+
+| Case | S3 key | Supabase metadata |
+|---|---|---|
+| `sf_record_id` present | `SUNDIAL/{sf_record_id}/welcome-call-{YYYY-MM-DD}-attempt-{n}.mp3` | row: category `Welcome Call Recording`, uploader `Wattson (system)`, mime `audio/mpeg`, size, `sf_object_type` `Sundial_Customer__c`, `tenant_id` = the record's `Client__c` |
+| absent (rep-form orphan) | `SUNDIAL/_orphan-welcome-calls/{call_id}.mp3` | **none** |
+| no `recording_url` | *skipped silently* | — |
+
+- **The date is America/Phoenix**, not UTC. A call placed at 6pm Phoenix is already
+  tomorrow in UTC, and a UTC-named file would sit in the Files tab under a date the
+  office never dialed on.
+- **`attempt_no` comes from `call.metadata` and falls back to the literal `x`.** A
+  rep-form call has no attempt number; `…-attempt-x.mp3` says that honestly instead of
+  growing an `undefined`. Because the attempt number is in the name, attempt 2 does not
+  clobber attempt 1 — a customer who was called three times keeps three recordings.
+- **No recording is not a failure.** A call that never connected has no
+  `recording_url`, which is the common case for a no-answer. It must stay silent or
+  every unanswered call logs an error.
+- **No metadata row for orphans, deliberately.** Every list query is scoped by
+  `sf_record_id`; a row with a null one is unreachable — worse than no row, because it
+  looks registered.
+
+**Download safety.** https only, no credentials attached, 20 s timeout, 50 MB cap
+(checked against `content-length` before buffering *and* against the actual bytes).
+The URL arrives inside the request body; even though that body is HMAC-verified,
+attaching the Retell API key to a URL taken from a payload would hand the key to
+whatever host it names.
+
+**Nothing here can fail the call result.** Every path resolves rather than throwing,
+and a failure logs at ERROR with the `call_id` and the still-live `recording_url` so
+the file can be fetched by hand.
+
+**Idempotency.** Keys are deterministic, so a redelivery overwrites the object in
+place. The metadata insert is the part that would duplicate — a second row means the
+file shows twice in the Files tab with no way to tell them apart — so it is skipped
+when `findFileMetadataByKey` already finds one. The archival step sits *after* the
+duplicate check, so a redelivery does not re-download a few MB to rewrite an identical
+object; the trade is that a first delivery which stored the status but failed the
+recording will not retry the audio. The Retell URL is in the log line and the ledger
+row for exactly that case.
+
+When archival succeeds, the result log line gains an `archived=<key>` segment. The
+expiring Retell URL stays alongside it; the key is the durable one.
+
+---
+
+## `POST /welcome-call/orphan-match`
+
+The other half of the rep-form story. Once the Zapier sweep works out which customer a
+parked recording belonged to, it calls this endpoint to promote the file.
+
+**Auth:** `X-Sundial-Zap-Secret` vs `ZAP_ORPHAN_MATCH_SECRET`, constant-time compared.
+Not a portal JWT — the caller is a Zap. **An unset secret rejects everything (401).**
+This endpoint moves files into a customer folder on the strength of a caller-supplied
+record id, so it is the last place to be lenient.
+
+**Body:** `{ "call_id": "call_abc123", "sf_record_id": "a1P7y00000AUo6TEAT" }`
+
+**Sequence:**
+
+1. Resolve the customer from Salesforce — proves the target exists (404 if not) and
+   supplies the `Client__c` stamped on the metadata row. There is no caller tenant
+   here, so the record scopes itself, the same model `sundial-aurora-inbound` uses.
+2. `HEAD SUNDIAL/_orphan-welcome-calls/{call_id}.mp3`.
+3. Copy to `SUNDIAL/{sf_record_id}/welcome-call-{YYYY-MM-DD}-{call_id}.mp3`, **dated
+   from the holding object's `LastModified`** in Phoenix time — the sweep may run days
+   after the call, and the file should be named for the conversation, not the sweep.
+4. Register Supabase file metadata (skipped if a row for that key exists).
+5. Prepend `rep-form call {call_id} matched, recording attached` to
+   `Welcome_Call_Log__c`, then cache + Realtime.
+6. **Delete the holding object last**, only after the copy is confirmed.
+
+**Idempotency has to work backwards, because the operation deletes its own input.** A
+retry cannot re-derive the destination key — that key embeds the `LastModified` of an
+object that no longer exists. So the retry path **searches** `SUNDIAL/{sf_record_id}/`
+for any `welcome-call-*-{call_id}.mp3` and reports `already_matched: true`. It also
+re-attempts the metadata row and the log line, each a no-op when already present, so a
+partially-failed run **converges** instead of silently losing the note. (Without that,
+a run whose log append failed would delete the holding object and the note could never
+be written.)
+
+**A failed holding-object delete is not a failed match.** The bytes are attached and
+registered, which is the point; the response says `holdingDeleted: false` and a later
+retry cleans up the duplicate.
+
+**Responses:**
+
+| Code | When |
+|---|---|
+| 200 | promoted (`already_matched: false`), or already done (`already_matched: true`) |
+| 400 | `MISSING_FIELDS`, `INVALID_RECORD_ID`, `INVALID_CALL_ID`, `INVALID_BODY` |
+| 401 | missing/invalid `X-Sundial-Zap-Secret`, or none configured |
+| 404 | `RECORD_NOT_FOUND`, or `RECORDING_NOT_FOUND` (nothing parked and nothing matched) |
+
+```json
+{ "already_matched": false,
+  "key": "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-15-call_abc123.mp3",
+  "recordId": "a1P7y00000AUo6TEAT", "callId": "call_abc123", "sizeBytes": 184320,
+  "metadata": "registered", "log": "appended", "holdingDeleted": true }
+```
+
+---
+
 ## Log format — `Welcome_Call_Log__c`
 
 **Newest line first.** The field is read by a human in a Salesforce field viewer that
@@ -317,7 +453,7 @@ half you can afford to lose. Truncation trims to a line boundary, so the log nev
 ends mid-record.
 
 ```
-2026-08-17 14:32 MST · Attempt 1 · Result: passed · Status: Verified · mismatches: none · recording=https://… · call_id=call_abc123
+2026-08-17 14:32 MST · Attempt 1 · Result: passed · Status: Verified · mismatches: none · recording=https://… · archived=SUNDIAL/a1P…/welcome-call-2026-08-17-attempt-1.mp3 · call_id=call_abc123
 2026-08-17 14:19 MST · Attempt 1 · Call placed · call_id=call_abc123
 2026-08-17 09:02 MST · Skipped · unmappable financing partner: GoodLeap
 ```
@@ -327,7 +463,8 @@ Line shapes:
 | Kind | Shape |
 |---|---|
 | Placed | `<stamp> · Attempt <n> · Call placed · call_id=<id>` |
-| Result | `<stamp> · Attempt <n> · Result: <outcome> · Status: <status> [· not confirmed: <…>] · mismatches: <…> [· unconfirmed: <…>] [· notes: <…>] [· voicemail: yes] [· recording=<url>] · call_id=<id>` |
+| Result | `<stamp> · Attempt <n> · Result: <outcome> · Status: <status> [· not confirmed: <…>] · mismatches: <…> [· unconfirmed: <…>] [· notes: <…>] [· voicemail: yes] [· recording=<url>] [· archived=<s3 key>] · call_id=<id>` |
+| Matched | `<stamp> · rep-form call <call_id> matched, recording attached` |
 | Skip | `<stamp> · Skipped · unmappable financing partner: <value>` |
 
 `not confirmed:` lists only the confirmation flags that came back anything other than
@@ -337,6 +474,8 @@ is **not** redundant with `mismatches:`: a mismatch is "the customer gave a diff
 value", an unpassed check is "we never got an answer", and they point at different
 follow-ups. `call_summary` is not put in the log (it is prose and would dominate the
 field) — it reaches the ledger in the forwarded payload and the Realtime broadcast.
+`recording=` is Retell's URL, which **expires**; `archived=` is the permanent S3 key,
+and its presence is also the record that archival succeeded.
 
 `<stamp>` is `YYYY-MM-DD HH:mm MST`, local Phoenix time. Phoenix does not observe DST,
 so the abbreviation is MST year-round. Mismatch/unconfirmed/notes segments are clipped
@@ -431,6 +570,7 @@ All three exist in the live org today, with this `Welcome_Call_Status__c` pickli
 |---|---|---|---|
 | `RETELL_API_KEY` | credential | **secret**, then env | `api_key`, `apiKey`, `retell_api_key`, `key` |
 | `RETELL_WEBHOOK_SECRET` | credential | **secret**, then env | `webhook_secret`, `webhookSecret`, `signing_secret`, `webhook_token` |
+| `ZAP_ORPHAN_MATCH_SECRET` | credential | **secret**, then env | `zap_orphan_match_secret`, `orphan_match_secret`, `zap_secret` |
 | `RETELL_FROM_NUMBER` | config | **env**, then secret | `from_number`, `fromNumber` |
 | `RETELL_AGENT_ID` | config | **env**, then secret | `agent_id`, `agentId`, `override_agent_id` |
 | `ZAPIER_RESULTS_HOOK_URL` | config | **env**, then secret | `zapier_results_hook_url`, `zapier_hook_url`, `results_hook_url` |
@@ -450,7 +590,7 @@ puts everything in env vars is valid.
 ```powershell
 # Secret (credentials)
 aws secretsmanager create-secret --name sundial/retell/api --region us-west-1 `
-  --secret-string '{"api_key":"key_…","webhook_secret":"whsec_…"}'
+  --secret-string '{"api_key":"key_…","webhook_secret":"whsec_…","zap_orphan_match_secret":"…"}'
 
 # Env vars (config). NOTE: update-function-configuration REPLACES the whole map.
 aws lambda get-function-configuration --function-name sundial-welcome-call `
@@ -463,6 +603,12 @@ aws lambda update-function-configuration --function-name sundial-welcome-call --
 **IAM:** `sundial-lambda-execution-role` already carries `secretsmanager:GetSecretValue`
 for the `sundial/*` secrets used by the other Lambdas; confirm the new secret is
 covered by that policy's resource pattern before go-live.
+
+S3 is also needed now: `ListBucket` on `sfsolproj` plus `GetObject` / `PutObject` /
+**`DeleteObject`** on `sfsolproj/SUNDIAL/*`. The role carries `AmazonS3FullAccess`
+today (verified 2026-08-03 for copy-to-solar), so no change is expected — but
+`DeleteObject` is new for Sundial with this feature (orphan-match removes the holding
+object), so re-check it if the role is ever tightened to a least-privilege policy.
 
 ---
 
@@ -531,6 +677,33 @@ instead, with no code change.
 A Catch Hook whose URL goes in `ZAPIER_RESULTS_HOOK_URL`. **Dedupe on
 `call.call_id`** — see the redelivery note above.
 
+### 6. The Zapier orphan sweep
+
+The other half of the rep-form story. For ledger rows with no `sf_record_id`, work out
+which customer the call belonged to (by the phone number the rep dialed, the name in
+`call_summary`, whatever the Zap can key on) and then:
+
+```
+POST https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/welcome-call/orphan-match
+X-Sundial-Zap-Secret: <ZAP_ORPHAN_MATCH_SECRET>
+{ "call_id": "call_abc123", "sf_record_id": "a1P7y00000AUo6TEAT" }
+```
+
+- Only worth calling when the ledger row carries **`s3_recording_key`** — its absence
+  means the archival failed and there is nothing parked to promote (the endpoint will
+  answer `404 RECORDING_NOT_FOUND`).
+- **Safe to retry.** Repeat calls return `already_matched: true` and heal anything the
+  first run failed to finish.
+- Nothing expires on our side, so the sweep can run on whatever cadence suits — daily
+  is plenty.
+
+### 7. Watch `SUNDIAL/_orphan-welcome-calls/`
+
+Objects should not pile up here. Anything more than a few weeks old is a call the
+sweep never matched. **No lifecycle rule is configured, deliberately** — auto-deleting
+an unmatched recording of a contract conversation is the wrong default. Check it
+periodically and either match it or delete it by hand.
+
 ---
 
 ## Deploy
@@ -542,13 +715,15 @@ A Catch Hook whose URL goes in `ZAPIER_RESULTS_HOOK_URL`. **Dedupe on
 
 # 2. Env vars + secret (above)
 
-# 3. The one API route
-.\scripts\wire-retell-webhook-route.ps1
+# 3. Both API routes
+.\scripts\wire-welcome-call-routes.ps1
 ```
 
-Timeout guidance: the webhook path can spend up to ~10 s on Zapier retries plus a
-Salesforce read and write, so **60 s** leaves comfortable headroom. Memory 512 MB
-matches the other integration Lambdas.
+Timeout guidance: the webhook path can spend up to ~10 s on Zapier retries, ~20 s on
+the recording download, plus a Salesforce read and write — so **60 s** is the floor,
+not headroom. Memory **512 MB** matches the other integration Lambdas and holds a
+buffered recording comfortably (the download is capped at 50 MB, which is far above any
+real call; a phone recording is a few MB).
 
 > ⚠️ **Account concurrency quota is 10 in us-west-1**, shared by every function (see
 > the G2 note in `docs/api-endpoints.md`). The platform-event path processes a batch
@@ -559,12 +734,22 @@ matches the other integration Lambdas.
 
 ## Testing
 
-`npm test` — 52 tests in `lambdas/sundial-welcome-call/test.js`, covering every
+`npm test` — 76 tests in `lambdas/sundial-welcome-call/test.js`, covering every
 eligibility branch, every finance-partner value (including the EN DASH), the spoken
 formatting of each variable, signature verification (including base64 bodies and the
 fail-closed unset secret), the forward-first ordering and its retry ladder, the full
 outcome→status table with the attempt ceiling, idempotency on redelivery, log
 truncation, and shape-based routing.
 
-**Not yet verified against live Retell or a live Salesforce record** — that needs the
-platform event created, the agent provisioned, and a real phone number.
+Recording and orphan-match run against an **in-memory S3** (a stubbed
+`@aws-sdk/client-s3` with a real key→object map) and a PostgREST-shaped Supabase stub
+whose metadata select reads back what its inserts recorded — so "skip the insert if a
+row exists" is genuinely exercised rather than asserted. Covered: key construction on
+all three shapes, a hostile `call_id` failing to escape the holding prefix, the
+`attempt_no` fallback, Phoenix-vs-UTC dating, the download guards (non-https, 404,
+empty), archival failure not blocking the writeback, redelivery producing one object
+and one metadata row, the orphan payload enrichment (and its absence on failure), and
+the orphan-match idempotency path including a retry that heals a failed log append.
+
+**Not yet verified against live Retell, live S3, or a live Salesforce record** — that
+needs the platform event created, the agent provisioned, and a real phone number.

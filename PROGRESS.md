@@ -1,5 +1,86 @@
 # Sundial — Progress Log
 
+## 2026-08-17 — Welcome Call: recording archival + orphan-match endpoint (D-054 addendum, NOT DEPLOYED)
+
+**Retell's `recording_url` expires.** Without archiving, the link written into
+`Welcome_Call_Log__c` works today and 404s exactly when someone needs it — when a
+customer disputes what they agreed to. The webhook now downloads the mp3 server-side
+and writes it into the ordinary Sundial file convention
+(`SUNDIAL/{customerId}/welcome-call-{YYYY-MM-DD}-attempt-{n}.mp3` in `sfsolproj`),
+which buys the portal Files tab, XFiles Pro, and the Dropbox mirror with **zero
+additional code** — that is the whole reason to use the existing key convention instead
+of inventing a recordings bucket. Registered in `sundial_file_metadata` as category
+`Welcome Call Recording`, uploader `Wattson (system)`.
+
+**The date is Phoenix, not UTC, and that is not pedantry.** A call placed at 6pm
+Phoenix is already tomorrow in UTC, so a UTC-named file lands in the Files tab under a
+date the office never dialed on. Same reasoning puts `attempt_no` in the filename:
+attempt 2 must not clobber attempt 1, because a customer called three times has three
+different conversations worth keeping.
+
+**The orphan case forced an ordering inversion, and it is the one interesting decision
+here.** D-054 says the Zapier billing forward goes first, before anything that can
+fail. But a rep-form call has no Salesforce record, so its ledger row is the *only*
+trace of it — and the sweep that later matches it to a customer needs the recording's
+S3 key, which does not exist until the upload has happened. So the orphan path runs
+the recording step *before* the forward and enriches the payload with
+`s3_recording_key`; the attached path keeps the original order. Two orderings in one
+handler is a smell, so it is commented at both sites and in the runbook. The key is
+technically derivable from `call_id` alone, but a derived key can't tell the sweep
+whether the upload actually *succeeded* — its absence is the signal that there is
+nothing to match.
+
+**Orphans get no metadata row, deliberately.** Every file list query is scoped by
+`sf_record_id`; a row with a null one is unreachable by any surface. That is worse than
+no row, because it looks registered.
+
+**`POST /welcome-call/orphan-match` has to be idempotent while deleting its own
+input.** The Zap posts `{call_id, sf_record_id}`; the endpoint copies the holding
+object to `SUNDIAL/{recordId}/welcome-call-{date}-{call_id}.mp3`, dating it from the
+holding object's `LastModified` (the sweep may run days later — name the file for the
+conversation, not the sweep), registers metadata, appends the log line, then deletes
+the holding object last. A retry therefore **cannot re-derive the destination key**,
+because the `LastModified` it embeds belongs to an object that no longer exists. So the
+retry path *searches* the record folder for `welcome-call-*-{call_id}.mp3` instead and
+returns `already_matched: true`. It also re-attempts the metadata row and the log line,
+each a no-op when present — without that, a run whose log append failed would have
+deleted the holding object and the note could never be written. There is a test that
+fails the SF update on the first call and asserts the second one heals it.
+
+**A failed holding-object delete is not a failed match** — the bytes are attached and
+registered, which is the point; the response says `holdingDeleted: false` and the next
+retry cleans up.
+
+**Auth is a second shared secret** (`X-Sundial-Zap-Secret` / `ZAP_ORPHAN_MATCH_SECRET`),
+not a portal JWT — the caller is a Zap. Fails closed when unset, same as the Retell
+signature gate; the constant-time compare is now a shared helper so the two gates can't
+drift apart. A test asserts each route rejects the *other* route's credential.
+
+**Nothing in the recording path can cost us the call result.** Every path resolves
+rather than throwing; a failure logs at ERROR with the `call_id` and the still-live
+`recording_url` for manual retrieval, and the Salesforce writeback runs regardless.
+Download is https-only with no credentials attached (the URL comes from the request
+body — even signed, we don't hand the Retell API key to whatever host it names), 20 s
+timeout, 50 MB cap checked against `content-length` before buffering.
+
+**Duplicate-row trap, now closed for everyone:** deterministic keys mean a redelivery
+overwrites the S3 object harmlessly, but a second `registerFileMetadata` would insert a
+second row and show the file twice in the Files tab with no way to tell them apart.
+Added `findFileMetadataByKey` to `lib/file-access.js` — shared, so the other
+best-effort writers (copy-to-solar, budget snapshots, Aurora signed PDFs) can use it
+too.
+
+24 new tests (76 in this Lambda, suite 218, green) against an in-memory S3 stub and a
+PostgREST-shaped Supabase stub whose metadata select reads back its own inserts, so the
+dedupe is genuinely exercised. `wire-retell-webhook-route.ps1` is now
+`wire-welcome-call-routes.ps1` and wires both routes (it had never been run, so no
+operational history was lost).
+
+**Still not deployed.** Same blockers as the base feature, plus: the orphan-sweep Zap,
+`ZAP_ORPHAN_MATCH_SECRET`, and a check that the execution role keeps `s3:DeleteObject`
+on `sfsolproj/SUNDIAL/*` (new for Sundial with this change — `AmazonS3FullAccess`
+covers it today).
+
 ## 2026-08-17 — Welcome Call backend: Retell voice verification (D-054, NOT YET DEPLOYED)
 
 `lambdas/sundial-welcome-call` — one Lambda, two entry points, told apart by the shape

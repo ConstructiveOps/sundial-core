@@ -28,6 +28,7 @@ import crypto from "node:crypto";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
 import { MAX_ATTEMPTS, phoenixStamp } from "./format.js";
+import { archiveRecording } from "./recording.js";
 import { applyWelcomeCallUpdate, prependLogLine, CUSTOMER_SF_OBJECT } from "./writeback.js";
 
 export const SIGNATURE_HEADER = "x-retell-signature";
@@ -73,11 +74,24 @@ export function verifySignature(rawBody, header, secret) {
     .update(Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody), "utf8"))
     .digest("hex");
 
-  // Hash both sides to a fixed 32 bytes: timingSafeEqual throws on a length mismatch,
-  // and comparing lengths first would itself be a signal.
-  const a = crypto.createHash("sha256").update(provided, "utf8").digest();
-  const b = crypto.createHash("sha256").update(expected, "utf8").digest();
-  return crypto.timingSafeEqual(a, b);
+  return constantTimeEquals(provided, expected);
+}
+
+/**
+ * Constant-time equality that is also length-safe.
+ *
+ * `crypto.timingSafeEqual` throws when the two buffers differ in length, and
+ * comparing raw lengths first would leak the expected length. Hashing both sides to a
+ * fixed 32 bytes removes both problems: the digests are always the same size, and only
+ * identical inputs produce identical digests.
+ *
+ * Shared by the Retell signature check above and the Zap shared-secret gate in
+ * index.js, so neither can drift into an early-exit comparison.
+ */
+export function constantTimeEquals(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a), "utf8").digest();
+  const hb = crypto.createHash("sha256").update(String(b), "utf8").digest();
+  return crypto.timingSafeEqual(ha, hb);
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +153,19 @@ function safePayloadForLog(body) {
   const s = typeof body === "string" ? body : JSON.stringify(body ?? {});
   // CloudWatch truncates enormous lines anyway; cap so one payload can't dominate.
   return s.length > 20000 ? `${s.slice(0, 20000)}…[truncated]` : s;
+}
+
+/**
+ * Re-serialize the payload with `s3_recording_key` added, for the orphan forward.
+ *
+ * This is the ONE case where the ledger does not receive Retell's raw bytes: the Zap
+ * needs to know where the parked recording landed. The key is technically derivable
+ * from `call_id`, but a derived key cannot tell the sweep whether the upload actually
+ * succeeded — an explicit field can, and its absence means "there is nothing to
+ * match".
+ */
+function withRecordingKey(payload, key) {
+  return JSON.stringify({ ...payload, s3_recording_key: key });
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +271,15 @@ const CONFIRMATION_FLAGS = [
  * guard below matches on, and the literal marker "Result:" that distinguishes a
  * finished call from the "Call placed" line written when it was dialed.
  */
-export function buildResultLogLine({ stamp, attemptNo, outcome, status, analysis, call }) {
+export function buildResultLogLine({
+  stamp,
+  attemptNo,
+  outcome,
+  status,
+  analysis,
+  call,
+  recordingKey = null,
+}) {
   const parts = [
     stamp,
     `Attempt ${attemptNo}`,
@@ -270,6 +305,10 @@ export function buildResultLogLine({ stamp, attemptNo, outcome, status, analysis
 
   const recording = clip(call?.recording_url, 500);
   if (recording) parts.push(`recording=${recording}`);
+
+  // The Retell URL above EXPIRES; this key does not. When both are present the key is
+  // the one to use, and its presence is also the record that archival succeeded.
+  if (recordingKey) parts.push(`archived=${recordingKey}`);
 
   parts.push(`call_id=${call?.call_id ?? "unknown"}`);
   return parts.join(" · ");
@@ -302,24 +341,49 @@ export function alreadyProcessed(logText, callId) {
 export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Date() } = {}) {
   const call = extractCall(payload);
   const callId = call?.call_id ?? null;
+  const recordId = call?.metadata?.sf_record_id ?? null;
+
+  // ---- ORPHAN PATH: park the recording, THEN forward, then stop -----------
+  //
+  // The recording step runs BEFORE the forward here, and only here. That is the
+  // opposite of the attached path below, and it is forced by what the ledger needs:
+  // for a rep-form call the ledger row is the ONLY trace of the call, and the sweep
+  // that later matches it to a customer needs the recording's key. There is nothing
+  // to put in the payload unless the upload has already happened.
+  //
+  // The cost is that an orphan's ledger row waits on a download bounded at 20 s. That
+  // is acceptable because the step cannot throw and cannot skip the forward — a failed
+  // archival simply forwards without `s3_recording_key`, which the sweep reads as
+  // "no recording to attach".
+  if (!recordId) {
+    const rec = await archiveRecording({ call, sfRecordId: null, now });
+    const bodyToForward =
+      rec.ok && rec.key ? withRecordingKey(payload, rec.key) : rawBody;
+    const orphanForward = await forwardToZapier(
+      cfg.zapierResultsHookUrl,
+      payload,
+      bodyToForward
+    );
+    console.log(
+      `welcome-call webhook: call_analyzed with no sf_record_id (call_id=${callId}) — ` +
+        `forwarded to the ledger only (forwarded=${orphanForward.ok}, ` +
+        `recording=${rec.key ?? rec.reason ?? "none"}).`
+    );
+    return {
+      status: 200,
+      body: {
+        received: true,
+        forwarded: orphanForward.ok,
+        salesforce: "not_applicable",
+        recording: rec.key ?? null,
+      },
+    };
+  }
 
   // ---- 1) Billing ledger first, always -----------------------------------
   const forwarded = await forwardToZapier(cfg.zapierResultsHookUrl, payload, rawBody);
 
-  // ---- 2) No Salesforce record => the forward WAS the whole job -----------
-  const recordId = call?.metadata?.sf_record_id ?? null;
-  if (!recordId) {
-    console.log(
-      `welcome-call webhook: call_analyzed with no sf_record_id (call_id=${callId}) — ` +
-        `forwarded to the ledger only (forwarded=${forwarded.ok}).`
-    );
-    return {
-      status: 200,
-      body: { received: true, forwarded: forwarded.ok, salesforce: "not_applicable" },
-    };
-  }
-
-  // ---- 3) Salesforce writeback -------------------------------------------
+  // ---- 2) Salesforce writeback -------------------------------------------
   const describe = await describeObject(CUSTOMER_SF_OBJECT);
   const schema = resolveCustomerFields(describe);
   if (schema.missingRequired.length) {
@@ -376,6 +440,23 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
   // stamped; the stored counter is the fallback for a call placed some other way.
   const attemptNo = Number(call?.metadata?.attempt_no) || attempts || 1;
 
+  // ---- Recording: after the ledger forward, before the writeback lands -----
+  //
+  // Sequenced here so the archived key can go INTO the log line the writeback is about
+  // to save — one Salesforce write, not two. `archiveRecording` never throws, so the
+  // writeback below runs whatever happens to the audio.
+  //
+  // Placing it after the idempotency check means a redelivery does not re-download a
+  // few MB to overwrite an identical object. The trade: if the very first delivery
+  // stored the status but failed the recording, a redelivery will not retry the audio.
+  // The Retell URL is in the log line and in the ledger row for exactly that case.
+  const recording = await archiveRecording({
+    call,
+    sfRecordId: record.Id,
+    tenantId,
+    now,
+  });
+
   const line = buildResultLogLine({
     stamp: phoenixStamp(now),
     attemptNo,
@@ -383,6 +464,7 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
     status,
     analysis,
     call,
+    recordingKey: recording.ok ? recording.key : null,
   });
   const nextLog = prependLogLine(existingLog, line);
 
@@ -398,12 +480,14 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
         call_id: callId,
         outcome,
         recording_url: call?.recording_url ?? null,
+        recording_key: recording.ok ? recording.key ?? null : null,
         call_summary: call?.call_analysis?.call_summary ?? null,
       },
     });
     console.log(
       `welcome-call RESULT ${recordId}: ${outcome} -> ${status} (attempt ${attemptNo}, ` +
-        `call_id=${callId}, forwarded=${forwarded.ok}, cache=${applied.cache}, realtime=${applied.realtime})`
+        `call_id=${callId}, forwarded=${forwarded.ok}, cache=${applied.cache}, ` +
+        `realtime=${applied.realtime}, recording=${recording.key ?? recording.reason ?? "none"})`
     );
     return {
       status: 200,
@@ -412,6 +496,7 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
         forwarded: forwarded.ok,
         salesforce: "updated",
         welcomeCallStatus: status,
+        recording: recording.ok ? recording.key ?? null : null,
       },
     };
   } catch (e) {

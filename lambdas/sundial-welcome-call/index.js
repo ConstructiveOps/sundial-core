@@ -1,42 +1,51 @@
 // sundial-welcome-call — the Welcome Call backend.
 //
-// ONE Lambda, TWO entry points, told apart by the SHAPE of the event:
+// ONE Lambda, THREE entry points. The first split is by the SHAPE of the event; the
+// two HTTP entry points are then split by PATH:
 //
 //   1. PLATFORM EVENT (no HTTP method on the event) — `Sundial_Welcome_Call_Request__e`
 //      relayed through Salesforce Event Relay -> Amazon EventBridge. Carries
 //      Customer_Id__c. Reads the customer FRESH from Salesforce, applies the
 //      eligibility guard, and places the call through Retell. See placeCall.js.
 //
-//   2. HTTP (POST /webhooks/retell) — Retell's lifecycle webhook. Forwards every
-//      analyzed call to the Zapier billing ledger, then writes the verification
-//      result back to Salesforce. See webhook.js.
+//   2. POST /webhooks/retell — Retell's lifecycle webhook. Forwards every analyzed
+//      call to the Zapier billing ledger, archives the recording into the record's S3
+//      folder, and writes the verification result back to Salesforce. See webhook.js.
 //
-// WHY SHAPE AND NOT A FLAG: the relay is Tim's to configure and its exact envelope
-// (EventBridge vs SQS-wrapped) is not settled — the same ambiguity sundial-budget
-// handles. An HTTP event always carries requestContext.http.method or httpMethod;
-// nothing else does. That test is stable across every relay variant.
+//   3. POST /welcome-call/orphan-match — the Zapier orphan sweep, after it works out
+//      which customer a rep-form call belonged to. Promotes the parked recording onto
+//      that record. See orphanMatch.js.
 //
-// There is NO portal UI for this feature and NO portal-authenticated route. The only
-// HTTP surface is the webhook, and its only gate is the x-retell-signature HMAC — no
-// Supabase JWT, no API Gateway authorizer (see webhook.js for why).
+// WHY SHAPE AND NOT A FLAG for the first split: the relay is Tim's to configure and
+// its exact envelope (EventBridge vs SQS-wrapped) is not settled — the same ambiguity
+// sundial-budget handles. An HTTP event always carries requestContext.http.method or
+// httpMethod; nothing else does. That test is stable across every relay variant.
+//
+// NEITHER HTTP ROUTE USES A PORTAL JWT, and there is no portal UI for this feature.
+// Both callers are machines with no Sundial user, so resolveIdentity has nothing to
+// verify. Each route is gated by its own shared secret in a header, constant-time
+// compared, and each FAILS CLOSED when its secret is unreadable.
 
 import { getConfig } from "./config.js";
 import { extractCustomerIds, placeWelcomeCall } from "./placeCall.js";
 import {
   EVENT_ANALYZED,
   SIGNATURE_HEADER,
+  constantTimeEquals,
   isAckOnlyEvent,
   processCallAnalyzed,
   verifySignature,
 } from "./webhook.js";
+import { ZAP_SECRET_HEADER, handleOrphanMatch } from "./orphanMatch.js";
 
-// Retell is a server, not a browser, so CORS is not required. A small permissive set
-// is sent so nothing downstream chokes; no credentials are echoed.
+// Both callers are servers, not browsers, so CORS is not required. A small permissive
+// set is sent so nothing downstream chokes; no credentials are echoed.
 const BASE_HEADERS = {
   "Content-Type": "application/json",
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Retell-Signature",
+  "Access-Control-Allow-Headers":
+    "Content-Type, X-Retell-Signature, X-Sundial-Zap-Secret",
 };
 
 function jsonResponse(statusCode, bodyObj) {
@@ -74,16 +83,59 @@ function rawBodyOf(event) {
   return String(body);
 }
 
+/** Is this request the orphan-match route rather than the Retell webhook? */
+function isOrphanMatchRoute(event) {
+  const path = event?.rawPath || event?.path || event?.requestContext?.path || "";
+  return /\/welcome-call\/orphan-match\/?$/.test(path);
+}
+
+// --- Orphan-match entry point ------------------------------------------------
+async function handleOrphanMatchRoute(event, cfg) {
+  const headers = normalizeHeaders(event?.headers);
+
+  // Same fail-closed rule as the Retell webhook: an unset secret must never mean
+  // "accept everything". This endpoint moves files between customer folders on the
+  // strength of a caller-supplied record id, so it is the last place to be lenient.
+  if (!cfg.zapOrphanMatchSecret) {
+    console.error(
+      "welcome-call orphan-match: ZAP_ORPHAN_MATCH_SECRET is not configured — rejecting."
+    );
+    return jsonResponse(401, { error: "unauthorized" });
+  }
+  const provided = headers[ZAP_SECRET_HEADER];
+  if (
+    typeof provided !== "string" ||
+    provided.length === 0 ||
+    !constantTimeEquals(provided, cfg.zapOrphanMatchSecret)
+  ) {
+    // Never log the expected or received secret — only that the gate rejected.
+    console.warn(`welcome-call orphan-match rejected: missing or invalid ${ZAP_SECRET_HEADER}.`);
+    return jsonResponse(401, { error: "unauthorized" });
+  }
+
+  let body;
+  try {
+    body = JSON.parse(rawBodyOf(event));
+  } catch {
+    return jsonResponse(400, { error: "invalid_body", code: "INVALID_BODY" });
+  }
+
+  const result = await handleOrphanMatch(body);
+  return jsonResponse(result.status, result.body);
+}
+
 // --- HTTP entry point -------------------------------------------------------
 async function handleHttp(event, method) {
   if (method === "OPTIONS") return { statusCode: 204, headers: BASE_HEADERS, body: "" };
   if (method !== "POST") return jsonResponse(405, { error: "method_not_allowed" });
 
+  const cfg = await getConfig();
+  if (isOrphanMatchRoute(event)) return await handleOrphanMatchRoute(event, cfg);
+
   const headers = normalizeHeaders(event?.headers);
   const rawBody = rawBodyOf(event);
 
   // --- AUTH GATE: the only protection on a public endpoint ------------------
-  const cfg = await getConfig();
   if (!cfg.retellWebhookSecret) {
     // Fail CLOSED. An unset secret must never mean "accept everything" — that would
     // let anyone set a customer's verification status.

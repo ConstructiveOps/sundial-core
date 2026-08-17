@@ -30,6 +30,11 @@ export const RETELL_SECRET_NAME = "sundial/retell/api";
 const SECRET_FIELD_CANDIDATES = {
   RETELL_API_KEY: ["api_key", "apiKey", "retell_api_key", "key"],
   RETELL_WEBHOOK_SECRET: ["webhook_secret", "webhookSecret", "signing_secret", "webhook_token"],
+  ZAP_ORPHAN_MATCH_SECRET: [
+    "zap_orphan_match_secret",
+    "orphan_match_secret",
+    "zap_secret",
+  ],
   RETELL_FROM_NUMBER: ["from_number", "fromNumber"],
   RETELL_AGENT_ID: ["agent_id", "agentId", "override_agent_id"],
   ZAPIER_RESULTS_HOOK_URL: ["zapier_results_hook_url", "zapier_hook_url", "results_hook_url"],
@@ -83,6 +88,7 @@ function fromSecret(secret, name) {
  *
  * @returns {Promise<{
  *   retellApiKey: string|null, retellWebhookSecret: string|null,
+ *   zapOrphanMatchSecret: string|null,
  *   retellFromNumber: string|null, retellAgentId: string|null,
  *   zapierResultsHookUrl: string|null
  * }>}
@@ -95,6 +101,7 @@ export async function getConfig() {
   return {
     retellApiKey: credential("RETELL_API_KEY"),
     retellWebhookSecret: credential("RETELL_WEBHOOK_SECRET"),
+    zapOrphanMatchSecret: credential("ZAP_ORPHAN_MATCH_SECRET"),
     retellFromNumber: setting("RETELL_FROM_NUMBER"),
     retellAgentId: setting("RETELL_AGENT_ID"),
     zapierResultsHookUrl: setting("ZAPIER_RESULTS_HOOK_URL"),

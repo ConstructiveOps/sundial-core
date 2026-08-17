@@ -290,6 +290,18 @@ export function phoenixStamp(date = new Date()) {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${PHOENIX_ABBR}`;
 }
 
+/**
+ * Date only, "2026-08-17", in America/Phoenix.
+ *
+ * Used in recording FILENAMES, which is why it must be Phoenix and not UTC: a call
+ * placed at 6pm Phoenix is already "tomorrow" in UTC, so a UTC-named file would sit
+ * in the Files tab under a date the office never dialed on.
+ */
+export function phoenixDate(date = new Date()) {
+  const p = phoenixParts(date);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic variables
 // ---------------------------------------------------------------------------

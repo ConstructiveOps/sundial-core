@@ -1493,3 +1493,81 @@ format), `docs/api-endpoints.md` (`POST /webhooks/retell`, env var table),
 `docs/integrations/budget-recalc-relay.md` (the platform-event relay pattern), D-045
 (secret/describe TTL and rotation), D-048 (the other public webhook), D-051 (cache
 deletion blind spot — part of why this read is always fresh).
+
+### D-054 addendum (2026-08-17): call recordings are archived into the normal file convention, and rep-form orphans get a holding prefix
+
+**Status:** Accepted, same day as D-054.
+
+**Context.** Retell's `recording_url` expires. The base design put it in
+`Welcome_Call_Log__c`, which means the link works today and 404s exactly when someone
+needs it — when a customer disputes what they agreed to. And a rep-form call has no
+Salesforce record to attach a recording to, sometimes not yet and sometimes not ever.
+
+**Decision.**
+
+1. **The recording is archived into the ordinary Sundial file convention** —
+   `SUNDIAL/{customerId}/welcome-call-{YYYY-MM-DD}-attempt-{n}.mp3` in `sfsolproj`,
+   with a `sundial_file_metadata` row (category `Welcome Call Recording`, uploader
+   `Wattson (system)`). Not a recordings bucket, not a new prefix: the existing
+   convention is what makes it appear on the portal Files tab, in XFiles Pro, and in
+   the Dropbox mirror with **no additional code** (docs/file-storage.md). The date is
+   **America/Phoenix** and the attempt number is in the filename, so a file is never
+   dated to a day the office did not dial on and attempt 2 never clobbers attempt 1.
+2. **Rep-form orphans park at `SUNDIAL/_orphan-welcome-calls/{call_id}.mp3`** with **no
+   metadata row**, and the key is forwarded to the billing ledger as
+   `s3_recording_key`. A new endpoint, `POST /welcome-call/orphan-match`, promotes the
+   file onto a record once the Zapier sweep identifies the customer.
+3. **The orphan path forwards to the ledger AFTER archiving; the attached path forwards
+   before.** This inverts D-054's "ledger first, always" — for the orphan case only.
+
+**Why.**
+
+**The leading underscore on `_orphan-welcome-calls` is deliberate.** It is not a valid
+Salesforce id, so the prefix can never collide with a record folder and XFiles Pro
+never resolves a record to it.
+
+**No metadata row for orphans.** Every file list query is scoped by `sf_record_id`. A
+row with a null one is unreachable by any surface — worse than no row, because it looks
+registered.
+
+**The ordering inversion is forced, not stylistic.** For a rep-form call the ledger row
+is the *only* trace of the call, and the sweep needs the recording's key. There is
+nothing to put in the payload unless the upload has already happened. The key is
+technically derivable from `call_id`, but a derived key cannot tell the sweep whether
+the upload *succeeded*; an explicit field can, and its absence means "nothing to match".
+The cost is bounded (a 20 s download cap) and the step cannot throw or skip the forward.
+
+**Idempotency had to be built backwards, because the match operation deletes its own
+input.** A retry cannot re-derive the destination key: that key embeds the holding
+object's `LastModified`, and the holding object is gone. So the retry path **searches**
+`SUNDIAL/{recordId}/` for `welcome-call-*-{call_id}.mp3` and reports `already_matched`.
+It also re-attempts the metadata row and the log line, each a no-op when present —
+without that, a run whose log append failed would have deleted the holding object and
+the note could never be written.
+
+**The destination is dated from the holding object, not from `now()`.** The sweep may
+run days after the call; the file should be named for the conversation it contains.
+
+**Consequences.**
+
+- **A second shared-secret gate** (`X-Sundial-Zap-Secret` / `ZAP_ORPHAN_MATCH_SECRET`),
+  fail-closed, credential-resolution identical to the Retell secret. The constant-time
+  compare is now a shared helper so the two gates cannot drift apart.
+- **`s3:DeleteObject` on `sfsolproj/SUNDIAL/*` is newly required** (orphan-match removes
+  the holding object). `AmazonS3FullAccess` covers it today; it matters only if the role
+  is ever tightened.
+- **A failed holding-object delete is not a failed match** — the bytes are attached and
+  registered. The response reports `holdingDeleted: false` and a retry cleans up.
+- **`findFileMetadataByKey` added to `lib/file-access.js`.** Deterministic keys mean a
+  re-run overwrites the S3 object harmlessly but would INSERT a second metadata row,
+  showing the file twice in the Files tab with no way to tell the rows apart. Shared, so
+  the other best-effort writers (copy-to-solar, budget snapshots, Aurora signed PDFs)
+  can close the same trap.
+- **Nothing accumulates in the holding prefix on its own, and there is no lifecycle
+  rule** — auto-deleting an unmatched recording of a contract conversation is the wrong
+  default. It needs periodic eyeballing instead.
+- **The Lambda's timeout floor rises to 60 s** (Zapier retries + a 20 s download + the
+  Salesforce round trips), and it now buffers a file in memory — capped at 50 MB, far
+  above any real phone recording.
+- The archived key is appended to the result log line as `archived=<key>`, so its
+  presence in Salesforce is also the record that archival succeeded.

@@ -599,8 +599,18 @@ Updates whitelisted fields on one tenant user. Body may contain `firstName`, `la
 
 **`call_analyzed` order of operations** — the order is the design:
 1. **Forward the full raw payload to `ZAPIER_RESULTS_HOOK_URL` FIRST**, before Salesforce is touched (3 attempts, 500 ms → 2 s backoff). That Zap is the billing ledger and records *every* analyzed call, including rep-initiated calls this Lambda never placed. On final failure the payload is logged at ERROR for manual replay and **processing continues** — a forward failure never blocks the writeback.
-2. If `call.metadata.sf_record_id` is **absent** (rep-form call, possibly no Salesforce record yet), the forward was the whole job → 200, Salesforce is never queried.
-3. Otherwise map `call_analysis.custom_analysis_data.verification_result` to `Welcome_Call_Status__c`, append a log line, then Salesforce → cache → Realtime.
+2. If `call.metadata.sf_record_id` is **absent** (rep-form call, possibly no Salesforce record yet), the forward was the whole job → 200, Salesforce is never queried. *Exception to the ordering above:* the recording is parked **before** the forward here, so its key can be added to the forwarded payload as `s3_recording_key`.
+3. Otherwise: **archive the recording** (below), map `call_analysis.custom_analysis_data.verification_result` to `Welcome_Call_Status__c`, append a log line carrying the archived key, then Salesforce → cache → Realtime.
+
+**Recording archival.** `call.recording_url` is downloaded server-side (https only, no credentials attached, 20 s / 50 MB caps) and written to the `sfsolproj` bucket — which puts it on the record's portal Files tab, in XFiles Pro, and in the Dropbox mirror with no further work.
+
+| Case | S3 key | Supabase metadata |
+|---|---|---|
+| `sf_record_id` present | `SUNDIAL/{sf_record_id}/welcome-call-{YYYY-MM-DD}-attempt-{n}.mp3` | row, category `Welcome Call Recording`, uploader `Wattson (system)` |
+| absent (rep-form orphan) | `SUNDIAL/_orphan-welcome-calls/{call_id}.mp3` | **none** — no record to attach to |
+| no `recording_url` | — skipped silently (the call never connected) | — |
+
+Date is **America/Phoenix**; `attempt_no` comes from `call.metadata` and falls back to the literal `x`. **The whole step is non-fatal**: any failure logs at ERROR with the `call_id` and the (still-live) `recording_url` for manual retrieval, and the Salesforce writeback proceeds regardless. Keys are deterministic, so a redelivery overwrites in place, and the metadata insert is skipped when a row for that key already exists.
 
 **Idempotency:** a `Welcome_Call_Log__c` line carrying both this `call_id` and the `Result:` marker means the call was already recorded → ack and skip. (Retell may redeliver. The Zapier forward is *not* suppressed on a duplicate, so **dedupe on `call_id` in the Zap**.)
 
@@ -611,7 +621,33 @@ Updates whitelisted fields on one tenant user. Body may contain `firstName`, `la
 | 401 | missing/invalid signature, or `RETELL_WEBHOOK_SECRET` not configured |
 | **500** | **Salesforce writeback failed — deliberate**, so Retell retries; the ledger already has the call and the idempotency guard makes redelivery safe |
 
-**Wiring:** `scripts/wire-retell-webhook-route.ps1`.
+**Wiring (both Welcome Call routes):** `scripts/wire-welcome-call-routes.ps1`.
+
+#### `POST /welcome-call/orphan-match`
+
+**Lambda:** `sundial-welcome-call`
+**Purpose:** Promote a parked rep-form recording onto the customer record, once the Zapier orphan sweep has worked out who the call belonged to.
+
+**Authentication:** `X-Sundial-Zap-Secret` compared constant-time against `ZAP_ORPHAN_MATCH_SECRET`. **Not a portal JWT** — the caller is a Zap. An unset secret fails closed (401).
+
+**Request body:** `{ "call_id": "call_abc123", "sf_record_id": "a1P7y00000AUo6TEAT" }`
+
+**Behavior:** verifies `SUNDIAL/_orphan-welcome-calls/{call_id}.mp3` exists → copies it to `SUNDIAL/{sf_record_id}/welcome-call-{YYYY-MM-DD}-{call_id}.mp3` (**date from the holding object's `LastModified`**, Phoenix time — the sweep may run days after the call, and the file should be named for the conversation, not the sweep) → registers Supabase metadata → prepends `rep-form call {call_id} matched, recording attached` to `Welcome_Call_Log__c` (then cache + Realtime) → deletes the holding object **last**.
+
+**Idempotent, and it has to work backwards.** The operation ends by deleting its own input, so a retry cannot re-derive the destination key (that key embeds the holding object's `LastModified`). Instead the retry **searches** `SUNDIAL/{sf_record_id}/` for `welcome-call-*-{call_id}.mp3` and returns `already_matched: true`. It also re-attempts the metadata row and the log line, skipping each if already present — so a partially-failed run converges rather than silently losing the note.
+
+**Response (200):**
+```json
+{ "already_matched": false, "key": "SUNDIAL/a1P.../welcome-call-2026-08-15-call_abc123.mp3",
+  "recordId": "a1P...", "callId": "call_abc123", "sizeBytes": 184320,
+  "metadata": "registered", "log": "appended", "holdingDeleted": true }
+```
+
+**Errors:** 400 (`MISSING_FIELDS`, `INVALID_RECORD_ID`, `INVALID_CALL_ID`, `INVALID_BODY`), 401 (missing/invalid secret, or none configured), 404 (`RECORD_NOT_FOUND`; `RECORDING_NOT_FOUND` when neither a holding object nor an already-matched file exists).
+
+A failed holding-object delete is **not** a failed match — the bytes are attached and registered, so the call returns 200 with `holdingDeleted: false` and a later retry cleans up.
+
+**IAM:** `sfsolproj` `ListBucket` plus `GetObject`/`PutObject`/`DeleteObject` on `sfsolproj/SUNDIAL/*`. The execution role carries `AmazonS3FullAccess` today (verified 2026-08-03 for copy-to-solar), so no IAM change is expected — but `DeleteObject` is new for this feature, so confirm it if the role is ever tightened.
 
 #### `POST /webhooks/acumatica`
 
@@ -658,7 +694,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
-| `sundial-welcome-call` | POST /webhooks/retell (**also** EventBridge — see below) |
+| `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:
@@ -694,6 +730,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `ZAPIER_RESULTS_HOOK_URL` | `sundial-welcome-call` | **Yes** (for the billing ledger) | Catch Hook of the billing-ledger Zap. Unset means analyzed calls are logged at ERROR instead of billed; the Salesforce writeback still runs. |
 | `RETELL_API_KEY` | `sundial-welcome-call` | Credential | **Prefer the `sundial/retell/api` secret** — the secret wins over this env var so the key can be rotated without a redeploy. Accepted here as a fallback. |
 | `RETELL_WEBHOOK_SECRET` | `sundial-welcome-call` | Credential | Same: secret-first, env fallback. If neither is set the webhook **rejects everything with 401** (fails closed). |
+| `ZAP_ORPHAN_MATCH_SECRET` | `sundial-welcome-call` | Credential | Shared secret for `POST /welcome-call/orphan-match` (`X-Sundial-Zap-Secret`). Secret-first, env fallback; fails closed when unset. |
 
 Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
 

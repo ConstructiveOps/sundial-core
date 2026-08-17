@@ -100,6 +100,7 @@ function resetCtx() {
   ctx.secret = {
     api_key: "retell-key",
     webhook_secret: WEBHOOK_SECRET,
+    zap_orphan_match_secret: "zap-orphan-secret",
     from_number: "+16025550000",
     agent_id: "agent_welcome",
   };
@@ -114,13 +115,22 @@ function resetCtx() {
   ctx.retellResponse = { status: 201, body: { call_id: "call_abc123" } };
   ctx.zapierPosts = [];
   ctx.zapierResponses = [];
+  ctx.s3Objects = new Map();
+  ctx.s3Ops = [];
+  ctx.s3Throws = null; // { op: "PutObject", message } -> that op throws
+  ctx.metadataInserts = [];
+  ctx.recordingResponse = { status: 200, bytes: Buffer.from("ID3fake-mp3-bytes") };
   process.env.ZAPIER_RESULTS_HOOK_URL = "https://hooks.zapier.com/hooks/catch/1/abc/";
   delete process.env.RETELL_API_KEY;
   delete process.env.RETELL_FROM_NUMBER;
   delete process.env.RETELL_AGENT_ID;
   delete process.env.RETELL_WEBHOOK_SECRET;
+  delete process.env.ZAP_ORPHAN_MATCH_SECRET;
 }
 resetCtx();
+
+const ZAP_SECRET = "zap-orphan-secret";
+const RECORDING_URL = "https://recordings.retellai.com/call_abc123.wav";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -145,29 +155,138 @@ mock.module("../../lib/salesforce.js", {
   },
 });
 
-// A minimal PostgREST-shaped chainable stub: .from().update().eq().eq() resolves.
+// A minimal PostgREST-shaped chainable stub covering the three shapes this Lambda
+// uses: .update().eq().eq(), .insert().select().maybeSingle(), and
+// .select().eq().limit().maybeSingle(). The metadata select reads back what the
+// inserts recorded, so the "skip if already registered" path is really exercised.
 function supabaseStub() {
   return {
     from(table) {
-      const rec = { table, patch: null, filters: {} };
+      const rec = { table, op: null, patch: null, row: null, filters: {} };
+      const finish = () => {
+        if (rec.op === "insert") {
+          ctx.metadataInserts.push(rec.row);
+          return Promise.resolve({
+            data: { id: `meta-${ctx.metadataInserts.length}` },
+            error: null,
+          });
+        }
+        if (rec.op === "update") {
+          ctx.cacheUpdates.push(rec);
+          return Promise.resolve({ error: null });
+        }
+        const hit = ctx.metadataInserts.find((r) => r.s3_key === rec.filters.s3_key);
+        return Promise.resolve({ data: hit ? { id: "existing" } : null, error: null });
+      };
       const chain = {
         update(patch) {
+          rec.op = "update";
           rec.patch = patch;
+          return chain;
+        },
+        insert(row) {
+          rec.op = "insert";
+          rec.row = row;
+          return chain;
+        },
+        select() {
           return chain;
         },
         eq(col, val) {
           rec.filters[col] = val;
           return chain;
         },
-        then(resolve) {
-          ctx.cacheUpdates.push(rec);
-          return Promise.resolve({ error: null }).then(resolve);
+        limit() {
+          return chain;
         },
+        maybeSingle: () => finish(),
+        then: (resolve, reject) => finish().then(resolve, reject),
       };
       return chain;
     },
   };
 }
+
+// --- @aws-sdk/client-s3 stub -------------------------------------------------
+// An in-memory bucket. Commands are plain tagged objects; the client dispatches on
+// the tag. Enough fidelity to exercise key construction, copy, head, list-by-prefix
+// and delete — which is where every bug in this feature would live.
+function s3Command(op) {
+  return class {
+    constructor(input) {
+      this.op = op;
+      this.input = input;
+    }
+  };
+}
+
+mock.module("@aws-sdk/client-s3", {
+  exports: {
+    PutObjectCommand: s3Command("PutObject"),
+    HeadObjectCommand: s3Command("HeadObject"),
+    CopyObjectCommand: s3Command("CopyObject"),
+    DeleteObjectCommand: s3Command("DeleteObject"),
+    ListObjectsV2Command: s3Command("ListObjectsV2"),
+    GetObjectCommand: s3Command("GetObject"),
+    S3Client: class {
+      async send(cmd) {
+        ctx.s3Ops.push({ op: cmd.op, key: cmd.input?.Key, input: cmd.input });
+        if (ctx.s3Throws?.op === cmd.op) throw new Error(ctx.s3Throws.message);
+
+        switch (cmd.op) {
+          case "PutObject":
+            ctx.s3Objects.set(cmd.input.Key, {
+              body: cmd.input.Body,
+              size: cmd.input.Body?.length ?? 0,
+              lastModified: ctx.s3PutTime ?? new Date("2026-08-17T21:32:00Z"),
+              contentType: cmd.input.ContentType,
+            });
+            return {};
+          case "HeadObject": {
+            const o = ctx.s3Objects.get(cmd.input.Key);
+            if (!o) {
+              const e = new Error("NotFound");
+              e.name = "NotFound";
+              e.$metadata = { httpStatusCode: 404 };
+              throw e;
+            }
+            return { ContentLength: o.size, LastModified: o.lastModified };
+          }
+          case "CopyObject": {
+            // CopySource is "bucket/uri-encoded-key" — decode it back to a key.
+            const src = String(cmd.input.CopySource);
+            const key = src
+              .slice(src.indexOf("/") + 1)
+              .split("/")
+              .map(decodeURIComponent)
+              .join("/");
+            const o = ctx.s3Objects.get(key);
+            if (!o) {
+              const e = new Error("NoSuchKey");
+              e.name = "NoSuchKey";
+              e.$metadata = { httpStatusCode: 404 };
+              throw e;
+            }
+            ctx.s3Objects.set(cmd.input.Key, { ...o });
+            return {};
+          }
+          case "DeleteObject":
+            ctx.s3Objects.delete(cmd.input.Key);
+            return {};
+          case "ListObjectsV2": {
+            const prefix = cmd.input.Prefix || "";
+            const Contents = [...ctx.s3Objects.entries()]
+              .filter(([k]) => k.startsWith(prefix))
+              .map(([k, v]) => ({ Key: k, Size: v.size, LastModified: v.lastModified }));
+            return { Contents, IsTruncated: false };
+          }
+          default:
+            throw new Error(`unexpected S3 command ${cmd.op}`);
+        }
+      }
+    },
+  },
+});
 
 mock.module("../../lib/supabase.js", {
   exports: {
@@ -191,6 +310,17 @@ mock.module("../../lib/realtime.js", {
 // throws, so a new call site can't slip through a test unnoticed.
 globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
+
+  if (u.includes("recordings.retellai.com") || u.includes("recordings.example")) {
+    const { status, bytes, throws } = ctx.recordingResponse;
+    if (throws) throw new Error(throws);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (h) => (h === "content-length" ? String(bytes?.length ?? 0) : null) },
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
+    };
+  }
 
   if (u.includes("api.retellai.com")) {
     ctx.retellCalls.push({ url: u, headers: init.headers, body: JSON.parse(init.body) });
@@ -241,6 +371,8 @@ const fieldsMod = await import("./fields.js");
 const wb = await import("./writeback.js");
 const hook = await import("./webhook.js");
 const place = await import("./placeCall.js");
+const rec = await import("./recording.js");
+const orphan = await import("./orphanMatch.js");
 const { handler } = await import("./index.js");
 const { clearConfigCache } = await import("./config.js");
 
@@ -267,12 +399,23 @@ function signedWebhookEvent(payload, secret = WEBHOOK_SECRET) {
   };
 }
 
+function orphanMatchEvent(body, secret = ZAP_SECRET) {
+  const headers = { "Content-Type": "application/json" };
+  if (secret !== null) headers["X-Sundial-Zap-Secret"] = secret;
+  return {
+    httpMethod: "POST",
+    path: "/welcome-call/orphan-match",
+    headers,
+    body: JSON.stringify(body),
+  };
+}
+
 function analyzedPayload(overrides = {}, analysisOverrides = {}) {
   return {
     event: "call_analyzed",
     call: {
       call_id: "call_abc123",
-      recording_url: "https://recordings.retellai.com/call_abc123.wav",
+      recording_url: RECORDING_URL,
       in_voicemail: false,
       metadata: { source: "sundial", sf_record_id: baseCustomer().Id, attempt_no: 1 },
       call_analysis: {
@@ -989,4 +1132,417 @@ test("a failing platform-event batch throws so the relay retries", async () => {
     () => handler({ detail: { payload: { Customer_Id__c: baseCustomer().Id } } }),
     /1 of 1 call attempts failed/
   );
+});
+
+// ===========================================================================
+// Recording archival — key construction
+// ===========================================================================
+
+test("recording keys follow the SUNDIAL/{recordId}/ convention", () => {
+  assert.equal(
+    rec.attachedRecordingKey("a1P7y00000AUo6TEAT", "2026-08-17", "2"),
+    "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-17-attempt-2.mp3"
+  );
+  assert.equal(
+    rec.matchedRecordingKey("a1P7y00000AUo6TEAT", "2026-08-17", "call_abc123"),
+    "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-17-call_abc123.mp3"
+  );
+  assert.equal(
+    rec.orphanRecordingKey("call_abc123"),
+    "SUNDIAL/_orphan-welcome-calls/call_abc123.mp3"
+  );
+});
+
+test("a hostile call_id cannot escape the holding prefix", () => {
+  // call_id reaches us inside the (signed) payload, but the key it builds must be
+  // safe regardless — a traversal here would write outside SUNDIAL/.
+  const key = rec.orphanRecordingKey("../../etc/passwd");
+  assert.ok(key.startsWith("SUNDIAL/_orphan-welcome-calls/"));
+  assert.ok(!key.includes(".."));
+  assert.ok(!key.slice("SUNDIAL/_orphan-welcome-calls/".length).includes("/"));
+});
+
+test("attempt_no falls back to 'x' when absent or nonsense", () => {
+  assert.equal(rec.normalizeAttemptNo(3), "3");
+  assert.equal(rec.normalizeAttemptNo("3"), "3");
+  assert.equal(rec.normalizeAttemptNo(undefined), "x");
+  assert.equal(rec.normalizeAttemptNo(null), "x");
+  assert.equal(rec.normalizeAttemptNo(0), "x");
+  assert.equal(rec.normalizeAttemptNo(-1), "x");
+  assert.equal(rec.normalizeAttemptNo("../evil"), "x");
+  assert.equal(rec.normalizeAttemptNo(99999), "x");
+});
+
+test("phoenixDate is the Phoenix calendar day, not the UTC one", () => {
+  // 2026-08-18T02:00Z is still 2026-08-17 at 19:00 in Phoenix. A UTC-named file would
+  // sit under a date the office never dialed on.
+  assert.equal(fmt.phoenixDate(new Date("2026-08-18T02:00:00Z")), "2026-08-17");
+  assert.equal(fmt.phoenixDate(new Date("2026-08-17T21:32:00Z")), "2026-08-17");
+});
+
+// ===========================================================================
+// Recording archival — download guards
+// ===========================================================================
+
+test("a non-https or unparseable recording_url is refused before any fetch", async () => {
+  fresh();
+  assert.equal((await rec.downloadRecording("http://insecure/x.mp3")).ok, false);
+  assert.equal((await rec.downloadRecording("not a url")).ok, false);
+  assert.equal((await rec.downloadRecording("file:///etc/passwd")).ok, false);
+});
+
+test("a download failure is reported, never thrown", async () => {
+  fresh();
+  ctx.recordingResponse = { status: 404, bytes: Buffer.alloc(0) };
+  const r = await rec.archiveRecording({
+    call: { call_id: "c1", recording_url: RECORDING_URL },
+    sfRecordId: "a1P7y00000AUo6TEAT",
+    tenantId: "a1W7y000007AszBEAS",
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /HTTP 404/);
+  assert.equal(ctx.s3Objects.size, 0);
+});
+
+test("an empty recording is not archived", async () => {
+  fresh();
+  ctx.recordingResponse = { status: 200, bytes: Buffer.alloc(0) };
+  const r = await rec.archiveRecording({
+    call: { call_id: "c1", recording_url: RECORDING_URL },
+    sfRecordId: "a1P7y00000AUo6TEAT",
+  });
+  assert.equal(r.ok, false);
+  assert.equal(ctx.s3Objects.size, 0);
+});
+
+test("no recording_url skips silently — it is the normal no-answer case", async () => {
+  fresh();
+  const r = await rec.archiveRecording({ call: { call_id: "c1" }, sfRecordId: "a1P" });
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, true);
+  assert.equal(ctx.s3Ops.length, 0);
+});
+
+// ===========================================================================
+// Recording archival — through the webhook
+// ===========================================================================
+
+test("an attached call's recording lands in the record folder with metadata", async () => {
+  fresh();
+  const res = await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(res.statusCode, 200);
+
+  // Dated from the wall clock (the handler doesn't take an injected `now`), so the
+  // expectation is derived the same way rather than pinned to the day this was written.
+  const today = fmt.phoenixDate(new Date());
+  const key = `SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-${today}-attempt-1.mp3`;
+  assert.equal(parse(res).recording, key);
+  assert.ok(ctx.s3Objects.has(key));
+  assert.equal(ctx.s3Objects.get(key).contentType, "audio/mpeg");
+
+  assert.equal(ctx.metadataInserts.length, 1);
+  const meta = ctx.metadataInserts[0];
+  assert.equal(meta.s3_key, key);
+  assert.equal(meta.file_name, `welcome-call-${today}-attempt-1.mp3`);
+  assert.equal(meta.category, "Welcome Call Recording");
+  assert.equal(meta.uploaded_by_user_name, "Wattson (system)");
+  assert.equal(meta.mime_type, "audio/mpeg");
+  assert.equal(meta.sf_record_id, "a1P7y00000AUo6TEAT");
+  assert.equal(meta.sf_object_type, "Sundial_Customer__c");
+  assert.equal(meta.tenant_id, "a1W7y000007AszBEAS");
+  assert.equal(meta.file_size_bytes, ctx.recordingResponse.bytes.length);
+});
+
+test("the archived key goes into the same Salesforce write as the status", async () => {
+  fresh();
+  await handler(signedWebhookEvent(analyzedPayload()));
+  // One SF write, not two — the recording step runs before the writeback so its key
+  // can ride along in the log line.
+  assert.equal(ctx.sfUpdates.length, 1);
+  const today = fmt.phoenixDate(new Date());
+  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
+  assert.ok(
+    line.includes(
+      `archived=SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-${today}-attempt-1.mp3`
+    ),
+    line
+  );
+  // The (expiring) Retell URL is still recorded alongside the durable key.
+  assert.match(line, /recording=https:\/\/recordings\.retellai\.com/);
+});
+
+test("a recording failure does NOT block the Salesforce writeback", async () => {
+  fresh();
+  ctx.s3Throws = { op: "PutObject", message: "AccessDenied" };
+  const res = await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).salesforce, "updated");
+  assert.equal(parse(res).recording, null);
+  assert.equal(ctx.sfUpdates[0].fields.Welcome_Call_Status__c, "Verified");
+  // No archived= segment, because nothing was archived.
+  assert.ok(!ctx.sfUpdates[0].fields.Welcome_Call_Log__c.includes("archived="));
+});
+
+test("redelivery overwrites the same key and does not duplicate the metadata row", async () => {
+  fresh();
+  await rec.archiveRecording({
+    call: { call_id: "call_abc123", recording_url: RECORDING_URL, metadata: { attempt_no: 1 } },
+    sfRecordId: "a1P7y00000AUo6TEAT",
+    tenantId: "a1W7y000007AszBEAS",
+    now: new Date("2026-08-17T21:32:00Z"),
+  });
+  const second = await rec.archiveRecording({
+    call: { call_id: "call_abc123", recording_url: RECORDING_URL, metadata: { attempt_no: 1 } },
+    sfRecordId: "a1P7y00000AUo6TEAT",
+    tenantId: "a1W7y000007AszBEAS",
+    now: new Date("2026-08-17T21:32:00Z"),
+  });
+  assert.equal(second.metadata, "already_registered");
+  assert.equal(ctx.s3Objects.size, 1); // same key, overwritten
+  assert.equal(ctx.metadataInserts.length, 1); // NOT two rows in the Files tab
+});
+
+test("an attempt-2 call gets its own key rather than clobbering attempt 1", async () => {
+  fresh();
+  for (const attempt of [1, 2]) {
+    await rec.archiveRecording({
+      call: {
+        call_id: `call_${attempt}`,
+        recording_url: RECORDING_URL,
+        metadata: { attempt_no: attempt },
+      },
+      sfRecordId: "a1P7y00000AUo6TEAT",
+      now: new Date("2026-08-17T21:32:00Z"),
+    });
+  }
+  assert.equal(ctx.s3Objects.size, 2);
+  assert.ok(ctx.s3Objects.has("SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-17-attempt-1.mp3"));
+  assert.ok(ctx.s3Objects.has("SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-17-attempt-2.mp3"));
+});
+
+// ===========================================================================
+// Orphan recordings — parked, and announced to the ledger
+// ===========================================================================
+
+test("a rep-form call parks the recording and forwards its key to the ledger", async () => {
+  fresh();
+  const payload = analyzedPayload({ metadata: { source: "rep_form" } });
+  const res = await handler(signedWebhookEvent(payload));
+  assert.equal(res.statusCode, 200);
+
+  const key = "SUNDIAL/_orphan-welcome-calls/call_abc123.mp3";
+  assert.ok(ctx.s3Objects.has(key));
+  assert.equal(parse(res).recording, key);
+
+  // The ledger payload is enriched — this is the ONE case it isn't Retell's raw bytes.
+  assert.equal(ctx.zapierPosts.length, 1);
+  const forwarded = JSON.parse(ctx.zapierPosts[0].body);
+  assert.equal(forwarded.s3_recording_key, key);
+  assert.equal(forwarded.event, "call_analyzed"); // rest of the payload intact
+  assert.equal(forwarded.call.call_id, "call_abc123");
+
+  // No Salesforce, and no metadata row — there is no record to attach it to.
+  assert.equal(ctx.sfUpdates.length, 0);
+  assert.equal(ctx.metadataInserts.length, 0);
+});
+
+test("an orphan whose recording fails still reaches the ledger, without the key", async () => {
+  fresh();
+  ctx.s3Throws = { op: "PutObject", message: "AccessDenied" };
+  const res = await handler(
+    signedWebhookEvent(analyzedPayload({ metadata: { source: "rep_form" } }))
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(ctx.zapierPosts.length, 1);
+  const forwarded = JSON.parse(ctx.zapierPosts[0].body);
+  assert.ok(!("s3_recording_key" in forwarded)); // absence means "nothing to match"
+});
+
+test("an orphan with no recording forwards Retell's raw bytes untouched", async () => {
+  fresh();
+  const payload = analyzedPayload({ metadata: { source: "rep_form" }, recording_url: null });
+  const event = signedWebhookEvent(payload);
+  const res = await handler(event);
+  assert.equal(res.statusCode, 200);
+  assert.equal(ctx.zapierPosts[0].body, event.body);
+  assert.equal(ctx.s3Objects.size, 0);
+});
+
+// ===========================================================================
+// POST /welcome-call/orphan-match
+// ===========================================================================
+
+function parkOrphan(callId = "call_abc123", when = new Date("2026-08-17T21:32:00Z")) {
+  ctx.s3Objects.set(`SUNDIAL/_orphan-welcome-calls/${callId}.mp3`, {
+    body: Buffer.from("mp3"),
+    size: 3,
+    lastModified: when,
+    contentType: "audio/mpeg",
+  });
+}
+
+test("orphan-match requires the shared secret and fails closed without one", async () => {
+  fresh();
+  parkOrphan();
+  // No header.
+  assert.equal(
+    (await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }, null)))
+      .statusCode,
+    401
+  );
+  // Wrong secret.
+  assert.equal(
+    (await handler(
+      orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }, "nope")
+    )).statusCode,
+    401
+  );
+  // Secret not configured at all -> reject, never accept-everything.
+  ctx.secret = { api_key: "k", webhook_secret: WEBHOOK_SECRET };
+  clearConfigCache();
+  assert.equal(
+    (await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id })))
+      .statusCode,
+    401
+  );
+  assert.equal(ctx.s3Ops.filter((o) => o.op === "CopyObject").length, 0);
+});
+
+test("orphan-match promotes the recording, logs it, and deletes the holding object", async () => {
+  fresh();
+  parkOrphan("call_abc123", new Date("2026-08-15T20:00:00Z")); // 13:00 MST on the 15th
+  const res = await handler(
+    orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+
+  // Date comes from the HOLDING object, not from now.
+  const expected =
+    "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-15-call_abc123.mp3";
+  assert.equal(body.key, expected);
+  assert.equal(body.already_matched, false);
+  assert.ok(ctx.s3Objects.has(expected));
+  assert.ok(!ctx.s3Objects.has("SUNDIAL/_orphan-welcome-calls/call_abc123.mp3"));
+  assert.equal(body.holdingDeleted, true);
+
+  assert.equal(ctx.metadataInserts.length, 1);
+  assert.equal(ctx.metadataInserts[0].s3_key, expected);
+  assert.equal(ctx.metadataInserts[0].category, "Welcome Call Recording");
+
+  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
+  assert.match(line, /rep-form call call_abc123 matched, recording attached/);
+  assert.match(line, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} MST · /);
+});
+
+test("orphan-match is idempotent once the holding object is gone", async () => {
+  fresh();
+  parkOrphan();
+  const first = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(first.already_matched, false);
+
+  // Simulate the Zap calling again. The destination key cannot be re-derived (the
+  // holding object's LastModified is gone), so the retry has to FIND it.
+  ctx.queryRows = [
+    baseCustomer({ Welcome_Call_Log__c: ctx.sfUpdates[0].fields.Welcome_Call_Log__c }),
+  ];
+  const before = ctx.sfUpdates.length;
+  const second = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(second.already_matched, true);
+  assert.equal(second.key, first.key);
+  assert.equal(second.log, "already_present");
+  assert.equal(second.metadata, "already_registered");
+  assert.equal(ctx.sfUpdates.length, before); // no duplicate log line
+  assert.equal(ctx.metadataInserts.length, 1); // no duplicate metadata row
+});
+
+test("a retry heals a run whose log append failed", async () => {
+  fresh();
+  parkOrphan();
+  ctx.sfUpdateThrows = "UNABLE_TO_LOCK_ROW";
+  const first = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  // The recording still got attached, and the endpoint still reports success...
+  assert.equal(first.already_matched, false);
+  assert.equal(first.log, "failed");
+  assert.ok(ctx.s3Objects.has(first.key));
+
+  // ...and a retry writes the note that was lost.
+  ctx.sfUpdateThrows = null;
+  const second = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(second.already_matched, true);
+  assert.equal(second.log, "appended");
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    /rep-form call call_abc123 matched, recording attached/
+  );
+});
+
+test("orphan-match 404s when there is nothing parked and nothing matched", async () => {
+  fresh();
+  const res = await handler(
+    orphanMatchEvent({ call_id: "call_missing", sf_record_id: baseCustomer().Id })
+  );
+  assert.equal(res.statusCode, 404);
+  assert.equal(parse(res).code, "RECORDING_NOT_FOUND");
+  assert.equal(parse(res).holdingKey, "SUNDIAL/_orphan-welcome-calls/call_missing.mp3");
+});
+
+test("orphan-match validates its inputs and the target record", async () => {
+  fresh();
+  parkOrphan();
+  assert.equal(
+    (await handler(orphanMatchEvent({ call_id: "call_abc123" }))).statusCode,
+    400
+  );
+  assert.equal((await handler(orphanMatchEvent({ sf_record_id: baseCustomer().Id }))).statusCode, 400);
+  assert.equal(
+    (await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: "nope" }))).statusCode,
+    400
+  );
+
+  // A well-formed id for a record that doesn't exist -> 404, nothing copied.
+  ctx.queryRows = [];
+  const res = await handler(
+    orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id })
+  );
+  assert.equal(res.statusCode, 404);
+  assert.equal(parse(res).code, "RECORD_NOT_FOUND");
+  assert.equal(ctx.s3Ops.filter((o) => o.op === "CopyObject").length, 0);
+});
+
+test("a failed holding delete still reports the match as done", async () => {
+  fresh();
+  parkOrphan();
+  ctx.s3Throws = { op: "DeleteObject", message: "AccessDenied" };
+  const body = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(body.already_matched, false);
+  assert.equal(body.holdingDeleted, false);
+  assert.ok(ctx.s3Objects.has(body.key)); // the bytes are attached, which is the point
+});
+
+test("the two HTTP routes are told apart by path, and neither takes a portal JWT", async () => {
+  fresh();
+  parkOrphan();
+  // The Retell signature is NOT accepted on the orphan-match route...
+  const sigEvent = signedWebhookEvent(analyzedPayload());
+  const res = await handler({ ...sigEvent, path: "/welcome-call/orphan-match" });
+  assert.equal(res.statusCode, 401);
+  // ...and the Zap secret is not accepted on the webhook route.
+  const zapOnWebhook = await handler({
+    httpMethod: "POST",
+    path: "/webhooks/retell",
+    headers: { "X-Sundial-Zap-Secret": ZAP_SECRET },
+    body: JSON.stringify(analyzedPayload()),
+  });
+  assert.equal(zapOnWebhook.statusCode, 401);
 });

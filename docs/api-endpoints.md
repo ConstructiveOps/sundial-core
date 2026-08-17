@@ -43,7 +43,7 @@ six and redeploying all twelve. (Consolidation is logged as tech debt in TASKS.m
 
 ## Authentication
 
-All requests except `/webhooks/acumatica` require a Supabase JWT in the `Authorization` header:
+All requests except the `/webhooks/*` routes require a Supabase JWT in the `Authorization` header:
 
 ```
 Authorization: Bearer <supabase-jwt>
@@ -580,6 +580,39 @@ Updates whitelisted fields on one tenant user. Body may contain `firstName`, `la
 
 **Tests:** `lambdas/sundial-aurora-webhook/test.js` (14) and `lambdas/sundial-aurora-inbound/test.js` (55), via `npm test`.
 
+#### `POST /webhooks/retell`
+
+**Lambda:** `sundial-welcome-call`
+**Purpose:** Retell AI's call lifecycle webhook for the automated **Welcome Call** (the post-sale contract-verification call). Forwards every analyzed call to the Zapier billing ledger, then writes the verification result back to `Sundial_Customer__c`. Full runbook: `docs/integrations/retell-welcome-call.md`. Design rationale: **D-054**.
+
+> **This is the only HTTP route the Welcome Call feature adds.** There is no portal UI and no portal-authenticated endpoint. The call-placing side is invoked by EventBridge from a Salesforce platform event, not over HTTP.
+
+**Authentication:** `X-Retell-Signature` — HMAC-SHA256 of the **raw request body**, keyed with `RETELL_WEBHOOK_SECRET`, hex-encoded (Retell sends `v=<hex>`; a bare hex value is also accepted). Constant-time compared in-Lambda. **No Supabase JWT and no API Gateway authorizer** — the caller is a machine with no portal user. An **unset secret fails closed (401)**, never open.
+
+**Request body:** Retell's lifecycle payload, `{ event, call: { … } }`.
+
+| `event` | Behavior |
+|---|---|
+| `call_started`, `call_ended` | Acked and ignored — 200, no ledger row, no Salesforce write |
+| `call_analyzed` | Fully processed (below) |
+| anything else | Acked (200) so Retell stops retrying |
+
+**`call_analyzed` order of operations** — the order is the design:
+1. **Forward the full raw payload to `ZAPIER_RESULTS_HOOK_URL` FIRST**, before Salesforce is touched (3 attempts, 500 ms → 2 s backoff). That Zap is the billing ledger and records *every* analyzed call, including rep-initiated calls this Lambda never placed. On final failure the payload is logged at ERROR for manual replay and **processing continues** — a forward failure never blocks the writeback.
+2. If `call.metadata.sf_record_id` is **absent** (rep-form call, possibly no Salesforce record yet), the forward was the whole job → 200, Salesforce is never queried.
+3. Otherwise map `call_analysis.custom_analysis_data.verification_result` to `Welcome_Call_Status__c`, append a log line, then Salesforce → cache → Realtime.
+
+**Idempotency:** a `Welcome_Call_Log__c` line carrying both this `call_id` and the `Result:` marker means the call was already recorded → ack and skip. (Retell may redeliver. The Zapier forward is *not* suppressed on a duplicate, so **dedupe on `call_id` in the Zap**.)
+
+**Responses:**
+| Code | When |
+|---|---|
+| 200 | processed, duplicate, ack-only event, no `sf_record_id`, record deleted |
+| 401 | missing/invalid signature, or `RETELL_WEBHOOK_SECRET` not configured |
+| **500** | **Salesforce writeback failed — deliberate**, so Retell retries; the ledger already has the call and the idempotency guard makes redelivery safe |
+
+**Wiring:** `scripts/wire-retell-webhook-route.ps1`.
+
 #### `POST /webhooks/acumatica`
 
 **Lambda:** `sundial-acumatica-webhook`
@@ -625,6 +658,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
+| `sundial-welcome-call` | POST /webhooks/retell (**also** EventBridge — see below) |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:
@@ -635,6 +669,8 @@ Lambda functions not exposed through API Gateway:
 | `sundial-acumatica-push` | SQS (sundial-acumatica-outbound) | Outbound calls to Acumatica with rate-limit handling |
 | `sundial-dropbox-sync` | S3 PUT events on `constructive-sundial-files` | Mirrors uploaded files to Harmon's Dropbox |
 | `sundial-cache-invalidator` | Salesforce Platform Events (Phase 2+) | Propagates out-of-band Salesforce changes to the cache |
+
+> `sundial-welcome-call` appears in **both** tables on purpose: one Lambda, two entry points, told apart by the shape of the event. An HTTP event carries `requestContext.http.method`/`httpMethod`; the EventBridge relay of `Sundial_Welcome_Call_Request__e` (field `Customer_Id__c`) does not. The platform-event path reads the customer **fresh from Salesforce** — never the cache — because the values are read aloud to the customer on a recorded call. The EventBridge rule and the Salesforce Event Relay are configured by hand, not in code; the expected rule shape is in `docs/integrations/retell-welcome-call.md`.
 
 ---
 
@@ -653,6 +689,11 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `SES_REGION` | any sender | No | Region the SES identity is verified in (defaults to `us-west-1`). |
 | `EMAIL_CONFIG_SET` | any sender | No | SES configuration set for bounce/complaint tracking. |
 | `PORTAL_BASE_URL` | `sundial-user-admin` | No | Base URL for invite links. Set to `https://sundial.harmonelectric.net` (D-053); in-code default matches. Point at the client's real domain per tenant. |
+| `RETELL_FROM_NUMBER` | `sundial-welcome-call` | **Yes** (to place calls) | The Retell-owned E.164 number the Welcome Call dials from. |
+| `RETELL_AGENT_ID` | `sundial-welcome-call` | **Yes** (to place calls) | `override_agent_id` for the Welcome Call agent. |
+| `ZAPIER_RESULTS_HOOK_URL` | `sundial-welcome-call` | **Yes** (for the billing ledger) | Catch Hook of the billing-ledger Zap. Unset means analyzed calls are logged at ERROR instead of billed; the Salesforce writeback still runs. |
+| `RETELL_API_KEY` | `sundial-welcome-call` | Credential | **Prefer the `sundial/retell/api` secret** — the secret wins over this env var so the key can be rotated without a redeploy. Accepted here as a fallback. |
+| `RETELL_WEBHOOK_SECRET` | `sundial-welcome-call` | Credential | Same: secret-first, env fallback. If neither is set the webhook **rejects everything with 401** (fails closed). |
 
 Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
 

@@ -71,7 +71,7 @@ All third-party costs (Salesforce licenses, AWS, Supabase, Vercel, FullCalendar 
 | Payments | Stripe | Service payments, service plan e-commerce (Phase 3) |
 | SMS | Twilio (under the hood, not branded in client docs) | Customer notifications, appointment reminders |
 | Email | SendGrid or Salesforce email | Customer comms, automated notifications |
-| AI Voice (Add-on Service) | Retell.ai | After-hours service intake — sold as service, not built into platform |
+| AI Voice | Retell.ai | **Welcome Call (built, D-054):** automated post-sale contract verification, triggered from Salesforce via one platform event over Event Relay/EventBridge; no portal UI. Also the engine for after-hours service intake — that one is still an add-on service, not built into the platform. |
 | Scheduling Library (Phase 3) | FullCalendar Premium with Scheduler plugin | Drag-and-drop install scheduling board |
 | Version Control | GitHub | Source code repository |
 
@@ -427,7 +427,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 - `docs/acumatica-integration.md` — API endpoints, payloads, queue config (create when Acumatica work starts)
 - `docs/service-workflows.md` — Service ticket lifecycle, intake patterns, dispatch logic
 - `docs/migration.md` — Sunbase, HCP, and Dropbox migration plans
-- `docs/integrations/` — One file per external system (acumatica, stripe, dropbox-sync, xfiles-pro, sitecapture)
+- `docs/integrations/` — One file per external system (acumatica, stripe, dropbox-sync, xfiles-pro, sitecapture). Written so far: `aurora-api-reference.md`, `aurora-inbound.md`, `acumatica-budget-push.md`, `budget-recalc-relay.md`, `auth-email-ses.md`, `retell-welcome-call.md`
 
 **Standing instruction:** After completing any feature, Claude Code must:
 1. Update PROGRESS.md

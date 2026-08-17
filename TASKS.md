@@ -4,6 +4,28 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Welcome Call — Retell voice verification (2026-08-17, D-054)
+
+Runbook: `docs/integrations/retell-welcome-call.md`. **No portal UI** — do not add one (D-054 explains why a "Call now" button was rejected).
+
+- [x] **`lambdas/sundial-welcome-call`** — one Lambda, two entry points routed by event shape. Platform-event path: fresh Salesforce read → eligibility guard → Retell `create-phone-call` → SF/cache/Realtime writeback. Webhook path: signature → Zapier ledger forward → outcome mapping → writeback.
+- [x] Describe guard with **candidate API names** per logical field — the org has `Due_at_Green_Tag_Amount__c`, the spec says `Due_at_Greentag_Amount__c`; both resolve. A missing field renders as `not provided`, never an error.
+- [x] `finance_source` from `Financing_Partner__c` alone, with **dash folding** (the live picklist mixes an EN DASH and an ASCII hyphen — a literal compare silently skips half the prepaid-lease customers).
+- [x] `POST /webhooks/retell` route script (`scripts/wire-retell-webhook-route.ps1`) + `docs/api-endpoints.md`.
+- [x] **`lib/realtime.js`** — first Supabase Realtime *sender* in the backend (HTTP broadcast endpoint, not a WebSocket channel). Available to any Lambda that wants the write-path broadcast the caching doc describes.
+- [x] 52 tests (suite 194, green); esbuild bundle verified.
+- [ ] **DEPLOY** — create the function in the console (Node.js 22.x, `index.handler`, `sundial-lambda-execution-role`, **60 s / 512 MB**), then `.\deploy.ps1 sundial-welcome-call`, then `.\scripts\wire-retell-webhook-route.ps1`.
+- [!] **TIM (Salesforce): create the platform event `Sundial_Welcome_Call_Request__e`** with field `Customer_Id__c` (Text 18). **It does not exist in the org yet** — verified against the live describe. Nothing works until it does.
+- [!] **TIM (Salesforce): the two publisher Flows** — record-triggered on the `Stage__c` "sold" transition, and a scheduled retry Flow for `Welcome_Call_Status__c = 'No Answer'` AND `Welcome_Call_Attempts__c < 5`. Both publish the same one event with `Customer_Id__c = {!$Record.Id}`. **Neither needs guard logic** — the Lambda's eligibility guard is the single authority, so an over-eager Flow is a logged no-op.
+- [!] **TIM (Salesforce + AWS): Event Relay → EventBridge rule** targeting `sundial-welcome-call`, plus the `events.amazonaws.com` invoke permission. Expected rule shape is in the runbook. The Lambda also parses an SQS-wrapped envelope, so an SQS relay works with no code change.
+- [!] **TIM (AWS): secret `sundial/retell/api`** (`api_key`, `webhook_secret`) + env vars `RETELL_FROM_NUMBER`, `RETELL_AGENT_ID`, `ZAPIER_RESULTS_HOOK_URL`. Credentials resolve **secret-first** so they rotate without a redeploy. Confirm the execution role's `secretsmanager:GetSecretValue` resource pattern covers the new secret.
+- [!] **TIM (Retell): the agent + webhook URL.** Prompt must branch on `finance_source` and must treat the literal string `not provided` as "unavailable, don't say it". Post-call analysis must emit the `custom_analysis_data` keys in the runbook. Webhook signing secret must match `RETELL_WEBHOOK_SECRET`.
+- [!] **TIM (Zapier): dedupe the billing-ledger Zap on `call.call_id`.** The ledger forward is unconditional and happens before the Salesforce writeback (deliberate — see D-054), so a Retell redelivery posts twice even though the Salesforce side is idempotent.
+- [ ] **Decide whether `Contact Info Mismatch` / `Contract Values Mismatch` should be produced.** Both exist in the org picklist; the current mapping sends every mismatch to `Verified - Exceptions` with the detail in the log. Splitting them out is a small change in `webhook.js`.
+- [ ] **Decide mappings for the seven unmapped financing partners** (`Aurora`, `Enfin`, `GoodLeap`, `Mosaic`, `Other`, `Sungage`, `Sunlight`). Until then those customers are skipped with a log line naming the partner — safe, but they never get a Welcome Call.
+- [ ] Optional: add `welcome_call_status` / `welcome_call_attempts` / `welcome_call_log` columns to `sundial_customer_cache`. Not required — the Lambda checks for them and falls back to flagging `is_stale`.
+- [ ] Verify end to end against a real record and a real phone number once the above lands. **Nothing has been exercised against live Retell or a live customer yet.**
+
 ## Sales Rep visibility (proper feature — replaces the TEMP guard below)
 
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.

@@ -1,5 +1,90 @@
 # Sundial — Progress Log
 
+## 2026-08-17 — Welcome Call backend: Retell voice verification (D-054, NOT YET DEPLOYED)
+
+`lambdas/sundial-welcome-call` — one Lambda, two entry points, told apart by the shape
+of the event. An EventBridge relay of `Sundial_Welcome_Call_Request__e` places the
+call; `POST /webhooks/retell` receives the result. **No portal UI, no
+portal-authenticated route** — the webhook is the only route added.
+
+**The interesting bug was one nobody would ever have reproduced by hand: an EN DASH.**
+The live `Financing_Partner__c` picklist holds `Participate Prepaid Lease – Cash` with
+U+2013 and `Participate Prepaid Lease - Financed` with an ASCII hyphen. The spec spells
+both with a hyphen. A literal comparison matches one and silently misses the other — so
+half the prepaid-lease customers would have fallen into the "unmappable partner" path
+and never been called, with a log line blaming their data. Partner matching now folds
+every dash variant before comparing. Same class of drift, found the same way: the spec
+names `Due_at_Greentag_Amount__c`; the org has `Due_at_Green_Tag_Amount__c`. The
+describe guard now takes a **candidate list** per logical field, so it reads the right
+value today and survives a rename. Both were caught by describing the live object
+before writing the mapping, not by testing.
+
+**Every ambiguity resolves to *don't dial*.** The eligibility guard skips on a
+non-eligible status, attempts ≥ 5, an unparseable US phone, a time outside 08:00–20:00
+America/Phoenix, or a financing partner that doesn't map — and a skip is a *success*,
+not a retry. Phone parsing is deliberately strict (valid NANP prefixes, no appended
+extensions): a wrong-but-plausible number reads a stranger someone else's contract.
+Only the unmappable-partner skip writes to Salesforce, because it is the only one a
+human must fix data to clear; the rest would just churn the log. **A Retell failure
+writes nothing at all** — no `Calling`, no attempt increment — because we never
+established that a call was placed and burning one of five attempts on our own outage
+would be wrong.
+
+**The guard lives in the Lambda, not the Flows, and that is what lets the Flows be
+dumb.** Tim's trigger Flow and retry Flow both publish the same one event with no entry
+logic of their own; a Flow that fires too eagerly is a logged no-op. One event, not
+two: a retry and a first call run identical code, and the attempt number is on the
+record.
+
+**Read is always fresh from Salesforce, never the cache.** These values are read aloud
+to a customer as the terms of a contract they signed. Formatting is for speech, not for
+a screen — `$142.50 per month`, `11,450 kilowatt-hours`, `1.9% per year` — and a blank
+source becomes the literal string `not provided`, which the agent prompt branches on.
+Zero is not blank: a `$0` down payment renders as `$0`. Two things that look like bugs
+and aren't: `estimated_production` reads a field named `..._kW_Production__c` but is
+spoken as kilowatt-**hours** (the label is wrong, the value is energy), and
+`energy_rate` gets its own formatter because at two decimals `$0.089` rounds to `$0.09`
+and misstates the contract.
+
+**Webhook ordering is the design.** The Zapier billing-ledger forward happens FIRST,
+before Salesforce is touched, with two retries and an ERROR-level payload dump for
+manual replay on final failure — and it never blocks the writeback. The Zap bills for
+*every* analyzed call, including rep-initiated ones that carry no `sf_record_id` and
+may have no Salesforce record at all; for those, the forward is the whole job and
+Salesforce is never even queried. A Salesforce outage therefore costs a verification
+status (recoverable — we return a deliberate 500 and Retell retries) rather than a
+billing row (not recoverable once we 200). **Consequence Tim needs to act on: dedupe on
+`call_id` inside the Zap**, since a redelivery double-forwards.
+
+**Idempotency rides on the log field**, with a subtlety worth not re-deriving: matching
+the `call_id` alone would discard the *first* legitimate result, because the "Call
+placed" line carries the same id. The guard requires both the `call_id` and the literal
+marker `Result:`.
+
+**`No Answer` is the only non-terminal outcome** — that is what makes the retry Flow
+meaningful, and the attempt ceiling rewriting it to `Failed - Max Attempts` is what
+makes it terminate. An **unrecognized** outcome goes to `Verified - Exceptions`, not
+`No Answer`: parking it for a human beats silently queueing another call on a result we
+did not understand.
+
+**New shared code: `lib/realtime.js`** — the first actual Supabase Realtime *sender* in
+this backend. The caching doc has described this broadcast since Phase 1, but no Lambda
+implemented it (`sundial-sf-update` only flags `is_stale`). It posts to Supabase's
+stateless HTTP broadcast endpoint rather than opening a channel: a WebSocket whose
+Lambda container can freeze mid-handshake is a silently dropped message. The cache
+write follows `sundial-sf-update` exactly — best effort, tenant-scoped, never fails a
+write Salesforce accepted — and additionally writes the three welcome-call columns
+*when the cache table has them*, checked against PostgREST's OpenAPI document, because
+an unknown column would make PostgREST reject the whole update and drop the `is_stale`
+flag with it.
+
+52 tests (suite now 194, green). Bundle builds clean.
+
+**Not deployed and not verified end to end.** Blocked on Tim: create
+`Sundial_Welcome_Call_Request__e` (it does not exist in the org yet), the two Flows, the
+Event Relay + EventBridge rule, the Retell agent, and the `sundial/retell/api` secret.
+Runbook with the expected rule shape: `docs/integrations/retell-welcome-call.md`.
+
 ## 2026-08-13 — Related-records filter: `?parentId=` on the generic list endpoint (DEPLOYED)
 
 `GET /sf/solar?parentId=<customerSfId>` returns one customer's solar projects.

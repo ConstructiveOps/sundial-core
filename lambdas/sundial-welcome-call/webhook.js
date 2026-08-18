@@ -27,9 +27,9 @@
 import crypto from "node:crypto";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
-import { MAX_ATTEMPTS, phoenixStamp } from "./format.js";
+import { MAX_ATTEMPTS, durationMmSs, phoenixStamp } from "./format.js";
 import { archiveRecording } from "./recording.js";
-import { applyWelcomeCallUpdate, prependLogLine, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
 
 export const SIGNATURE_HEADER = "x-retell-signature";
 
@@ -50,14 +50,19 @@ const FORWARD_ATTEMPTS = 3;
 const FORWARD_BACKOFF_MS = [500, 2000];
 const FORWARD_TIMEOUT_MS = 8000;
 
-// Log lines are bounded so one pathological analysis payload cannot eat the 32k log
-// field (and take the status update down with it — see writeback.prependLogLine).
-const LOG_SEGMENT_MAX = 200;
-const LOG_NOTES_MAX = 300;
-// call_summary is prose and the longest thing in the line, so it is clipped hardest
-// relative to its natural length. It earns the space: it is the only segment that says
-// what actually HAPPENED on the call rather than which checks passed.
-const LOG_SUMMARY_MAX = 400;
+// NOTHING FROM THE CALL IS TRUNCATED ANY MORE (2026-08-19).
+//
+// Segments used to be clipped at 200/300/400 chars to protect a 32k log field. That
+// traded the wrong thing away: this field is merged into email alerts and read by a
+// human deciding what went wrong on a customer call, and a mismatch description cut
+// at 200 characters is exactly the half you needed. The field is now 131,072 chars
+// (Salesforce's long-text maximum) and capacity is managed by dropping WHOLE OLD
+// ENTRIES instead — see writeback.prependLogEntry.
+//
+// Whitespace normalisation stays, and is now load-bearing rather than cosmetic: the
+// entry format is line-oriented and parsed back apart when trimming, so a newline
+// inside a call summary would corrupt the block structure.
+const ENTRY_MARKER = "── ";
 
 // ---------------------------------------------------------------------------
 // Signature verification
@@ -335,10 +340,15 @@ function listToText(v) {
     .join("; ");
 }
 
-function clip(s, max) {
-  const t = String(s ?? "").replace(/\s+/g, " ").trim();
-  if (t === "") return "";
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+/**
+ * Collapse whitespace without losing any content.
+ *
+ * The collapse is REQUIRED, not tidiness: entries are multi-line blocks delimited by a
+ * marker at the start of a line, and trimming splits the log back apart on that
+ * marker. A raw newline inside a call summary would fabricate a block boundary.
+ */
+function full(s) {
+  return String(s ?? "").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -354,9 +364,9 @@ const CONFIRMATION_FLAGS = [
   ["identity_confirmed", "identity"],
   ["email_confirmed", "email"],
   ["system_details_confirmed", "system"],
-  ["financial_terms_confirmed", "financials"],
-  ["utility_bill_understood", "utility bill"],
-  ["usage_change_understood", "usage change"],
+  ["financial_terms_confirmed", "financial"],
+  ["utility_bill_understood", "utility"],
+  ["usage_change_understood", "usage"],
 ];
 
 /**
@@ -378,59 +388,75 @@ function inVoicemail(call) {
 }
 
 /**
- * Build the result log line. Contains the call_id, which is what the idempotency
- * guard below matches on, and the literal marker "Result:" that distinguishes a
- * finished call from the "Call placed" line written when it was dialed.
+ * Build one result log ENTRY — a multi-line block, newest-first in the field.
+ *
+ *   ── 2026-08-19 14:32 MST · Attempt 2 · Result: Verified - Exceptions · call_id=…
+ *   Call Summary: …
+ *   Mismatched Items: …
+ *   Unconfirmed Items: none
+ *   Follow Up: …
+ *   Confirmations: identity=N email=N system=Y financial=Y utility=Y usage=Y
+ *   Recording: SUNDIAL/…/welcome-call-… · Duration: 2:51
+ *
+ * ONE FORMATTER, BOTH ORIGINS. A rep-form call backfilled by the orphan sweep and a
+ * Salesforce-initiated call written by the webhook produce byte-identical structure —
+ * only the `origin` segment differs. That is the whole point of sharing this: someone
+ * reading the field, or an email alert merging it, must not have to know which path
+ * produced an entry.
+ *
+ * Every field is rendered in FULL. `none` is written explicitly rather than omitting
+ * the line, so a reader can tell "the call reported nothing" from "this entry predates
+ * the field" — an omitted line is ambiguous, and this text is read by people deciding
+ * whether a contract detail is wrong.
+ *
+ * The header carries `call_id=` AND `Result:`, which is what alreadyProcessed() and
+ * the backfill idempotency check both match on. Keep them on that line.
+ *
+ * @param {object} args
+ * @param {string} args.stamp        - phoenixStamp(now)
+ * @param {string} args.origin       - "Attempt 2" | "rep-form call" | "rep-form call (…)"
+ * @param {string} args.status       - the mapped Salesforce status
+ * @param {object} args.analysis     - custom_analysis_data
+ * @param {object} args.call         - the Retell call object
+ * @param {string|null} [args.recordingKey] - permanent S3 key, when archived
  */
-export function buildResultLogLine({
+export function buildResultLogEntry({
   stamp,
-  attemptNo,
-  outcome,
+  origin,
   status,
   analysis,
   call,
   recordingKey = null,
 }) {
-  const parts = [
-    stamp,
-    `Attempt ${attemptNo}`,
-    `Result: ${outcome}`,
-    `Status: ${status}`,
-  ];
+  const header =
+    `${ENTRY_MARKER}${stamp} · ${origin} · Result: ${status} · ` +
+    `call_id=${call?.call_id ?? "unknown"}`;
 
-  const notConfirmed = CONFIRMATION_FLAGS.filter(([key]) => analysis?.[key] !== true).map(
-    ([, label]) => label
+  const lines = [header];
+
+  lines.push(`Call Summary: ${full(call?.call_analysis?.call_summary) || "none"}`);
+  lines.push(`Mismatched Items: ${full(listToText(analysis?.mismatched_items)) || "none"}`);
+  lines.push(`Unconfirmed Items: ${full(listToText(analysis?.unconfirmed_items)) || "none"}`);
+  lines.push(`Follow Up: ${full(analysis?.follow_up_notes) || "none"}`);
+
+  // Y/N for all six, not just the failures. In a block this wide the full row is
+  // readable at a glance and answers "was this even asked?" — which the old
+  // failures-only list could not.
+  lines.push(
+    "Confirmations: " +
+      CONFIRMATION_FLAGS.map(([key, label]) => `${label}=${analysis?.[key] === true ? "Y" : "N"}`).join(" ")
   );
-  if (notConfirmed.length) parts.push(`not confirmed: ${notConfirmed.join(", ")}`);
 
-  const mismatches = clip(listToText(analysis?.mismatched_items), LOG_SEGMENT_MAX);
-  parts.push(`mismatches: ${mismatches || "none"}`);
+  // The Retell URL EXPIRES; the S3 key does not. Prefer the key and fall back to the
+  // URL so an entry written when archival failed still points somewhere.
+  const where = recordingKey || full(call?.recording_url) || "none";
+  const duration = durationMmSs(call?.duration_ms);
+  const tail = [`Recording: ${where}`];
+  if (duration) tail.push(`Duration: ${duration}`);
+  if (inVoicemail(call)) tail.push("Voicemail: yes");
+  lines.push(tail.join(" · "));
 
-  const unconfirmed = clip(listToText(analysis?.unconfirmed_items), LOG_SEGMENT_MAX);
-  if (unconfirmed) parts.push(`unconfirmed: ${unconfirmed}`);
-
-  const notes = clip(analysis?.follow_up_notes, LOG_NOTES_MAX);
-  if (notes) parts.push(`notes: ${notes}`);
-
-  // call_summary lives on call_analysis, NOT in custom_analysis_data. It was
-  // originally left out of the log as "prose that would dominate the field"; Tim
-  // asked for it (2026-08-18) because it is the only part of the record that says
-  // what happened on the call, and reading the ledger to find that out is a worse
-  // trade than a longer log line. Clipped like every other segment.
-  const summary = clip(call?.call_analysis?.call_summary, LOG_SUMMARY_MAX);
-  if (summary) parts.push(`summary: ${summary}`);
-
-  if (inVoicemail(call)) parts.push("voicemail: yes");
-
-  const recording = clip(call?.recording_url, 500);
-  if (recording) parts.push(`recording=${recording}`);
-
-  // The Retell URL above EXPIRES; this key does not. When both are present the key is
-  // the one to use, and its presence is also the record that archival succeeded.
-  if (recordingKey) parts.push(`archived=${recordingKey}`);
-
-  parts.push(`call_id=${call?.call_id ?? "unknown"}`);
-  return parts.join(" · ");
+  return lines.join("\n");
 }
 
 /**
@@ -576,16 +602,16 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
     now,
   });
 
-  const line = buildResultLogLine({
+  const entry = buildResultLogEntry({
     stamp: phoenixStamp(now),
-    attemptNo,
-    outcome,
+    origin: `Attempt ${attemptNo}`,
     status,
     analysis,
     call,
     recordingKey: recording.ok ? recording.key : null,
   });
-  const nextLog = prependLogLine(existingLog, line);
+  // Capacity from the describe, not a constant — the field has been resized once.
+  const nextLog = prependLogEntry(existingLog, entry, schema.fieldLength("welcomeCallLog"));
 
   const sfFields = { [statusApi]: status, [logApi]: nextLog };
 

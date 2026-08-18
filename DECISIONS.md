@@ -1571,3 +1571,80 @@ run days after the call; the file should be named for the conversation it contai
   above any real phone recording.
 - The archived key is appended to the result log line as `archived=<key>`, so its
   presence in Salesforce is also the record that archival succeeded.
+
+---
+
+## D-055: Salesforce is the system of record for call RESULTS regardless of origin; the ledger is billing only
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Extends:** D-054
+
+### Context
+
+Welcome Calls arrive two ways. A Salesforce-initiated call carries `sf_record_id` in
+its Retell metadata and writes its result back to the customer. A **rep-form** call —
+started by a rep for a customer who may not exist in Salesforce yet — carries no record
+id, so the webhook parks its recording and forwards the payload to the Zapier billing
+ledger, and that was the end of it.
+
+The orphan sweep then attached the audio and wrote one line: `rep-form call <id>
+matched, recording attached`. It said a call happened and nothing about what was said.
+
+The first three live calls were **all** rep-form. So in practice the analysis Harmon
+actually needs — which contract values the customer disputed, what they asked for,
+whether identity was confirmed — existed only in a Zapier ledger built for billing.
+Anyone asking "what went wrong on this call?" had to leave Salesforce to find out, and
+the answer lived in a system nobody in operations opens.
+
+### Decision
+
+**Salesforce holds the result of every Welcome Call, however it started.** The Zapier
+ledger is for billing and stays exactly as it was — it still receives every call. This
+is additive on the Salesforce side.
+
+1. **`POST /welcome-call/orphan-match` backfills the full result.** It re-reads the
+   call from Retell (`GET /v2/get-call/{call_id}`) rather than having Zapier re-send
+   the analysis: same data, same authority the webhook used, and no new contract with
+   Zapier.
+2. **One formatter, both origins.** `mapOutcomeToStatus` and `buildResultLogEntry` are
+   shared, so a backfilled entry and a webhook-written entry are structurally identical
+   — only the origin segment and the recording filename differ. A test asserts this
+   byte-for-byte. A reader, or an email alert merging the field, must never have to
+   know which path produced an entry.
+3. **A terminal status is never overwritten by a backfill.** A rep-form call is a
+   second conversation with a customer whose verification may already be settled, and a
+   sweep running days later must not reopen it. The entry is still appended, marked so
+   the reader can see why the status doesn't match that line's result. `Calling` is
+   explicitly NOT terminal — it means a call is in flight, not that a result exists.
+4. **`Welcome_Call_Attempts__c` is never incremented by a backfill.** That counter is
+   the retry ceiling for Salesforce-initiated dials; counting a rep-form call against
+   it would silently consume a customer's retry budget.
+5. **Nothing from a call is truncated.** Segments were clipped at 200/300/400 chars to
+   protect a 32k field. That traded away the wrong thing: this text is merged into
+   email alerts and read by a human deciding what went wrong, and a mismatch
+   description cut at 200 characters is exactly the half they needed. Entries are now
+   multi-line blocks carrying every analysis field in full.
+6. **Capacity is read from the describe, never hardcoded**, and overflow drops WHOLE
+   OLDEST ENTRIES with a visible `… older entries trimmed …` marker. Character-level
+   clipping could leave a header with no analysis under it, or analysis lines with no
+   header naming the call — both worse than a missing entry, because they read as real
+   data.
+
+### Consequences
+
+- The sweep now depends on Retell being reachable. It degrades rather than fails: the
+  recording is attached first, and an unreachable Retell falls back to the old one-line
+  note without inventing a status from a call it could not read.
+- One extra Retell API call per swept call. Negligible against the sweep's daily cadence.
+- Entries are ~1 kB instead of ~300 chars, so a 32,768-char field holds roughly 30 of
+  them before trimming (and ~130 once the field is raised to 131,072). Trimming is now
+  a normal, marked event rather than a pathological one.
+- The log format changed. Anything parsing it — an email template, a report formula —
+  should key on the `── ` marker and the `Label: value` lines rather than the old
+  ` · `-delimited single line.
+
+### Related
+
+`docs/integrations/retell-welcome-call.md` (backfill flow, entry format, capacity),
+D-054 (the trigger and ledger-first fan-out), `lambdas/sundial-welcome-call/`.

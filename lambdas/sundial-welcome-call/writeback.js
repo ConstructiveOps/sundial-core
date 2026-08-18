@@ -24,32 +24,94 @@ export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const CUSTOMER_CACHE_TABLE = "sundial_customer_cache";
 export const CUSTOMER_CHANNEL_OBJECT = "sundial_customer";
 
-// Welcome_Call_Log__c is a Long Text Area capped at 32,768 characters in the org.
-// Salesforce rejects the whole PATCH if we exceed it, which would lose the status
-// update too — so the log is trimmed on our side, never on theirs.
-export const LOG_FIELD_MAX_CHARS = 32768;
+// Fallback capacity for Welcome_Call_Log__c, used only when the describe doesn't
+// report a length. The field is 131,072 in the org (Salesforce's long-text maximum),
+// but the REAL number is read from the describe at call time — hardcoding it is how a
+// field resize silently becomes either wasted capacity or a rejected PATCH.
+export const LOG_FIELD_MAX_CHARS = 131072;
+
+/** Start-of-line marker that begins each result entry (webhook.js » ENTRY_MARKER). */
+const ENTRY_MARKER = "── ";
+const TRIM_NOTICE = "… older entries trimmed …";
 
 /**
- * Put the newest line at the TOP of the log and drop from the BOTTOM when the field
- * would overflow.
+ * Split a log field back into whole entries, newest first.
  *
- * Newest-first is the deliberate choice: this field is read by a human in a
- * Salesforce field viewer that shows the first few lines, and the last thing that
- * happened is what they need. It also means truncation discards the OLDEST history,
- * which is the half you can afford to lose.
- *
- * Truncation trims to a line boundary so the log never ends mid-record.
+ * An entry starts at a line beginning with the marker. Anything before the first
+ * marker is legacy single-line history from before the block format — it is kept as
+ * one leading chunk rather than discarded, so upgrading the format doesn't erase what
+ * came before it.
  */
-export function prependLogLine(existing, line) {
-  const prior = typeof existing === "string" ? existing : "";
-  const combined = prior.trim() === "" ? line : `${line}\n${prior}`;
-  if (combined.length <= LOG_FIELD_MAX_CHARS) return combined;
+function splitEntries(text) {
+  const lines = String(text ?? "").split("\n");
+  const entries = [];
+  let current = null;
+  for (const line of lines) {
+    if (line.startsWith(ENTRY_MARKER)) {
+      if (current !== null) entries.push(current);
+      current = line;
+    } else if (current === null) {
+      // Leading legacy content (or a stray trim notice we're about to rewrite).
+      if (line.trim() === TRIM_NOTICE) continue;
+      entries.push(line);
+    } else {
+      current += `\n${line}`;
+    }
+  }
+  if (current !== null) entries.push(current);
+  return entries.filter((e) => e.trim() !== "");
+}
 
-  const clipped = combined.slice(0, LOG_FIELD_MAX_CHARS);
-  const lastBreak = clipped.lastIndexOf("\n");
-  // If the very first line alone is over the cap (it never should be — every line we
-  // build is bounded), a hard clip is still better than a rejected PATCH.
-  return lastBreak > 0 ? clipped.slice(0, lastBreak) : clipped;
+/**
+ * Put the newest ENTRY at the TOP of the log, dropping whole entries from the BOTTOM
+ * when the field would overflow.
+ *
+ * Newest-first is deliberate: the field is read in a Salesforce viewer that shows the
+ * first lines, and the last thing that happened is what a human needs. It also means
+ * overflow discards the OLDEST history, which is the half you can afford to lose.
+ *
+ * WHOLE ENTRIES, NOT CHARACTERS. The previous version clipped at a line boundary,
+ * which could leave a half-entry — a header with no analysis under it, or analysis
+ * lines with no header saying which call they belonged to. Both are worse than a
+ * missing entry, because they read as real data. When anything is dropped, a single
+ * `… older entries trimmed …` line marks the cut so the gap is visible.
+ *
+ * The NEW entry is never truncated. If a single entry somehow exceeded the whole
+ * field — impossible with real Retell payloads, since even a verbose analysis is a few
+ * kB against 131,072 — it is hard-clipped as an absolute last resort, because a
+ * rejected PATCH would lose the status update too. That case logs loudly.
+ *
+ * @param {string|null} existing
+ * @param {string} entry     - the new entry (may be multi-line)
+ * @param {number} [maxChars] - from the describe; falls back to the constant
+ */
+export function prependLogEntry(existing, entry, maxChars = LOG_FIELD_MAX_CHARS) {
+  const max = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : LOG_FIELD_MAX_CHARS;
+  const prior = typeof existing === "string" ? existing : "";
+
+  if (entry.length > max) {
+    console.error(
+      `welcome-call: a single log entry (${entry.length} chars) exceeds the ` +
+        `Welcome_Call_Log__c capacity (${max}) — hard-clipping it to keep the ` +
+        `status update from being rejected. Investigate the payload.`
+    );
+    return entry.slice(0, max);
+  }
+
+  const combined = prior.trim() === "" ? entry : `${entry}\n${prior}`;
+  if (combined.length <= max) return combined;
+
+  // Drop whole entries from the oldest end until the new one fits alongside the
+  // notice. `kept` never includes the new entry, which is prepended at the end.
+  const older = splitEntries(prior);
+  while (older.length > 0) {
+    older.pop();
+    const candidate = [entry, ...older, TRIM_NOTICE].join("\n");
+    if (candidate.length <= max) return candidate;
+  }
+  // Everything old had to go.
+  const bare = `${entry}\n${TRIM_NOTICE}`;
+  return bare.length <= max ? bare : entry;
 }
 
 // --- Cache column introspection --------------------------------------------

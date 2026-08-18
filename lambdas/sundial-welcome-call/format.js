@@ -18,14 +18,32 @@
 /** The exact string the Retell agent prompt keys off for an absent value. */
 export const NOT_PROVIDED = "not provided";
 
-/** Salesforce picklist values that mean "do not place another call". */
-export const TERMINAL_OR_IN_FLIGHT_STATUSES = new Set([
-  "Calling",
+/**
+ * Statuses that mean the call is FINISHED and its result is settled.
+ *
+ * Distinct from the set below, which also contains `Calling` — "a call is in flight"
+ * is a reason not to dial again, but it is NOT a settled result. The rep-form backfill
+ * needs the settled meaning: it must not overwrite a status a completed call already
+ * established, but it SHOULD replace `Calling` or `No Answer` with what actually
+ * happened.
+ */
+export const TERMINAL_STATUSES = new Set([
   "Verified",
   "Verified - Exceptions",
   "Refused",
   "Failed - Max Attempts",
 ]);
+
+/** Salesforce picklist values that mean "do not place another call". */
+export const TERMINAL_OR_IN_FLIGHT_STATUSES = new Set(["Calling", ...TERMINAL_STATUSES]);
+
+/** "2:51" from a duration in milliseconds. Empty when absent or nonsense. */
+export function durationMmSs(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return "";
+  const total = Math.round(n / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
 
 /** Attempt ceiling. At or above this, no new call is placed. */
 export const MAX_ATTEMPTS = 5;

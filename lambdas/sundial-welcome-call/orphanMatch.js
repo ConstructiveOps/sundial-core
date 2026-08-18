@@ -34,14 +34,22 @@ import {
 } from "@aws-sdk/client-s3";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
-import { phoenixDate, phoenixStamp } from "./format.js";
+import { phoenixDate, phoenixStamp, TERMINAL_STATUSES } from "./format.js";
+import { getConfig } from "./config.js";
+import { getCall } from "./retell.js";
+import {
+  alreadyProcessed,
+  buildResultLogEntry,
+  extractCall,
+  mapOutcomeToStatus,
+} from "./webhook.js";
 import {
   s3,
   orphanRecordingKey,
   matchedRecordingKey,
   registerRecordingMetadata,
 } from "./recording.js";
-import { applyWelcomeCallUpdate, prependLogLine, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
 
 export const ZAP_SECRET_HEADER = "x-sundial-zap-secret";
 
@@ -107,7 +115,7 @@ async function appendMatchNote({ record, schema, callId, now }) {
   const text = matchLogText(callId);
   if (typeof existing === "string" && existing.includes(text)) return "already_present";
 
-  const nextLog = prependLogLine(existing, `${phoenixStamp(now)} · ${text}`);
+  const nextLog = prependLogEntry(existing, `${phoenixStamp(now)} · ${text}`);
   try {
     await applyWelcomeCallUpdate({
       recordId: record.Id,
@@ -124,6 +132,141 @@ async function appendMatchNote({ record, schema, callId, now }) {
     );
     return "failed";
   }
+}
+
+/**
+ * Backfill a rep-form call's FULL result onto the customer record.
+ *
+ * WHY THIS EXISTS (D-055). A rep-form call reaches the webhook with no
+ * `sf_record_id`, so the entire Salesforce writeback is skipped and its analysis —
+ * mismatches, follow-ups, the summary — used to live only in the Zapier billing
+ * ledger. The sweep then attached the audio and wrote a one-line "matched" note,
+ * which told a reader that a call happened but nothing about what was said. Salesforce
+ * is the system of record for call RESULTS regardless of how the call started; the
+ * ledger is for billing.
+ *
+ * The sweep hands us only `{call_id, sf_record_id}`, so the analysis is re-read from
+ * Retell rather than re-sent by Zapier — same data, same authority the webhook used,
+ * which is what lets both paths share `mapOutcomeToStatus` and `buildResultLogEntry`
+ * and produce byte-identical entries.
+ *
+ * STATUS RULES:
+ *   - A record already at a TERMINAL status keeps it. A rep-form call is a SECOND
+ *     conversation with a customer whose verification may already be settled, and a
+ *     sweep running days later must not reopen it. The entry is still appended, marked
+ *     so a reader knows why the status doesn't match the result on that line.
+ *   - `Welcome_Call_Attempts__c` is NEVER incremented. That counter drives the retry
+ *     ceiling for Salesforce-initiated dials; a rep-form call is not one of those, and
+ *     counting it would silently consume a customer's retry budget.
+ *
+ * Best-effort throughout: the recording is already attached by the time this runs, so
+ * neither an unreachable Retell nor a Salesforce blip may turn a completed match into
+ * a failure.
+ *
+ * @returns {Promise<{ result: string, status?: string|null, detail?: string }>}
+ */
+async function backfillCallResult({ record, schema, callId, now, recordingKey }) {
+  const logApi = schema.apiName("welcomeCallLog");
+  const statusApi = schema.apiName("welcomeCallStatus");
+  if (!logApi) return { result: "no_log_field" };
+
+  const existingLog = record[logApi];
+  // Same guard the webhook uses: a full result entry for this call_id is already here.
+  if (alreadyProcessed(existingLog, callId)) return { result: "already_present" };
+
+  const cfg = await getConfig();
+  if (!cfg.retellApiKey) {
+    console.warn(
+      `welcome-call orphan-match: no Retell API key configured — cannot backfill ${callId}.`
+    );
+    return { result: "no_api_key" };
+  }
+
+  const fetched = await getCall({ apiKey: cfg.retellApiKey, callId });
+  if (!fetched.ok) {
+    console.warn(
+      `welcome-call orphan-match: could not fetch ${callId} from Retell ` +
+        `(status=${fetched.status}): ${fetched.error} — falling back to the match note.`
+    );
+    return { result: "fetch_failed", detail: fetched.error ?? "" };
+  }
+
+  const call = extractCall(fetched.call);
+  const analysis = call?.call_analysis?.custom_analysis_data ?? {};
+
+  // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
+  // written back. Passing it keeps the mapping identical to the webhook's.
+  const attempts = Number(schema.reader(record)("welcomeCallAttempts")) || 0;
+  const { status: mappedStatus } = mapOutcomeToStatus(analysis?.verification_result, {
+    attempts,
+    inVoicemail:
+      call?.call_analysis?.in_voicemail === true || call?.in_voicemail === true,
+  });
+
+  const currentStatus = statusApi ? String(record[statusApi] ?? "").trim() : "";
+  const isTerminal = TERMINAL_STATUSES.has(currentStatus);
+
+  const entry = buildResultLogEntry({
+    stamp: phoenixStamp(now),
+    origin: isTerminal
+      ? "rep-form call (status unchanged, record already terminal)"
+      : "rep-form call",
+    // The entry always states the call's OWN result, even when the record keeps its
+    // existing status — otherwise the line would misreport what the call found.
+    status: mappedStatus,
+    analysis,
+    call,
+    recordingKey,
+  });
+
+  const nextLog = prependLogEntry(existingLog, entry, schema.fieldLength("welcomeCallLog"));
+  const sfFields = { [logApi]: nextLog };
+  const cacheValues = { welcome_call_log: nextLog };
+  if (!isTerminal && statusApi) {
+    sfFields[statusApi] = mappedStatus;
+    cacheValues.welcome_call_status = mappedStatus;
+  }
+
+  try {
+    await applyWelcomeCallUpdate({
+      recordId: record.Id,
+      tenantId: schema.reader(record)("client") ?? null,
+      sfFields,
+      cacheValues,
+      broadcastPayload: {
+        reason: "rep_form_backfill",
+        call_id: callId,
+        status: isTerminal ? currentStatus : mappedStatus,
+        recording_key: recordingKey ?? null,
+        call_summary: call?.call_analysis?.call_summary ?? null,
+      },
+    });
+    return {
+      result: isTerminal ? "backfilled_status_unchanged" : "backfilled",
+      status: isTerminal ? currentStatus : mappedStatus,
+    };
+  } catch (e) {
+    console.error(
+      `welcome-call orphan-match: backfill write failed for ${record.Id} ` +
+        `(call_id=${callId}):`,
+      e?.message || String(e)
+    );
+    return { result: "failed" };
+  }
+}
+
+/**
+ * Attach the call result to the record: the full backfill when Retell can supply the
+ * analysis, and the one-line match note when it cannot. One log write either way —
+ * the backfill entry supersedes the note, so writing both would be duplicate noise.
+ */
+async function recordMatchOnSalesforce({ record, schema, callId, now, recordingKey }) {
+  const backfill = await backfillCallResult({ record, schema, callId, now, recordingKey });
+  if (backfill.result === "fetch_failed" || backfill.result === "no_api_key") {
+    const note = await appendMatchNote({ record, schema, callId, now });
+    return { backfill: backfill.result, log: note, status: null };
+  }
+  return { backfill: backfill.result, log: backfill.result, status: backfill.status ?? null };
 }
 
 /**
@@ -175,9 +318,16 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
   if (!holding) {
     const existingKey = await findMatchedRecording(sfRecordId, callId);
     if (existingKey) {
-      // Converge the parts that may have failed last time. Both are no-ops when the
-      // earlier run completed.
-      const note = await appendMatchNote({ record, schema, callId, now });
+      // Converge the parts that may have failed last time. All are no-ops when the
+      // earlier run completed — the backfill's own idempotency check sees its entry
+      // already in the log and skips.
+      const attached = await recordMatchOnSalesforce({
+        record,
+        schema,
+        callId,
+        now,
+        recordingKey: existingKey,
+      });
       const metadata = await registerRecordingMetadata({
         key: existingKey,
         fileName: existingKey.slice(existingKey.lastIndexOf("/") + 1),
@@ -196,7 +346,9 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
           key: existingKey,
           recordId: sfRecordId,
           callId,
-          log: note,
+          log: attached.log,
+          backfill: attached.backfill,
+          welcomeCallStatus: attached.status,
           metadata,
         },
       };
@@ -242,7 +394,15 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
     description: `Retell call ${callId} (rep-form, matched)`,
   });
 
-  const note = await appendMatchNote({ record, schema, callId, now });
+  // Backfill BEFORE the holding object is deleted: if the write fails, the holding
+  // object survives and the Zap's retry re-runs the whole thing.
+  const attached = await recordMatchOnSalesforce({
+    record,
+    schema,
+    callId,
+    now,
+    recordingKey: destKey,
+  });
 
   // Delete the holding object LAST, and only after the copy is confirmed. If anything
   // above threw, the holding object survives and the Zap can simply call again.
@@ -263,7 +423,8 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
 
   console.log(
     `welcome-call orphan-match: ${callId} -> ${sfRecordId} at ${destKey} ` +
-      `(metadata=${metadata}, log=${note}, holdingDeleted=${holdingDeleted})`
+      `(metadata=${metadata}, backfill=${attached.backfill}, ` +
+      `status=${attached.status ?? "unchanged"}, holdingDeleted=${holdingDeleted})`
   );
 
   return {
@@ -275,7 +436,9 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
       callId,
       sizeBytes: holding.ContentLength ?? null,
       metadata,
-      log: note,
+      log: attached.log,
+      backfill: attached.backfill,
+      welcomeCallStatus: attached.status,
       holdingDeleted,
     },
   };

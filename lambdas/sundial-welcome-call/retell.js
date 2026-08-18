@@ -8,11 +8,55 @@
 // resulting call_id and the record id.
 
 export const RETELL_CREATE_CALL_URL = "https://api.retellai.com/v2/create-phone-call";
+export const RETELL_GET_CALL_URL = "https://api.retellai.com/v2/get-call";
 
 // Retell's create-call is a fast control-plane call (it returns as soon as the call
 // is registered, not when it connects). If it hasn't answered in this long, the
 // Lambda should give up rather than burn its own timeout budget.
 const REQUEST_TIMEOUT_MS = 15000;
+
+/**
+ * Fetch one completed call, including its post-call analysis.
+ *
+ * Used by the rep-form backfill: the orphan sweep hands us only `{call_id,
+ * sf_record_id}`, so the analysis has to be re-read from the authority rather than
+ * re-sent by Zapier. It is the same data the webhook saw, from the same source, which
+ * is what lets both paths share one formatter and produce identical entries.
+ *
+ * Never throws — a backfill that cannot reach Retell must still leave the recording
+ * attached, so the caller degrades to a short note instead of failing the match.
+ *
+ * @returns {Promise<{ ok: boolean, status: number, call: object|null, error: string|null }>}
+ */
+export async function getCall({ apiKey, callId }) {
+  let resp;
+  try {
+    resp = await fetch(`${RETELL_GET_CALL_URL}/${encodeURIComponent(callId)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, status: 0, call: null, error: e?.message || String(e) };
+  }
+
+  const text = await resp.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    /* non-JSON — handled below */
+  }
+
+  if (!resp.ok) {
+    const message =
+      data?.error_message || data?.message || data?.error || text?.slice(0, 300) || "";
+    return { ok: false, status: resp.status, call: null, error: message };
+  }
+  if (!data || typeof data !== "object") {
+    return { ok: false, status: resp.status, call: null, error: "empty response body" };
+  }
+  return { ok: true, status: resp.status, call: data, error: null };
+}
 
 /**
  * Place an outbound call.

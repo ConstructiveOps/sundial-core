@@ -16,6 +16,12 @@ import crypto from "node:crypto";
 // ---------------------------------------------------------------------------
 // Shared mutable context the mocks read from
 // ---------------------------------------------------------------------------
+// Retell signs webhooks with the API KEY, so that is what the fixtures sign with and
+// what the gate is expected to verify against. WEBHOOK_SECRET is a DIFFERENT value on
+// purpose: it stands for a legacy explicitly-configured signing secret, and keeping
+// the two distinct is what makes the precedence provable — the whole signed-webhook
+// suite passes only if the API key is the key actually used.
+const API_KEY = "retell-key";
 const WEBHOOK_SECRET = "whsec-test-value";
 const SUPABASE_URL = "https://proj.supabase.co";
 
@@ -98,7 +104,7 @@ function baseCustomer(overrides = {}) {
 
 function resetCtx() {
   ctx.secret = {
-    api_key: "retell-key",
+    api_key: API_KEY,
     webhook_secret: WEBHOOK_SECRET,
     zap_orphan_match_secret: "zap-orphan-secret",
     from_number: "+16025550000",
@@ -389,7 +395,7 @@ const IN_WINDOW = new Date("2026-08-17T17:00:00Z");
 // 05:00 UTC = 22:00 MST the previous day — outside.
 const OUT_OF_WINDOW = new Date("2026-08-18T05:00:00Z");
 
-function signedWebhookEvent(payload, secret = WEBHOOK_SECRET) {
+function signedWebhookEvent(payload, secret = API_KEY) {
   const body = JSON.stringify(payload);
   const sig = crypto.createHmac("sha256", secret).update(body, "utf8").digest("hex");
   return {
@@ -851,18 +857,85 @@ test("an unsigned or wrongly-signed webhook is 401 and touches nothing", async (
 
 test("an unconfigured webhook secret fails CLOSED", async () => {
   fresh();
-  ctx.secret = { api_key: "retell-key" }; // no webhook_secret anywhere
+  // NEITHER key present — an api_key alone is no longer "unconfigured", since the
+  // API key IS the signing key.
+  ctx.secret = {};
   clearConfigCache();
   const res = await handler(signedWebhookEvent(analyzedPayload()));
   assert.equal(res.statusCode, 401);
   assert.equal(ctx.sfUpdates.length, 0);
 });
 
+// --- signing-key resolution (2026-08-17) ------------------------------------
+// Retell signs with the API key. These pin the precedence so a future edit can't
+// quietly restore webhook-secret-first, which would keep passing on Harmon's org
+// (both fields hold the same value there) and break any org where they differ.
+
+test("the API KEY verifies the signature, even when a different webhook_secret is set", async () => {
+  fresh(); // fixture has api_key=API_KEY AND webhook_secret=WEBHOOK_SECRET (different)
+  const res = await handler(signedWebhookEvent(analyzedPayload(), API_KEY));
+  assert.equal(res.statusCode, 200);
+});
+
+test("a payload signed with the legacy webhook_secret is REJECTED when an api_key exists", async () => {
+  fresh();
+  const res = await handler(signedWebhookEvent(analyzedPayload(), WEBHOOK_SECRET));
+  assert.equal(res.statusCode, 401);
+  assert.equal(ctx.sfUpdates.length, 0);
+});
+
+test("webhook_secret still works as a fallback when no api_key is configured", async () => {
+  fresh();
+  ctx.secret = { webhook_secret: WEBHOOK_SECRET, zap_orphan_match_secret: "zap-orphan-secret" };
+  clearConfigCache();
+  const res = await handler(signedWebhookEvent(analyzedPayload(), WEBHOOK_SECRET));
+  assert.equal(res.statusCode, 200);
+});
+
+// --- rejection diagnostics --------------------------------------------------
+
+test("describeSignatureShape reports structure and never values", () => {
+  const body = '{"a":1}';
+  const digest = "a".repeat(64);
+
+  assert.match(hook.describeSignatureShape(`v=${digest}`, body), /parts=1 \[v=len64\]/);
+  // A compound header — the shape that would reject 100% of real deliveries while
+  // every self-signed test still passed. This is the line that would name it.
+  assert.match(
+    hook.describeSignatureShape(`t=1750000000,v=${digest}`, body),
+    /parts=2 \[t=len10, v=len64\]/
+  );
+  assert.match(hook.describeSignatureShape(digest, body), /bare-hex=len64/);
+  assert.match(hook.describeSignatureShape("", body), /header absent or empty/);
+  assert.match(hook.describeSignatureShape(undefined, body), /header absent or empty/);
+  assert.match(hook.describeSignatureShape(`v=${digest}`, body), /bodyBytes=7/);
+
+  // The digest itself must never appear.
+  const out = hook.describeSignatureShape(`t=123,v=${digest}`, body);
+  assert.ok(!out.includes(digest), "the signature value must not be logged");
+  assert.ok(!out.includes("1750000000"), "no header value should be logged");
+});
+
+test("a rejected webhook logs the header shape", async () => {
+  fresh();
+  const warnings = [];
+  const orig = console.warn;
+  console.warn = (...a) => warnings.push(a.join(" "));
+  try {
+    await handler(signedWebhookEvent(analyzedPayload(), "wrong-key"));
+  } finally {
+    console.warn = orig;
+  }
+  const line = warnings.join(" ");
+  assert.match(line, /welcome-call webhook rejected/);
+  assert.match(line, /shape: parts=1 \[v=len64\]/);
+});
+
 test("base64-encoded bodies verify (API Gateway may deliver them that way)", async () => {
   fresh();
   const payload = analyzedPayload();
   const body = JSON.stringify(payload);
-  const sig = crypto.createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
+  const sig = crypto.createHmac("sha256", API_KEY).update(body).digest("hex");
   const res = await handler({
     httpMethod: "POST",
     headers: { "x-retell-signature": `v=${sig}` },

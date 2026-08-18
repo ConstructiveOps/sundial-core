@@ -226,10 +226,41 @@ own outage would be wrong. The Lambda throws so the relay retries.
 
 ## Entry point 2 — `POST /webhooks/retell`
 
-**Auth:** `X-Retell-Signature`, an HMAC-SHA256 of the **raw request body** keyed with
-`RETELL_WEBHOOK_SECRET`, hex-encoded. Retell sends `v=<hex>`; a bare hex value is
-accepted too. Constant-time compared via fixed-length digests, so neither the secret
-nor the expected value leaks through timing or a length check.
+**Auth:** `X-Retell-Signature`, an HMAC-SHA256 of the **raw request body**, hex-encoded.
+Retell sends `v=<hex>`; a bare hex value is accepted too. Constant-time compared via
+fixed-length digests, so neither the secret nor the expected value leaks through timing
+or a length check.
+
+> **The signing key is the RETELL API KEY** (Tim, 2026-08-17), not a separate signing
+> secret. `retellWebhookSecret` therefore resolves **`RETELL_API_KEY` first**, falling
+> back to `RETELL_WEBHOOK_SECRET` only for a deployment that configured no API key.
+> The name is a legacy of assuming a Stripe-style dedicated secret.
+>
+> Harmon's secret happens to carry the same key in **both** `api_key` and
+> `webhook_secret`, so either resolution order verifies today — which is exactly the
+> trap. Rotate the API key while updating only `api_key` and a webhook-secret-first
+> resolution would start rejecting every delivery with no obvious cause. Three tests
+> pin the precedence (`the API KEY verifies the signature…`, `a payload signed with the
+> legacy webhook_secret is REJECTED…`, `webhook_secret still works as a fallback…`).
+
+**No timestamp, no replay window.** The HMAC covers the body alone; nothing in the
+header is treated as a timestamp and there is no freshness check. If Retell turns out
+to send a compound header (`t=<ts>,v=<hex>`), the current parser strips only a leading
+`v=` and would reject **100% of deliveries** — while every self-signed test still
+passes, because the suite generates the header it expects. That is what the shape
+diagnostic below exists to catch. A 5-minute window is a genuine follow-up **only once
+a real header is known to carry a timestamp** — adding one against a guessed format
+would break verification outright.
+
+**Rejection diagnostics.** A failed verification logs the header's *shape* — key names
+and value **lengths** only, plus the body byte count — never any value:
+
+```
+welcome-call webhook rejected: missing or invalid x-retell-signature. shape: parts=1 [v=len64] bodyBytes=1234
+```
+
+`parts=2 [t=len10, v=len64]` would immediately identify a compound header;
+`header absent or empty` a stripped header; a `bodyBytes` mismatch a mangled body.
 
 - **No Supabase JWT and no API Gateway authorizer.** The caller is a machine with no
   portal user; `resolveIdentity` has nothing to verify and must not be used.
@@ -569,7 +600,11 @@ All three exist in the live org today, with this `Welcome_Call_Status__c` pickli
 | Variable | Kind | Resolution order | Secret field candidates |
 |---|---|---|---|
 | `RETELL_API_KEY` | credential | **secret**, then env | `api_key`, `apiKey`, `retell_api_key`, `key` |
-| `RETELL_WEBHOOK_SECRET` | credential | **secret**, then env | `webhook_secret`, `webhookSecret`, `signing_secret`, `webhook_token` |
+| `RETELL_WEBHOOK_SECRET` | credential | **secret**, then env — but see below | `webhook_secret`, `webhookSecret`, `signing_secret`, `webhook_token` |
+
+> ⚠️ `retellWebhookSecret` is **not** resolved from `RETELL_WEBHOOK_SECRET` first.
+> Retell signs with the API key, so it resolves `RETELL_API_KEY` first and falls back
+> to `RETELL_WEBHOOK_SECRET` only when no API key is configured at all.
 | `ZAP_ORPHAN_MATCH_SECRET` | credential | **secret**, then env | `zap_orphan_match_secret`, `orphan_match_secret`, `zap_secret` |
 | `RETELL_FROM_NUMBER` | config | **env**, then secret | `from_number`, `fromNumber` |
 | `RETELL_AGENT_ID` | config | **env**, then secret | `agent_id`, `agentId`, `override_agent_id` |

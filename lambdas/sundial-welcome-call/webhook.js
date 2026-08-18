@@ -78,6 +78,48 @@ export function verifySignature(rawBody, header, secret) {
 }
 
 /**
+ * Describe the SHAPE of a signature header for diagnostics — never its content.
+ *
+ * Exists because the gate is deliberately silent about values, which is right for
+ * security and useless when a real provider delivery is rejected and nobody can say
+ * why. The two failure modes this distinguishes are the ones that actually happen:
+ *
+ *   - the digest genuinely doesn't match (shape looks right, secret or body is wrong)
+ *   - the header isn't the shape we parse at all — e.g. a compound
+ *     `t=<ts>,v=<hex>` when we only strip a leading `v=`, which would reject
+ *     100% of deliveries while every self-generated test still passes
+ *
+ * Emits key names and value LENGTHS only. A length cannot reconstruct a secret, and
+ * the digest is a public value anyway — but keeping values out entirely means this
+ * can never become the thing that leaks one.
+ *
+ * @returns {string} e.g. `parts=2 [t=len10, v=len64] bodyBytes=1234`
+ */
+export function describeSignatureShape(header, rawBody) {
+  const bodyBytes = Buffer.isBuffer(rawBody)
+    ? rawBody.length
+    : Buffer.byteLength(String(rawBody ?? ""), "utf8");
+
+  if (typeof header !== "string" || header.trim() === "") {
+    return `header absent or empty bodyBytes=${bodyBytes}`;
+  }
+
+  const parts = header.trim().split(",").map((p) => p.trim()).filter(Boolean);
+  const shapes = parts.map((p) => {
+    const eq = p.indexOf("=");
+    if (eq > 0) {
+      const key = p.slice(0, eq);
+      // Key names are format identifiers (v, t, s1...), not secrets — but bound the
+      // length so a hostile header can't flood the log.
+      return `${key.slice(0, 12)}=len${p.length - eq - 1}`;
+    }
+    return /^[0-9a-f]+$/i.test(p) ? `bare-hex=len${p.length}` : `unkeyed=len${p.length}`;
+  });
+
+  return `parts=${parts.length} [${shapes.join(", ")}] bodyBytes=${bodyBytes}`;
+}
+
+/**
  * Constant-time equality that is also length-safe.
  *
  * `crypto.timingSafeEqual` throws when the two buffers differ in length, and

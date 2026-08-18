@@ -98,9 +98,28 @@ export async function getConfig() {
   const credential = (name) => fromSecret(secret, name) ?? fromEnv(name); // secret wins
   const setting = (name) => fromEnv(name) ?? fromSecret(secret, name); // env wins
 
+  const retellApiKey = credential("RETELL_API_KEY");
+
   return {
-    retellApiKey: credential("RETELL_API_KEY"),
-    retellWebhookSecret: credential("RETELL_WEBHOOK_SECRET"),
+    retellApiKey,
+    // RETELL SIGNS WEBHOOKS WITH THE API KEY, not a separate signing secret — so the
+    // API key is the primary source here and an explicitly-configured
+    // RETELL_WEBHOOK_SECRET is only the override.
+    //
+    // The name is a legacy of assuming a Stripe-style dedicated signing secret. It is
+    // kept as a fallback so a deployment that set one keeps working, and so a future
+    // Retell change to separate signing secrets needs no code change.
+    //
+    // Why the order matters: Harmon's secret happens to carry the SAME api key in both
+    // `api_key` and `webhook_secret`, so either order verifies correctly today. That
+    // coincidence is exactly the trap — rotate the API key while updating only
+    // `api_key` and a webhook-secret-first resolution would silently start rejecting
+    // every delivery with no obvious cause. Keying off the API key removes that.
+    // API key FIRST. If Retell signs with the API key, then honouring a
+    // RETELL_WEBHOOK_SECRET that differs from it would break verification rather
+    // than override it — so the fallback only covers a deployment that configured
+    // no API key at all (webhook-only, never places calls).
+    retellWebhookSecret: retellApiKey ?? credential("RETELL_WEBHOOK_SECRET"),
     zapOrphanMatchSecret: credential("ZAP_ORPHAN_MATCH_SECRET"),
     retellFromNumber: setting("RETELL_FROM_NUMBER"),
     retellAgentId: setting("RETELL_AGENT_ID"),

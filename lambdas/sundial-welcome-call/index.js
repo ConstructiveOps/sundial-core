@@ -32,6 +32,7 @@ import {
   EVENT_ANALYZED,
   SIGNATURE_HEADER,
   constantTimeEquals,
+  describeSignatureShape,
   isAckOnlyEvent,
   processCallAnalyzed,
   verifySignature,
@@ -146,8 +147,14 @@ async function handleHttp(event, method) {
     return jsonResponse(401, { error: "unauthorized" });
   }
   if (!verifySignature(rawBody, headers[SIGNATURE_HEADER], cfg.retellWebhookSecret)) {
-    // Never log the expected or received signature — only that the gate rejected.
-    console.warn(`welcome-call webhook rejected: missing or invalid ${SIGNATURE_HEADER}.`);
+    // Never log the expected or received signature — only that the gate rejected,
+    // plus the header's SHAPE (key names + value lengths, no values). Without the
+    // shape, a rejected real delivery is unexplainable: a digest mismatch and a
+    // header format we don't parse look identical from out here.
+    console.warn(
+      `welcome-call webhook rejected: missing or invalid ${SIGNATURE_HEADER}. ` +
+        `shape: ${describeSignatureShape(headers[SIGNATURE_HEADER], rawBody)}`
+    );
     return jsonResponse(401, { error: "unauthorized" });
   }
 

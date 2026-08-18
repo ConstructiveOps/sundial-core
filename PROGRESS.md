@@ -797,3 +797,47 @@ the three config env vars; the `Sundial_Welcome_Call_Request__e` platform event 
 two publisher Flows; the Event Relay → EventBridge rule; the Retell agent + webhook
 secret; and the Aurora `agreement_status_changed` subscription. Aurora's pipeline is
 deployed and idle until that subscription exists.
+
+### 2026-08-17 — Welcome Call signature verification: sign with the API key, and say why a rejection happened
+
+Two changes after Tim flagged that **Retell signs webhooks with the API key**, not a
+separate signing secret.
+
+**1. The signing key is now the API key.** `retellWebhookSecret` resolves
+`RETELL_API_KEY` first, falling back to `RETELL_WEBHOOK_SECRET` only when no API key is
+configured (a webhook-only deployment). The old order wasn't causing a live failure —
+Harmon's secret carries the *same* key in both `api_key` and `webhook_secret`, so either
+resolution verifies today. That coincidence was the whole problem: rotate the API key
+while updating only `api_key` and webhook-secret-first would have started rejecting
+every delivery with no obvious cause. Note the fallback is deliberately *not* an
+override — if Retell signs with the API key, honouring a different configured
+webhook_secret would break verification rather than customise it.
+
+The test fixtures encoded the old assumption, so they were reconciled rather than
+patched around: `signedWebhookEvent` now signs with `API_KEY` by default, and the
+fixture keeps `webhook_secret` at a **different** value on purpose — the entire
+signed-webhook suite now passes only if the API key is the key actually used. Three
+tests pin the precedence explicitly, including one asserting a payload signed with the
+legacy secret is **rejected**. `an unconfigured webhook secret fails CLOSED` was fixed
+too: an `api_key` alone is no longer "unconfigured", so it now sets an empty secret.
+
+**2. A rejected webhook logs the header's SHAPE.** Key names and value lengths only,
+plus body byte count — never a value:
+
+```
+... rejected: missing or invalid x-retell-signature. shape: parts=1 [v=len64] bodyBytes=1234
+```
+
+The gate was deliberately silent about values, which is right for security and useless
+when a real delivery is rejected. The failure mode this is aimed at: if Retell sends a
+compound `t=<ts>,v=<hex>` header, the parser strips only a leading `v=` and would reject
+**100% of deliveries** — while all 81 tests still pass, because the suite generates the
+header it expects. `parts=2 [t=len10, v=len64]` in the log names that instantly.
+
+**Still unverified, and deliberately so:** there is no timestamp in the HMAC and no
+replay window. Adding a 5-minute check against a guessed header format would break
+verification outright, so it stays a follow-up until a real Retell header is observed.
+The test suite validates the implementation against its own assumption — only a live
+delivery settles the wire format.
+
+231 green. Deployed to `sundial-welcome-call`.

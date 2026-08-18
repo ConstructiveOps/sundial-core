@@ -35,7 +35,7 @@ import {
   toE164US,
 } from "./format.js";
 import { createPhoneCall } from "./retell.js";
-import { applyWelcomeCallUpdate, prependLogLine, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
 import { getConfig } from "./config.js";
 
 /** Salesforce id shape (15 or 18 char, alphanumeric). */
@@ -105,7 +105,7 @@ async function readCustomerFresh(recordId, schema) {
 async function logSkipToSalesforce({ record, schema, tenantId, line }) {
   const logApi = schema.apiName("welcomeCallLog");
   if (!logApi) return; // no log field in this org — CloudWatch is the only record
-  const next = prependLogLine(record[logApi], line);
+  const next = prependLogEntry(record[logApi], line, schema.fieldLength("welcomeCallLog"));
   try {
     await applyWelcomeCallUpdate({
       recordId: record.Id,
@@ -265,7 +265,7 @@ export async function placeWelcomeCall(recordId, { now = new Date() } = {}) {
 
   const line =
     `${phoenixStamp(now)} · Attempt ${attemptNo} · Call placed · call_id=${call.callId}`;
-  const nextLog = prependLogLine(record[logApi], line);
+  const nextLog = prependLogEntry(record[logApi], line, schema.fieldLength("welcomeCallLog"));
 
   const sfFields = {
     [statusApi]: "Calling",

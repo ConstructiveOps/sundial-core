@@ -84,14 +84,20 @@ export function resolveCustomerFields(describe) {
   );
 
   const resolved = new Map(); // logical -> canonical API name
+  const lengths = new Map(); // logical -> declared field length (text/textarea)
   const missingLogical = [];
 
   for (const [logical, candidates] of Object.entries(FIELD_CANDIDATES)) {
     const hit = candidates
       .map((c) => byLower.get(c.toLowerCase()))
       .find((f) => f != null);
-    if (hit) resolved.set(logical, hit.name);
-    else missingLogical.push(logical);
+    if (hit) {
+      resolved.set(logical, hit.name);
+      // Capacity comes from the ORG, not a constant. Welcome_Call_Log__c has been
+      // resized once already; a hardcoded ceiling would mean either wasting the new
+      // headroom or, after a shrink, a PATCH Salesforce rejects outright.
+      if (Number.isFinite(hit.length) && hit.length > 0) lengths.set(logical, hit.length);
+    } else missingLogical.push(logical);
   }
 
   // Id is always selected — every downstream write addresses the record by it.
@@ -99,6 +105,8 @@ export function resolveCustomerFields(describe) {
 
   return {
     apiName: (logical) => resolved.get(logical) ?? null,
+    /** Declared capacity of a field, or null when the describe didn't report one. */
+    fieldLength: (logical) => lengths.get(logical) ?? null,
     selectFields,
     missingLogical,
     missingRequired: REQUIRED_LOGICAL_FIELDS.filter((l) => !resolved.has(l)),

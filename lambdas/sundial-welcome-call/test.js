@@ -71,6 +71,63 @@ const ORG_FIELDS = [
   ["Client__c", "reference"],
 ].map(([name, type]) => ({ name, type }));
 
+// Capacity is read from the DESCRIBE, not a constant — the org raised
+// Welcome_Call_Log__c to Salesforce's long-text maximum. Tests that exercise the
+// trim-at-capacity path shrink this so they don't have to build 131k of fixture.
+const LOG_FIELD_LENGTH = 131072;
+function describeWithLogLength(length = LOG_FIELD_LENGTH) {
+  return ORG_FIELDS.map((f) =>
+    f.name === "Welcome_Call_Log__c" ? { ...f, length } : f
+  );
+}
+
+/**
+ * A REAL `GET /v2/get-call` response, copied from the Geovanna Macedo call on
+ * 2026-08-18 (names/emails left as Retell transcribed them — the mismatch between the
+ * spoken and contract values is the whole point of that call's result).
+ *
+ * Kept verbatim in shape because inventing this fixture is what hid two bugs:
+ * `in_voicemail` sits on `call_analysis`, and `mismatched_items` / `unconfirmed_items`
+ * are STRINGS, not arrays.
+ */
+function geovannaCall(overrides = {}, analysisOverrides = {}) {
+  return {
+    call_id: "call_ced35ad380c4a0fff47c8de58f9",
+    call_status: "ended",
+    disconnection_reason: "agent_hangup",
+    duration_ms: 171651,
+    recording_url: "https://recordings.retellai.com/call_ced35ad380c4a0fff47c8de58f9.wav",
+    call_analysis: {
+      in_voicemail: false,
+      user_sentiment: "Positive",
+      call_successful: true,
+      call_summary:
+        "The agent called Geovanna Macedo to verify her identity and confirm the " +
+        "details of her solar agreement, including system size, estimated production, " +
+        "payment schedule, and utility bill expectations. Geovanna confirmed all " +
+        "details and requested email reminders for payment due dates.",
+      custom_analysis_data: {
+        verification_result: "partial",
+        identity_confirmed: false,
+        email_confirmed: false,
+        system_details_confirmed: true,
+        financial_terms_confirmed: true,
+        utility_bill_understood: true,
+        usage_change_understood: true,
+        used_loan_for_prepaid: "not_applicable",
+        mismatched_items:
+          "Name and email provided by customer (Giovanna Massaro, Giovanna Masato at " +
+          "Harman Electric dot net) do not match the expected name (Geovanna Macedo) " +
+          "and contract email (geovannamacedo at harmonelectric dot net).",
+        unconfirmed_items: "",
+        follow_up_notes: "Customer requested email reminders for payment due dates.",
+        ...analysisOverrides,
+      },
+    },
+    ...overrides,
+  };
+}
+
 function baseCustomer(overrides = {}) {
   return {
     Id: "a1P7y00000AUo6TEAT",
@@ -110,7 +167,7 @@ function resetCtx() {
     from_number: "+16025550000",
     agent_id: "agent_welcome",
   };
-  ctx.describeFields = ORG_FIELDS;
+  ctx.describeFields = describeWithLogLength();
   ctx.queryRows = [baseCustomer()];
   ctx.soqlSeen = [];
   ctx.sfUpdates = [];
@@ -119,6 +176,8 @@ function resetCtx() {
   ctx.broadcasts = [];
   ctx.retellCalls = [];
   ctx.retellResponse = { status: 201, body: { call_id: "call_abc123" } };
+  ctx.retellGetCalls = [];
+  ctx.retellGetCallResponse = { status: 200, body: geovannaCall() };
   ctx.zapierPosts = [];
   ctx.zapierResponses = [];
   ctx.s3Objects = new Map();
@@ -325,6 +384,24 @@ globalThis.fetch = async (url, init = {}) => {
       status,
       headers: { get: (h) => (h === "content-length" ? String(bytes?.length ?? 0) : null) },
       arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
+    };
+  }
+
+  // GET /v2/get-call/{id} — the rep-form backfill re-reads the analysis from Retell.
+  // Separated from create-phone-call because it carries no body to parse.
+  if (u.includes("api.retellai.com/v2/get-call")) {
+    ctx.retellGetCalls.push({ url: u, headers: init?.headers });
+    const { status, body } = ctx.retellGetCallResponse;
+    // Echo the requested id back, the way the real endpoint does — otherwise a test
+    // matching call_abc123 would get a payload claiming to be a different call, and
+    // the idempotency marker written to the log would be for the wrong id.
+    const requested = decodeURIComponent(u.split("/v2/get-call/")[1] ?? "");
+    const payload =
+      body && typeof body === "object" && requested ? { ...body, call_id: requested } : body;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => (typeof payload === "string" ? payload : JSON.stringify(payload)),
     };
   }
 
@@ -1169,16 +1246,19 @@ test("result writeback records outcome, mismatches and recording url", async () 
   assert.equal(res.statusCode, 200);
   const fields = ctx.sfUpdates[0].fields;
   assert.equal(fields.Welcome_Call_Status__c, "Verified - Exceptions");
-  const line = fields.Welcome_Call_Log__c.split("\n")[0];
-  assert.match(line, /Result: partial/);
-  assert.match(line, /Status: Verified - Exceptions/);
-  assert.match(line, /not confirmed: email, financials/);
-  assert.match(line, /mismatches: email address; monthly payment/);
-  assert.match(line, /unconfirmed: utility bill/);
-  assert.match(line, /notes: Customer will call back/);
-  assert.match(line, /summary: Customer confirmed all terms\./);
-  assert.match(line, /recording=https:\/\/recordings\.retellai\.com\/call_abc123\.wav/);
-  assert.match(line, /call_id=call_abc123/);
+  const entry = fields.Welcome_Call_Log__c;
+
+  assert.match(entry, /^── .* · Attempt 1 · Result: Verified - Exceptions · call_id=call_abc123$/m);
+  assert.match(entry, /^Call Summary: Customer confirmed all terms\.$/m);
+  assert.match(entry, /^Mismatched Items: email address; monthly payment$/m);
+  assert.match(entry, /^Unconfirmed Items: utility bill$/m);
+  assert.match(entry, /^Follow Up: Customer will call back about the payment amount\.$/m);
+  assert.match(
+    entry,
+    /^Confirmations: identity=Y email=N system=Y financial=N utility=Y usage=Y$/m
+  );
+  // Archival succeeds here, so the durable S3 key is what the line carries.
+  assert.match(entry, /^Recording: SUNDIAL\/a1P7y00000AUo6TEAT\/welcome-call-.*\.mp3/m);
 });
 
 // --- shapes taken from a REAL completed call (2026-08-18) -------------------
@@ -1206,14 +1286,21 @@ test("the real Retell payload shape lands in the log intact", async () => {
 
   const res = await handler(signedWebhookEvent(payload));
   assert.equal(res.statusCode, 200);
-  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
+  const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
 
-  assert.match(line, /not confirmed: identity, email/);
-  assert.match(line, /mismatches: Name and email provided by customer do not match/);
-  assert.match(line, /notes: Customer requested email reminders/);
-  assert.match(line, /summary: The agent called to verify identity/);
-  // An empty string must not produce an "unconfirmed:" segment.
-  assert.ok(!/unconfirmed:/.test(line), "empty unconfirmed_items must be omitted");
+  assert.match(
+    entry,
+    /^Confirmations: identity=N email=N system=Y financial=Y utility=Y usage=Y$/m
+  );
+  assert.match(
+    entry,
+    /^Mismatched Items: Name and email provided by customer do not match the expected name and contract email\.$/m
+  );
+  assert.match(entry, /^Follow Up: Customer requested email reminders for payment due dates\.$/m);
+  assert.match(entry, /^Call Summary: The agent called to verify identity/m);
+  // An empty value is stated as "none" rather than omitted — an absent line would be
+  // ambiguous between "nothing to report" and "this entry predates the field".
+  assert.match(entry, /^Unconfirmed Items: none$/m);
 });
 
 test("in_voicemail is read from call_analysis, where Retell actually puts it", async () => {
@@ -1224,7 +1311,7 @@ test("in_voicemail is read from call_analysis, where Retell actually puts it", a
   const res = await handler(signedWebhookEvent(payload));
   assert.equal(res.statusCode, 200);
   const fields = ctx.sfUpdates[0].fields;
-  assert.match(fields.Welcome_Call_Log__c.split("\n")[0], /voicemail: yes/);
+  assert.match(fields.Welcome_Call_Log__c, /^Recording: .* · Voicemail: yes$/m);
   // The flag is what turns an empty verification result into No Answer — the status
   // the scheduled retry Flow selects on. Reading the wrong path stranded these calls.
   assert.equal(fields.Welcome_Call_Status__c, "No Answer");
@@ -1235,19 +1322,34 @@ test("a top-level in_voicemail is still honoured if Retell ever moves it", async
   const payload = analyzedPayload({ in_voicemail: true }, { verification_result: "" });
   const res = await handler(signedWebhookEvent(payload));
   assert.equal(res.statusCode, 200);
-  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /voicemail: yes/);
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /Voicemail: yes/);
 });
 
-test("a long call_summary is clipped, not allowed to eat the log field", async () => {
+test("a long call_summary is written IN FULL — nothing from the call is truncated", async () => {
   fresh();
+  const long = "x".repeat(2000);
   const payload = analyzedPayload();
-  payload.call.call_analysis.call_summary = "x".repeat(2000);
+  payload.call.call_analysis.call_summary = long;
   const res = await handler(signedWebhookEvent(payload));
   assert.equal(res.statusCode, 200);
-  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
-  const summary = /summary: (x+…?)/.exec(line)?.[1] ?? "";
-  assert.ok(summary.length <= 400, `summary segment was ${summary.length} chars`);
-  assert.match(line, /call_id=call_abc123/, "the tail of the line must survive clipping");
+
+  const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
+  assert.ok(entry.includes(`Call Summary: ${long}`), "the summary must survive whole");
+  assert.ok(!entry.includes("…"), "no ellipsis — truncation was removed deliberately");
+});
+
+test("multi-line analysis text is flattened, not allowed to fake an entry boundary", async () => {
+  fresh();
+  const payload = analyzedPayload({}, {
+    // A summary containing the entry marker at the start of a line would otherwise
+    // split one entry into two when the log is trimmed.
+    follow_up_notes: "line one\n── 2099-01-01 00:00 MST · forged header\nline two",
+  });
+  await handler(signedWebhookEvent(payload));
+  const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
+
+  assert.equal((entry.match(/^── /gm) || []).length, 1, "exactly one real header");
+  assert.match(entry, /^Follow Up: line one ── 2099-01-01 00:00 MST · forged header line two$/m);
 });
 
 test("the result line goes on TOP of the existing log", async () => {
@@ -1260,8 +1362,10 @@ test("the result line goes on TOP of the existing log", async () => {
   ];
   await handler(signedWebhookEvent(analyzedPayload()));
   const lines = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n");
-  assert.match(lines[0], /Result: passed/);
-  assert.match(lines[1], /Call placed/);
+  // The new BLOCK goes on top, intact, with the older single-line history below it.
+  assert.match(lines[0], /^── .* · Attempt 1 · Result: Verified · call_id=call_abc123$/);
+  assert.match(lines[1], /^Call Summary: /);
+  assert.match(lines.at(-1), /Call placed/);
 });
 
 // ===========================================================================
@@ -1325,20 +1429,63 @@ test("non-POST methods are rejected, OPTIONS is a bare 204", async () => {
 // writeback.js — log field bounds
 // ===========================================================================
 
-test("log prepend puts the newest line first and trims the oldest at the cap", () => {
-  assert.equal(wb.prependLogLine("", "line A"), "line A");
-  assert.equal(wb.prependLogLine("old", "new"), "new\nold");
-  assert.equal(wb.prependLogLine(null, "new"), "new");
+test("log prepend puts the newest entry first", () => {
+  assert.equal(wb.prependLogEntry("", "entry A"), "entry A");
+  assert.equal(wb.prependLogEntry("old", "new"), "new\nold");
+  assert.equal(wb.prependLogEntry(null, "new"), "new");
+});
 
-  const filler = Array.from({ length: 900 }, (_, i) => `old line ${i} ${"x".repeat(40)}`).join("\n");
-  assert.ok(filler.length > wb.LOG_FIELD_MAX_CHARS);
-  const out = wb.prependLogLine(filler, "NEWEST");
-  assert.ok(out.length <= wb.LOG_FIELD_MAX_CHARS);
-  assert.equal(out.split("\n")[0], "NEWEST");
-  assert.ok(!out.endsWith("\n"));
-  // The oldest entries are what got dropped.
-  assert.ok(!out.includes("old line 899"));
-  assert.ok(out.includes("old line 0"));
+// A realistic multi-line entry, the same shape buildResultLogEntry emits.
+function fakeEntry(n) {
+  return (
+    `── 2026-08-19 1${n % 10}:00 MST · Attempt ${n} · Result: Verified · call_id=call_${n}\n` +
+    `Call Summary: ${"summary text ".repeat(20)}\n` +
+    `Mismatched Items: none\nUnconfirmed Items: none\nFollow Up: none\n` +
+    `Confirmations: identity=Y email=Y system=Y financial=Y utility=Y usage=Y\n` +
+    `Recording: SUNDIAL/rec/welcome-call-${n}.mp3 · Duration: 2:51`
+  );
+}
+
+test("at capacity, WHOLE oldest entries are dropped and the cut is marked", () => {
+  const older = [fakeEntry(1), fakeEntry(2), fakeEntry(3), fakeEntry(4), fakeEntry(5)].join("\n");
+  const newest = fakeEntry(99);
+  // Size the ceiling from the fixtures rather than a magic number, so the test keeps
+  // forcing a trim if the entry format grows: room for the new entry, ONE old one,
+  // and the notice — nothing more.
+  const max = newest.length + fakeEntry(1).length + 40;
+  const out = wb.prependLogEntry(older, newest, max);
+
+  assert.ok(out.length <= max, `got ${out.length} > ${max}`);
+  // The new entry survives COMPLETE — every line of it.
+  for (const line of newest.split("\n")) assert.ok(out.includes(line), `lost: ${line}`);
+  // The cut is visible rather than silent.
+  assert.match(out, /… older entries trimmed …/);
+  // Oldest went first; the newest of the survivors stayed.
+  assert.ok(!out.includes("call_id=call_5"), "the oldest entry should be gone");
+  assert.ok(out.includes("call_id=call_1"), "the most recent old entry should survive");
+
+  // No half-entries: every retained header has its Confirmations line under it.
+  const headers = (out.match(/^── /gm) || []).length;
+  const confirmations = (out.match(/^Confirmations: /gm) || []).length;
+  assert.equal(headers, confirmations, "an entry was cut in half");
+});
+
+test("a single entry larger than the whole field is clipped, not dropped", () => {
+  // Impossible with real payloads, but a rejected PATCH would lose the status too.
+  const huge = `── header · call_id=x\n${"y".repeat(5000)}`;
+  const out = wb.prependLogEntry("older", huge, 1000);
+  assert.equal(out.length, 1000);
+  assert.ok(out.startsWith("── header"));
+});
+
+test("trimming keeps legacy single-line history as entries too", () => {
+  const legacy = Array.from({ length: 50 }, (_, i) => `2026-08-1 · Attempt ${i} · Call placed`).join("\n");
+  const out = wb.prependLogEntry(legacy, fakeEntry(7), 1200);
+  assert.ok(out.length <= 1200);
+  assert.ok(out.includes("call_id=call_7"));
+  assert.match(out, /… older entries trimmed …/);
+  // Oldest legacy lines dropped from the bottom, newest legacy line retained.
+  assert.ok(!out.includes("Attempt 49 · Call placed"));
 });
 
 // ===========================================================================
@@ -1523,15 +1670,26 @@ test("the archived key goes into the same Salesforce write as the status", async
   // can ride along in the log line.
   assert.equal(ctx.sfUpdates.length, 1);
   const today = fmt.phoenixDate(new Date());
-  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
-  assert.ok(
-    line.includes(
-      `archived=SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-${today}-attempt-1.mp3`
-    ),
-    line
+  const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
+  // The durable S3 key is what the Recording line carries — the Retell URL expires,
+  // so when both exist the key is the one worth keeping.
+  assert.match(
+    entry,
+    new RegExp(
+      `^Recording: SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-${today}-attempt-1\\.mp3`,
+      "m"
+    )
   );
-  // The (expiring) Retell URL is still recorded alongside the durable key.
-  assert.match(line, /recording=https:\/\/recordings\.retellai\.com/);
+});
+
+test("with no archived key the Recording line falls back to Retell's URL", async () => {
+  fresh();
+  ctx.s3Throws = { op: "PutObject", message: "AccessDenied" };
+  await handler(signedWebhookEvent(analyzedPayload()));
+  assert.match(
+    ctx.sfUpdates[0].fields.Welcome_Call_Log__c,
+    /^Recording: https:\/\/recordings\.retellai\.com\/call_abc123\.wav/m
+  );
 });
 
 test("a recording failure does NOT block the Salesforce writeback", async () => {
@@ -1693,9 +1851,198 @@ test("orphan-match promotes the recording, logs it, and deletes the holding obje
   assert.equal(ctx.metadataInserts[0].s3_key, expected);
   assert.equal(ctx.metadataInserts[0].category, "Welcome Call Recording");
 
-  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
-  assert.match(line, /rep-form call call_abc123 matched, recording attached/);
-  assert.match(line, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} MST · /);
+  // The log now carries the FULL result, not a one-line "matched" note.
+  const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
+  assert.match(entry, /^── .* · rep-form call · Result: .* · call_id=call_abc123$/m);
+  assert.equal(body.backfill, "backfilled");
+});
+
+// ===========================================================================
+// Rep-form backfill (D-055) — the call RESULT reaching Salesforce
+// ===========================================================================
+
+/** Park an orphan whose call_id matches the real get-call fixture. */
+function parkGeovanna(when = new Date("2026-08-18T16:00:00Z")) {
+  parkOrphan("call_ced35ad380c4a0fff47c8de58f9", when);
+}
+function matchGeovanna() {
+  return orphanMatchEvent({
+    call_id: "call_ced35ad380c4a0fff47c8de58f9",
+    sf_record_id: baseCustomer().Id,
+  });
+}
+
+test("backfill writes the full analysis and the mapped status to Salesforce", async () => {
+  fresh();
+  parkGeovanna();
+  const res = await handler(matchGeovanna());
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.equal(body.backfill, "backfilled");
+
+  // Retell was re-read for the analysis — the sweep only sends {call_id, record}.
+  assert.equal(ctx.retellGetCalls.length, 1);
+  assert.match(ctx.retellGetCalls[0].url, /\/v2\/get-call\/call_ced35ad380c4a0fff47c8de58f9$/);
+
+  const fields = ctx.sfUpdates.at(-1).fields;
+  // verification_result "partial" -> Verified - Exceptions, same mapping the webhook uses.
+  assert.equal(fields.Welcome_Call_Status__c, "Verified - Exceptions");
+  assert.equal(body.welcomeCallStatus, "Verified - Exceptions");
+
+  const entry = fields.Welcome_Call_Log__c;
+  assert.match(
+    entry,
+    /^── .* · rep-form call · Result: Verified - Exceptions · call_id=call_ced35ad380c4a0fff47c8de58f9$/m
+  );
+  assert.match(entry, /^Call Summary: The agent called Geovanna Macedo to verify/m);
+  assert.match(entry, /^Mismatched Items: Name and email provided by customer/m);
+  assert.match(entry, /^Unconfirmed Items: none$/m);
+  assert.match(entry, /^Follow Up: Customer requested email reminders for payment due dates\.$/m);
+  assert.match(
+    entry,
+    /^Confirmations: identity=N email=N system=Y financial=Y utility=Y usage=Y$/m
+  );
+  // The permanent key, not Retell's expiring URL, and the real duration.
+  assert.match(entry, /^Recording: SUNDIAL\/a1P7y00000AUo6TEAT\/welcome-call-.*\.mp3 · Duration: 2:52$/m);
+
+  // Nothing is truncated: the full mismatch sentence survives.
+  assert.ok(entry.includes("(geovannamacedo at harmonelectric dot net)."));
+});
+
+test("a backfilled entry is byte-identical in structure to a webhook-written one", async () => {
+  // The point of sharing buildResultLogEntry: a reader (or an email merge) must not
+  // be able to tell which path produced an entry, beyond the origin segment.
+  fresh();
+  parkGeovanna();
+  await handler(matchGeovanna());
+  const backfilled = ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c;
+
+  fresh();
+  const payload = { event: "call_analyzed", call: geovannaCall() };
+  payload.call.metadata = { sf_record_id: baseCustomer().Id, attempt_no: 1 };
+  await handler(signedWebhookEvent(payload));
+  const live = ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c;
+
+  // Normalise the three things that legitimately differ by origin: the timestamp, the
+  // origin segment, and the recording FILENAME (matched recordings are named for the
+  // call_id, attached ones for the attempt number — the sweep has no attempt number).
+  const shape = (s) =>
+    s
+      .split("\n")
+      .map((l) =>
+        l
+          .replace(/^(── ).*?( · )/, "$1<stamp>$2")
+          .replace(/^(── <stamp> · ).*?( · Result)/, "$1<origin>$2")
+          .replace(/^(Recording: SUNDIAL\/[^/]+\/).*?(\.mp3)/, "$1<file>$2")
+      );
+  assert.deepEqual(shape(backfilled), shape(live));
+});
+
+test("a record already at a terminal status keeps it — the entry is still appended", async () => {
+  for (const terminal of ["Verified", "Verified - Exceptions", "Refused", "Failed - Max Attempts"]) {
+    fresh();
+    ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: terminal })];
+    parkGeovanna();
+    const res = await handler(matchGeovanna());
+    assert.equal(res.statusCode, 200);
+    assert.equal(parse(res).backfill, "backfilled_status_unchanged");
+
+    const fields = ctx.sfUpdates.at(-1).fields;
+    assert.equal(
+      fields.Welcome_Call_Status__c,
+      undefined,
+      `${terminal} must not be overwritten by a later rep-form call`
+    );
+    assert.match(
+      fields.Welcome_Call_Log__c,
+      /^── .* · rep-form call \(status unchanged, record already terminal\) · Result: Verified - Exceptions · /m
+    );
+  }
+});
+
+test("a NON-terminal status IS advanced by the backfill", async () => {
+  for (const status of ["Queued", "Calling", "No Answer", ""]) {
+    fresh();
+    ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: status })];
+    parkGeovanna();
+    await handler(matchGeovanna());
+    assert.equal(
+      ctx.sfUpdates.at(-1).fields.Welcome_Call_Status__c,
+      "Verified - Exceptions",
+      `"${status}" is not a settled result and should be replaced`
+    );
+  }
+});
+
+test("backfill NEVER increments Welcome_Call_Attempts__c", async () => {
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Attempts__c: 2 })];
+  parkGeovanna();
+  await handler(matchGeovanna());
+  for (const u of ctx.sfUpdates) {
+    assert.equal(
+      "Welcome_Call_Attempts__c" in u.fields,
+      false,
+      "the attempts counter is for SF-initiated dials only"
+    );
+  }
+});
+
+test("re-running the sweep does not append a second entry", async () => {
+  fresh();
+  parkGeovanna();
+  await handler(matchGeovanna());
+  const afterFirst = ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c;
+
+  // Second run: holding object is gone, destination exists -> already_matched path.
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Log__c: afterFirst })];
+  const writesBefore = ctx.sfUpdates.length;
+  const res = await handler(matchGeovanna());
+
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.equal(body.already_matched, true);
+  assert.equal(body.backfill, "already_present");
+  assert.equal(ctx.sfUpdates.length, writesBefore, "no second Salesforce write");
+  assert.equal(
+    (afterFirst.match(/call_id=call_ced35ad380c4a0fff47c8de58f9/g) || []).length,
+    1
+  );
+});
+
+test("an unreachable Retell still attaches the recording, with the short note", async () => {
+  fresh();
+  parkGeovanna();
+  ctx.retellGetCallResponse = { status: 500, body: { error_message: "upstream" } };
+  const res = await handler(matchGeovanna());
+
+  assert.equal(res.statusCode, 200, "a backfill failure must not fail the match");
+  const body = parse(res);
+  assert.equal(body.backfill, "fetch_failed");
+  assert.equal(body.already_matched, false);
+  // The audio is attached regardless — that is the part that cannot be redone.
+  assert.ok(ctx.s3Objects.has(body.key));
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    /rep-form call call_ced35ad380c4a0fff47c8de58f9 matched, recording attached/
+  );
+  // No status is invented from a call we could not read.
+  assert.equal(ctx.sfUpdates.at(-1).fields.Welcome_Call_Status__c, undefined);
+});
+
+test("the backfill entry is trimmed against the DESCRIBED field length", async () => {
+  fresh();
+  // Shrink the field: the code must read this, not a constant.
+  ctx.describeFields = describeWithLogLength(900);
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Log__c: "OLDEST-MARKER\n" + "z".repeat(800) })];
+  parkGeovanna();
+  await handler(matchGeovanna());
+
+  const log = ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c;
+  assert.ok(log.length <= 900, `log was ${log.length} chars against a 900 ceiling`);
+  assert.match(log, /^── .* · rep-form call · /m, "the new entry survives whole");
+  assert.match(log, /^Call Summary: The agent called Geovanna Macedo/m);
+  assert.ok(!log.includes("OLDEST-MARKER"), "the oldest content is what gets dropped");
 });
 
 test("orphan-match is idempotent once the holding object is gone", async () => {
@@ -1732,19 +2079,19 @@ test("a retry heals a run whose log append failed", async () => {
   );
   // The recording still got attached, and the endpoint still reports success...
   assert.equal(first.already_matched, false);
-  assert.equal(first.log, "failed");
+  assert.equal(first.backfill, "failed");
   assert.ok(ctx.s3Objects.has(first.key));
 
-  // ...and a retry writes the note that was lost.
+  // ...and a retry writes the RESULT that was lost — the full entry, not a note.
   ctx.sfUpdateThrows = null;
   const second = parse(
     await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
   );
   assert.equal(second.already_matched, true);
-  assert.equal(second.log, "appended");
+  assert.equal(second.backfill, "backfilled");
   assert.match(
     ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
-    /rep-form call call_abc123 matched, recording attached/
+    /^── .* · rep-form call · Result: .* · call_id=call_abc123$/m
   );
 });
 

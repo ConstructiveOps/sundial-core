@@ -1010,3 +1010,85 @@ self-contained one is to have the sweep re-fetch the call from Retell, since we 
 hold the API key.
 
 238 green. Deployed.
+
+## 2026-08-19 — Rep-form call results reach Salesforce; result entries stop being truncated (D-055)
+
+Implements option (a) from the blocked decision logged on 2026-08-18.
+
+**The problem.** All three live Welcome Calls were rep-form: started by a rep, no
+`sf_record_id`, so the entire Salesforce writeback was skipped. The orphan sweep
+attached the audio and wrote one line — `rep-form call <id> matched, recording
+attached` — which said a call happened and nothing about what was said. The analysis
+Harmon actually needs (disputed contract values, follow-up requests, whether identity
+was confirmed) lived only in a Zapier ledger built for billing.
+
+**The fix.** `POST /welcome-call/orphan-match` now backfills the full result. The sweep
+sends only `{call_id, sf_record_id}`, so the analysis is re-read from Retell
+(`GET /v2/get-call/{call_id}`) rather than re-sent by Zapier — same data, same
+authority the webhook used, and no new contract with Zapier. Crucially it goes through
+the SAME `mapOutcomeToStatus` and `buildResultLogEntry` as the live path: a test
+asserts a backfilled entry and a webhook-written one are structurally identical
+line-for-line, normalising only the three things that legitimately differ (timestamp,
+origin segment, recording filename). A reader — or an email alert merging the field —
+must never have to know which path produced an entry.
+
+Rules that took the most thought:
+- **A terminal status is never overwritten.** A rep-form call is a *second*
+  conversation with a customer whose verification may already be settled, and a sweep
+  running days later must not reopen it. The entry is still appended, marked
+  `(status unchanged, record already terminal)` so the reader can see why the status
+  doesn't match that line's result. `Calling` is deliberately NOT terminal — it means a
+  call is in flight, not that a result exists — so a new `TERMINAL_STATUSES` set was
+  split out from the existing `TERMINAL_OR_IN_FLIGHT_STATUSES`.
+- **`Welcome_Call_Attempts__c` is never incremented.** That counter is the retry
+  ceiling for Salesforce-initiated dials; counting a rep-form call against it would
+  silently consume a customer's retry budget.
+- **Degrades rather than fails.** The recording is attached before the backfill runs,
+  so an unreachable Retell falls back to the old one-line note and invents no status
+  from a call it could not read.
+
+**Truncation removed.** Segments were clipped at 200/300/400 chars to protect a 32k
+field. That traded away the wrong thing — this text is merged into email alerts and
+read by a human deciding what went wrong, and a mismatch description cut at 200
+characters is exactly the half they needed. Entries are now multi-line blocks:
+
+```
+── 2026-08-19 14:32 MST · rep-form call · Result: Verified - Exceptions · call_id=…
+Call Summary: <full>
+Mismatched Items: <full, or "none">
+Unconfirmed Items: <full, or "none">
+Follow Up: <full, or "none">
+Confirmations: identity=N email=N system=Y financial=Y utility=Y usage=Y
+Recording: <s3 key> · Duration: 2:52
+```
+
+`Confirmations:` now shows all six flags rather than only the failures — in a block
+this wide the full row is readable at a glance and answers "was this even asked?".
+Empty values are written as `none` rather than omitted, so "nothing to report" is
+distinguishable from "this entry predates the field". Whitespace collapsing became
+load-bearing rather than cosmetic: entries are parsed back apart on the `── ` marker
+when trimming, so a raw newline in a call summary would fabricate a block boundary —
+there is a test that feeds a forged header through `follow_up_notes`.
+
+**Capacity is read from the describe, not hardcoded**, and overflow drops WHOLE OLDEST
+ENTRIES with a visible `… older entries trimmed …` marker. The previous
+character-clipping could leave a header with no analysis under it, or analysis lines
+with no header naming the call — both worse than a missing entry, because they read as
+real data. A test asserts retained headers and `Confirmations:` lines stay balanced, so
+no entry is ever cut in half.
+
+**Reading the length from the describe turned out to matter immediately:**
+`Welcome_Call_Log__c` is **still 32,768** in the org, not the 131,072 the change
+assumed. Nothing breaks — the code trims to whatever the describe reports — and it will
+pick up the larger ceiling the moment the field is saved. A hardcoded 131,072 would
+have started rejecting PATCHes today.
+
+**Fixtures rebuilt from the real Geovanna Macedo `get-call` response**, including the
+two shapes that hid bugs before: `mismatched_items` as a STRING and `in_voicemail` on
+`call_analysis`.
+
+15 new tests, 251 green across the repo. Deployed.
+
+**Outstanding:** raise the log field to 131,072 (Tim), and run the sweep against the
+two recordings currently parked in `SUNDIAL/_orphan-welcome-calls/` to exercise the
+backfill against real records.

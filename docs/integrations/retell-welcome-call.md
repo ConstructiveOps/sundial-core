@@ -474,18 +474,57 @@ record id, so it is the last place to be lenient.
    from the holding object's `LastModified`** in Phoenix time — the sweep may run days
    after the call, and the file should be named for the conversation, not the sweep.
 4. Register Supabase file metadata (skipped if a row for that key exists).
-5. Prepend `rep-form call {call_id} matched, recording attached` to
-   `Welcome_Call_Log__c`, then cache + Realtime.
+5. **Backfill the full call result** (see below), then cache + Realtime.
 6. **Delete the holding object last**, only after the copy is confirmed.
+
+### The backfill (D-055)
+
+Attaching the audio was never enough. A rep-form call reaches the webhook with no
+`sf_record_id`, so its entire Salesforce writeback is skipped — and until this existed,
+the analysis (mismatches, follow-ups, the summary) lived **only** in the Zapier billing
+ledger. Salesforce is the system of record for call RESULTS regardless of how the call
+started; the ledger is for billing.
+
+The sweep sends only `{call_id, sf_record_id}`, so the analysis is **re-read from
+Retell** (`GET /v2/get-call/{call_id}`, same API key as create-call) rather than re-sent
+by Zapier. Same data, same authority the webhook used — which is what lets both paths
+share `mapOutcomeToStatus` and `buildResultLogEntry` and emit identical entries.
+
+**Status rules:**
+
+| Current `Welcome_Call_Status__c` | What the backfill does |
+|---|---|
+| `Verified`, `Verified - Exceptions`, `Refused`, `Failed - Max Attempts` | **Status untouched.** The entry is still appended, with the origin `rep-form call (status unchanged, record already terminal)` so a reader can see why the status doesn't match the result on that line. |
+| Anything else (`Not Started`, `Queued`, `Calling`, `No Answer`, blank) | Status set to the mapped outcome. |
+
+A rep-form call is a *second* conversation with a customer whose verification may
+already be settled, and a sweep running days later must not reopen it. Note `Calling`
+is treated as non-terminal — it means a call is in flight, not that a result is
+settled.
+
+**`Welcome_Call_Attempts__c` is never incremented.** That counter drives the retry
+ceiling for Salesforce-initiated dials; a rep-form call is not one, and counting it
+would silently consume a customer's retry budget.
+
+**Degradation:** the recording is already attached by the time the backfill runs, so
+neither an unreachable Retell (`backfill: "fetch_failed"`) nor a missing API key
+(`"no_api_key"`) may fail the match — those fall back to the one-line
+`rep-form call … matched, recording attached` note, and no status is invented from a
+call we could not read. A Salesforce failure reports `"failed"`; the holding object
+survives and the Zap's retry re-runs the whole thing.
+
+**Idempotency** reuses the webhook's own guard: if the log already contains a full
+result entry for this `call_id` (a line carrying both `call_id=` and `Result:`), the
+backfill returns `"already_present"` and writes nothing.
 
 **Idempotency has to work backwards, because the operation deletes its own input.** A
 retry cannot re-derive the destination key — that key embeds the `LastModified` of an
 object that no longer exists. So the retry path **searches** `SUNDIAL/{sf_record_id}/`
 for any `welcome-call-*-{call_id}.mp3` and reports `already_matched: true`. It also
-re-attempts the metadata row and the log line, each a no-op when already present, so a
-partially-failed run **converges** instead of silently losing the note. (Without that,
-a run whose log append failed would delete the holding object and the note could never
-be written.)
+re-attempts the metadata row and the backfill, each a no-op when already present, so a
+partially-failed run **converges** instead of silently losing the result. (Without
+that, a run whose Salesforce write failed would delete the holding object and the
+result could never be written.)
 
 **A failed holding-object delete is not a failed match.** The bytes are attached and
 registered, which is the point; the response says `holdingDeleted: false` and a later
@@ -517,39 +556,74 @@ means truncation at the 32,768-char cap discards the **oldest** history, which i
 half you can afford to lose. Truncation trims to a line boundary, so the log never
 ends mid-record.
 
+A **result** is a multi-line BLOCK, newest first. Single-line entries (placed, skipped,
+matched-without-analysis) sit alongside them.
+
 ```
-2026-08-17 14:32 MST · Attempt 1 · Result: passed · Status: Verified · mismatches: none · recording=https://… · archived=SUNDIAL/a1P…/welcome-call-2026-08-17-attempt-1.mp3 · call_id=call_abc123
-2026-08-17 14:19 MST · Attempt 1 · Call placed · call_id=call_abc123
+── 2026-08-19 14:32 MST · rep-form call · Result: Verified - Exceptions · call_id=call_ced35…
+Call Summary: The agent called Geovanna Macedo to verify her identity and confirm the details of her solar agreement…
+Mismatched Items: Name and email provided by customer (Giovanna Massaro…) do not match the expected name (Geovanna Macedo)…
+Unconfirmed Items: none
+Follow Up: Customer requested email reminders for payment due dates.
+Confirmations: identity=N email=N system=Y financial=Y utility=Y usage=Y
+Recording: SUNDIAL/a1P…/welcome-call-2026-08-18-call_ced35….mp3 · Duration: 2:52
+── 2026-08-17 14:19 MST · Attempt 1 · Call placed · call_id=call_abc123
 2026-08-17 09:02 MST · Skipped · unmappable financing partner: GoodLeap
 ```
 
-Line shapes:
-
 | Kind | Shape |
 |---|---|
+| **Result** | `── <stamp> · <origin> · Result: <status> · call_id=<id>` then one line each for Call Summary / Mismatched Items / Unconfirmed Items / Follow Up / Confirmations / Recording |
 | Placed | `<stamp> · Attempt <n> · Call placed · call_id=<id>` |
-| Result | `<stamp> · Attempt <n> · Result: <outcome> · Status: <status> [· not confirmed: <…>] · mismatches: <…> [· unconfirmed: <…>] [· notes: <…>] [· summary: <…>] [· voicemail: yes] [· recording=<url>] [· archived=<s3 key>] · call_id=<id>` |
-| Matched | `<stamp> · rep-form call <call_id> matched, recording attached` |
+| Matched (no analysis) | `<stamp> · rep-form call <call_id> matched, recording attached` |
 | Skip | `<stamp> · Skipped · unmappable financing partner: <value>` |
 
-`not confirmed:` lists only the confirmation flags that came back anything other than
-`true` (identity / email / system / financials / utility bill / usage change) — the
-actionable half; listing six `true`s on every good call would bury the exceptions. It
-is **not** redundant with `mismatches:`: a mismatch is "the customer gave a different
-value", an unpassed check is "we never got an answer", and they point at different
-follow-ups. `summary:` is `call_analysis.call_summary`, clipped to 400 chars —
-**added 2026-08-18** (Tim). It was originally omitted as "prose that would dominate the
-field", but it is the only segment that says what actually *happened* on the call
-rather than which checks passed, and making someone open the ledger to find that out
-was the worse trade. It still also reaches the ledger and the Realtime broadcast.
-`recording=` is Retell's URL, which **expires**; `archived=` is the permanent S3 key,
-and its presence is also the record that archival succeeded.
+`<origin>` is `Attempt <n>` for a Salesforce-initiated call, `rep-form call` for a
+backfill, or `rep-form call (status unchanged, record already terminal)` when the
+backfill deliberately left the status alone.
 
-`<stamp>` is `YYYY-MM-DD HH:mm MST`, local Phoenix time. Phoenix does not observe DST,
-so the abbreviation is MST year-round. Mismatch/unconfirmed/notes segments are clipped
-(200/200/300 chars) so one pathological analysis payload cannot eat the field — and
-take the status update down with it, since Salesforce rejects the whole PATCH on
-overflow.
+**NOTHING IS TRUNCATED (2026-08-19).** Segments used to be clipped at 200/300/400
+chars. This field is merged into email alerts and read by a human deciding what went
+wrong on a customer call, and a mismatch description cut at 200 characters is exactly
+the half you needed. Every value is now written in full. `Confirmations:` shows all six
+flags as `Y`/`N` rather than only the failures — in a block this wide the whole row is
+readable at a glance and answers "was this even asked?". Empty values are written as
+`none` rather than omitted, so "the call reported nothing" is distinguishable from
+"this entry predates the field".
+
+**One formatter, both origins.** `buildResultLogEntry` is shared by the webhook and the
+backfill, so a rep-form entry and a Salesforce-initiated entry are structurally
+identical — only `<origin>` and the recording filename differ. A test asserts that
+byte-for-byte, because the whole point is that a reader never has to know which path
+produced an entry.
+
+`Recording:` prefers the permanent S3 key and falls back to Retell's URL (which
+**expires**) when archival failed. `Duration:` is `m:ss` from `duration_ms`, omitted
+when absent. `Voicemail: yes` is appended when `call_analysis.in_voicemail` is true.
+
+`<stamp>` is `YYYY-MM-DD HH:mm MST`, local Phoenix time — Phoenix has no DST, so it is
+MST year-round. Whitespace inside any value is collapsed to single spaces; that is
+**required**, not cosmetic, because entries are parsed back apart on the `── ` marker
+when trimming and a raw newline in a summary would fabricate a block boundary.
+
+### Field capacity
+
+`Welcome_Call_Log__c` is a Long Text Area. **Its capacity is read from the describe at
+write time, never hardcoded** — the field is 32,768 today and is being raised to
+131,072 (Salesforce's long-text maximum); a constant would mean either wasting the new
+headroom or, after a shrink, a PATCH Salesforce rejects outright.
+
+When a new entry would overflow, **whole oldest entries are dropped from the bottom**
+until it fits, and a single `… older entries trimmed …` line marks the cut. The
+previous version clipped at a line boundary, which could leave a header with no
+analysis under it, or analysis lines with no header saying which call they belonged to
+— both worse than a missing entry, because they read as real data. Legacy single-line
+history from before the block format is preserved and trimmed as entries too.
+
+The newly written entry is never truncated. If one somehow exceeded the entire field —
+impossible with real payloads, where a verbose analysis is a few kB — it is
+hard-clipped as an absolute last resort and logged at ERROR, because a rejected PATCH
+would lose the status update as well.
 
 ---
 

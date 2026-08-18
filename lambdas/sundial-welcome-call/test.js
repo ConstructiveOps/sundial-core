@@ -1104,10 +1104,27 @@ test("log prepend puts the newest line first and trims the oldest at the cap", (
 // Routing
 // ===========================================================================
 
+// These two drive the platform-event path through `handler`, which takes no clock
+// injection — it reads `new Date()` deep in the eligibility guard. Left to the real
+// clock they pass during Phoenix business hours and fail every evening, because the
+// guard correctly refuses to dial at 22:00. Freeze the clock inside the window so
+// they test ROUTING, which is what they are about. try/finally so a failure can't
+// leak a frozen clock into the rest of the suite.
+function atTime(when, fn) {
+  mock.timers.enable({ apis: ["Date"], now: when.getTime() });
+  try {
+    return fn();
+  } finally {
+    mock.timers.reset();
+  }
+}
+
 test("the handler routes by event shape, not by a flag", async () => {
   fresh();
   // No HTTP method -> platform-event path -> a real call is placed.
-  const r1 = await handler({ detail: { payload: { Customer_Id__c: baseCustomer().Id } } });
+  const r1 = await atTime(IN_WINDOW, () =>
+    handler({ detail: { payload: { Customer_Id__c: baseCustomer().Id } } })
+  );
   assert.equal(r1.processed, 1);
   assert.equal(ctx.retellCalls.length, 1);
 
@@ -1128,9 +1145,14 @@ test("a platform event with no Customer_Id__c is a clean no-op", async () => {
 test("a failing platform-event batch throws so the relay retries", async () => {
   fresh();
   ctx.retellResponse = { status: 500, body: { error_message: "upstream" } };
-  await assert.rejects(
-    () => handler({ detail: { payload: { Customer_Id__c: baseCustomer().Id } } }),
-    /1 of 1 call attempts failed/
+  // Same clock caveat as above: outside the window the customer is SKIPPED, which
+  // is a success, so nothing would throw and the test would pass vacuously — or
+  // rather, fail, which is how this was caught.
+  await atTime(IN_WINDOW, () =>
+    assert.rejects(
+      () => handler({ detail: { payload: { Customer_Id__c: baseCustomer().Id } } }),
+      /1 of 1 call attempts failed/
+    )
   );
 });
 

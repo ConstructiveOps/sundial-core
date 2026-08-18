@@ -54,6 +54,10 @@ const FORWARD_TIMEOUT_MS = 8000;
 // field (and take the status update down with it — see writeback.prependLogLine).
 const LOG_SEGMENT_MAX = 200;
 const LOG_NOTES_MAX = 300;
+// call_summary is prose and the longest thing in the line, so it is clipped hardest
+// relative to its natural length. It earns the space: it is the only segment that says
+// what actually HAPPENED on the call rather than which checks passed.
+const LOG_SUMMARY_MAX = 400;
 
 // ---------------------------------------------------------------------------
 // Signature verification
@@ -356,6 +360,24 @@ const CONFIRMATION_FLAGS = [
 ];
 
 /**
+ * Read the voicemail flag.
+ *
+ * Retell puts `in_voicemail` on **`call_analysis`**, not on the call — verified
+ * against a real completed call (2026-08-18, `GET /v2/get-call`). Reading only
+ * `call.in_voicemail` returned `undefined` every time, so the flag was silently never
+ * set. That mattered twice: the log never recorded a voicemail, and `mapOutcomeToStatus`
+ * never saw the one signal that turns an empty verification result into **No Answer** —
+ * the status the scheduled retry Flow selects on. A voicemail-only call would therefore
+ * neither read as a voicemail nor ever be retried.
+ *
+ * Both locations are accepted: the nested one is what Retell documents and sends, and
+ * the top-level fallback costs nothing if a future payload moves it.
+ */
+function inVoicemail(call) {
+  return call?.call_analysis?.in_voicemail === true || call?.in_voicemail === true;
+}
+
+/**
  * Build the result log line. Contains the call_id, which is what the idempotency
  * guard below matches on, and the literal marker "Result:" that distinguishes a
  * finished call from the "Call placed" line written when it was dialed.
@@ -390,7 +412,15 @@ export function buildResultLogLine({
   const notes = clip(analysis?.follow_up_notes, LOG_NOTES_MAX);
   if (notes) parts.push(`notes: ${notes}`);
 
-  if (call?.in_voicemail === true) parts.push("voicemail: yes");
+  // call_summary lives on call_analysis, NOT in custom_analysis_data. It was
+  // originally left out of the log as "prose that would dominate the field"; Tim
+  // asked for it (2026-08-18) because it is the only part of the record that says
+  // what happened on the call, and reading the ledger to find that out is a worse
+  // trade than a longer log line. Clipped like every other segment.
+  const summary = clip(call?.call_analysis?.call_summary, LOG_SUMMARY_MAX);
+  if (summary) parts.push(`summary: ${summary}`);
+
+  if (inVoicemail(call)) parts.push("voicemail: yes");
 
   const recording = clip(call?.recording_url, 500);
   if (recording) parts.push(`recording=${recording}`);
@@ -522,7 +552,7 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
   const attempts = Number(get("welcomeCallAttempts")) || 0;
   const { status, outcome } = mapOutcomeToStatus(analysis?.verification_result, {
     attempts,
-    inVoicemail: call?.in_voicemail === true,
+    inVoicemail: inVoicemail(call),
   });
 
   // The attempt this result belongs to. metadata.attempt_no is what the placing side

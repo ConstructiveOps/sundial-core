@@ -332,8 +332,21 @@ Retell stops retrying it.
 Read from `call.call_analysis.custom_analysis_data`: `verification_result`,
 `identity_confirmed`, `email_confirmed`, `system_details_confirmed`,
 `financial_terms_confirmed`, `utility_bill_understood`, `usage_change_understood`,
-`mismatched_items`, `unconfirmed_items`, `follow_up_notes` — plus `recording_url`,
-`call_summary` and `in_voicemail` from the call.
+`mismatched_items`, `unconfirmed_items`, `follow_up_notes`. Plus `recording_url` from
+the **call**, and `call_summary` + `in_voicemail` from **`call_analysis`**.
+
+> **Verified against a real completed call, 2026-08-18** (`GET /v2/get-call`). All ten
+> `custom_analysis_data` keys came back exactly as named above — the agent's post-call
+> schema matches. Two shape facts worth keeping:
+>
+> - **`in_voicemail` is on `call_analysis`, not on the call.** The code read
+>   `call.in_voicemail` and got `undefined` every time, so the flag was never set —
+>   see the note in `webhook.js » inVoicemail()`. Both paths are now accepted.
+> - **`mismatched_items` / `unconfirmed_items` arrive as STRINGS, not arrays.**
+>   `listToText` already handles both, and tests now pin the string shape.
+>
+> Retell also sends **`used_loan_for_prepaid`** (e.g. `"not_applicable"`), which the
+> Lambda currently ignores. Harmless, but it is real data — see TASKS.md.
 
 | `verification_result` | `Welcome_Call_Status__c` |
 |---|---|
@@ -515,7 +528,7 @@ Line shapes:
 | Kind | Shape |
 |---|---|
 | Placed | `<stamp> · Attempt <n> · Call placed · call_id=<id>` |
-| Result | `<stamp> · Attempt <n> · Result: <outcome> · Status: <status> [· not confirmed: <…>] · mismatches: <…> [· unconfirmed: <…>] [· notes: <…>] [· voicemail: yes] [· recording=<url>] [· archived=<s3 key>] · call_id=<id>` |
+| Result | `<stamp> · Attempt <n> · Result: <outcome> · Status: <status> [· not confirmed: <…>] · mismatches: <…> [· unconfirmed: <…>] [· notes: <…>] [· summary: <…>] [· voicemail: yes] [· recording=<url>] [· archived=<s3 key>] · call_id=<id>` |
 | Matched | `<stamp> · rep-form call <call_id> matched, recording attached` |
 | Skip | `<stamp> · Skipped · unmappable financing partner: <value>` |
 
@@ -524,8 +537,11 @@ Line shapes:
 actionable half; listing six `true`s on every good call would bury the exceptions. It
 is **not** redundant with `mismatches:`: a mismatch is "the customer gave a different
 value", an unpassed check is "we never got an answer", and they point at different
-follow-ups. `call_summary` is not put in the log (it is prose and would dominate the
-field) — it reaches the ledger in the forwarded payload and the Realtime broadcast.
+follow-ups. `summary:` is `call_analysis.call_summary`, clipped to 400 chars —
+**added 2026-08-18** (Tim). It was originally omitted as "prose that would dominate the
+field", but it is the only segment that says what actually *happened* on the call
+rather than which checks passed, and making someone open the ledger to find that out
+was the worse trade. It still also reaches the ledger and the Realtime broadcast.
 `recording=` is Retell's URL, which **expires**; `archived=` is the permanent S3 key,
 and its presence is also the record that archival succeeded.
 

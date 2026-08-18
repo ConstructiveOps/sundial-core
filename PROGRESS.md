@@ -674,6 +674,8 @@ SPF passed without *aligning*. The DNS for `mail.sundialcrm.com` was already cor
 ~all`); only the SES side was wrong. Repointed → `MailFromDomainStatus: SUCCESS`. SPF
 now aligns, DKIM already passed, DMARC satisfied on both.
 
+**Outstanding (Tim): RESOLVED 2026-08-18** — the duplicate DMARC record was deleted; `_dmarc.sundialcrm.com` now publishes a single policy. (Original finding below.)
+
 **Outstanding (Tim):** `_dmarc.sundialcrm.com` publishes **two** conflicting DMARC
 records (`p=quarantine` and `p=none`). More than one is invalid — receivers treat the
 domain as having no policy. One must be deleted in GoDaddy DNS.
@@ -924,3 +926,87 @@ Flows, the Event Relay rule, and the eligibility guard against a live customer �
 still never run. Nothing has dialled a real number from a Salesforce trigger.
 
 234 green. Deployed.
+
+
+## 2026-08-18 — Tim's console/org backlog cleared; Welcome Call platform event in progress
+
+Status update logged from the Chief-of-Staff session. **These are external-system
+changes reported by Tim. Nothing here was independently verified against the org, AWS,
+Supabase or DNS from this session** — each carries its verification step so the next
+thread can close it cheaply rather than assume it.
+
+**Reported DONE (2026-08-18):**
+
+| Item | Was | Verify by |
+|---|---|---|
+| Duplicate `_dmarc.sundialcrm.com` record deleted | two conflicting policies = no policy at receivers | `dig TXT _dmarc.sundialcrm.com` returns exactly one record |
+| Supabase auth email templates emit `?token_hash={{ .TokenHash }}&type=recovery\|invite` | deferred-redemption fix was **inert** without it | send a real invite; the link must survive a prefetch and still set a password |
+| Supabase Site URL + Redirect allowlist includes `https://sundial.harmonelectric.net` | resets broke on the new domain | request a reset from the custom domain and complete it |
+| AWS Lambda concurrency quota raised 10 → 1000 (us-west-1) | root cause of the G2 500s | 12-wide `limit=500` burst returns 12/12 (it lost 2 before) |
+| `Design_Request_Email_Sent__c` created on `Sundial_Customer__c` | every re-submit re-sent the design-manager email | live describe shows the datetime field, writable by the integration user |
+| `Energy_Rate__c` widened to 4 decimals | `$0.1425` stored as `0.14` | **see caution below** |
+
+**Caution on `Energy_Rate__c`.** This is the *second* time it has been reported done. On
+2026-08-17 a forced-refresh describe in a fresh process still returned
+`currency(18, 2)`, and the field was absent from `Sundial_Solar__c` too — so the earlier
+edit never landed anywhere. TASKS.md keeps it at `[~]`, not `[x]`, until
+`describeObject('Sundial_Customer__c', { forceRefresh: true })` returns scale 4.
+Salesforce silently keeps the old scale if a Currency field edit is abandoned at the
+confirmation step, which is the likely explanation for the first miss.
+
+**SES production access — confirmed, and narrower than it sounds.** AWS moved the
+account out of the SES sandbox on **2026-08-03**, effective immediately in us-west-1
+(support case 178572585300376). That closes step (b) of the *Wire AWS SES* task. It does
+**not** close step (c): `ses:SendEmail` on the Lambda role plus `EMAIL_FROM` /
+`SES_REGION` / `DESIGN_REQUEST_NOTIFY_TO` env vars are still unset, and that — not
+sandbox status — is why Design Request notifications still degrade to
+`email.sent: false, reason: "email_not_configured"`. The auth-email path is unaffected
+either way; it goes through Supabase Custom SMTP, independent of `lib/email.js`.
+
+**In progress:** Tim is configuring the `Sundial_Welcome_Call_Request__e` platform event
+and both Flows. Until the event exists in the org and a test publish reaches the
+webhook, the Welcome Call retry loop cannot run.
+
+**Users provisioned (Harmon):** the exec users and **Brian** are created. **Jake does not
+need access** — punchlist H1 is closed on that basis, not deferred.
+
+### 2026-08-18 — Real call analysis inspected; call_summary added to the log, in_voicemail bug found
+
+Pulled a real completed call from Retell (`GET /v2/get-call`, using the API key we
+already hold) rather than reasoning from the payload we *expected* — the same check
+that would have caught the signature bug days earlier.
+
+**Good news: all ten `custom_analysis_data` keys came back exactly as named.** The
+agent's post-call schema matches what the Lambda reads, so nothing is being silently
+dropped for a naming reason.
+
+Three shape facts the fixtures had wrong:
+
+1. **`in_voicemail` is on `call_analysis`, not on the call.** The code read
+   `call.in_voicemail` and got `undefined` every time. Two consequences: the log never
+   recorded a voicemail, and `mapOutcomeToStatus` never saw the one signal that turns
+   an empty verification result into **No Answer** — which is the status the scheduled
+   retry Flow selects on. A voicemail-only call would neither read as a voicemail nor
+   ever be retried. The test fixture put it at the call level, which is exactly why 76
+   tests never noticed. Both paths are now accepted; the fixture matches reality.
+2. **`mismatched_items` / `unconfirmed_items` arrive as STRINGS, not arrays.**
+   `listToText` already handled both, so no bug — but the fixtures only ever exercised
+   the array form. Tests now pin the string shape.
+3. **`used_loan_for_prepaid`** is emitted by the agent and ignored by the Lambda. Real
+   data with no home; TASKS.md carries the decision.
+
+**`call_summary` now goes in the log** (`summary:`, clipped to 400 chars), per Tim. It
+was deliberately omitted as "prose that would dominate the field", but it is the only
+segment that says what actually *happened* rather than which checks passed, and making
+someone open the Zapier ledger to find that out is the worse trade.
+
+**The bigger finding, not yet fixed:** `mismatched_items` and `follow_up_notes` were
+already captured — but **none of it reaches Salesforce for rep-form calls**, which is
+all three live calls so far. They arrive with no `sf_record_id`, so the entire writeback
+is skipped, and the orphan-match sweep appends only `rep-form call <id> matched,
+recording attached` — it attaches the audio and backfills nothing. The analysis exists
+only in the ledger. Logged as a blocked decision in TASKS.md with three options; the
+self-contained one is to have the sweep re-fetch the call from Retell, since we already
+hold the API key.
+
+238 green. Deployed.

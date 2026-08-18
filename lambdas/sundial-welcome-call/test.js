@@ -442,9 +442,13 @@ function analyzedPayload(overrides = {}, analysisOverrides = {}) {
     call: {
       call_id: "call_abc123",
       recording_url: RECORDING_URL,
-      in_voicemail: false,
       metadata: { source: "sundial", sf_record_id: baseCustomer().Id, attempt_no: 1 },
       call_analysis: {
+        // in_voicemail lives HERE, on call_analysis — verified against a real
+        // completed call (GET /v2/get-call, 2026-08-18). The fixture used to put it
+        // at the call level, which is why the code read the wrong path for months
+        // without a single test noticing.
+        in_voicemail: false,
         call_summary: "Customer confirmed all terms.",
         custom_analysis_data: {
           verification_result: "passed",
@@ -1172,8 +1176,78 @@ test("result writeback records outcome, mismatches and recording url", async () 
   assert.match(line, /mismatches: email address; monthly payment/);
   assert.match(line, /unconfirmed: utility bill/);
   assert.match(line, /notes: Customer will call back/);
+  assert.match(line, /summary: Customer confirmed all terms\./);
   assert.match(line, /recording=https:\/\/recordings\.retellai\.com\/call_abc123\.wav/);
   assert.match(line, /call_id=call_abc123/);
+});
+
+// --- shapes taken from a REAL completed call (2026-08-18) -------------------
+// Retell sends mismatched_items / unconfirmed_items as STRINGS, not arrays, and puts
+// in_voicemail and call_summary on call_analysis. The fixtures above use arrays, so
+// these pin the real wire shapes too.
+
+test("the real Retell payload shape lands in the log intact", async () => {
+  fresh();
+  const payload = analyzedPayload(
+    {},
+    {
+      verification_result: "partial",
+      identity_confirmed: false,
+      email_confirmed: false,
+      // Strings, exactly as observed on the wire.
+      mismatched_items:
+        "Name and email provided by customer do not match the expected name and contract email.",
+      unconfirmed_items: "",
+      follow_up_notes: "Customer requested email reminders for payment due dates.",
+    }
+  );
+  payload.call.call_analysis.call_summary =
+    "The agent called to verify identity and confirm the solar agreement details.";
+
+  const res = await handler(signedWebhookEvent(payload));
+  assert.equal(res.statusCode, 200);
+  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
+
+  assert.match(line, /not confirmed: identity, email/);
+  assert.match(line, /mismatches: Name and email provided by customer do not match/);
+  assert.match(line, /notes: Customer requested email reminders/);
+  assert.match(line, /summary: The agent called to verify identity/);
+  // An empty string must not produce an "unconfirmed:" segment.
+  assert.ok(!/unconfirmed:/.test(line), "empty unconfirmed_items must be omitted");
+});
+
+test("in_voicemail is read from call_analysis, where Retell actually puts it", async () => {
+  fresh();
+  const payload = analyzedPayload({}, { verification_result: "" });
+  payload.call.call_analysis.in_voicemail = true;
+
+  const res = await handler(signedWebhookEvent(payload));
+  assert.equal(res.statusCode, 200);
+  const fields = ctx.sfUpdates[0].fields;
+  assert.match(fields.Welcome_Call_Log__c.split("\n")[0], /voicemail: yes/);
+  // The flag is what turns an empty verification result into No Answer — the status
+  // the scheduled retry Flow selects on. Reading the wrong path stranded these calls.
+  assert.equal(fields.Welcome_Call_Status__c, "No Answer");
+});
+
+test("a top-level in_voicemail is still honoured if Retell ever moves it", async () => {
+  fresh();
+  const payload = analyzedPayload({ in_voicemail: true }, { verification_result: "" });
+  const res = await handler(signedWebhookEvent(payload));
+  assert.equal(res.statusCode, 200);
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /voicemail: yes/);
+});
+
+test("a long call_summary is clipped, not allowed to eat the log field", async () => {
+  fresh();
+  const payload = analyzedPayload();
+  payload.call.call_analysis.call_summary = "x".repeat(2000);
+  const res = await handler(signedWebhookEvent(payload));
+  assert.equal(res.statusCode, 200);
+  const line = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n")[0];
+  const summary = /summary: (x+…?)/.exec(line)?.[1] ?? "";
+  assert.ok(summary.length <= 400, `summary segment was ${summary.length} chars`);
+  assert.match(line, /call_id=call_abc123/, "the tail of the line must survive clipping");
 });
 
 test("the result line goes on TOP of the existing log", async () => {

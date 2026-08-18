@@ -200,7 +200,37 @@ All onto **`Sundial_Customer__c`** (no Solar record exists yet — D-047/D-048):
   with no reasonable match instead of guessing)
 - `Financing_Partner__c` ← `financier.provider` (only when financier is non-null)
 - `Down_Payment_Amount__c` ← `down_payment` (loans only; skip otherwise)
-- Everything else (monthly payments, savings, incentives) is NOT mapped in v1.
+
+### Lease/PPA financing → Salesforce mapping (2026-08-17)
+These keys are **lease/PPA-only** in Aurora's response, so they are written on the
+non-loan branch and are simply absent for cash and loans:
+- `Energy_Rate__c` ← `solar_rate` — the customer's **$/kWh energy rate**.
+  **Not `Solar_Price_per_Watt__c`**, which is a different metric (contract amount ÷
+  system watts; this pipeline writes that as `Contract_Price_Per_Watt__c`). Mixing
+  them would put a ~$3 figure in a ~$0.14 field.
+- `Escalator__c` ← `escalation` — annual escalation on that rate.
+  ⚠️ **Unit unverified.** `Escalator__c` is a Salesforce PERCENT field, which stores
+  the percentage itself (`2.9` = 2.9%). Aurora's docs don't say whether `escalation`
+  is a percentage (`2.9`) or a fraction (`0.029`), and Aurora is inconsistent about
+  this elsewhere (`energy_production.annual_offset` is the **string** `"87%"`). We
+  pass the number through **unconverted** rather than guess at a ×100, and the worker
+  warns when the value is `0 < x < 1` — the tell for a fraction, since real
+  escalations are 1–5%. Settle it against a real payload, then apply a ×100 or drop
+  the warning (TASKS.md).
+- `Monthly_Payment__c` ← `monthly_payment` — see the note below; this was **already**
+  implemented, contrary to the superseded line this section replaced.
+
+**`upfront_payment` is deliberately NOT mapped.** Aurora lists it as a lease/PPA field
+with no definition, and the plausible readings — a capital-cost reduction/prepayment
+that lowers the monthly, vs. a due-at-signing fee — belong in different Salesforce
+fields and mean different things to finance. `Down_Payment_Amount__c` is the tempting
+target and is the wrong one if it is a prepayment. Left unmapped until a real
+Participate payload proves its meaning (TASKS.md).
+
+> **Superseded (was: "Everything else … is NOT mapped in v1").** That line dated from
+> 2026-07-23 and was already false: the 2026-08-03 design-results round added
+> `Monthly_Payment__c` for both loans and lease/PPA, and the code has written it since.
+> Savings and incentives remain genuinely unmapped.
 
 ## Webhook: agreement_status_changed (our inbound doorbell)
 - Aurora sends a **GET** to our url_template with query params; available

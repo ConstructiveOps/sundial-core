@@ -516,3 +516,64 @@ domain as having no policy. One must be deleted in GoDaddy DNS.
 already set to `https://sundial.harmonelectric.net` (checked before touching it; no
 change made). That custom domain — not `harmon-crm.vercel.app` — is prod; both are
 live and serving.
+
+## 2026-08-17 — Aurora signed-agreement mapping: lease/PPA financing fields
+
+Extended `buildSignedFieldMap`'s financing mapping with the three lease/PPA fields
+that were coming back from Retrieve Financing and going nowhere.
+
+| Aurora | Salesforce | Notes |
+|---|---|---|
+| `solar_rate` | `Energy_Rate__c` | the customer's $/kWh energy rate |
+| `escalation` | `Escalator__c` | annual escalation on that rate |
+| `monthly_payment` | `Monthly_Payment__c` | **was already implemented** — see below |
+
+All three are lease/PPA-only in Aurora's response, so they sit on the non-loan branch
+and are simply absent for cash and loans. All three exist on the org (describe-verified
+2026-08-17) and all three pass through the worker's existing describe guard
+(`filterToExisting`), so a later rename drops the field from the PATCH and names it in
+the notification email instead of failing the write-back.
+
+**Doc/code reconciliation.** The task flagged a contradiction and it was real:
+`aurora-api-reference.md` said both "`Monthly_Payment__c` ← `monthly_payment_first_month`
+(loans) or `monthly_payment` (lease/ppa)" **and** "Everything else (monthly payments,
+savings, incentives) is NOT mapped in v1." The second was stale text from the
+2026-07-23 round, superseded by the 2026-08-03 design-results approval; the code has
+written `Monthly_Payment__c` on both branches since then. Corrected the doc rather
+than the code — no behaviour change for that field. Savings and incentives really are
+still unmapped.
+
+**`solar_rate` is not price-per-watt.** It is $/kWh; `Solar_Price_per_Watt__c` is
+contract amount ÷ system watts, which this pipeline already writes as
+`Contract_Price_Per_Watt__c` from `system_price / system_size_stc`. Conflating them
+would put a ~$3 figure in a ~$0.14 field, so the distinction is called out in the code
+comment, the API reference, and the schema doc.
+
+**`escalation`'s unit is unverified, and that is deliberate.** `Escalator__c` is a
+Salesforce PERCENT field, which stores the percentage itself (`2.9` = 2.9%). Aurora's
+docs never say whether `escalation` is a percentage or a fraction, and Aurora is
+demonstrably inconsistent — `energy_production.annual_offset` comes back as the
+**string** `"87%"`. Rather than invent a ×100, the value is written through unchanged
+and the worker warns when it is `0 < x < 1`, which is the fraction tell (real
+escalations are 1–5%). The warning fires never if Aurora sends percentages, and once
+per lease deal if it sends fractions — self-resolving either way. TASKS.md carries the
+follow-up to settle it against the first real payload and then delete the warning.
+
+**`upfront_payment` deliberately not mapped**, per the task: Aurora defines it nowhere,
+and "prepayment that lowers the monthly" vs. "due at signing" belong in different
+fields. `Down_Payment_Amount__c` is the tempting target and the wrong one if it's a
+prepayment. Code comment + TASKS.md entry record why.
+
+**Flagged for Tim (not fixed here):** `Energy_Rate__c` is Currency with **scale 2**, so
+a `$0.1425/kWh` rate stores as `0.14` — ~1.8% off on a customer-facing number. Widening
+it to 4 decimals is a one-field Setup change; noted in TASKS.md and the schema doc.
+
+**Tests:** 8 new (lease writes all three; loan writes none of them; PPA still gets them
+even though `Financing_Type__c` can't map; absent keys write nothing without blanking
+the rest; `upfront_payment` reaches no field; the fraction warning fires and a normal
+percentage raises none; missing-from-org fields are dropped, reported, and non-fatal).
+150 green across the repo. Also added a `ctx.describeExclude` hook to the test harness
+so the describe guard can be exercised on fields that *do* exist today.
+
+No deployment yet — `sundial-aurora-inbound` is still undeployed and its subscription
+uncreated (unchanged by this work).

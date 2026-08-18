@@ -889,3 +889,38 @@ alongside the shape.
 **Lesson worth keeping:** the value-safe shape diagnostic cost about fifteen lines and
 turned an unexplainable 401 into a solved problem on the first real request. Worth
 having on every signed webhook before go-live, not after.
+
+### 2026-08-18 — First live Retell webhook processed end to end
+
+The corrected verifier passed a real delivery on the first attempt. Full run, no
+rejection:
+
+```
+WARN  unrecognized event "transcript_updated" — acking.   (x3, now fixed)
+INFO  orphan recording stored at
+        SUNDIAL/_orphan-welcome-calls/call_f2eb80f1a2574a37a2aeede0754.mp3 (829278 bytes)
+INFO  call_analyzed with no sf_record_id — forwarded to the ledger only
+        (forwarded=true, recording=SUNDIAL/_orphan-welcome-calls/…)
+```
+
+Verified in S3: 829,278 bytes, `audio/mpeg`, and **exactly one** object in the holding
+prefix — the ~25 rejected retries from the broken verifier never reached the archival
+step, so there are no duplicates to clean up.
+
+This exercised the **rep-form orphan path** precisely as designed: a call with no
+`sf_record_id` parks its recording under the holding prefix and forwards the key to the
+billing ledger, leaving the sweep to promote it onto a customer later. Retell's URL
+expires; ours doesn't.
+
+**`transcript_updated` added to the ack-only set.** Retell streams it repeatedly during
+a call, and each one was logging a WARN about an unrecognized event — a long call would
+have buried the real lines. It is a known event we deliberately ignore, not a surprise.
+Unknown events are still acked rather than 4xx'd, so a genuinely new event type can
+never push Retell into its retry ladder over something we don't care about.
+
+**What is now proven vs. not.** The webhook half is real: signature, recording
+download, S3 archival, ledger forward. The place-call half — platform event, the two
+Flows, the Event Relay rule, and the eligibility guard against a live customer — has
+still never run. Nothing has dialled a real number from a Salesforce trigger.
+
+234 green. Deployed.

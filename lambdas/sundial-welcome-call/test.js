@@ -1030,14 +1030,28 @@ test("base64-encoded bodies verify (API Gateway may deliver them that way)", asy
 // Webhook — lifecycle events
 // ===========================================================================
 
-test("call_started and call_ended are acked and ignored (no ledger row)", async () => {
-  for (const name of ["call_started", "call_ended"]) {
+test("lifecycle events are acked and ignored (no ledger row)", async () => {
+  // transcript_updated observed live 2026-08-18 — Retell streams it repeatedly
+  // during a call, so it must be a KNOWN ignore rather than a per-event warning.
+  for (const name of ["call_started", "call_ended", "transcript_updated"]) {
     fresh();
-    const res = await handler(signedWebhookEvent({ event: name, call: { call_id: "c1" } }));
+    const warnings = [];
+    const orig = console.warn;
+    console.warn = (...a) => warnings.push(a.join(" "));
+    let res;
+    try {
+      res = await handler(signedWebhookEvent({ event: name, call: { call_id: "c1" } }));
+    } finally {
+      console.warn = orig;
+    }
     assert.equal(res.statusCode, 200);
     assert.equal(parse(res).ignored, name);
     assert.equal(ctx.zapierPosts.length, 0);
     assert.equal(ctx.sfUpdates.length, 0);
+    assert.ok(
+      !/unrecognized event/.test(warnings.join(" ")),
+      `${name} is a known event and must not warn`
+    );
   }
 });
 

@@ -33,9 +33,17 @@ import { applyWelcomeCallUpdate, prependLogLine, CUSTOMER_SF_OBJECT } from "./wr
 
 export const SIGNATURE_HEADER = "x-retell-signature";
 
-/** Retell lifecycle events. Only the third one is processed. */
+/** Retell lifecycle events. Only `call_analyzed` is processed. */
 const EVENT_ANALYZED = "call_analyzed";
-const ACK_ONLY_EVENTS = new Set(["call_started", "call_ended"]);
+//
+// `transcript_updated` was added after the first live delivery (2026-08-18): Retell
+// streams it repeatedly DURING a call, and every one was logging a WARN about an
+// unrecognized event. It is a known event we deliberately ignore, not a surprise, and
+// a long call would otherwise bury the real lines in noise.
+//
+// Note an unknown event is still acked (200) rather than 4xx'd — a rejection would put
+// Retell into its retry ladder over something we simply don't care about.
+const ACK_ONLY_EVENTS = new Set(["call_started", "call_ended", "transcript_updated"]);
 
 // Zapier forward retry ladder: initial attempt + 2 retries.
 const FORWARD_ATTEMPTS = 3;

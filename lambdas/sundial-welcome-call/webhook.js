@@ -51,30 +51,68 @@ const LOG_NOTES_MAX = 300;
 // Signature verification
 // ---------------------------------------------------------------------------
 
-/**
- * Verify the `x-retell-signature` header: HMAC-SHA256 of the RAW request body, keyed
- * with the webhook secret, hex-encoded. Retell sends it as `v=<hex>`; a bare hex
- * value is accepted too so a proxy that strips the prefix doesn't lock us out.
- *
- * THE RAW BODY MATTERS. The HMAC must be computed over the exact bytes Retell signed
- * — re-serializing the parsed JSON changes key order and whitespace and will never
- * match. That is why the handler passes the body through untouched (base64-decoded
- * first when API Gateway flags it, which restores the original bytes).
- *
- * Compared in constant time via fixed-length digests, so neither the secret nor the
- * expected signature leaks through timing or a length check.
- */
-export function verifySignature(rawBody, header, secret) {
-  if (typeof header !== "string" || header.trim() === "") return false;
-  if (typeof secret !== "string" || secret === "") return false;
+/** Retell's replay window: the signature timestamp must be within 5 minutes. */
+export const MAX_SIGNATURE_AGE_MS = 5 * 60 * 1000;
 
-  const provided = header.trim().replace(/^v=/i, "").toLowerCase();
+/**
+ * Verify the `x-retell-signature` header, per Retell's documented scheme
+ * (https://docs.retellai.com/features/secure-webhook):
+ *
+ *     header  = `v={unix_ms_timestamp},d={hex_digest}`
+ *     digest  = HMAC-SHA256(raw_body + timestamp, API_KEY)   // concatenated, no separator
+ *     window  = timestamp must be within ±5 minutes of now
+ *
+ * THREE THINGS THIS GOT WRONG BEFORE (fixed 2026-08-18 against a real delivery):
+ *   1. the timestamp is part of the signed material, not decoration
+ *   2. the key is the Retell API KEY, not a separate signing secret
+ *   3. `v=` holds the TIMESTAMP; the digest is in `d=`. The old parser stripped a
+ *      leading `v=` and compared the remainder as a digest, which rejected 100% of
+ *      real deliveries while every self-signed test passed
+ *
+ * The bare-hex / `v=<hex>` legacy forms are deliberately NOT accepted any more. They
+ * were our own invention, nothing real ever sent them, and honouring a body-only HMAC
+ * would sidestep the replay window this now enforces.
+ *
+ * THE RAW BODY MATTERS. The HMAC covers the exact bytes Retell signed —
+ * re-serializing parsed JSON changes key order and whitespace and will never match.
+ * The handler passes the body through untouched (base64-decoded first when API
+ * Gateway flags it, which restores the original bytes).
+ *
+ * Compared in constant time via fixed-length digests, so neither the key nor the
+ * expected digest leaks through timing or a length check.
+ *
+ * @param {Buffer|string} rawBody
+ * @param {string} header       - the x-retell-signature value
+ * @param {string} secret       - the Retell API key
+ * @param {number} [now]        - injectable clock, for tests
+ * @returns {{ ok: boolean, reason: string }} reason is for logging, never for the caller
+ */
+export function verifySignature(rawBody, header, secret, now = Date.now()) {
+  if (typeof secret !== "string" || secret === "") return { ok: false, reason: "no_secret" };
+  if (typeof header !== "string" || header.trim() === "") return { ok: false, reason: "no_header" };
+
+  const m = /^v=(\d+),d=([0-9a-fA-F]+)$/.exec(header.trim());
+  if (!m) return { ok: false, reason: "malformed_header" };
+
+  const timestamp = m[1];
+  const provided = m[2].toLowerCase();
+
+  // Replay window BEFORE the HMAC: a stale-but-validly-signed delivery is exactly
+  // what this is here to stop, so it must not be able to pass on digest alone.
+  // Checked in both directions — a clock ahead of ours is as suspect as one behind.
+  if (Math.abs(now - Number(timestamp)) > MAX_SIGNATURE_AGE_MS) {
+    return { ok: false, reason: "stale_timestamp" };
+  }
+
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody ?? ""), "utf8");
   const expected = crypto
     .createHmac("sha256", secret)
-    .update(Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody), "utf8"))
+    .update(Buffer.concat([body, Buffer.from(timestamp, "utf8")]))
     .digest("hex");
 
-  return constantTimeEquals(provided, expected);
+  return constantTimeEquals(provided, expected)
+    ? { ok: true, reason: "ok" }
+    : { ok: false, reason: "digest_mismatch" };
 }
 
 /**
@@ -82,12 +120,13 @@ export function verifySignature(rawBody, header, secret) {
  *
  * Exists because the gate is deliberately silent about values, which is right for
  * security and useless when a real provider delivery is rejected and nobody can say
- * why. The two failure modes this distinguishes are the ones that actually happen:
+ * why. It earned its keep immediately: the first real Retell delivery logged
+ * `parts=2 [v=len13, d=len64]`, which is what identified the true header format
+ * (`v=<unix_ms>,d=<hex>`) and the three-way bug in the old verifier.
  *
- *   - the digest genuinely doesn't match (shape looks right, secret or body is wrong)
- *   - the header isn't the shape we parse at all — e.g. a compound
- *     `t=<ts>,v=<hex>` when we only strip a leading `v=`, which would reject
- *     100% of deliveries while every self-generated test still passes
+ * The expected healthy shape is now `parts=2 [v=len13, d=len64]`. Anything else —
+ * `parts=1`, a bare hex, a `bodyBytes` that doesn't match what was signed — names the
+ * failure without exposing a value.
  *
  * Emits key names and value LENGTHS only. A length cannot reconstruct a secret, and
  * the digest is a public value anyway — but keeping values out entirely means this

@@ -146,13 +146,14 @@ async function handleHttp(event, method) {
     );
     return jsonResponse(401, { error: "unauthorized" });
   }
-  if (!verifySignature(rawBody, headers[SIGNATURE_HEADER], cfg.retellWebhookSecret)) {
-    // Never log the expected or received signature — only that the gate rejected,
-    // plus the header's SHAPE (key names + value lengths, no values). Without the
-    // shape, a rejected real delivery is unexplainable: a digest mismatch and a
-    // header format we don't parse look identical from out here.
+  const sig = verifySignature(rawBody, headers[SIGNATURE_HEADER], cfg.retellWebhookSecret);
+  if (!sig.ok) {
+    // Never log the expected or received signature — only WHY the gate rejected, plus
+    // the header's SHAPE (key names + value lengths, no values). Without these, a
+    // rejected real delivery is unexplainable: a digest mismatch, a stale timestamp
+    // and a header format we don't parse all look identical from out here.
     console.warn(
-      `welcome-call webhook rejected: missing or invalid ${SIGNATURE_HEADER}. ` +
+      `welcome-call webhook rejected: ${sig.reason}. ` +
         `shape: ${describeSignatureShape(headers[SIGNATURE_HEADER], rawBody)}`
     );
     return jsonResponse(401, { error: "unauthorized" });

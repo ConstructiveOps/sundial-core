@@ -395,12 +395,32 @@ const IN_WINDOW = new Date("2026-08-17T17:00:00Z");
 // 05:00 UTC = 22:00 MST the previous day — outside.
 const OUT_OF_WINDOW = new Date("2026-08-18T05:00:00Z");
 
-function signedWebhookEvent(payload, secret = API_KEY) {
+/**
+ * Build a webhook event signed the way RETELL actually signs
+ * (https://docs.retellai.com/features/secure-webhook):
+ *   header = `v={unix_ms},d={hex}`,  digest = HMAC-SHA256(raw_body + timestamp, api_key)
+ *
+ * Confirmed against a real delivery on 2026-08-18. Do not "simplify" this back to a
+ * body-only HMAC — that was our own invention, and a suite that signs the way the
+ * verifier reads proves nothing about the wire format.
+ */
+function retellSignature(body, secret = API_KEY, ts = Date.now()) {
+  const timestamp = String(ts);
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(Buffer.concat([Buffer.from(body, "utf8"), Buffer.from(timestamp, "utf8")]))
+    .digest("hex");
+  return `v=${timestamp},d=${digest}`;
+}
+
+function signedWebhookEvent(payload, secret = API_KEY, ts = Date.now()) {
   const body = JSON.stringify(payload);
-  const sig = crypto.createHmac("sha256", secret).update(body, "utf8").digest("hex");
   return {
     httpMethod: "POST",
-    headers: { "Content-Type": "application/json", "X-Retell-Signature": `v=${sig}` },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Retell-Signature": retellSignature(body, secret, ts),
+    },
     body,
   };
 }
@@ -831,18 +851,61 @@ test("customer id is extracted from every relay envelope", () => {
 // Webhook — signature
 // ===========================================================================
 
-test("signature must match the raw body, with or without the v= prefix", () => {
+test("signature is HMAC(raw_body + timestamp) keyed with the API key", () => {
   const body = '{"event":"call_analyzed"}';
-  const sig = crypto.createHmac("sha256", WEBHOOK_SECRET).update(body).digest("hex");
-  assert.equal(hook.verifySignature(body, `v=${sig}`, WEBHOOK_SECRET), true);
-  assert.equal(hook.verifySignature(body, sig, WEBHOOK_SECRET), true);
-  assert.equal(hook.verifySignature(body, sig.toUpperCase(), WEBHOOK_SECRET), true);
+  const now = 1787034811377;
+  const header = retellSignature(body, API_KEY, now);
 
-  assert.equal(hook.verifySignature(body, sig, "wrong-secret"), false);
-  assert.equal(hook.verifySignature(`${body} `, `v=${sig}`, WEBHOOK_SECRET), false);
-  assert.equal(hook.verifySignature(body, "", WEBHOOK_SECRET), false);
-  assert.equal(hook.verifySignature(body, undefined, WEBHOOK_SECRET), false);
-  assert.equal(hook.verifySignature(body, `v=${sig}`, ""), false);
+  assert.equal(hook.verifySignature(body, header, API_KEY, now).ok, true);
+  // Uppercase hex is still the same digest.
+  assert.equal(
+    hook.verifySignature(body, header.replace(/d=(.*)$/, (_, d) => `d=${d.toUpperCase()}`), API_KEY, now).ok,
+    true
+  );
+
+  // Wrong key, tampered body, wrong timestamp — each must fail.
+  assert.equal(hook.verifySignature(body, header, "wrong-key", now).reason, "digest_mismatch");
+  assert.equal(hook.verifySignature(`${body} `, header, API_KEY, now).reason, "digest_mismatch");
+  assert.equal(hook.verifySignature(body, "", API_KEY, now).reason, "no_header");
+  assert.equal(hook.verifySignature(body, undefined, API_KEY, now).reason, "no_header");
+  assert.equal(hook.verifySignature(body, header, "", now).reason, "no_secret");
+
+  // THE REGRESSION THAT REJECTED EVERY REAL DELIVERY: a body-only HMAC in the old
+  // `v=<hex>` / bare-hex forms must NOT be accepted. Honouring them would also
+  // sidestep the replay window, since neither carries a timestamp.
+  const bodyOnly = crypto.createHmac("sha256", API_KEY).update(body).digest("hex");
+  assert.equal(hook.verifySignature(body, `v=${bodyOnly}`, API_KEY, now).reason, "malformed_header");
+  assert.equal(hook.verifySignature(body, bodyOnly, API_KEY, now).reason, "malformed_header");
+});
+
+test("the timestamp is inside the signed material, not decoration", () => {
+  const body = '{"event":"call_analyzed"}';
+  const now = 1787034811377;
+  // Same body, same key, different timestamp -> different digest.
+  const a = retellSignature(body, API_KEY, now);
+  const b = retellSignature(body, API_KEY, now + 1000);
+  assert.notEqual(a.split("d=")[1], b.split("d=")[1]);
+
+  // A digest computed for one timestamp cannot be replayed under another.
+  const swapped = `v=${now + 1000},d=${a.split("d=")[1]}`;
+  assert.equal(hook.verifySignature(body, swapped, API_KEY, now + 1000).reason, "digest_mismatch");
+});
+
+test("signatures outside the 5-minute window are rejected, in BOTH directions", () => {
+  const body = '{"event":"call_analyzed"}';
+  const now = 1787034811377;
+  const at = (offset) =>
+    hook.verifySignature(body, retellSignature(body, API_KEY, now + offset), API_KEY, now);
+
+  assert.equal(at(0).ok, true);
+  assert.equal(at(-(hook.MAX_SIGNATURE_AGE_MS - 1000)).ok, true, "just inside, past");
+  assert.equal(at(hook.MAX_SIGNATURE_AGE_MS - 1000).ok, true, "just inside, future");
+
+  // Stale is rejected on the TIMESTAMP, before the HMAC — a validly-signed replay
+  // must not pass on digest alone.
+  assert.equal(at(-(hook.MAX_SIGNATURE_AGE_MS + 1000)).reason, "stale_timestamp");
+  // A clock ahead of ours is as suspect as one behind.
+  assert.equal(at(hook.MAX_SIGNATURE_AGE_MS + 1000).reason, "stale_timestamp");
 });
 
 test("an unsigned or wrongly-signed webhook is 401 and touches nothing", async () => {
@@ -898,25 +961,25 @@ test("describeSignatureShape reports structure and never values", () => {
   const body = '{"a":1}';
   const digest = "a".repeat(64);
 
-  assert.match(hook.describeSignatureShape(`v=${digest}`, body), /parts=1 \[v=len64\]/);
-  // A compound header — the shape that would reject 100% of real deliveries while
-  // every self-signed test still passed. This is the line that would name it.
+  // The REAL Retell shape, as observed in production on 2026-08-18.
   assert.match(
-    hook.describeSignatureShape(`t=1750000000,v=${digest}`, body),
-    /parts=2 \[t=len10, v=len64\]/
+    hook.describeSignatureShape(`v=1787034811377,d=${digest}`, body),
+    /parts=2 \[v=len13, d=len64\]/
   );
+  // The shape our old verifier expected — this is the line that exposed the bug.
+  assert.match(hook.describeSignatureShape(`v=${digest}`, body), /parts=1 \[v=len64\]/);
   assert.match(hook.describeSignatureShape(digest, body), /bare-hex=len64/);
   assert.match(hook.describeSignatureShape("", body), /header absent or empty/);
   assert.match(hook.describeSignatureShape(undefined, body), /header absent or empty/);
   assert.match(hook.describeSignatureShape(`v=${digest}`, body), /bodyBytes=7/);
 
-  // The digest itself must never appear.
-  const out = hook.describeSignatureShape(`t=123,v=${digest}`, body);
+  // The digest and timestamp must never appear.
+  const out = hook.describeSignatureShape(`v=1787034811377,d=${digest}`, body);
   assert.ok(!out.includes(digest), "the signature value must not be logged");
-  assert.ok(!out.includes("1750000000"), "no header value should be logged");
+  assert.ok(!out.includes("1787034811377"), "no header value should be logged");
 });
 
-test("a rejected webhook logs the header shape", async () => {
+test("a rejected webhook logs the reason AND the header shape", async () => {
   fresh();
   const warnings = [];
   const orig = console.warn;
@@ -927,18 +990,35 @@ test("a rejected webhook logs the header shape", async () => {
     console.warn = orig;
   }
   const line = warnings.join(" ");
-  assert.match(line, /welcome-call webhook rejected/);
-  assert.match(line, /shape: parts=1 \[v=len64\]/);
+  assert.match(line, /welcome-call webhook rejected: digest_mismatch/);
+  assert.match(line, /shape: parts=2 \[v=len13, d=len64\]/);
+});
+
+test("a stale delivery is rejected as stale, and says so", async () => {
+  fresh();
+  const warnings = [];
+  const orig = console.warn;
+  console.warn = (...a) => warnings.push(a.join(" "));
+  try {
+    // Correctly signed, but six minutes old.
+    const stale = signedWebhookEvent(analyzedPayload(), API_KEY, Date.now() - 6 * 60 * 1000);
+    const res = await handler(stale);
+    assert.equal(res.statusCode, 401);
+  } finally {
+    console.warn = orig;
+  }
+  assert.match(warnings.join(" "), /rejected: stale_timestamp/);
+  assert.equal(ctx.sfUpdates.length, 0, "a replayed call must not touch Salesforce");
 });
 
 test("base64-encoded bodies verify (API Gateway may deliver them that way)", async () => {
   fresh();
   const payload = analyzedPayload();
   const body = JSON.stringify(payload);
-  const sig = crypto.createHmac("sha256", API_KEY).update(body).digest("hex");
+  // Signed over the DECODED bytes — base64 is transport, not signed material.
   const res = await handler({
     httpMethod: "POST",
-    headers: { "x-retell-signature": `v=${sig}` },
+    headers: { "x-retell-signature": retellSignature(body) },
     body: Buffer.from(body, "utf8").toString("base64"),
     isBase64Encoded: true,
   });

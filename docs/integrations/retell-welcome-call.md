@@ -226,41 +226,62 @@ own outage would be wrong. The Lambda throws so the relay retries.
 
 ## Entry point 2 — `POST /webhooks/retell`
 
-**Auth:** `X-Retell-Signature`, an HMAC-SHA256 of the **raw request body**, hex-encoded.
-Retell sends `v=<hex>`; a bare hex value is accepted too. Constant-time compared via
-fixed-length digests, so neither the secret nor the expected value leaks through timing
-or a length check.
+**Auth:** `X-Retell-Signature`. Per
+[Retell's spec](https://docs.retellai.com/features/secure-webhook), confirmed against a
+real delivery 2026-08-18:
 
-> **The signing key is the RETELL API KEY** (Tim, 2026-08-17), not a separate signing
-> secret. `retellWebhookSecret` therefore resolves **`RETELL_API_KEY` first**, falling
-> back to `RETELL_WEBHOOK_SECRET` only for a deployment that configured no API key.
-> The name is a legacy of assuming a Stripe-style dedicated secret.
+```
+header  = v={unix_ms_timestamp},d={hex_digest}
+digest  = HMAC-SHA256(raw_body + timestamp, RETELL_API_KEY)   // concatenated, no separator
+window  = timestamp must be within ±5 minutes of now
+```
+
+Constant-time compared via fixed-length digests, so neither the key nor the expected
+digest leaks through timing or a length check. **The `v=` field is the TIMESTAMP, not
+the digest** — the digest is in `d=`.
+
+> ### The three-way bug this replaced (2026-08-18)
 >
-> Harmon's secret happens to carry the same key in **both** `api_key` and
-> `webhook_secret`, so either resolution order verifies today — which is exactly the
-> trap. Rotate the API key while updating only `api_key` and a webhook-secret-first
-> resolution would start rejecting every delivery with no obvious cause. Three tests
-> pin the precedence (`the API KEY verifies the signature…`, `a payload signed with the
-> legacy webhook_secret is REJECTED…`, `webhook_secret still works as a fallback…`).
+> The original implementation HMAC'd the **body alone**, keyed with a separate
+> **`webhook_secret`**, and parsed the header by stripping a leading **`v=`** and
+> treating the remainder as the digest. Every one of those is wrong, and together they
+> rejected **100% of real deliveries** — while all 81 tests passed, because the suite
+> generated the header its own verifier expected. A test suite that signs the way the
+> verifier reads proves nothing about the wire format.
+>
+> It was invisible until a real delivery arrived because the two credential fields in
+> Harmon's secret hold the **same** value, which masked the key error entirely.
+>
+> What found it: the shape diagnostic below, on the first real webhook —
+> `shape: parts=2 [v=len13, d=len64]`. A 13-character `v` is a millisecond epoch, and
+> that single line identified the true format.
+>
+> The legacy `v=<hex>` and bare-hex forms are **deliberately no longer accepted**.
+> They were our own invention, nothing real ever sent them, and honouring a body-only
+> HMAC would sidestep the replay window (neither form carries a timestamp).
 
-**No timestamp, no replay window.** The HMAC covers the body alone; nothing in the
-header is treated as a timestamp and there is no freshness check. If Retell turns out
-to send a compound header (`t=<ts>,v=<hex>`), the current parser strips only a leading
-`v=` and would reject **100% of deliveries** — while every self-signed test still
-passes, because the suite generates the header it expects. That is what the shape
-diagnostic below exists to catch. A 5-minute window is a genuine follow-up **only once
-a real header is known to carry a timestamp** — adding one against a guessed format
-would break verification outright.
+**Key resolution.** `retellWebhookSecret` resolves **`RETELL_API_KEY` first**, falling
+back to `RETELL_WEBHOOK_SECRET` only for a deployment that configured no API key. The
+name is a legacy of the assumption above. Note Retell only signs with an API key that
+carries the **webhook badge** in their dashboard — if verification fails with
+`digest_mismatch` on a well-formed header, check that first.
 
-**Rejection diagnostics.** A failed verification logs the header's *shape* — key names
-and value **lengths** only, plus the body byte count — never any value:
+**Replay window.** The timestamp is checked **before** the HMAC, in both directions
+(a clock ahead of ours is as suspect as one behind), so a stale-but-validly-signed
+delivery cannot pass on digest alone.
+
+**Rejection diagnostics.** A failed verification logs **why**, plus the header's
+*shape* — key names and value **lengths** only, plus the body byte count — never any
+value:
 
 ```
-welcome-call webhook rejected: missing or invalid x-retell-signature. shape: parts=1 [v=len64] bodyBytes=1234
+welcome-call webhook rejected: digest_mismatch. shape: parts=2 [v=len13, d=len64] bodyBytes=1347
 ```
 
-`parts=2 [t=len10, v=len64]` would immediately identify a compound header;
-`header absent or empty` a stripped header; a `bodyBytes` mismatch a mangled body.
+Reasons: `no_secret`, `no_header`, `malformed_header`, `stale_timestamp`,
+`digest_mismatch`. The healthy shape is `parts=2 [v=len13, d=len64]`; anything else
+names the problem without exposing a value. `stale_timestamp` on legitimate traffic
+means clock skew, not an attack — compare the Lambda's clock against Retell's.
 
 - **No Supabase JWT and no API Gateway authorizer.** The caller is a machine with no
   portal user; `resolveIdentity` has nothing to verify and must not be used.

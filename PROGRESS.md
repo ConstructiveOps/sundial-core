@@ -841,3 +841,51 @@ The test suite validates the implementation against its own assumption — only 
 delivery settles the wire format.
 
 231 green. Deployed to `sundial-welcome-call`.
+
+### 2026-08-18 — Retell signature verification was wrong three ways; a real delivery proved it
+
+The first real Retell webhook was rejected, and the shape diagnostic added hours
+earlier named the cause on its first line:
+
+```
+welcome-call webhook rejected: missing or invalid x-retell-signature.
+  shape: parts=2 [v=len13, d=len64] bodyBytes=1347
+```
+
+A 13-character `v` is a millisecond epoch. That identified the real header format and,
+with [Retell's spec](https://docs.retellai.com/features/secure-webhook), the whole bug:
+
+```
+header  = v={unix_ms},d={hex_digest}
+digest  = HMAC-SHA256(raw_body + timestamp, RETELL_API_KEY)
+window  = ±5 minutes
+```
+
+**Our implementation was wrong on all three counts**, exactly as Tim suspected: it
+HMAC'd the **body alone**, keyed with a separate **webhook_secret**, and read **`v=`
+as the digest** when `v=` is the timestamp and `d=` is the digest. Any one of those
+alone rejects every delivery. Retell had retried ~25 times across `call_started`,
+`call_ended` and `call_analyzed` (bodies 1347→11770 bytes) before we looked.
+
+**Why 81 passing tests missed it:** the suite generated the header its own verifier
+expected. A test that signs the way the code reads proves the code is self-consistent,
+not that it matches the wire. The fixtures now build a genuine Retell signature
+(`retellSignature()`), and a regression test asserts the old body-only `v=<hex>` and
+bare-hex forms are **rejected** — accepting them would also sidestep the replay window,
+since neither carries a timestamp.
+
+**Also masked by the org config:** `api_key` and `webhook_secret` hold the same value
+in Harmon's secret, so the key error was invisible from the outside. Two independent
+faults, one of them hidden by a coincidence.
+
+`verifySignature` now returns `{ ok, reason }` and the timestamp is checked **before**
+the HMAC (in both directions — a clock ahead is as suspect as one behind), so a
+stale-but-validly-signed replay cannot pass on digest alone. Rejections log the reason
+(`no_secret` / `no_header` / `malformed_header` / `stale_timestamp` / `digest_mismatch`)
+alongside the shape.
+
+234 green. Deployed.
+
+**Lesson worth keeping:** the value-safe shape diagnostic cost about fifteen lines and
+turned an unexplainable 401 into a solved problem on the first real request. Worth
+having on every signed webhook before go-live, not after.

@@ -1363,3 +1363,211 @@ Two backend surfaces are domain-aware and do not follow a redirect:
 
 `docs/integrations/auth-email-ses.md` (Parts C and D), `docs/api-endpoints.md` (CORS
 section + env var table), D-046 (provisioning), D-052 (auth email delivery).
+
+---
+
+## D-054: Welcome calls trigger through ONE platform event over Event Relay; the Retell webhook fans out Lambda-first to the Zapier billing ledger
+
+**Date:** 2026-08-17
+**Status:** Accepted
+
+### Context
+
+Harmon's back office calls every sold customer to verify the contract terms before the
+project moves into design. Retell AI's voice agent can make that call if it is handed
+the customer's terms as dynamic variables. Three questions had to be settled:
+
+1. **What starts a call?** A sold-stage transition needs to start one, and a no-answer
+   needs to start another later. Both are Salesforce-side facts.
+2. **Does the portal get a button?** Every other integration in Sundial has one.
+3. **Who hears the result?** Two consumers want it: Salesforce (the verification
+   status) and a Zapier Zap that maintains the billing ledger for the calls.
+
+### Decision
+
+**One platform event, two publishers, no button, and a Lambda-first fan-out.**
+
+1. **`Sundial_Welcome_Call_Request__e` (field `Customer_Id__c`) is the only trigger**,
+   published by two Flows — a record-triggered Flow on the `Stage__c` change, and a
+   scheduled retry Flow for `No Answer` records under the attempt ceiling. It reaches
+   the Lambda via Salesforce **Event Relay → Amazon EventBridge**.
+2. **No portal UI and no portal-authenticated route.** The only HTTP surface the
+   feature adds is `POST /webhooks/retell`.
+3. **The eligibility guard lives in the Lambda, not in the Flows.** Status, attempt
+   ceiling, phone validity, calling hours and financing mapping are all checked in one
+   place, immediately before dialing, against a **fresh Salesforce read**.
+4. **Retell's webhook hits the Lambda, and the Lambda forwards to Zapier** — first,
+   unconditionally, before Salesforce is touched.
+
+### Why
+
+**One event, not two.** A separate "retry" event would double the Salesforce metadata,
+the relay config, the EventBridge rules and the Lambda's parsing, to express a
+difference the Lambda does not act on: a retry and a first call run identical code. The
+attempt number lives on the record, so the event does not need to carry it.
+
+**Event Relay, not a portal endpoint or a scheduled poll.** The trigger is a Salesforce
+state change, so Salesforce should announce it. A poll would burn API budget on a
+question that is almost always "no", and a portal endpoint would need a signed-in user
+for something no user initiates. This also reuses the relay pattern already documented
+for budget recalc (`docs/integrations/budget-recalc-relay.md`) — and, as there, the
+Lambda parses both the EventBridge and SQS-wrapped envelopes, so the relay mechanism
+can change without a code change.
+
+**No button, deliberately.** A "Call now" button reads as harmless and is not: it puts
+the decision to dial a customer in the hands of whoever is looking at the record, at
+whatever hour, bypassing the attempt ceiling and the calling-hours check unless those
+are duplicated on the UI path. The guard is only trustworthy if there is exactly one
+way in. Harmon can still force a call by moving the stage, or by letting the retry Flow
+pick the record up.
+
+**Guard in the Lambda, not the Flows.** Flow entry criteria are edited by an admin in a
+browser; a mistake there dials real customers. Keeping the guard in one tested place
+means a Flow that fires too eagerly is *harmless* — publishing for a record already
+`Calling`, or at attempt 5, is a logged no-op. It also means the check runs against
+data read seconds before the dial, not whenever the Flow evaluated.
+
+**Fresh read, never the cache.** These values are spoken to a customer as the terms of
+a contract they signed. The cache has a documented TTL and a documented deletion blind
+spot (D-051); a stale monthly payment on a recorded call is a trust and compliance
+problem, not a rendering glitch. This is squarely the always-fresh class in
+`docs/caching-architecture.md`.
+
+**Lambda-first fan-out, not Zapier-first.** Retell can only call one webhook URL, so
+one consumer has to relay to the other. Pointing Retell at Zapier and having the Zap
+call our API would put a third party in the path of the Salesforce writeback, and would
+mean authenticating a Zap into the API. Pointing Retell at the Lambda keeps the
+signature check at the edge and makes the Salesforce write a first-class step.
+
+**And within that, the ledger is forwarded FIRST.** The Zap bills for calls — including
+rep-initiated calls that carry no `sf_record_id` and may have no Salesforce record at
+all. Forwarding before the Salesforce work means a Salesforce outage costs a
+verification status (recoverable — Retell retries on our deliberate 500) rather than a
+billing row (not recoverable — Retell will not redeliver once we 200). A forward
+failure is retried twice, then logged at ERROR with the payload for manual replay, and
+never blocks the writeback.
+
+### Consequences
+
+- **The Zap must dedupe on `call_id`.** Because the forward is unconditional and comes
+  first, a Retell redelivery posts to the ledger twice even though the Salesforce side
+  is idempotent. Moving the idempotency check ahead of the forward was rejected: it
+  would put a Salesforce read in front of billing.
+- **Idempotency is carried by the log field**, not a dedicated one: a
+  `Welcome_Call_Log__c` line containing both the `call_id` and the marker `Result:`
+  means the call is already recorded. Matching the `call_id` alone would misfire,
+  because the "Call placed" line carries the same id.
+- **`No Answer` is the only non-terminal outcome**, which is what makes the retry Flow
+  meaningful, and the 5-attempt ceiling (which rewrites it to `Failed - Max Attempts`)
+  is what makes it terminate. An **unrecognized** outcome resolves to
+  `Verified - Exceptions`, not `No Answer` — parking it for a human rather than
+  silently queueing another call on a result we did not understand.
+- **A skip is a success.** The eligibility guard logs and returns; only the unmappable
+  financing partner writes to Salesforce, because it is the only skip a human must
+  change data to clear.
+- **`finance_source` is derived from `Financing_Partner__c` alone**, not combined with
+  `Financing_Type__c`, so there is exactly one field to look at when a mapping is
+  wrong. Seven of the org's thirteen partner values are intentionally unmapped and will
+  skip until a mapping is agreed. Partner comparison **folds dash variants**: the live
+  picklist mixes an EN DASH (`Participate Prepaid Lease – Cash`) with an ASCII hyphen
+  (`… - Financed`), and a literal compare would silently skip half of them.
+- **Tim owns the platform event, both Flows, the Event Relay and the EventBridge rule.**
+  None are built in code. `Sundial_Welcome_Call_Request__e` does not exist in the org
+  yet.
+- **Credentials resolve secret-first, config env-first** (`sundial/retell/api` vs. the
+  three env vars). Consistent with D-045's rotation argument and with
+  `docs/api-endpoints.md`'s rule that credentials never live in a Lambda env var.
+- The webhook is the **second** public, non-JWT route in the API (after the Aurora
+  doorbell). Both are gated solely by a shared secret in a header; both fail closed
+  when the secret is unreadable.
+- **New shared code: `lib/realtime.js`** — the first actual Supabase Realtime *sender*
+  in the backend. The caching doc has described this broadcast since Phase 1 but no
+  Lambda implemented it; `sundial-sf-update` only flags `is_stale`. It uses Supabase's
+  stateless HTTP broadcast endpoint rather than a WebSocket channel, because a socket
+  whose Lambda container may freeze mid-handshake is a silently dropped message.
+
+### Related
+
+`docs/integrations/retell-welcome-call.md` (runbook, finance table, state machine, log
+format), `docs/api-endpoints.md` (`POST /webhooks/retell`, env var table),
+`docs/integrations/budget-recalc-relay.md` (the platform-event relay pattern), D-045
+(secret/describe TTL and rotation), D-048 (the other public webhook), D-051 (cache
+deletion blind spot — part of why this read is always fresh).
+
+### D-054 addendum (2026-08-17): call recordings are archived into the normal file convention, and rep-form orphans get a holding prefix
+
+**Status:** Accepted, same day as D-054.
+
+**Context.** Retell's `recording_url` expires. The base design put it in
+`Welcome_Call_Log__c`, which means the link works today and 404s exactly when someone
+needs it — when a customer disputes what they agreed to. And a rep-form call has no
+Salesforce record to attach a recording to, sometimes not yet and sometimes not ever.
+
+**Decision.**
+
+1. **The recording is archived into the ordinary Sundial file convention** —
+   `SUNDIAL/{customerId}/welcome-call-{YYYY-MM-DD}-attempt-{n}.mp3` in `sfsolproj`,
+   with a `sundial_file_metadata` row (category `Welcome Call Recording`, uploader
+   `Wattson (system)`). Not a recordings bucket, not a new prefix: the existing
+   convention is what makes it appear on the portal Files tab, in XFiles Pro, and in
+   the Dropbox mirror with **no additional code** (docs/file-storage.md). The date is
+   **America/Phoenix** and the attempt number is in the filename, so a file is never
+   dated to a day the office did not dial on and attempt 2 never clobbers attempt 1.
+2. **Rep-form orphans park at `SUNDIAL/_orphan-welcome-calls/{call_id}.mp3`** with **no
+   metadata row**, and the key is forwarded to the billing ledger as
+   `s3_recording_key`. A new endpoint, `POST /welcome-call/orphan-match`, promotes the
+   file onto a record once the Zapier sweep identifies the customer.
+3. **The orphan path forwards to the ledger AFTER archiving; the attached path forwards
+   before.** This inverts D-054's "ledger first, always" — for the orphan case only.
+
+**Why.**
+
+**The leading underscore on `_orphan-welcome-calls` is deliberate.** It is not a valid
+Salesforce id, so the prefix can never collide with a record folder and XFiles Pro
+never resolves a record to it.
+
+**No metadata row for orphans.** Every file list query is scoped by `sf_record_id`. A
+row with a null one is unreachable by any surface — worse than no row, because it looks
+registered.
+
+**The ordering inversion is forced, not stylistic.** For a rep-form call the ledger row
+is the *only* trace of the call, and the sweep needs the recording's key. There is
+nothing to put in the payload unless the upload has already happened. The key is
+technically derivable from `call_id`, but a derived key cannot tell the sweep whether
+the upload *succeeded*; an explicit field can, and its absence means "nothing to match".
+The cost is bounded (a 20 s download cap) and the step cannot throw or skip the forward.
+
+**Idempotency had to be built backwards, because the match operation deletes its own
+input.** A retry cannot re-derive the destination key: that key embeds the holding
+object's `LastModified`, and the holding object is gone. So the retry path **searches**
+`SUNDIAL/{recordId}/` for `welcome-call-*-{call_id}.mp3` and reports `already_matched`.
+It also re-attempts the metadata row and the log line, each a no-op when present —
+without that, a run whose log append failed would have deleted the holding object and
+the note could never be written.
+
+**The destination is dated from the holding object, not from `now()`.** The sweep may
+run days after the call; the file should be named for the conversation it contains.
+
+**Consequences.**
+
+- **A second shared-secret gate** (`X-Sundial-Zap-Secret` / `ZAP_ORPHAN_MATCH_SECRET`),
+  fail-closed, credential-resolution identical to the Retell secret. The constant-time
+  compare is now a shared helper so the two gates cannot drift apart.
+- **`s3:DeleteObject` on `sfsolproj/SUNDIAL/*` is newly required** (orphan-match removes
+  the holding object). `AmazonS3FullAccess` covers it today; it matters only if the role
+  is ever tightened.
+- **A failed holding-object delete is not a failed match** — the bytes are attached and
+  registered. The response reports `holdingDeleted: false` and a retry cleans up.
+- **`findFileMetadataByKey` added to `lib/file-access.js`.** Deterministic keys mean a
+  re-run overwrites the S3 object harmlessly but would INSERT a second metadata row,
+  showing the file twice in the Files tab with no way to tell the rows apart. Shared, so
+  the other best-effort writers (copy-to-solar, budget snapshots, Aurora signed PDFs)
+  can close the same trap.
+- **Nothing accumulates in the holding prefix on its own, and there is no lifecycle
+  rule** — auto-deleting an unmatched recording of a contract conversation is the wrong
+  default. It needs periodic eyeballing instead.
+- **The Lambda's timeout floor rises to 60 s** (Zapier retries + a 20 s download + the
+  Salesforce round trips), and it now buffers a file in memory — capped at 50 MB, far
+  above any real phone recording.
+- The archived key is appended to the result log line as `archived=<key>`, so its
+  presence in Salesforce is also the record that archival succeeded.

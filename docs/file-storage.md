@@ -38,6 +38,20 @@ Full URLs look like `https://sfsolproj.s3.us-west-1.amazonaws.com/SUNDIAL/a01XX0
 
 Subfolders within a record's folder are allowed (e.g., `site-photos/`, `permits/`, `signed-contracts/`) and the portal surfaces them as logical groupings.
 
+### `SUNDIAL/_orphan-welcome-calls/` — the one non-record prefix
+
+```
+SUNDIAL/_orphan-welcome-calls/{call_id}.mp3
+```
+
+A holding area for Welcome Call recordings that have no record to attach to yet. A sales rep can start a Welcome Call from a form for a customer who has not been created in Salesforce, so the recording arrives with no `sf_record_id`. Throwing it away is not an option (it is a recorded conversation about a contract), and there is no folder to put it in.
+
+**The leading underscore is load-bearing.** It is not a valid Salesforce record ID, so this prefix can never collide with a real record folder, XFiles Pro never resolves a record to it, and it sorts away from the record folders in any S3 browser.
+
+**Nothing here has a `sundial_file_metadata` row**, deliberately: every list query is scoped by `sf_record_id`, so a row with a null one would be unreachable — worse than no row, because it looks registered. The file becomes a normal record file only when `POST /welcome-call/orphan-match` promotes it to `SUNDIAL/{sf_record_id}/welcome-call-{date}-{call_id}.mp3`, registers metadata, and deletes the holding object.
+
+Objects should not accumulate here. Anything older than a few weeks is a call the Zapier sweep never managed to match — worth a look, not a lifecycle rule (deleting an unmatched recording of a signed-contract conversation is the wrong default). See `docs/integrations/retell-welcome-call.md`.
+
 **Note on tenant isolation:** Earlier drafts of this design included `{tenant_id}` as the first path segment for multi-tenant isolation at the path level. Because XFiles Pro requires a single bucket and a fixed prefix per configuration, tenant isolation now lives entirely in Lambda code rather than the path. This is acceptable for the under-10-clients scale Sundial is targeting; every Lambda must enforce tenant filtering by querying the SF record's `Client__c` value before granting any file access. If a future requirement creates a need for path-level isolation, we will revisit, potentially by giving each client its own bucket.
 
 **Path pattern verified against existing XFiles Pro install:** Tim's existing XFiles Pro setup uses an analogous pattern for Solar_Project__c with the prefix `OPS/`, paths look like `OPS/{record_id}/{filename}`. SUNDIAL follows the same pattern as a peer functional prefix. No object type in the path; SF record ID is sufficient for XFiles Pro to resolve.
@@ -125,6 +139,21 @@ Marks the file as soft-deleted in metadata; the actual S3 object is retained.
 Route: `GET /files/by-record/{recordId}/related`
 Returns files from related records based on Salesforce relationships.
 - **Logic:** Lambda traverses the SF relationships (Sundial_Customer__c on the source record, any linked projects, related POs, etc.) and queries the metadata table for files associated with those related records
+
+### Other writers into `SUNDIAL/`
+
+Not every object under `SUNDIAL/` arrives through `sundial-upload-file`. Three Lambdas write files as a side effect of doing something else, and all of them reuse the same key convention and the shared `registerFileMetadata` helper in `lib/file-access.js` so the results are indistinguishable from an upload:
+
+| Writer | Key | Category |
+|---|---|---|
+| `sundial-budget` | `SUNDIAL/{solarId}/Budget_{Name}_{timestamp}.xlsx` | budget snapshot |
+| `sundial-list-files` (copy-to-solar) | `SUNDIAL/{solarId}/{name}` | `Copied from Customer` |
+| `sundial-aurora-inbound` | `SUNDIAL/{customerId}/{agreementId}-signed-agreement.pdf` | signed agreement |
+| `sundial-welcome-call` | `SUNDIAL/{customerId}/welcome-call-{date}-attempt-{n}.mp3` | `Welcome Call Recording` |
+
+**Registration is best-effort for all of them.** The deployed Files tab lists straight from S3, so a file is visible the moment it lands; the metadata row adds category, uploader, and search. A Supabase outage must never fail the operation that produced the file.
+
+**Deterministic keys mean re-runs overwrite rather than duplicate** — but only in S3. A second `registerFileMetadata` for the same key would insert a *second* row and show the file twice in the Files tab with no way to tell them apart. Any writer that can legitimately run twice (a webhook redelivery, a retried copy) must call `findFileMetadataByKey` first and skip the insert; `sundial-welcome-call` does.
 
 ### Path structure note
 

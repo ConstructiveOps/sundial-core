@@ -743,3 +743,57 @@ so the describe guard can be exercised on fields that *do* exist today.
 
 No deployment yet — `sundial-aurora-inbound` is still undeployed and its subscription
 uncreated (unchanged by this work).
+
+## 2026-08-17 — Go-live: aurora-inbound + welcome-call deployed, routes wired
+
+**Merged and pushed** `feature/aurora-financing-fields` and `feature/welcome-call-lambda`
+into `master` (this repo's mainline), then deployed — merge, push and deploy in one
+pass, per CLAUDE.md.
+
+**Caught on merge: two red tests the branch recorded as green.** The welcome-call suite
+was 74/76, not 76/76. Both failures were the platform-event path through `handler`,
+which takes no clock injection and reads `new Date()` inside the eligibility guard —
+so they pass during Phoenix business hours and fail every evening, because the guard
+correctly refuses to dial at 22:00 (the customer is skipped, no call is placed, nothing
+throws). The **product code was right**; the tests were reading the wall clock. Fixed by
+freezing the clock at `IN_WINDOW` via `mock.timers` with a try/finally so a failure
+can't leak a frozen clock into the rest of the suite. 226/226 green — verified at 22:00
+local, the hour that used to fail.
+
+**Deployed:**
+- `sundial-aurora-inbound` — infrastructure verified present first (both SQS queues,
+  event-source mapping **Enabled** with `ReportBatchItemFailures`, 60s/512MB/arm64), so
+  this was a code push only. Now carries the lease/PPA financing fields.
+- `sundial-welcome-call` — **did not exist in AWS**, and `deploy.ps1` deliberately never
+  creates functions, so the shell was created first (Node 22 / arm64 / `index.handler` /
+  `sundial-lambda-execution-role` / 60s / 512MB) and the code deployed onto it.
+
+**Routes live.** `wire-welcome-call-routes.ps1` needs `-Yes` in a non-interactive shell —
+without it the routes are created but never deployed, and it says so rather than
+pretending. Before deploying the stage I checked what else would ride along, since a
+REST API deployment snapshots the **whole** API: `budget/recalc` was already live, so
+only the two new routes went live. Verified against the live URLs:
+
+| Request | Result |
+|---|---|
+| `POST /webhooks/retell` unsigned | **401** `{"error":"unauthorized"}` |
+| `POST /webhooks/retell` bad signature | 401 |
+| `POST /welcome-call/orphan-match` no secret | 401 (fails closed) |
+| `OPTIONS /webhooks/retell` | 200 |
+
+Both gates reject before doing anything. The first unsigned probe returned API Gateway's
+403 `Missing Authentication Token` for ~a minute after `create-deployment` — stage
+propagation lag, not a wiring fault; it settled to 401 on retry.
+
+**`Energy_Rate__c` is still `currency(18,2)`.** The widening to 4 decimal places was
+reported done but has **not** taken effect: a forced-refresh describe in a fresh process
+(so no in-process cache) still returns scale 2, and there is no `Energy_Rate__c` on
+`Sundial_Solar__c`, so it didn't land on another object either. TASKS.md and the schema
+doc record the real state rather than the intended one. Until it's changed, a
+`$0.1425/kWh` rate stores as `0.14`.
+
+**Still gated on Tim, nothing flows without them:** the `sundial/retell/api` secret and
+the three config env vars; the `Sundial_Welcome_Call_Request__e` platform event and its
+two publisher Flows; the Event Relay → EventBridge rule; the Retell agent + webhook
+secret; and the Aurora `agreement_status_changed` subscription. Aurora's pipeline is
+deployed and idle until that subscription exists.

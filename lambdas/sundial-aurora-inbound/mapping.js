@@ -3,9 +3,13 @@
 // Pure functions only: no network, no AWS, no Salesforce. Everything the worker
 // decides about VALUES lives here so it can be tested directly.
 //
-// Sources: the confirmed financing mapping (2026-07-23) and the design-results
-// mapping (approved 2026-08-03), both recorded in
-// docs/integrations/aurora-api-reference.md and DECISIONS.md D-048.
+// Sources: the confirmed financing mapping (2026-07-23), the design-results
+// mapping (approved 2026-08-03), and the lease/PPA financing fields (2026-08-17),
+// all recorded in docs/integrations/aurora-api-reference.md and DECISIONS.md D-048.
+//
+// Every field this module emits passes through the worker's describe guard before
+// it reaches a PATCH (index.js » filterToExisting), so naming a field the org does
+// not have costs a line in the notification email, never a failed write-back.
 
 // Harmon is Phoenix (no DST). Contract_Signed_Date__c / Sold_Date__c are DATE
 // fields, so the calendar date must be derived in LOCAL time — a signature at
@@ -259,8 +263,46 @@ export function buildSignedFieldMap({
     const months = num(financing.loans?.[0]?.duration_months);
     if (months !== null && months > 0) set("Loan_Term_Years__c", round2(months / 12));
   } else {
-    // lease / ppa / levelized_ppa carry a flat monthly_payment instead.
+    // lease / ppa / levelized_ppa. monthly_payment, solar_rate, escalation and
+    // upfront_payment are LEASE/PPA-ONLY in Aurora's response, so they are read
+    // here and never on the loan branch — and `set` already skips anything absent,
+    // which is what keeps a cash financing from writing any of them.
     set("Monthly_Payment__c", num(financing.monthly_payment));
+
+    // The customer's energy rate in $/kWh — the price they pay for solar power.
+    // NOT Solar_Price_per_Watt__c: that is contract amount ÷ system watts, a
+    // different metric entirely (and one this pipeline writes as
+    // Contract_Price_Per_Watt__c above). Confusing the two would put a ~$3 figure
+    // in a ~$0.14 field.
+    set("Energy_Rate__c", num(financing.solar_rate));
+
+    // Annual escalation on that rate.
+    const escalation = num(financing.escalation);
+    set("Escalator__c", escalation);
+    // UNIT UNVERIFIED. Escalator__c is a Salesforce PERCENT field, which stores the
+    // percentage value itself (2.9 means 2.9%). Aurora's docs don't state whether
+    // `escalation` is a percentage (2.9) or a fraction (0.029), and Aurora is
+    // demonstrably inconsistent about this — `energy_production.annual_offset`
+    // comes back as the STRING "87%". We pass the number through unconverted
+    // rather than guess at a ×100, and flag the ambiguous case so a fraction can't
+    // land silently as ~0%. Escalations are realistically 1-5%, so a value below 1
+    // is the tell. Delete this warning once a real lease/PPA payload settles it
+    // (TASKS.md).
+    if (escalation !== null && escalation > 0 && escalation < 1) {
+      warnings.push(
+        `Aurora sent escalation = ${escalation}, which looks like a fraction rather than a percentage. ` +
+          `Escalator__c is a percent field, so it now reads ${escalation}% — verify against the signed ` +
+          `proposal; if Aurora reports fractions, this value needs multiplying by 100.`
+      );
+    }
+
+    // DELIBERATELY NOT MAPPED: `upfront_payment`. Aurora documents it only as a
+    // lease/PPA field with no definition. The plausible readings — a prepayment
+    // that buys down the monthly, vs. a fee due at signing — belong in different
+    // Salesforce fields and mean different things to finance.
+    // Down_Payment_Amount__c is the tempting target and is the wrong one if this
+    // is a prepayment. Left unmapped until a real Participate payload proves its
+    // meaning — see TASKS.md.
   }
 
   // A stale financial simulation means these numbers may not match what the

@@ -25,6 +25,8 @@ const BASE_DESCRIBE_FIELDS = [
   "Proposal_Amount__c", "Contract_Price_Per_Watt__c", "Down_Payment_Amount__c",
   "Final_System_Size_kW__c", "Final_Panel_Count__c", "First_Year_kW_Production__c",
   "Contract_Signed_Date__c", "Sold_Date__c", "Loan_Term_Years__c", "Monthly_Payment__c",
+  // lease/PPA financing fields — all three confirmed present on the org 2026-08-17
+  "Energy_Rate__c", "Escalator__c",
 ].map((name) => ({ name, type: "string" }));
 
 const PARTNER_PICKLIST = [
@@ -159,6 +161,7 @@ function resetCtx() {
   ctx.hasDealerStatusValue = true;
   ctx.hasDealerStageValue = true;
   ctx.stageValueCasing = "Sold - Pending Review";
+  ctx.describeExclude = [];
   ctx.customerRows = [baseCustomer()];
   ctx.customerById = null;
   ctx.tenantRows = [{ Id: TENANT_SF_ID }];
@@ -266,7 +269,14 @@ mock.module("../../lib/salesforce.js", {
         ...(ctx.hasTrackingFields
           ? TRACKING_FIELDS.map((name) => ({ name, type: "string" }))
           : []),
-      ],
+      ].filter(
+        // ctx.describeExclude lets a test pretend the org is missing any field,
+        // to exercise the describe guard on fields that DO exist today.
+        (f) =>
+          !(ctx.describeExclude || []).some(
+            (n) => String(n).toLowerCase() === f.name.toLowerCase()
+          )
+      ),
     }),
   },
 });
@@ -450,6 +460,136 @@ test("signed happy path: all four retrievals, field write-back, PDF, and email",
   // no Sundial_Solar__c anywhere
   assert.ok(!JSON.stringify(ctx.updates).includes("Sundial_Solar__c"));
   assert.ok(!ctx.soqlSeen.join(" ").includes("Sundial_Solar__c"));
+});
+
+// --- lease/PPA financing fields (2026-08-17) --------------------------------
+// solar_rate/escalation/monthly_payment are LEASE/PPA-ONLY in Aurora's response.
+
+function leaseFinancingFixture(over = {}) {
+  return {
+    id: FINANCING_ID,
+    financing_option: "lease",
+    system_price: 38750.5,
+    monthly_payment: 142.75,
+    solar_rate: 0.1425,
+    escalation: 2.9,
+    epc_price_per_watt: 3.1,
+    upfront_payment: 1500, // deliberately NOT mapped
+    up_to_date: true,
+    financier: { type: "integrated", provider: "lightreach" },
+    ...over,
+  };
+}
+
+test("lease: solar_rate, escalation and monthly_payment are written", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture();
+  const res = await handler(sqsEvent());
+
+  assert.deepEqual(res.batchItemFailures, []);
+  const f = mergedFields();
+  assert.equal(f.Energy_Rate__c, 0.1425);
+  assert.equal(f.Escalator__c, 2.9);
+  assert.equal(f.Monthly_Payment__c, 142.75);
+  assert.equal(f.Financing_Type__c, "Lease");
+  assert.equal(f.Financing_Partner__c, "Lightreach");
+
+  // Contract PPW is still derived from system_price / watts, NOT epc_price_per_watt.
+  assert.equal(f.Contract_Price_Per_Watt__c, 3.13);
+  // The $/kWh rate must never be confused with the $/W metric.
+  assert.equal(f.Solar_Price_per_Watt__c, undefined);
+  // Loan-only fields stay absent on a lease.
+  assert.equal(f.Down_Payment_Amount__c, undefined);
+  assert.equal(f.Loan_Term_Years__c, undefined);
+});
+
+test("upfront_payment is deliberately ignored, including as a down payment", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture({ upfront_payment: 1500 });
+  await handler(sqsEvent());
+
+  const f = mergedFields();
+  assert.equal(f.Down_Payment_Amount__c, undefined, "upfront_payment must not become a down payment");
+  assert.ok(
+    !Object.values(f).includes(1500),
+    "no field should carry the upfront_payment value until its meaning is proven"
+  );
+});
+
+test("a loan financing writes none of the lease/PPA fields", async () => {
+  resetCtx(); // default fixture is a loan
+  await handler(sqsEvent());
+
+  const f = mergedFields();
+  assert.equal(f.Energy_Rate__c, undefined);
+  assert.equal(f.Escalator__c, undefined);
+  assert.equal(f.Monthly_Payment__c, 189.44); // from monthly_payment_first_month
+});
+
+test("lease with the fields absent from the response writes nothing for them", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture({
+    solar_rate: undefined, escalation: undefined, monthly_payment: undefined,
+  });
+  await handler(sqsEvent());
+
+  const f = mergedFields();
+  assert.equal(f.Energy_Rate__c, undefined);
+  assert.equal(f.Escalator__c, undefined);
+  assert.equal(f.Monthly_Payment__c, undefined);
+  // A partial response must not blank out the rest of the mapping.
+  assert.equal(f.Proposal_Amount__c, 38750.5);
+});
+
+test("a fraction-looking escalation is written but flagged for verification", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture({ escalation: 0.029 });
+  await handler(sqsEvent());
+
+  const f = mergedFields();
+  assert.equal(f.Escalator__c, 0.029, "value passes through unconverted — we never guess a x100");
+  const warnings = ctx.emails[0].warnings.join(" ");
+  assert.match(warnings, /looks like a fraction rather than a percentage/);
+});
+
+test("a normal percentage escalation raises no warning", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture({ escalation: 1.9 });
+  await handler(sqsEvent());
+
+  const warnings = ctx.emails[0].warnings.join(" ");
+  assert.ok(!/fraction rather than a percentage/.test(warnings));
+});
+
+test("ppa still gets the financing fields even though Financing_Type__c can't map", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture({ financing_option: "ppa" });
+  await handler(sqsEvent());
+
+  const f = mergedFields();
+  // A PPA has no Financing_Type__c picklist match (reported, never guessed into
+  // "Lease") — but the money fields are still real and must still land.
+  assert.equal(f.Financing_Type__c, undefined);
+  assert.equal(f.Energy_Rate__c, 0.1425);
+  assert.equal(f.Escalator__c, 2.9);
+  assert.equal(f.Monthly_Payment__c, 142.75);
+});
+
+test("lease/PPA fields missing from the org are dropped and reported, not fatal", async () => {
+  resetCtx();
+  ctx.aurora.financing = leaseFinancingFixture();
+  ctx.describeExclude = ["Energy_Rate__c", "Escalator__c"];
+  const res = await handler(sqsEvent());
+
+  assert.deepEqual(res.batchItemFailures, [], "a missing field must never fail the event");
+  const f = mergedFields();
+  assert.equal(f.Energy_Rate__c, undefined);
+  assert.equal(f.Escalator__c, undefined);
+  assert.equal(f.Monthly_Payment__c, 142.75, "the present field still lands");
+
+  const warnings = ctx.emails[0].warnings.join(" ");
+  assert.match(warnings, /Energy_Rate__c/);
+  assert.match(warnings, /Escalator__c/);
 });
 
 test("signed on an EXISTING matched customer sets Status/Stage too", async () => {

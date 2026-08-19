@@ -105,8 +105,15 @@ verified and out of sandbox for `sundialcrm.com` (us-west-1). Once configured, *
 invite and reset emails flow through SES and actually get delivered.
 
 > This is ONLY for Supabase **auth** emails (invite / reset / confirm). Application
-> transactional email (notifications, etc.) is a separate path via `lib/email.js`
-> (SES SDK). They don't overlap.
+> transactional email (Design Request, signed agreement, @-mentions) is a separate
+> path via `lib/email.js` (SES SDK) — see
+> **`docs/integrations/ses-transactional-email.md`**, live since 2026-08-19.
+>
+> The two paths share **only** the verified domain `sundialcrm.com`. Different
+> credentials (SMTP user vs. Lambda execution role), different config (Supabase
+> dashboard vs. Lambda env vars), different failure modes. A break in one is not
+> evidence about the other — but a **deliverability** problem (SPF/DKIM/DMARC,
+> reputation, suppression) hits both at once, since they send from the same domain.
 
 ---
 

@@ -755,10 +755,10 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `DESIGN_REQUEST_NOTIFY_CC` | `sundial-aurora-push`, `sundial-aurora-inbound` | No | The director (or anyone else) CC'd on those notifications. Same list format. When unset, **no Cc header is sent at all**. |
 | `AURORA_INBOUND_QUEUE_URL` | `sundial-aurora-webhook` | **Yes** | The SQS queue the Aurora doorbell enqueues to. If unset the doorbell returns **500 on purpose** so Aurora retries rather than the event being acked into a void. |
 | `SUNDIAL_TENANT_SLUG` | `sundial-aurora-inbound` | No (defaults `harmon`) | Tenant slug resolved to the `Sundial_Tenant__c` record id for `Client__c` on auto-created dealer customers (D-049). Same identity as `VITE_TENANT_ID` and the S3 prefix. |
-| `EMAIL_FROM` | any sender (`sundial-aurora-push`, `sundial-aurora-inbound`, …) | Yes to send | Verified SES From address, e.g. `Sundial <no-reply@sundialcrm.com>`. Until it is set, `lib/email.js` reports "not configured" and senders skip the email instead of failing. |
-| `EMAIL_REPLY_TO` | any sender | No | Default Reply-To. |
-| `SES_REGION` | any sender | No | Region the SES identity is verified in (defaults to `us-west-1`). |
-| `EMAIL_CONFIG_SET` | any sender | No | SES configuration set for bounce/complaint tracking. |
+| `EMAIL_FROM` | any sender (`sundial-aurora-push`, `sundial-aurora-inbound`, `sundial-comment-notify`) | Yes to send | **Set to `Sundial <no-reply@sundialcrm.com>`** (2026-08-19). The verified identity is the **domain** `sundialcrm.com`. Until it is set, `lib/email.js` reports "not configured" and senders skip the email instead of failing — which is exactly how Design Request notifications degraded silently for weeks. |
+| `EMAIL_REPLY_TO` | any sender | No, but **effectively required** | **Set to `tim@constructiveoperations.com`.** No mailbox exists behind `no-reply@sundialcrm.com`, so without this a recipient who hits Reply gets a bounce. **Per-tenant:** the From is correctly tenant-neutral, the reply target is not — a second tenant must point this at their own monitored address. |
+| `SES_REGION` | any sender | No (defaults `us-west-1`) | **Set explicitly to `us-west-1`**, which is where `sundialcrm.com` is verified. Matches the in-code default; set anyway so the config is self-describing. |
+| `EMAIL_CONFIG_SET` | any sender | No | **Set to `sundial-transactional`.** SES configuration set publishing BOUNCE / COMPLAINT / DELIVERY / REJECT to CloudWatch under the `configuration-set` dimension. These emails reach real Harmon employees on a domain that **also carries auth email**, so a bounce/complaint problem here is a reputation risk to the login flow, not just to notifications. |
 | `PORTAL_BASE_URL` | `sundial-user-admin`, `sundial-comment-notify` | No | Base URL for invite links and @-mention deep links. Set to `https://sundial.harmonelectric.net` (D-053); the in-code default matches in **both** Lambdas, so a lost env var degrades to the working domain. Point at the client's real domain per tenant. |
 | `RETELL_FROM_NUMBER` | `sundial-welcome-call` | **Yes** (to place calls) | The Retell-owned E.164 number the Welcome Call dials from. |
 | `RETELL_AGENT_ID` | `sundial-welcome-call` | **Yes** (to place calls) | `override_agent_id` for the Welcome Call agent. |
@@ -768,20 +768,31 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `ZAP_ORPHAN_MATCH_SECRET` | `sundial-welcome-call` | Credential | Shared secret for `POST /welcome-call/orphan-match` (`X-Sundial-Zap-Secret`). Secret-first, env fallback; fails closed when unset. |
 | `COMMENT_NOTIFY_SECRET` | `sundial-comment-notify` | Credential | Shared secret for `POST /webhooks/comment-mention` (`X-Sundial-Comment-Secret`). **Prefer the `sundial/comment-notify` secret** — it wins over this env var so it can rotate without a redeploy. The same value must be set as the `sundial.comment_notify_secret` database setting. Fails closed when unset. |
 
-Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
+Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map —
+read the current map, merge, and send the complete result in one command):
 
 ```powershell
-# Check what's there first
+# 1. ALWAYS read what's there first.
 aws lambda get-function-configuration --function-name sundial-aurora-push `
   --region us-west-1 --query 'Environment.Variables'
 
-aws lambda update-function-configuration `
-  --function-name sundial-aurora-push `
-  --region us-west-1 `
-  --environment "Variables={EMAIL_FROM=Sundial <no-reply@sundialcrm.com>,DESIGN_REQUEST_NOTIFY_TO=designmanager@harmonelectric.net,DESIGN_REQUEST_NOTIFY_CC=director@harmonelectric.net}"
+# 2. Merge and apply. Prefer a JSON file over the Variables={...} shorthand: EMAIL_FROM
+#    contains spaces and angle brackets, and the shorthand treats , and = as delimiters.
+#    (env.json = { "Variables": { "EMAIL_FROM": "...", ... } }, no BOM)
+aws lambda update-function-configuration --function-name sundial-aurora-push `
+  --region us-west-1 --environment file://env.json --query 'Environment.Variables'
+
+# 3. Re-read and diff against what you intended. A dropped var does not announce
+#    itself: losing COMMENT_NOTIFY_SECRET fails the webhook closed, and losing
+#    SUNDIAL_TENANT_SLUG silently mis-tenants auto-created customers.
+aws lambda get-function-configuration --function-name sundial-aurora-push `
+  --region us-west-1 --query 'Environment.Variables'
 ```
 
-The sending Lambda's execution role also needs `ses:SendEmail` for the email step to succeed.
+The sending Lambda's execution role also needs `ses:SendEmail`. On Harmon's
+`sundial-lambda-execution-role` this comes from the managed **`AmazonSESFullAccess`**;
+see `docs/integrations/ses-transactional-email.md` for the scoped alternative and why
+it was not applied.
 
 ---
 

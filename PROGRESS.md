@@ -1177,3 +1177,95 @@ two shapes that hid bugs before: `mismatched_items` as a STRING and `in_voicemai
 **Outstanding:** raise the log field to 131,072 (Tim), and run the sweep against the
 two recordings currently parked in `SUNDIAL/_orphan-welcome-calls/` to exercise the
 backfill against real records.
+
+## 2026-08-19 — SES wired for application email; Design Request stops degrading
+
+Config and IAM work, not a feature build. Runbook:
+`docs/integrations/ses-transactional-email.md`.
+
+**The stale premise, corrected.** TASKS.md still recommended creating
+`mail.constructiveoperations.com` as the sending identity. That text predated the
+auth-email work and would have been actively harmful: `sundialcrm.com` has been a
+verified SES domain in us-west-1 since 2026-08-02, out of the sandbox since 08-03, with
+DKIM `SUCCESS`, custom MAIL FROM `mail.sundialcrm.com` at `MailFromDomainStatus:
+SUCCESS`, and a single `p=quarantine` DMARC record since the duplicate was removed on
+08-18. A second domain would have split sending reputation for no gain. Verified all of
+it before touching anything; the TASKS entry and the `lib/email.js` header comment are
+both corrected so the next session isn't misled.
+
+**IAM: already granted, and left alone.** `ses:SendEmail` was NOT missing — the
+execution role carries the managed `AmazonSESFullAccess`, with no inline policy
+mentioning SES. A scoped `ses:SendEmail`-on-the-identity policy was drafted, but adding
+it alone would change nothing (an Allow doesn't restrict) and detaching the managed
+policy from a shared role was Tim's call to make — he chose to leave it. Recorded in
+the runbook with the exact JSON, so tightening later is a two-command job.
+
+Worth noting for whoever does tighten it: the ONLY SES call in the entire codebase is
+`SESv2 SendEmail` with `Content.Simple` in `lib/email.js`. **`ses:SendRawEmail` is
+never reached** — there is no raw-MIME path — so it does not belong in the policy, even
+though the *auth* email SMTP credential does need it. Different principal, different
+requirement.
+
+**Env vars set on `sundial-aurora-push` and `sundial-aurora-inbound`:** `EMAIL_FROM`,
+`EMAIL_REPLY_TO`, `SES_REGION`, `EMAIL_CONFIG_SET`, plus the notify recipients.
+`sundial-aurora-push` had **no environment variables at all**, which is precisely why
+Design Requests reported `email_not_configured`. Applied via JSON files rather than the
+`Variables={...}` shorthand (the From value contains spaces and angle brackets, and the
+shorthand treats `,` and `=` as delimiters), then re-read and diffed key-by-key against
+the intended map — both matched exactly, nothing dropped.
+
+**`EMAIL_REPLY_TO` is a per-tenant value, and that is the point.**
+`no-reply@sundialcrm.com` sends fine but has no mailbox behind it, so a reply would
+bounce silently. It now points at `tim@constructiveoperations.com`. The From is
+correctly tenant-neutral; the reply target is not, and a second tenant must override it
+or their customers' replies land in Constructive Operations' inbox. Flagged in both docs.
+
+**Bounce/complaint tracking:** configuration set `sundial-transactional` with a
+CloudWatch event destination on BOUNCE / COMPLAINT / DELIVERY / REJECT. Already
+receiving data — `Delivery: 3`, `Bounce: 0`, `Complaint: 0` under the
+`configuration-set` dimension. This matters more than it looks: these emails go to real
+Harmon employees from a domain that **also carries auth email**, so a complaint problem
+here degrades the login flow, not just notifications. No SNS→Lambda pipeline,
+deliberately — the requirement was that the signal exists and someone can look at it.
+
+**Proven on the feature path, not just in isolation.** A direct `lib/email.js` send
+delivered, and a **real Design Request submit** on `A3PROOF TEST Aug12` returned:
+
+```
+"email": { "sent": true, "messageId": "011101a018ba8b73-…", "recipients": { "to": 1, "cc": 1 } }
+```
+
+Those are different claims. Every consumer is deliberately best-effort — a missing
+`EMAIL_FROM` logs and continues rather than failing an Aurora push — which is the right
+design and exactly why this degraded unnoticed for weeks. The runbook says to check the
+feature response, not just SES.
+
+### Found while proving it — NOT an SES problem, needs Tim
+
+The same Design Request submit surfaced a pre-existing Salesforce fault. The Aurora push
+succeeded and the email sent, but the **writeback failed**:
+
+```
+status: "pushed_writeback_failed"
+CANNOT_EXECUTE_FLOW_TRIGGER — "Sundial Customer Update Flow" failed:
+INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST: bad value for restricted picklist field:
+"Proposal Pending"
+```
+
+`Stage__c` **does** have `Proposal Pending`; `Status__c` does **not**. So the Flow is
+writing a Stage value into a Status field. Consequence: **Aurora project
+`3f31d168-8847-49d6-b22f-92ae758d9efc` now exists with no link recorded in Salesforce** —
+`Aurora_Project_ID__c` and `Sent_to_Aurora__c` are both still null on
+`a1P7y00000AbTenEAF`. Under D-049, a signed agreement on an Aurora project no customer
+carries and with no `external_provider_id` **auto-creates a customer**, so this orphan
+would produce a duplicate rather than an error. Fix the Flow, then either backfill the
+link or delete the Aurora project.
+
+Docs: new `ses-transactional-email.md`; `auth-email-ses.md` and `api-endpoints.md`
+cross-reference it and state explicitly that auth email and application email are two
+independent paths sharing one domain. No DECISIONS entry — nothing architectural was
+decided here; the identity, the two-path split and the notification design are already
+D-046 / D-047 / D-056.
+
+**Open:** `sundial-comment-notify` is the third sender and is not deployed, so nothing
+was set on it; TASKS.md and the runbook carry the one-command hand-off for its deploy.

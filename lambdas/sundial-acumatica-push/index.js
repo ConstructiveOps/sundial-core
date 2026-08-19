@@ -40,7 +40,7 @@
 
 import { getSalesforceToken, sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
-import { putAcumaticaEntity } from "../../lib/acumatica.js";
+import { putAcumaticaEntity, normalizeAcumaticaPhone } from "../../lib/acumatica.js";
 import { lookupTaxZone } from "../../lib/acumatica-tax-zones.js";
 
 const SF_API_VERSION = "v60.0";
@@ -310,7 +310,31 @@ export const handler = async (event) => {
         );
       }
       const email = orNull(cust.Primary_Email__c);
-      const phone = orNull(cust.Primary_Phone__c);
+
+      // Acumatica enforces the `(999) 999-9999` input mask SERVER-SIDE and rejects the
+      // whole customer with a 422 when it does not match. Salesforce imposes no phone
+      // format, so a raw value like "623 703-2778" fails — which is exactly what killed
+      // a real production Create Project. Same behaviour as the tax zone below: send a
+      // value only when it is certainly valid, otherwise OMIT AND WARN rather than
+      // guessing or failing the whole push over a phone number.
+      const rawPhone = orNull(cust.Primary_Phone__c);
+      const { phone, extension, reason: phoneReason } = normalizeAcumaticaPhone(rawPhone);
+      if (rawPhone && !phone) {
+        console.warn(
+          `acumatica-push: phone "${rawPhone}" not usable for the Acumatica mask ` +
+            `(${phoneReason}) — Phone1 omitted for ${recordId}.`
+        );
+        summary.warnings.push({ code: "phone_unusable", value: rawPhone, reason: phoneReason });
+      }
+      // Phone1 has no extension slot, so an extension cannot be sent. Say so rather
+      // than dropping it silently — it is a real piece of the ops record.
+      if (extension) {
+        console.warn(
+          `acumatica-push: dropped extension "${extension}" from phone for ${recordId} ` +
+            `(Acumatica Phone1 has no extension field).`
+        );
+        summary.warnings.push({ code: "phone_extension_dropped", extension });
+      }
 
       // Tax zone from City__c; OMIT when unmatched (never guess), and warn.
       const city = cleanStr(cust.City__c);

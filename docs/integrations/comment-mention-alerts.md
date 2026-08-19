@@ -130,36 +130,69 @@ write-back and the Supabase ban retry.)
 Body: `{ mention_id, comment_id, mentioned_user_id }`. Header:
 `X-Sundial-Comment-Secret`.
 
-### Configuration is in database settings, not in the file
+### Configuration lives in `private.app_config`, not in the file
 
 ```sql
-alter database postgres set sundial.comment_notify_url =
-  'https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/webhooks/comment-mention';
-alter database postgres set sundial.comment_notify_secret = '<the shared secret>';
+insert into private.app_config (key, value) values
+  ('comment_notify_url',    'https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/webhooks/comment-mention'),
+  ('comment_notify_secret', '<the shared secret>')
+on conflict (key) do update set value = excluded.value, updated_at = now();
 ```
 
-> ⚠️ `ALTER DATABASE … SET` applies to **new connections only**. Supabase pools, so it
-> can take a minute before the trigger sees the values.
-
-Verify:
+Verify — this prints the URL but never the secret's value, only that it is set and how
+long it is, which is enough to catch a truncated paste:
 
 ```sql
-select current_setting('sundial.comment_notify_url', true) as url,
-       coalesce(nullif(current_setting('sundial.comment_notify_secret', true), ''), null)
-         is not null as secret_set;
+select key,
+       case when key like '%secret%'
+            then '(set, ' || length(value) || ' chars)'
+            else value end as value,
+       updated_at
+  from private.app_config
+ where key in ('comment_notify_url', 'comment_notify_secret')
+ order by key;
 ```
 
-**An unset setting is LOUD.** `current_setting(…, true)` returns NULL rather than
-erroring, and a silent no-op is exactly how a notification path rots unnoticed — the
-comments keep working, so nobody investigates. The trigger `RAISE WARNING`s on every
-mention until the values are set.
+Changes take effect **immediately** — the values are read per-invocation from a table,
+not from connection startup parameters, so there is no pooled-connection lag.
 
-**Why not Supabase Vault:** vault is the better home for a secret, but it is a second
-extension to depend on and its read path inside a `SECURITY DEFINER` trigger is
-fiddlier. The exposure here is bounded — a database setting is readable by the
-`postgres` superuser role, which can already read every comment directly, so the secret
-grants that role nothing it did not already have. Moving to vault is a change to
-`notify_comment_mention()` alone.
+> ### ⚠️ Database settings do not work on managed Supabase
+>
+> The first version of this used `alter database postgres set sundial.*` +
+> `current_setting()`. It fails:
+>
+> ```
+> ERROR: 42501: permission denied to set parameter "sundial.comment_notify_url"
+> ```
+>
+> Setting a custom parameter at database scope needs superuser or database ownership.
+> Supabase's `postgres` role is **not** a superuser and `supabase_admin` owns the
+> database, so this is not grantable and there is nothing to request.
+>
+> **Do not work around it with `alter role authenticator set …`.** It may work today,
+> it depends on Supabase internals, and a notification path that silently stops after a
+> platform change is the exact failure this design avoids everywhere else.
+
+**Missing config is LOUD.** A missing row leaves the variable NULL — same behaviour the
+`missing_ok` `current_setting()` had — and the trigger `RAISE WARNING`s on every mention
+until the values are set. A silent no-op is how a notification path rots unnoticed: the
+comments keep working, so nobody investigates.
+
+**Why the table has no API surface:** `private` is not in PostgREST's exposed-schema
+list and **must stay out of it** — adding it in Settings → API would publish the table,
+secret included. On top of that the table has RLS enabled with **no policies** (deny by
+default) and an explicit `revoke all` from `anon` and `authenticated`. The trigger reads
+it because `SECURITY DEFINER` runs as the table owner, and an owner bypasses RLS.
+
+> Note the table is deliberately **not** `force row level security`. FORCE would apply
+> RLS to the owner as well and silently break every notification.
+
+**Why not Supabase Vault:** still a reasonable home for a secret, still a second
+extension to depend on with a fiddlier read path inside a `SECURITY DEFINER` trigger.
+The exposure is bounded the same way it always was — anything that can read
+`private.app_config` is already the owner or a superuser, both of which can read every
+comment directly, so the secret grants them nothing new. Moving to vault remains a
+change to `notify_comment_mention()` alone.
 
 **Why not a Supabase Dashboard Database Webhook:** it would do the same job in two
 clicks and live nowhere in this repo. We were already burned once by a load-bearing
@@ -321,18 +354,24 @@ aws lambda update-function-configuration --function-name sundial-comment-notify 
 
 ## Deploy order
 
-**Wire and verify the route BEFORE applying the trigger migration.** The trigger starts
-posting the moment the database settings are set, and a 404 from an unwired route is a
-silently lost notification — the trigger swallows it by design.
+**Wire and verify the route BEFORE inserting the config rows.** The trigger starts
+posting the moment both rows exist, and a 404 from an unwired route is a silently lost
+notification — the trigger swallows it by design.
+
+Applying the migration itself is safe at any point: with no config rows the trigger
+warns and returns, so it is inert until you populate the table. That ordering is
+deliberate — the schema can land early without arming anything.
 
 1. `sql/sundial_user_preferences.sql` (independent of everything else; unblocks the
    harmon-crm Settings UI immediately)
 2. Create the Lambda, `.\deploy.ps1 sundial-comment-notify`
-3. Secret + env vars
+3. Secret + env vars (including the SES vars —
+   `docs/integrations/ses-transactional-email.md`)
 4. `.\scripts\wire-comment-mention-route.ps1`
 5. **Verify it fails closed:** an unsecreted POST must return 401
-6. `sql/sundial_comment_mention_notify.sql`
-7. `alter database postgres set …` for the URL and secret
+6. `sql/sundial_comment_mention_notify.sql` — creates `private.app_config`, the
+   trigger function and the trigger. Inert until step 7. **Safe to re-run.**
+7. `insert into private.app_config …` for the URL and secret — **this is what arms it**
 8. Post a test comment mentioning someone and check `net._http_response`
 
 ---
@@ -341,7 +380,7 @@ silently lost notification — the trigger swallows it by design.
 
 ```sql
 -- Recent pg_net attempts and what came back. A 401 here means the secret drifted
--- between the database setting and Secrets Manager.
+-- between private.app_config and Secrets Manager.
 select id, status_code, error_msg, created
   from net._http_response order by created desc limit 20;
 
@@ -349,8 +388,14 @@ select id, status_code, error_msg, created
 select id, comment_id, mentioned_user_id, created_at
   from comment_mentions where notified_at is null order by created_at desc;
 
--- Pause notifications without dropping anything (e.g. during a mail incident):
-alter database postgres reset sundial.comment_notify_url;
+-- Pause notifications without dropping anything (e.g. during a mail incident).
+-- Takes effect immediately; the trigger warns and returns, comments keep saving.
+delete from private.app_config where key = 'comment_notify_url';
+
+-- Rotate the secret. Update Secrets Manager too — between the two writes the Lambda
+-- returns 401 and pg_net records it, so do this deliberately.
+update private.app_config set value = '<new secret>', updated_at = now()
+ where key = 'comment_notify_secret';
 ```
 
 CloudWatch: `/aws/lambda/sundial-comment-notify`. Every skip logs its reason with the

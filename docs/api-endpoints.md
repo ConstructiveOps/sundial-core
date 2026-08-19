@@ -766,7 +766,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `RETELL_API_KEY` | `sundial-welcome-call` | Credential | **Prefer the `sundial/retell/api` secret** — the secret wins over this env var so the key can be rotated without a redeploy. Accepted here as a fallback. |
 | `RETELL_WEBHOOK_SECRET` | `sundial-welcome-call` | Credential | Same: secret-first, env fallback. If neither is set the webhook **rejects everything with 401** (fails closed). |
 | `ZAP_ORPHAN_MATCH_SECRET` | `sundial-welcome-call` | Credential | Shared secret for `POST /welcome-call/orphan-match` (`X-Sundial-Zap-Secret`). Secret-first, env fallback; fails closed when unset. |
-| `COMMENT_NOTIFY_SECRET` | `sundial-comment-notify` | Credential | Shared secret for `POST /webhooks/comment-mention` (`X-Sundial-Comment-Secret`). **Prefer the `sundial/comment-notify` secret** — it wins over this env var so it can rotate without a redeploy. The same value must be set as the `sundial.comment_notify_secret` database setting. Fails closed when unset. |
+| `COMMENT_NOTIFY_SECRET` | `sundial-comment-notify` | Credential | Shared secret for `POST /webhooks/comment-mention` (`X-Sundial-Comment-Secret`). **Prefer the `sundial/comment-notify` secret** — it wins over this env var so it can rotate without a redeploy. The same value must be stored **in the Supabase database as the `comment_notify_secret` row of `private.app_config`** (NOT a database setting — `alter database … set` is not permitted on managed Supabase; see `docs/integrations/comment-mention-alerts.md`). Fails closed when unset. |
 
 Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map —
 read the current map, merge, and send the complete result in one command):

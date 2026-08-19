@@ -23,31 +23,42 @@
 --
 -- CONFIGURATION — the URL and the shared secret are NOT hardcoded here
 -- --------------------------------------------------------------------
--- Both are read from database settings, so this file is safe to commit and the secret
--- can be rotated without editing the repo. Set them ONCE per project:
+-- Both live in `private.app_config`, a table with no API surface, read by the
+-- SECURITY DEFINER trigger function. This file stays safe to commit and the secret
+-- rotates with an UPDATE, not a code edit.
 --
---   alter database postgres set sundial.comment_notify_url =
---     'https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/webhooks/comment-mention';
---   alter database postgres set sundial.comment_notify_secret = '<the shared secret>';
+--   insert into private.app_config (key, value) values
+--     ('comment_notify_url', 'https://.../prod/webhooks/comment-mention'),
+--     ('comment_notify_secret', '<the shared secret>')
+--   on conflict (key) do update set value = excluded.value, updated_at = now();
 --
--- ⚠️ ALTER DATABASE ... SET only applies to NEW connections. Supabase pools
--- connections, so it can take a minute (or a pooler restart) before the trigger sees
--- the values. Verify with:
+-- WHY A TABLE AND NOT DATABASE SETTINGS — this is a PLATFORM CONSTRAINT, not taste
+-- ------------------------------------------------------------------------------
+-- The first version of this file used `alter database postgres set sundial.*` and
+-- `current_setting()`. That CANNOT WORK ON MANAGED SUPABASE. Setting a custom
+-- parameter at database scope requires superuser or database ownership; Supabase's
+-- `postgres` role is not a superuser and `supabase_admin` owns the database, so the
+-- statement fails outright:
 --
---   select current_setting('sundial.comment_notify_url', true) as url,
---          coalesce(nullif(current_setting('sundial.comment_notify_secret', true), ''), null)
---            is not null as secret_set;
+--   ERROR: 42501: permission denied to set parameter "sundial.comment_notify_url"
+--
+-- It is not grantable, so there is nothing to request. Do NOT "fix" this with
+-- `alter role authenticator set ...`: it may work today, it depends on Supabase
+-- internals, and a notification path that silently stops after a platform change is
+-- precisely the failure mode this design avoids everywhere else.
+--
+-- The old reasoning about settings-vs-vault is deliberately NOT preserved below,
+-- because it argued for an option that does not exist here.
 --
 -- The same secret must be reachable by the Lambda as COMMENT_NOTIFY_SECRET (Secrets
 -- Manager `sundial/comment-notify` first, env var second — see the Lambda's config.js).
 --
--- WHY SETTINGS AND NOT SUPABASE VAULT: vault is the better home for a secret, but it is
--- a second extension to depend on and its read path inside a SECURITY DEFINER trigger
--- is fiddlier. The exposure here is bounded — a database setting is readable by the
--- `postgres` superuser role, which can already read every comment in the database
--- directly, so the secret grants that role nothing it did not already have. Moving to
--- vault is a drop-in change to notify_comment_mention() alone if that ever stops being
--- true.
+-- WHY NOT SUPABASE VAULT: still a reasonable home for the secret, and still a second
+-- extension to depend on with a fiddlier read path inside a SECURITY DEFINER trigger.
+-- The exposure here is bounded the same way it always was — anything that can read
+-- `private.app_config` is already the table owner or a superuser, and both can read
+-- every comment in the database directly, so the secret grants them nothing new.
+-- Moving to vault remains a change to notify_comment_mention() alone.
 --
 -- WHY NOT A SUPABASE DASHBOARD DATABASE WEBHOOK: it would do the same job in about two
 -- clicks and live nowhere in this repo. We have already been burned once by a
@@ -64,6 +75,40 @@
 -- also why the Lambda can safely SELECT the mention row it was told about: by the time
 -- the request goes out, the INSERT is committed and visible.
 create extension if not exists pg_net;
+
+-- ---------------------------------------------------------------------------
+-- private.app_config — configuration with no API surface
+-- ---------------------------------------------------------------------------
+-- A schema PostgREST does not expose. Supabase exposes `public` (and
+-- `graphql_public`); `private` is absent from that list and MUST STAY ABSENT — adding
+-- it in Settings → API would publish this table, secret included, to the REST API.
+create schema if not exists private;
+
+create table if not exists private.app_config (
+  key        text primary key,
+  value      text not null,
+  updated_at timestamptz not null default now()
+);
+
+comment on table private.app_config is
+  'Server-side configuration read by SECURITY DEFINER functions. NOT exposed via PostgREST - `private` must never be added to the API exposed-schema list. Rows: comment_notify_url, comment_notify_secret.';
+
+-- Defence in depth. Two independent locks, because either one alone is a single point
+-- of failure for a table holding a shared secret:
+--
+--   1. RLS enabled with NO POLICIES. Postgres denies by default when RLS is on and
+--      nothing matches, so any role subject to RLS reads zero rows.
+--   2. Explicit REVOKE from the API roles, so even a future policy added by mistake
+--      has no privilege to act on.
+--
+-- NOTE: deliberately NOT `force row level security`. The trigger function is
+-- SECURITY DEFINER and runs as this table's OWNER, and an owner bypasses RLS —
+-- that bypass is exactly how the function reads its config. FORCE would apply RLS to
+-- the owner too and silently break every notification.
+alter table private.app_config enable row level security;
+
+revoke all on schema  private            from anon, authenticated;
+revoke all on table   private.app_config from anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- notified_at — the idempotency marker, owned by the Lambda
@@ -93,9 +138,16 @@ create index if not exists idx_comment_mentions_unnotified
 -- The trigger function
 -- ---------------------------------------------------------------------------
 -- SECURITY DEFINER because net.http_post is not granted to `authenticated`, and the
--- INSERT that fires this comes from a browser session. search_path is pinned so a
--- caller cannot shadow `net` or `pg_catalog` with a schema of their own — the standard
--- hardening for any SECURITY DEFINER function.
+-- INSERT that fires this comes from a browser session. Running as the owner is also
+-- what lets it read private.app_config, which every other role is denied.
+--
+-- search_path is pinned so a caller cannot shadow `net` or `pg_catalog` with a schema
+-- of their own — the standard hardening for any SECURITY DEFINER function.
+--
+-- ⚠️ `private` is deliberately NOT in that search_path. The config reads below are
+-- schema-qualified instead, which needs no search_path entry. Widening the search_path
+-- of a SECURITY DEFINER function is the exact thing this hardening exists to prevent,
+-- so do not "tidy" the qualification away.
 create or replace function notify_comment_mention()
 returns trigger
 language plpgsql
@@ -106,16 +158,19 @@ declare
   v_url    text;
   v_secret text;
 begin
-  -- Read config. `true` = missing_ok, so an unset setting is NULL rather than an error.
-  v_url    := nullif(current_setting('sundial.comment_notify_url', true), '');
-  v_secret := nullif(current_setting('sundial.comment_notify_secret', true), '');
+  -- Read config. SELECT ... INTO leaves the variable NULL when no row matches, so a
+  -- missing key behaves exactly like the old missing_ok current_setting() did.
+  select nullif(c.value, '') into v_url
+    from private.app_config c where c.key = 'comment_notify_url';
+  select nullif(c.value, '') into v_secret
+    from private.app_config c where c.key = 'comment_notify_secret';
 
   -- LOUD about being unconfigured. A silent no-op here is exactly how a notification
   -- path rots unnoticed — the comments keep working, so nobody investigates. A WARNING
   -- lands in the Postgres logs on every mention until someone sets the values.
   if v_url is null or v_secret is null then
     raise warning
-      'notify_comment_mention: sundial.comment_notify_url and/or sundial.comment_notify_secret is not set - mention % not notified. See sql/sundial_comment_mention_notify.sql.',
+      'notify_comment_mention: private.app_config is missing comment_notify_url and/or comment_notify_secret - mention % not notified. See sql/sundial_comment_mention_notify.sql.',
       new.id;
     return new;
   end if;
@@ -175,7 +230,30 @@ create trigger trg_comment_mention_notify
 --   select id, comment_id, mentioned_user_id, created_at
 --     from comment_mentions where notified_at is null order by created_at desc;
 --
--- To disable notifications without dropping anything (e.g. during a mail incident),
--- unset the URL — the trigger then warns and returns:
+-- Confirm the config the trigger will actually read (the secret's VALUE is never
+-- printed — only that it is set, and how long it is, which is enough to spot a
+-- truncated paste):
 --
---   alter database postgres reset sundial.comment_notify_url;
+--   select key,
+--          case when key like '%secret%'
+--               then '(set, ' || length(value) || ' chars)'
+--               else value end as value,
+--          updated_at
+--     from private.app_config
+--    where key in ('comment_notify_url', 'comment_notify_secret')
+--    order by key;
+--
+-- Rotating the secret — update here and in Secrets Manager. Between the two writes
+-- the Lambda returns 401 and pg_net records it, so rotate deliberately, not casually:
+--
+--   update private.app_config set value = '<new secret>', updated_at = now()
+--    where key = 'comment_notify_secret';
+--
+-- To disable notifications without dropping anything (e.g. during a mail incident),
+-- remove the URL row — the trigger then warns and returns, and comments keep saving:
+--
+--   delete from private.app_config where key = 'comment_notify_url';
+--
+-- Unlike the old ALTER DATABASE approach, this takes effect IMMEDIATELY: the value is
+-- read per-invocation from a table, not from a connection's startup parameters, so
+-- there is no pooled-connection lag to wait out.

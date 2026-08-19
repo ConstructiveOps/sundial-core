@@ -1269,3 +1269,60 @@ D-046 / D-047 / D-056.
 
 **Open:** `sundial-comment-notify` is the third sender and is not deployed, so nothing
 was set on it; TASKS.md and the runbook carry the one-command hand-off for its deploy.
+
+## 2026-08-19 — @-mention trigger config moved to `private.app_config` (D-056 amendment)
+
+`sql/sundial_comment_mention_notify.sql` applied cleanly through the trigger, then
+failed at the config step:
+
+```
+ERROR: 42501: permission denied to set parameter "sundial.comment_notify_url"
+```
+
+**`alter database … set` on a custom parameter is not available on managed Supabase.**
+It needs superuser or database ownership; the `postgres` role is not a superuser and
+`supabase_admin` owns the database. Not grantable, so there was nothing to request —
+the design had to change, not the permissions.
+
+**Rejected the tempting workaround.** `alter role authenticator set sundial.*` would
+likely work, and depends on Supabase internals. A notification path that silently stops
+after a platform change is the exact failure this feature exists to prevent — the whole
+reason it is a database trigger rather than a browser call is that nobody notices when
+somebody *else's* notification goes missing. A config mechanism documented to be
+unavailable beats one that happens to work.
+
+**Replacement:** `private.app_config (key, value, updated_at)`, read by the
+`SECURITY DEFINER` trigger function.
+
+- `private` is not in PostgREST's exposed-schema list and must stay out of it —
+  adding it would publish the table, secret included.
+- RLS on with **no policies** (deny by default) *and* an explicit `revoke all` from
+  `anon` / `authenticated`. Two locks, because one is a single point of failure for a
+  table holding a shared secret.
+- The function reads it because `SECURITY DEFINER` runs as the owner and owners bypass
+  RLS. So the table is deliberately **not** `force row level security` — FORCE applies
+  RLS to the owner as well and would silently break every notification. That one is
+  worth remembering; it looks like a hardening improvement and is a breakage.
+- Reads are schema-qualified and `private` is **not** added to the function's
+  `set search_path`, because widening a `SECURITY DEFINER` search_path is precisely
+  what that hardening line prevents.
+
+**Everything already right was preserved:** missing config still `RAISE WARNING`s
+rather than no-oping silently (a `select … into` with no matching row leaves NULL,
+exactly like `missing_ok` `current_setting()` did); the `exception when others` swallow
+around `net.http_post` is untouched; trigger definition, payload shape, header name and
+5s timeout are unchanged. The file remains safely re-runnable over an existing
+install — `create schema/table if not exists`, `create or replace function`,
+`drop trigger if exists`.
+
+**Incidental improvement:** database settings applied to new connections only, so a
+pooled deployment could lag a minute behind a change. A table read per invocation is
+immediate — which makes the "pause notifications during a mail incident" operation
+(`delete from private.app_config where key = 'comment_notify_url'`) actually instant.
+
+Docs corrected rather than appended to: the SQL header's settings-vs-Vault argument is
+**gone**, not annotated — it argued for an option that does not exist here.
+`comment-mention-alerts.md` has the new config/verify/operate SQL and a reordered
+deploy list (the migration is now inert until the config rows land, so it can be
+applied early), and `api-endpoints.md` no longer tells the reader to set a database
+setting. Nothing applied to the database by me — Tim runs the SQL.

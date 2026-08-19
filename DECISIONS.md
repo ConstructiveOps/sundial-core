@@ -1788,3 +1788,52 @@ pinned by a test named for it.
 D-045 (secret TTL / rotation), D-046 and D-052 (the auth-email templates that were the
 untracked dashboard state this decision avoids repeating), D-054 (the previous public
 webhook and its fail-closed gate).
+
+### Amendment (2026-08-19): trigger config lives in `private.app_config`, not database settings
+
+The original decision put the notification URL and shared secret in **database
+settings** (`alter database postgres set sundial.*`, read with `current_setting()`).
+**That is impossible on managed Supabase** and the first apply proved it:
+
+```
+ERROR: 42501: permission denied to set parameter "sundial.comment_notify_url"
+```
+
+Setting a custom parameter at database scope requires superuser or database ownership.
+Supabase's `postgres` role is not a superuser and `supabase_admin` owns the database.
+It is not grantable, so there is no request to make — the option simply does not exist
+on this platform. The original reasoning (settings vs. Vault) was sound in the abstract
+and irrelevant in practice, and has been removed from the SQL file rather than left to
+mislead.
+
+**Replacement:** a `private.app_config (key, value, updated_at)` table read by the
+`SECURITY DEFINER` trigger function.
+
+- `private` is **not** in PostgREST's exposed-schema list and must stay out of it —
+  adding it would publish the table, secret included, to the REST API.
+- RLS enabled with **no policies** (deny by default), plus an explicit `revoke all`
+  from `anon` and `authenticated`. Two independent locks, because either alone is a
+  single point of failure for a table holding a shared secret.
+- The function reads it because `SECURITY DEFINER` runs as the table owner and an owner
+  bypasses RLS. The table is therefore deliberately **not** `force row level security`,
+  which would apply RLS to the owner too and silently break every notification.
+- Reads are **schema-qualified** (`private.app_config`) and `private` is **not** added
+  to the function's `set search_path`. Widening a `SECURITY DEFINER` function's
+  search_path is exactly what that hardening prevents.
+
+**Explicitly rejected:** `alter role authenticator set sundial.*`. It may work today,
+it depends on Supabase internals, and a notification path that silently stops working
+after a platform change is the failure mode this design avoids everywhere else. A
+config mechanism that is *documented* to be unavailable is better than one that
+*happens* to work.
+
+**Incidental improvement:** the old approach applied to new connections only, so a
+pooled deployment could take a minute to see a change. A table read per invocation
+takes effect immediately — which also makes "pause notifications during a mail
+incident" (`delete from private.app_config where key = 'comment_notify_url'`) actually
+instant.
+
+**Generalises beyond this feature:** any future `SECURITY DEFINER` function on Supabase
+needing server-side config should use `private.app_config` rather than rediscovering
+this. That is the reason it is a shared table with a generic name and not
+`private.comment_notify_config`.

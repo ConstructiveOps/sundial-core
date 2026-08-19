@@ -649,6 +649,40 @@ A failed holding-object delete is **not** a failed match — the bytes are attac
 
 **IAM:** `sfsolproj` `ListBucket` plus `GetObject`/`PutObject`/`DeleteObject` on `sfsolproj/SUNDIAL/*`. The execution role carries `AmazonS3FullAccess` today (verified 2026-08-03 for copy-to-solar), so no IAM change is expected — but `DeleteObject` is new for this feature, so confirm it if the role is ever tightened.
 
+#### `POST /webhooks/comment-mention`
+
+**Lambda:** `sundial-comment-notify`
+**Purpose:** Sends the "you were @-mentioned in a comment" email. Full runbook: `docs/integrations/comment-mention-alerts.md`. Design rationale: **D-056**.
+
+> **The caller is POSTGRES, not a browser.** Comments are written directly from the browser under RLS — there is no server in that path — so the notification is driven by an `AFTER INSERT` trigger on `comment_mentions` posting through `pg_net` (`sql/sundial_comment_mention_notify.sql`). A client-driven alert would be lost whenever the commenter closed their tab, and the person who loses it is not the person who caused it.
+
+**Authentication:** shared secret in the `X-Sundial-Comment-Secret` header, constant-time compared in-Lambda against `COMMENT_NOTIFY_SECRET`. **No Supabase JWT and no API Gateway authorizer** — the caller has no portal user. **An unset secret rejects everything with 401** (fails closed). This is the **third** public non-JWT route, after the Aurora doorbell and the Retell webhook.
+
+**Request body:** `{ "mention_id": "<uuid>", "comment_id": "<uuid>", "mentioned_user_id": "<auth uuid>" }`. `mention_id` alone is enough; `comment_id` + `mentioned_user_id` is accepted as a replay fallback.
+
+**Behavior:** read the mention → read the comment → check preferences → resolve the recipient's address from `auth.users` (service role) → send via `lib/email.js` → stamp `comment_mentions.notified_at`.
+
+**Every skip is a success (200), never an error:**
+
+| `reason` | When |
+|---|---|
+| `already_notified` | `notified_at` is already set (pg_net can redeliver) |
+| `self_mention` | The recipient is the comment's author |
+| `alerts_disabled` | `user_preferences.comment_email_alerts = false` |
+| `no_recipient_email` | The auth user has no address |
+| `email_not_configured` | `EMAIL_FROM` unset — degrades like the Design Request email, so this ships before SES |
+| `cross_tenant` | Comment tenant ≠ recipient tenant (defence in depth; should never fire) |
+
+**A missing `user_preferences` row means alerts are ON.** There is no backfill — every existing user has no row, and nobody should have to opt in to keep today's behaviour.
+
+**Idempotency:** `notified_at` is stamped **only after a successful send**. Nothing stamps it on a skip, so a recipient who re-enables alerts — or an SES that comes online later — is still reachable by a replay.
+
+**Errors:** 400 (`MISSING_FIELDS`, `INVALID_BODY`), 401 (missing/invalid secret, or none configured), 404 (`MENTION_NOT_FOUND`, `COMMENT_NOT_FOUND`), 502 (send failed, database read failed, auth lookup failed). A send that succeeded but whose stamp failed returns **200** with `stamped: false` — the email went out, and reporting failure would invite a duplicate.
+
+**Link map** (`${PORTAL_BASE_URL}` + path, from `comments.record_object`): `customer` → `/customers/{id}`, `solar` → `/projects/solar/{id}`, `roofing` → `/projects/roofing/{id}`. **An unknown key falls back to `/dashboard` and logs a warning** — never emit a link that 404s. The Service module gets one entry in `RECORD_PATHS` when it lands.
+
+**Wiring:** `scripts/wire-comment-mention-route.ps1`. **Wire and verify this route before applying the trigger migration** — the trigger swallows post failures by design, so an unwired route loses notifications silently.
+
 #### `POST /webhooks/acumatica`
 
 **Lambda:** `sundial-acumatica-webhook`
@@ -695,6 +729,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
 | `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
+| `sundial-comment-notify` | POST /webhooks/comment-mention (called by Postgres via pg_net) |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
 
 Lambda functions not exposed through API Gateway:
@@ -724,13 +759,14 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `EMAIL_REPLY_TO` | any sender | No | Default Reply-To. |
 | `SES_REGION` | any sender | No | Region the SES identity is verified in (defaults to `us-west-1`). |
 | `EMAIL_CONFIG_SET` | any sender | No | SES configuration set for bounce/complaint tracking. |
-| `PORTAL_BASE_URL` | `sundial-user-admin` | No | Base URL for invite links. Set to `https://sundial.harmonelectric.net` (D-053); in-code default matches. Point at the client's real domain per tenant. |
+| `PORTAL_BASE_URL` | `sundial-user-admin`, `sundial-comment-notify` | No | Base URL for invite links and @-mention deep links. Set to `https://sundial.harmonelectric.net` (D-053); the in-code default matches in **both** Lambdas, so a lost env var degrades to the working domain. Point at the client's real domain per tenant. |
 | `RETELL_FROM_NUMBER` | `sundial-welcome-call` | **Yes** (to place calls) | The Retell-owned E.164 number the Welcome Call dials from. |
 | `RETELL_AGENT_ID` | `sundial-welcome-call` | **Yes** (to place calls) | `override_agent_id` for the Welcome Call agent. |
 | `ZAPIER_RESULTS_HOOK_URL` | `sundial-welcome-call` | **Yes** (for the billing ledger) | Catch Hook of the billing-ledger Zap. Unset means analyzed calls are logged at ERROR instead of billed; the Salesforce writeback still runs. |
 | `RETELL_API_KEY` | `sundial-welcome-call` | Credential | **Prefer the `sundial/retell/api` secret** — the secret wins over this env var so the key can be rotated without a redeploy. Accepted here as a fallback. |
 | `RETELL_WEBHOOK_SECRET` | `sundial-welcome-call` | Credential | Same: secret-first, env fallback. If neither is set the webhook **rejects everything with 401** (fails closed). |
 | `ZAP_ORPHAN_MATCH_SECRET` | `sundial-welcome-call` | Credential | Shared secret for `POST /welcome-call/orphan-match` (`X-Sundial-Zap-Secret`). Secret-first, env fallback; fails closed when unset. |
+| `COMMENT_NOTIFY_SECRET` | `sundial-comment-notify` | Credential | Shared secret for `POST /webhooks/comment-mention` (`X-Sundial-Comment-Secret`). **Prefer the `sundial/comment-notify` secret** — it wins over this env var so it can rotate without a redeploy. The same value must be set as the `sundial.comment_notify_secret` database setting. Fails closed when unset. |
 
 Setting them (⚠️ `update-function-configuration` **replaces** the whole Variables map — include every var the function needs in one command):
 

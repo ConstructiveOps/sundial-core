@@ -1648,3 +1648,143 @@ is additive on the Salesforce side.
 
 `docs/integrations/retell-welcome-call.md` (backfill flow, entry format, capacity),
 D-054 (the trigger and ledger-first fan-out), `lambdas/sundial-welcome-call/`.
+
+---
+
+## D-056: @-mention alerts are triggered by the database, and user preferences live in their own table
+
+**Date:** 2026-08-18
+**Status:** Accepted
+
+### Context
+
+Comments are **not a backend feature**. harmon-crm's `CommentThread.tsx` inserts into
+`comments` and then into `comment_mentions` **directly from the browser** under RLS.
+There is no server anywhere in that path, no Lambda, and no code in this repo. The
+mention insert is explicitly best-effort in that component.
+
+Two things then had to be decided to add email alerts:
+
+1. **Who fires the notification** — the client that already writes the mention, or
+   something server-side.
+2. **Where the "email me on mentions" toggle is stored.** The obvious home is
+   `public.profiles`, which already has a row per user.
+
+### Decision
+
+1. **An `AFTER INSERT` trigger on `comment_mentions` posts to a Lambda via `pg_net`**
+   (`sql/sundial_comment_mention_notify.sql` → `POST /webhooks/comment-mention` →
+   `sundial-comment-notify`). The client is not involved.
+2. **Preferences live in a new `user_preferences` table**, not on `profiles`.
+3. The trigger **can never block or fail the insert**, and the Lambda treats every
+   business reason not to send as a **success**.
+4. Idempotency is a `notified_at` column on `comment_mentions`, stamped **only after a
+   successful send**.
+
+### Why the database and not the client
+
+**Because the person who loses the notification is not the person who caused it.** A
+client-driven alert dies with the tab: close it, navigate away, or drop the network a
+second after posting, and *somebody else's* notification is silently gone. Neither
+party ever finds out. The mention insert is already best-effort for the same structural
+reason, and that was tolerable when the only consequence was a missing highlight in the
+UI — it is not tolerable when the consequence is a colleague never learning they were
+asked a question.
+
+Once the mention row is **committed**, the notification becomes the database's problem,
+and a database cannot navigate away.
+
+Three alternatives were rejected:
+
+- **Have the client call the Lambda.** Same failure mode, plus it would need the client
+  to hold a shared secret, or the route to accept a portal JWT and then re-derive
+  everything it was told — at which point it may as well read the row itself.
+- **Poll for unnotified mentions on a schedule.** Works, but adds a scheduled Lambda and
+  a minutes-long delay to something that should feel immediate, to solve a problem the
+  trigger solves at insert time.
+- **A Supabase Dashboard Database Webhook.** Two clicks, same behaviour, and it lives
+  nowhere in this repo. **We were already burned once by a load-bearing untracked
+  dashboard setting** (the Supabase auth email templates). A SQL file is reviewable,
+  diffable, and re-runnable; a dashboard toggle is none of those.
+
+`pg_net` posts **after the transaction commits** (its worker drains a transactional
+queue), which is both what makes the call non-blocking and what guarantees the Lambda
+can read the row it was told about.
+
+### Why preferences are their own table
+
+`profiles` is **server-owned**. `sundial-auth-proxy` upserts `tenant_id` / `role` /
+`email` into it on every `/auth/me`, and RLS on the cache tables resolves tenancy from
+it. It is the row that decides what data a session can see.
+
+The toggle is self-serve — written straight from the browser, like the comments
+themselves. Putting it on `profiles` therefore means granting the client `UPDATE` on
+that row, and **Postgres RLS is row-level, not column-level**: a policy that permits
+"update your preferences" permits `update profiles set tenant_id = '<another client>',
+role = 'admin'` in the same statement. That is privilege escalation and a
+tenant-isolation break in one, and no amount of client-side care closes it, because in
+that threat model the client *is* the attacker.
+
+Column-level `GRANT`s can narrow it, but they are a second, independent mechanism that
+must stay in sync with the policy forever, and a future column added to `profiles` is
+writable-by-default under that scheme unless someone remembers. A separate table has no
+such edge to keep sharp: **every column in `user_preferences` is safe for its owner to
+write**, and the worst a malicious user can do is turn off their own alerts.
+
+### Why absence means "alerts on", with no backfill
+
+Every existing user has no row, and that is the intended steady state for anyone who
+never opens Settings. **Reading a missing row as `comment_email_alerts = true`** means
+nobody has to opt in to keep working the way they do today. Backfilling rows would
+create a row per user to encode the default that the *absence* already encodes, and
+would then need re-running for every new user.
+
+The cost is that the default lives in two readers (the Lambda and the Settings page)
+rather than in the schema. That is stated in the migration header, in the runbook, and
+pinned by a test named for it.
+
+### Consequences
+
+- **A third public, non-JWT route.** Same discipline as the Aurora doorbell and the
+  Retell webhook: a shared secret in a header, constant-time compared, failing closed
+  when unreadable. `constantTimeEquals` moved to **`lib/secure-compare.js`** so all three
+  gates share one comparison and none can drift into a `===`.
+- **The URL and secret are database settings** (`sundial.comment_notify_url`,
+  `sundial.comment_notify_secret`), not literals in the migration — so the file is safe
+  to commit and the secret rotates without a repo edit. They are set with
+  `ALTER DATABASE ... SET`, which **applies to new connections only**. An unset setting
+  makes the trigger `RAISE WARNING` on every mention rather than no-op silently, because
+  a quiet notification path is exactly the kind that rots unnoticed.
+- **Vault was not used**, though it is the better home for a secret. It is a second
+  extension dependency and its read path inside a `SECURITY DEFINER` trigger is fiddlier;
+  the exposure is bounded because a database setting is readable by the `postgres`
+  superuser role, which can already read every comment directly. Swapping to vault is a
+  change to one function.
+- **The feature ships before SES.** `EMAIL_FROM` is unset everywhere today, so the
+  Lambda returns `email_not_configured` as a degraded success (mirroring the Design
+  Request email). Because nothing stamps `notified_at` on a skip, the backlog is
+  replayable once SES lands.
+- **`'list'` is stored, not `'table'`.** harmon-crm's `ViewMode` union happens to be
+  `'table' | 'board'`, but that is a detail of one component. The stored value is the
+  cross-repo contract and matches the user-facing word; harmon-crm maps it in one place.
+  Renaming a React type must never require a data migration.
+- **An unknown `record_object` links to `/dashboard`**, never a guessed path. A 404 from
+  a notification email reads as "the portal is broken", and the reader cannot tell that
+  apart from "we don't support that link yet". The Service module gets one entry in
+  `RECORD_PATHS` when it lands.
+- **A tenant guard was added beyond the specified skip list.** This path emails a
+  comment body, so a cross-tenant mention would be a data leak nobody ever sees. It
+  skips only when both tenants are known and differ, so a user who has never hit
+  `/auth/me` still gets their alerts.
+- **Deploy order is load-bearing:** wire and verify the route *before* applying the
+  trigger migration. The trigger swallows post failures by design, so an unwired route
+  loses notifications silently.
+
+### Related
+
+`docs/integrations/comment-mention-alerts.md` (runbook), `docs/api-endpoints.md`
+(`POST /webhooks/comment-mention`, env vars), `sql/sundial_user_preferences.sql`,
+`sql/sundial_comment_mention_notify.sql`, D-043 (the access model `profiles` backs),
+D-045 (secret TTL / rotation), D-046 and D-052 (the auth-email templates that were the
+untracked dashboard state this decision avoids repeating), D-054 (the previous public
+webhook and its fail-closed gate).

@@ -1,5 +1,90 @@
 # Sundial — Progress Log
 
+## 2026-08-18 — @-mention email alerts + user preferences (D-056, NOT APPLIED / NOT DEPLOYED)
+
+Backend half of two features harmon-crm is waiting on. **Nothing is live** — the
+migrations have not been run and the Lambda has not been created, deliberately (live
+changes, handed over as steps rather than executed).
+
+**The load-bearing fact is that comments have no backend at all.** `CommentThread.tsx`
+inserts `comments` and then `comment_mentions` straight from the browser under RLS, and
+that second insert is already explicitly best-effort. So a client-driven email would die
+with the tab — and **the person who loses the notification is not the person who caused
+it.** Neither of them ever finds out. Hence an `AFTER INSERT` trigger on
+`comment_mentions` that posts to a new Lambda through `pg_net`: once the row is
+committed, the notification is the database's problem, and a database cannot navigate
+away. A Supabase Dashboard Database Webhook would have done the same job in two clicks
+and lived nowhere in this repo — explicitly rejected, since we were already burned by
+one load-bearing untracked dashboard setting (the auth email templates).
+
+**Preferences are their own table, and the reason is a Postgres detail worth writing
+down: RLS is row-level, not column-level.** The obvious home was `public.profiles` —
+there's already a row per user. But `profiles` is server-owned (auth-proxy upserts
+tenant/role into it; RLS on the cache tables resolves tenancy *from* it), and a
+self-serve toggle means granting the client UPDATE on that row. A policy that allows
+"update your preferences" allows `set tenant_id = '<another client>', role = 'admin'` in
+the same statement. Column GRANTs can narrow it, but they're a second mechanism that has
+to stay in sync forever, and a column added to `profiles` later is writable-by-default
+unless someone remembers. `user_preferences` has no such edge — every column is safe for
+its owner to write, and the worst a malicious user can do is turn off their own alerts.
+
+**Absence means alerts ON, with no backfill.** Every existing user has no row and that's
+the intended steady state. A missing row reads as `comment_email_alerts = true` in both
+readers, so nobody opts in to keep today's behaviour. The cost — the default lives in
+readers rather than the schema — is stated in the migration header, the runbook, and a
+test named for it.
+
+**Stored value is `'list'`, not `'table'`.** harmon-crm's `ViewMode` union is
+`'table' | 'board'`, but that's a detail of one component; the stored value is the
+cross-repo contract and matches the user-facing word. Renaming a React type must never
+require a data migration.
+
+**Every business reason not to send is a 200.** Alerts off, self-mention, no address,
+SES not wired, already notified — all successes with a `reason`, because pg_net doesn't
+retry a 200 and redelivering a mention whose recipient has alerts off achieves nothing
+but log noise. **Nothing stamps `notified_at` except a successful send**, so a recipient
+who re-enables alerts, or an SES that comes online later, is still reachable by a
+replay. That last point is what lets the whole feature deploy *before* SES exists:
+`EMAIL_FROM` is unset everywhere today, so it returns `email_not_configured` as a
+degraded success, mirroring the Design Request email.
+
+**An unknown `record_object` links to `/dashboard`, never a guessed path.** A 404 from a
+notification email reads as "the portal is broken", and the reader can't tell that apart
+from "we don't support that link yet". Service gets one entry in `RECORD_PATHS` when it
+lands; until then it warns by name.
+
+**Two things added beyond the spec, both flagged.** A tenant guard (this path emails a
+comment body, so a cross-tenant mention would be a leak nobody sees — it only skips when
+both tenants are known and differ, so a user who's never hit `/auth/me` still gets
+alerts), and a best-effort subject label read from the Supabase cache, so the subject
+says "mentioned you on HOLLAND, DANA" rather than "on a1P7y00000AUo6TEAT". The label is
+never worth a Salesforce call and a cache miss falls back to `object id`.
+
+`constantTimeEquals` moved out of `sundial-welcome-call/webhook.js` into
+**`lib/secure-compare.js`** — three public non-JWT routes now gate on a shared-secret
+header and they must not each grow their own comparison. webhook.js imports and
+re-exports it, so its surface and tests are unchanged (proven: 251 still green before
+the new tests landed). The deployed welcome-call bundle still carries the inline copy
+and is behaviourally identical; no redeploy is required for correctness.
+
+**Real schema was read before writing any of it** rather than assumed: `comments` is
+`{id, tenant_id, record_id, record_object, author_id, author_name, body, created_at}`
+and `comment_mentions` is `{id, comment_id, mentioned_user_id, created_at}`. Worth
+noting `profiles` already carries an `email` column — the Lambda deliberately does NOT
+use it and reads `auth.users` instead, because `profiles.email` is only populated once a
+user has hit `/auth/me`, so a freshly-invited user mentioned before their first sign-in
+would silently get nothing.
+
+33 new tests, 284 green, bundle builds.
+
+**⚠️ `pg_net` availability is UNVERIFIED from this environment.** The only Supabase
+credentials here are the service-role key, which reaches PostgREST and nothing else —
+there is no arbitrary-SQL path and no management token, so `pg_available_extensions`
+could not be checked. The migration includes `create extension if not exists pg_net;`
+and it ships with every Supabase project, but that is an assumption, not a verification.
+If step 6 of the deploy order errors, stop there rather than reaching for a dashboard
+webhook.
+
 ## 2026-08-17 — Welcome Call: recording archival + orphan-match endpoint (D-054 addendum, NOT DEPLOYED)
 
 **Retell's `recording_url` expires.** Without archiving, the link written into

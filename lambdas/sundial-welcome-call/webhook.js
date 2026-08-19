@@ -25,6 +25,7 @@
 // trade for replayability, and it is why that path is ERROR-level and rare.
 
 import crypto from "node:crypto";
+import { constantTimeEquals } from "../../lib/secure-compare.js";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
 import { MAX_ATTEMPTS, durationMmSs, phoenixStamp } from "./format.js";
@@ -176,21 +177,16 @@ export function describeSignatureShape(header, rawBody) {
 }
 
 /**
- * Constant-time equality that is also length-safe.
+ * Constant-time, length-safe secret comparison.
  *
- * `crypto.timingSafeEqual` throws when the two buffers differ in length, and
- * comparing raw lengths first would leak the expected length. Hashing both sides to a
- * fixed 32 bytes removes both problems: the digests are always the same size, and only
- * identical inputs produce identical digests.
- *
- * Shared by the Retell signature check above and the Zap shared-secret gate in
- * index.js, so neither can drift into an early-exit comparison.
+ * MOVED TO lib/secure-compare.js and re-exported here. Three public routes now gate on
+ * a shared-secret header (the Aurora doorbell, this webhook, and the comment-mention
+ * hook), and they must not each grow their own comparison. The re-export keeps this
+ * module's surface — and its tests — unchanged.
  */
-export function constantTimeEquals(a, b) {
-  const ha = crypto.createHash("sha256").update(String(a), "utf8").digest();
-  const hb = crypto.createHash("sha256").update(String(b), "utf8").digest();
-  return crypto.timingSafeEqual(ha, hb);
-}
+// NOTE: imported at the top of this file, not re-exported with `export … from …` —
+// verifySignature() above calls it, and a bare re-export would not bind it locally.
+export { constantTimeEquals };
 
 // ---------------------------------------------------------------------------
 // Zapier forward (the billing ledger)

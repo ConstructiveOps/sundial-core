@@ -17,12 +17,14 @@ const CONV = {
     adderLabel: (name, suffix) => `Adder: ${name} — ${suffix}`,
     nsMarkup: { precision: 6, scale: 3 },   // NS_Adder_1_Markup_Percent__c
     nsHours: { precision: 6, scale: 1 },    // NS_Adder_1_Labor_Hours__c
+    ppw: { precision: 7, scale: 3 },        // Sales_Rep_Commission_PPW__c (Number, NOT Currency)
   },
   Sundial_Solar__c: {
     // Labels: "Adder Sub Panel - Price"  (no colon, ASCII hyphen)
     adderLabel: (name, suffix) => `Adder ${name} - ${suffix}`,
     nsMarkup: { precision: 18, scale: 4 },
     nsHours: { precision: 18, scale: 1 },
+    ppw: { precision: 18, scale: 3 },       // Sales_Rep_Commission_PPW__c (Number, NOT Currency)
   },
 };
 
@@ -47,23 +49,34 @@ const ADDERS = [
 
 // §4c — COST fields, Solar only. perWatt entries clone Solar's per-watt PRICE type
 // (Number precision 18 / scale 3), everything else is Currency 18,2.
+//
+// D15 (2026-08-20) REPLACED the original null-=-derive design with STATIC DEFAULTS.
+// The calc now ALWAYS reads the Cost field and never derives, so every field ships
+// with the value the sheet derivation produces. `basis` is that derivation, kept in
+// the field description so a future editor can tell a deliberate override from a
+// stale default.
+//
+// Flat: (price − hours × 33 × 1.75) ÷ 1.25   [1.75 = labor + 75% burden; 1.25 strips markup]
+// Per-watt: same shape in per-watt terms.
 const COSTS = [
-  { api: "Adder_Sub_Panel_Cost__c", name: "Sub Panel" },
-  { api: "Adder_Derate_Cost__c", name: "Derate" },
-  { api: "Adder_Heat_Detector_Cost__c", name: "Heat Detector" },
-  { api: "Adder_Upgrade_225_Cost__c", name: "225 Upgrade" },
-  { api: "Adder_Upgrade_400_Cost__c", name: "400 Upgrade" },
-  { api: "Adder_Upgrade_225_UG_Cost__c", name: "225 Upgrade-Underground" },
-  { api: "Adder_Gateway3_Cost__c", name: "Gateway3" },
-  { api: "Adder_Structural_Cost__c", name: "Structural", extra: "Sheet default derives to 250 (SUBCON engineering)." },
-  { api: "Adder_Conduit_Attic_Cost__c", name: "Conduit in Attic", perWatt: true },
-  { api: "Adder_Flat_Roof_Cost__c", name: "Flat Roof", perWatt: true },
-  { api: "Adder_Roof_Tile_Cost__c", name: "Roof Tile", perWatt: true },
-  { api: "Adder_Bird_Blocking_Cost__c", name: "Bird Blocking", perWatt: true, extra: "Sheet default derives to 0.06 per watt." },
+  { api: "Adder_Sub_Panel_Cost__c", name: "Sub Panel", dflt: "261.40", basis: "(500 price − 3h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Derate_Cost__c", name: "Derate", dflt: "341.40", basis: "(600 price − 3h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Heat_Detector_Cost__c", name: "Heat Detector", dflt: "175.20", basis: "(450 price − 4h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Upgrade_225_Cost__c", name: "225 Upgrade", dflt: "1540.80", basis: "(2850 price − 16h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Upgrade_400_Cost__c", name: "400 Upgrade", dflt: "3220.80", basis: "(4950 price − 16h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Upgrade_225_UG_Cost__c", name: "225 Upgrade-Underground", dflt: "1260.80", basis: "(2500 price − 16h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Gateway3_Cost__c", name: "Gateway3", dflt: "2175.20", basis: "(2950 price − 4h × 33 × 1.75) ÷ 1.25" },
+  { api: "Adder_Structural_Cost__c", name: "Structural", dflt: "250.00", basis: "direct — the engineer stamp cost, posts to SUBCON Engineering" },
+  { api: "Adder_Conduit_Attic_Cost__c", name: "Conduit in Attic", perWatt: true, dflt: "0.052", basis: "(0.1 − 0.02 × 1.75) ÷ 1.25" },
+  { api: "Adder_Flat_Roof_Cost__c", name: "Flat Roof", perWatt: true, dflt: "0.052", basis: "(0.1 − 0.02 × 1.75) ÷ 1.25" },
+  { api: "Adder_Roof_Tile_Cost__c", name: "Roof Tile", perWatt: true, dflt: "0.009", basis: "(0.02 − 0.005 × 1.75) ÷ 1.25" },
+  { api: "Adder_Bird_Blocking_Cost__c", name: "Bird Blocking", perWatt: true, dflt: "0.06", basis: "direct — posts to SUBCON Subcontractor" },
 ];
 
-const NULL_SEMANTICS =
-  "NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean \"unset\" — 0 is a real override meaning the adder costs nothing.";
+// The one sentence every Cost field must carry: the defaults are a snapshot of a
+// derivation, not a live link to it.
+const PRICE_DECOUPLING =
+  "Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.";
 
 // --- field builders ----------------------------------------------------------
 function field({ api, label, type, precision, scale, length, defaultValue, description, help }) {
@@ -149,6 +162,30 @@ function buildObject(objName) {
     }, { api: `NS_Adder_${n}_Labor_Hours__c`, type: `Number(${c.nsHours.precision - c.nsHours.scale},${c.nsHours.scale})`, default: "—", section: "4b" });
   }
 
+  // ---- §4d addendum: the internal-rep commission input -------------------
+  // Type cloned from Sales_Rep_Commission_PPW__c on this object — which is a NUMBER
+  // (double), not Currency, despite its "$/W" label, and diverges the same way the
+  // NS blocks do: Number(4,3) on Customer, Number(15,3) on Solar.
+  //
+  // D9/D16: this is the second of TWO rep inputs. Which one is populated decides the
+  // deal type — 3rd-party PPW > 0 routes to SLPC OUT + POs; internal PPW > 0 routes
+  // to SLPC · SALESCOMM, payroll only, no POs. Both populated is a validation error.
+  add({
+    api: "Internal_Rep_Commission_PPW__c",
+    label: "Internal Rep Commission PPW",
+    type: "Number",
+    precision: c.ppw.precision,
+    scale: c.ppw.scale,
+    defaultValue: 0,
+    description:
+      "v2 budget rework §4d / D9 / D16. Internal (Harmon) sales rep commission in dollars per watt. " +
+      "The COMPANION to Sales_Rep_Commission_PPW__c, which is being repurposed as the 3rd-party rep input. " +
+      "WHICH ONE IS POPULATED DETERMINES THE DEAL TYPE: 3rd-party > 0 posts to SLPC OUT · OTHER · M1&M2COM and generates commission POs; internal > 0 posts to SLPC · LABOR · SALESCOMM and is payroll only, NO POs (D16). Both populated is a validation error — the calc fails loudly rather than guessing. " +
+      "Internal commission IS burdened (75%); 3rd-party is not. Type cloned from Sales_Rep_Commission_PPW__c on this object (Number, not Currency).",
+    help:
+      "Dollars per watt for an INTERNAL Harmon rep. Leave at 0 for a third-party dealer deal and fill 3rd Party Rep Commission PPW instead — never both.",
+  }, { api: "Internal_Rep_Commission_PPW__c", type: `Number(${c.ppw.precision - c.ppw.scale},${c.ppw.scale})`, default: "0", section: "4d" });
+
   // ---- §4c: COST fields, SOLAR ONLY --------------------------------------
   if (objName === "Sundial_Solar__c") {
     for (const k of COSTS) {
@@ -162,18 +199,23 @@ function buildObject(objName) {
         type: perWatt ? "Number" : "Currency",
         precision: 18,
         scale: perWatt ? 3 : 2,
+        defaultValue: k.dflt,
         description:
-          `v2 budget rework §4c. COST side of the ${k.name} adder (budget), as opposed to the PRICE side (commission) per D6. ` +
-          (perWatt ? "PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). " : "") +
-          (k.extra ? k.extra + " " : "") +
-          NULL_SEMANTICS,
+          `v2 budget rework §4c / D15. COST side of the ${k.name} adder (budget), as opposed to the PRICE side (commission) per D6. ` +
+          (perWatt
+            ? `PER-WATT cost: the calc multiplies this by system watts when the adder is selected. Type cloned from this object's per-watt Adder_*_Price__c fields (Number, 3 dp). `
+            : `PER-UNIT cost: the calc multiplies this by the adder's Qty. `) +
+          `The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default ${k.dflt} = ${k.basis}. ` +
+          PRICE_DECOUPLING,
         help:
-          (perWatt ? "Per-watt cost override. " : "Cost override. ") +
-          "LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.",
+          (perWatt
+            ? `Cost PER WATT for this adder (× system watts). `
+            : `Cost PER UNIT for this adder (× Qty). `) +
+          `Defaults to ${k.dflt}; edit only when this job's cost differs. Changing the adder's price does not change this.`,
       }, {
         api: k.api,
         type: perWatt ? "Number(15,3) — per-watt" : "Currency(16,2)",
-        default: "NONE (null = derive)",
+        default: k.dflt,
         section: "4c",
       });
     }
@@ -181,16 +223,21 @@ function buildObject(objName) {
 
   const header = `<?xml version="1.0" encoding="UTF-8"?>
 <!--
-  v2 budget rework — new adder fields for ${objName}.
+  v2 budget rework — new adder + commission fields for ${objName}.
   Reference: docs/integrations/acumatica-budget-rework-v2.md §4 (canonical inventory).
 
   ALL TYPE SIGNATURES BELOW WERE CLONED FROM THE LIVE DESCRIBE (2026-08-20), not from
   the spec prose. The two objects genuinely differ — Customer's NS blocks are
-  Percent(3,3)/Number(5,1) while Solar's are Percent(14,4)/Number(17,1) — so blocks 4
-  and 5 match whichever object they sit on. See README.md "What the describe said".
-
+  Percent(3,3)/Number(5,1) vs Solar's Percent(14,4)/Number(17,1), and the commission
+  PPW field is Number(4,3) vs Number(15,3) — so every field matches whichever object
+  it sits on. See README.md "What the describe said".
+${objName === "Sundial_Solar__c" ? `
+  D15 (2026-08-20): the 12 Cost fields carry STATIC DEFAULTS. The earlier
+  null-means-derive design is GONE — the calc always reads these fields and never
+  derives, so a blank Cost field is a bug, not a signal.
+` : ""}
   Additive only: a collision check against the live describe on 2026-08-20 found NONE
-  of these ${objName === "Sundial_Solar__c" ? 34 : 22} API names already present on ${objName}.
+  of these ${manifest.length} API names already present on ${objName}.
 
   Field count: ${manifest.length}
 -->
@@ -219,14 +266,16 @@ fs.writeFileSync(
   path.join(OUT, "package.xml"),
   `<?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Workbench deploy: v2 budget rework adder fields.
-  Reference: docs/integrations/acumatica-budget-rework-v2.md §4a / §4b / §4c.
+  Workbench deploy: v2 budget rework adder + commission fields.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md §4a / §4b / §4c / §4d.
 
   ${manifest.length} new custom fields, additive only — no existing field is modified:
     §4a  28  7 new adders x (Price + Qty) x (Customer + Solar)
     §4b  16  NS adder blocks 4 and 5 x 4 fields x (Customer + Solar)
-    §4c  12  COST fields, Sundial_Solar__c ONLY, ALL NULLABLE with NO default
-             (null = the calc derives the sheet default; populated = per-job override)
+    §4c  12  COST fields, Sundial_Solar__c ONLY, each with a STATIC DEFAULT (D15).
+             Per-UNIT for flat adders (calc x Qty), per-WATT for the four per-watt
+             ones (calc x watts). The calc ALWAYS reads these and never derives.
+    §4d   2  Internal_Rep_Commission_PPW__c x (Customer + Solar)
 
   Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
   Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST.
@@ -244,7 +293,7 @@ ${members}
 );
 
 console.log(`wrote ${manifest.length} fields`);
-for (const s of ["4a", "4b", "4c"]) {
+for (const s of ["4a", "4b", "4c", "4d"]) {
   console.log(`  §${s}: ${manifest.filter((m) => m.section === s).length}`);
 }
 console.log(`  Customer: ${manifest.filter((m) => m.object === "Sundial_Customer__c").length}`);

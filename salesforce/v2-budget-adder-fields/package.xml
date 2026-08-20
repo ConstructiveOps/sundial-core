@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Workbench deploy: v2 budget rework adder fields.
-  Reference: docs/integrations/acumatica-budget-rework-v2.md §4a / §4b / §4c.
+  Workbench deploy: v2 budget rework adder + commission fields.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md §4a / §4b / §4c / §4d.
 
-  56 new custom fields, additive only — no existing field is modified:
+  58 new custom fields, additive only — no existing field is modified:
     §4a  28  7 new adders x (Price + Qty) x (Customer + Solar)
     §4b  16  NS adder blocks 4 and 5 x 4 fields x (Customer + Solar)
-    §4c  12  COST fields, Sundial_Solar__c ONLY, ALL NULLABLE with NO default
-             (null = the calc derives the sheet default; populated = per-job override)
+    §4c  12  COST fields, Sundial_Solar__c ONLY, each with a STATIC DEFAULT (D15).
+             Per-UNIT for flat adders (calc x Qty), per-WATT for the four per-watt
+             ones (calc x watts). The calc ALWAYS reads these and never derives.
+    §4d   2  Internal_Rep_Commission_PPW__c x (Customer + Solar)
 
   Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
   Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST.
@@ -37,6 +39,7 @@
         <members>Sundial_Customer__c.NS_Adder_5_Markup_Percent__c</members>
         <members>Sundial_Customer__c.NS_Adder_5_Material_Cost__c</members>
         <members>Sundial_Customer__c.NS_Adder_5_Labor_Hours__c</members>
+        <members>Sundial_Customer__c.Internal_Rep_Commission_PPW__c</members>
         <members>Sundial_Solar__c.Adder_Upgrade_225_UG_Price__c</members>
         <members>Sundial_Solar__c.Adder_Upgrade_225_UG_Qty__c</members>
         <members>Sundial_Solar__c.Adder_Gateway3_Price__c</members>
@@ -59,6 +62,7 @@
         <members>Sundial_Solar__c.NS_Adder_5_Markup_Percent__c</members>
         <members>Sundial_Solar__c.NS_Adder_5_Material_Cost__c</members>
         <members>Sundial_Solar__c.NS_Adder_5_Labor_Hours__c</members>
+        <members>Sundial_Solar__c.Internal_Rep_Commission_PPW__c</members>
         <members>Sundial_Solar__c.Adder_Sub_Panel_Cost__c</members>
         <members>Sundial_Solar__c.Adder_Derate_Cost__c</members>
         <members>Sundial_Solar__c.Adder_Heat_Detector_Cost__c</members>

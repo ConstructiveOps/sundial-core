@@ -1,17 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  v2 budget rework — new adder fields for Sundial_Solar__c.
+  v2 budget rework — new adder + commission fields for Sundial_Solar__c.
   Reference: docs/integrations/acumatica-budget-rework-v2.md §4 (canonical inventory).
 
   ALL TYPE SIGNATURES BELOW WERE CLONED FROM THE LIVE DESCRIBE (2026-08-20), not from
   the spec prose. The two objects genuinely differ — Customer's NS blocks are
-  Percent(3,3)/Number(5,1) while Solar's are Percent(14,4)/Number(17,1) — so blocks 4
-  and 5 match whichever object they sit on. See README.md "What the describe said".
+  Percent(3,3)/Number(5,1) vs Solar's Percent(14,4)/Number(17,1), and the commission
+  PPW field is Number(4,3) vs Number(15,3) — so every field matches whichever object
+  it sits on. See README.md "What the describe said".
+
+  D15 (2026-08-20): the 12 Cost fields carry STATIC DEFAULTS. The earlier
+  null-means-derive design is GONE — the calc always reads these fields and never
+  derives, so a blank Cost field is a bug, not a signal.
 
   Additive only: a collision check against the live describe on 2026-08-20 found NONE
-  of these 34 API names already present on Sundial_Solar__c.
+  of these 35 API names already present on Sundial_Solar__c.
 
-  Field count: 34
+  Field count: 35
 -->
 <CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
     <fields>
@@ -289,10 +294,24 @@
         <type>Number</type>
     </fields>
     <fields>
-        <fullName>Adder_Sub_Panel_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Sub Panel adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <fullName>Internal_Rep_Commission_PPW__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4d / D9 / D16. Internal (Harmon) sales rep commission in dollars per watt. The COMPANION to Sales_Rep_Commission_PPW__c, which is being repurposed as the 3rd-party rep input. WHICH ONE IS POPULATED DETERMINES THE DEAL TYPE: 3rd-party &gt; 0 posts to SLPC OUT · OTHER · M1&amp;M2COM and generates commission POs; internal &gt; 0 posts to SLPC · LABOR · SALESCOMM and is payroll only, NO POs (D16). Both populated is a validation error — the calc fails loudly rather than guessing. Internal commission IS burdened (75%); 3rd-party is not. Type cloned from Sales_Rep_Commission_PPW__c on this object (Number, not Currency).</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Dollars per watt for an INTERNAL Harmon rep. Leave at 0 for a third-party dealer deal and fill 3rd Party Rep Commission PPW instead — never both.</inlineHelpText>
+        <label>Internal Rep Commission PPW</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Sub_Panel_Cost__c</fullName>
+        <defaultValue>261.40</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Sub Panel adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 261.40 = (500 price − 3h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 261.40; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Sub Panel - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -302,9 +321,10 @@
     </fields>
     <fields>
         <fullName>Adder_Derate_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Derate adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>341.40</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Derate adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 341.40 = (600 price − 3h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 341.40; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Derate - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -314,9 +334,10 @@
     </fields>
     <fields>
         <fullName>Adder_Heat_Detector_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Heat Detector adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>175.20</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Heat Detector adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 175.20 = (450 price − 4h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 175.20; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Heat Detector - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -326,9 +347,10 @@
     </fields>
     <fields>
         <fullName>Adder_Upgrade_225_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the 225 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>1540.80</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the 225 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 1540.80 = (2850 price − 16h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 1540.80; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder 225 Upgrade - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -338,9 +360,10 @@
     </fields>
     <fields>
         <fullName>Adder_Upgrade_400_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the 400 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>3220.80</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the 400 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 3220.80 = (4950 price − 16h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 3220.80; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder 400 Upgrade - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -350,9 +373,10 @@
     </fields>
     <fields>
         <fullName>Adder_Upgrade_225_UG_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the 225 Upgrade-Underground adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>1260.80</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the 225 Upgrade-Underground adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 1260.80 = (2500 price − 16h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 1260.80; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder 225 Upgrade-Underground - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -362,9 +386,10 @@
     </fields>
     <fields>
         <fullName>Adder_Gateway3_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Gateway3 adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>2175.20</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Gateway3 adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 2175.20 = (2950 price − 4h × 33 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 2175.20; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Gateway3 - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -374,9 +399,10 @@
     </fields>
     <fields>
         <fullName>Adder_Structural_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Structural adder (budget), as opposed to the PRICE side (commission) per D6. Sheet default derives to 250 (SUBCON engineering). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>250.00</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Structural adder (budget), as opposed to the PRICE side (commission) per D6. PER-UNIT cost: the calc multiplies this by the adder's Qty. The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 250.00 = direct — the engineer stamp cost, posts to SUBCON Engineering. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER UNIT for this adder (× Qty). Defaults to 250.00; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Structural - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -386,9 +412,10 @@
     </fields>
     <fields>
         <fullName>Adder_Conduit_Attic_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Conduit in Attic adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>0.052</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Conduit in Attic adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT cost: the calc multiplies this by system watts when the adder is selected. Type cloned from this object's per-watt Adder_*_Price__c fields (Number, 3 dp). The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 0.052 = (0.1 − 0.02 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER WATT for this adder (× system watts). Defaults to 0.052; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Conduit in Attic - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -398,9 +425,10 @@
     </fields>
     <fields>
         <fullName>Adder_Flat_Roof_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Flat Roof adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>0.052</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Flat Roof adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT cost: the calc multiplies this by system watts when the adder is selected. Type cloned from this object's per-watt Adder_*_Price__c fields (Number, 3 dp). The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 0.052 = (0.1 − 0.02 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER WATT for this adder (× system watts). Defaults to 0.052; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Flat Roof - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -410,9 +438,10 @@
     </fields>
     <fields>
         <fullName>Adder_Roof_Tile_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Roof Tile adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>0.009</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Roof Tile adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT cost: the calc multiplies this by system watts when the adder is selected. Type cloned from this object's per-watt Adder_*_Price__c fields (Number, 3 dp). The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 0.009 = (0.02 − 0.005 × 1.75) ÷ 1.25. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER WATT for this adder (× system watts). Defaults to 0.009; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Roof Tile - Cost</label>
         <precision>18</precision>
         <required>false</required>
@@ -422,9 +451,10 @@
     </fields>
     <fields>
         <fullName>Adder_Bird_Blocking_Cost__c</fullName>
-        <description>v2 budget rework §4c. COST side of the Bird Blocking adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). Sheet default derives to 0.06 per watt. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <defaultValue>0.06</defaultValue>
+        <description>v2 budget rework §4c / D15. COST side of the Bird Blocking adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT cost: the calc multiplies this by system watts when the adder is selected. Type cloned from this object's per-watt Adder_*_Price__c fields (Number, 3 dp). The calc ALWAYS reads this field and never derives a value, so it must not be left blank. Default 0.06 = direct — posts to SUBCON Subcontractor. Price and cost are INDEPENDENT stored values: changing this adder's PRICE does not automatically move its COST. If a job needs both changed, change both.</description>
         <externalId>false</externalId>
-        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <inlineHelpText>Cost PER WATT for this adder (× system watts). Defaults to 0.06; edit only when this job's cost differs. Changing the adder's price does not change this.</inlineHelpText>
         <label>Adder Bird Blocking - Cost</label>
         <precision>18</precision>
         <required>false</required>

@@ -1,17 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  v2 budget rework — new adder fields for Sundial_Customer__c.
+  v2 budget rework — new adder + commission fields for Sundial_Customer__c.
   Reference: docs/integrations/acumatica-budget-rework-v2.md §4 (canonical inventory).
 
   ALL TYPE SIGNATURES BELOW WERE CLONED FROM THE LIVE DESCRIBE (2026-08-20), not from
   the spec prose. The two objects genuinely differ — Customer's NS blocks are
-  Percent(3,3)/Number(5,1) while Solar's are Percent(14,4)/Number(17,1) — so blocks 4
-  and 5 match whichever object they sit on. See README.md "What the describe said".
+  Percent(3,3)/Number(5,1) vs Solar's Percent(14,4)/Number(17,1), and the commission
+  PPW field is Number(4,3) vs Number(15,3) — so every field matches whichever object
+  it sits on. See README.md "What the describe said".
 
   Additive only: a collision check against the live describe on 2026-08-20 found NONE
-  of these 22 API names already present on Sundial_Customer__c.
+  of these 23 API names already present on Sundial_Customer__c.
 
-  Field count: 22
+  Field count: 23
 -->
 <CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
     <fields>
@@ -285,6 +286,19 @@
         <precision>6</precision>
         <required>false</required>
         <scale>1</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Internal_Rep_Commission_PPW__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4d / D9 / D16. Internal (Harmon) sales rep commission in dollars per watt. The COMPANION to Sales_Rep_Commission_PPW__c, which is being repurposed as the 3rd-party rep input. WHICH ONE IS POPULATED DETERMINES THE DEAL TYPE: 3rd-party &gt; 0 posts to SLPC OUT · OTHER · M1&amp;M2COM and generates commission POs; internal &gt; 0 posts to SLPC · LABOR · SALESCOMM and is payroll only, NO POs (D16). Both populated is a validation error — the calc fails loudly rather than guessing. Internal commission IS burdened (75%); 3rd-party is not. Type cloned from Sales_Rep_Commission_PPW__c on this object (Number, not Currency).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Dollars per watt for an INTERNAL Harmon rep. Leave at 0 for a third-party dealer deal and fill 3rd Party Rep Commission PPW instead — never both.</inlineHelpText>
+        <label>Internal Rep Commission PPW</label>
+        <precision>7</precision>
+        <required>false</required>
+        <scale>3</scale>
         <trackTrending>false</trackTrending>
         <type>Number</type>
     </fields>

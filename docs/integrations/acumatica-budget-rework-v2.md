@@ -1,6 +1,6 @@
 # Acumatica Budget Integration — v2 Rework Plan
-**Status: PLANNING — living document. Commit to sundial-core docs/integrations/ and update as decisions land.**
-Drafted 2026-08-15 from the new Harmon workbook `BUDGET BRADS 7292026adders added 8.14.26.xlsx` ("BRADS"), which supersedes the HOLLAND workbook as the source of truth for budget math.
+**Status: PLANNING→BUILD — living document. Update as decisions land.**
+Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget Revised 82026.xlsx` ("REVISED") supersedes BRADS as the final source of truth** — same 2-sheet shape but a shifted cell layout (watts at E7, mods at E9, material rows in F, summary block in I/J) and materially changed commission + cost-rollup mechanics. All cell references below are REVISED-layout. Also received 2026-08-20: the live Vendor list export (Acumatica Dealer Codes.csv) and the live attribute enumeration (project R251282, completed) — both incorporated below.
 
 ---
 
@@ -8,206 +8,181 @@ Drafted 2026-08-15 from the new Harmon workbook `BUDGET BRADS 7292026adders adde
 
 | # | Decision | Source |
 |---|---|---|
-| D1 | BRADS workbook replaces HOLLAND as the pinned regression fixture AND the S3 snapshot template. Its cached values are the expected outputs: contract 36,502 → Total Job Cost (no comm) 28,354.86 · Commissions 847 · GP$ 7,300.14 · Total Hours 64. | Workbook teardown |
+| D1 | **REVISED workbook** replaces HOLLAND (and BRADS) as the pinned regression fixture AND the S3 snapshot template. Fixture expectations from its cached example: contract 36,502 · watts 8,800 · commissions 3,169.50 (3rd-party 2,200 + mgmt 484 + geo 70 + burden 415.50) · Total Material 16,140.73 · GENO Other 2,550 · Engineer Stamps 250 · Subcontractor 528 · Software 30 · Referral 500 · Total Labor 2,605 · Labor Burden 1,953.75 · Job Cost (no comm) 24,557.48 · with comm 27,726.98 · Hours 63 (GENA 4 / S1 26.67 / S2 13.33 / S3 19) · Balance of Revenue 33,332.50 · GP$ 8,775.02 · GP% 24.04/26.33. | REVISED teardown |
 | D2 | DC rebate = **$0.45/W** (LightReach), NOT 30%. YES/NO toggle → revenue line `DC REBATE` on the RSDC template. | Tim, confirmed |
-| D3 | RSDC template already exists in live Acumatica, built by Harmon. Code `RSDC`. Selected when Domestic Content = true at project creation. | Tim, confirmed |
-| D4 | Dealer→Vendor resolution: **config map** (Dealer is a bare SF picklist, no backing object). Map built from a live Vendor list pull (VendorID + VendorName) matched to picklist values by Tim. Lives in code beside the tax-zone map pattern (`lib/acumatica-vendors.js` or similar), flagged for future config externalization like tax zones. | Tim, confirmed |
-| D5 | Attributes: fed from Sundial fields as they populate/update — date fields from the project lifecycle PLUS commission-payment fields that line up with POs and cost-budget lines. Attribute sync is therefore tied into the budget/PO update path, not a standalone feature. Enumeration comes from a live project `$expand=Attributes` pull. | Tim, confirmed |
-| D6 | Existing adder Price/Qty fields on Customer + Solar are REPURPOSED as PRICE (commission-side) fields. New COST fields (Solar only) feed the budget. Quantities are shared — no duplication. | Tim, confirmed |
-| D7 | After a Solar record exists, the SOLAR record is the source of truth for adders + commissions, including on the Customer page (read-only display of Solar values; editable Customer fields hidden). | Tim, confirmed |
-| D8 | All connection/auth/infra is unchanged and proven. This is a mapping + math + field-model rework. | Tim |
+| D3 | RSDC template exists in live Acumatica, built by Harmon. Code `RSDC`. Selected when Domestic Content = true at creation. | Tim, confirmed |
+| D4 | Dealer→Vendor resolution: **config map** built from the delivered Vendor export, matched to Dealer picklist values by Tim. Lives in code beside the tax-zone map pattern; flagged for config externalization. NOTE from the export: dealers AND individual salespeople exist as vendors (many individuals Inactive); map only what the picklist actually offers, prefer Active vendors, fail loudly on unmapped or Inactive. | Tim + vendor export |
+| D5 | Attributes are BOTH lifecycle dates and commission milestone amounts — confirmed by live pull (§7). Attribute sync ties into the budget/PO update path. | Live pull, confirmed |
+| D6 | Existing adder Price/Qty fields on Customer + Solar are PRICE (commission-side). New COST fields (Solar only) feed the budget. Quantities shared. | Tim, confirmed |
+| D7 | After a Solar record exists, SOLAR is the source of truth for adders + commissions; Customer page shows read-only Solar values, editable Customer fields hidden. | Tim, confirmed |
+| D8 | Connection/auth/infra unchanged and proven. Mapping + math + field-model rework. | Tim |
+| D9 | **Commission model v3 (from REVISED sheet):** two separate rep inputs — 3rd-Party Rep PPW → `SLPC OUT · OTHER · M1&M2COM`, Internal Rep PPW → `SLPC · LABOR · SALESCOMM`. Management (Ralph & Daniel) COMBINED at 0.055 PPW → `SLMC · LABOR · SALESCOMM`. Geo $70 flat → `APPT COM`. Burden 75% × (internal + mgmt + geo); 3rd-party NOT burdened. This resolves old Q1 and the Ralph/Daniel routing suspicion. | REVISED sheet |
+| D10 | **CONFIRMED (Tim 2026-08-20). Management PPW stays as TWO stored inputs** (Sales_Mgr .04 + Overhead .015); the calc sums them to the single SLMC cost line (0.055), while attributes break them apart (MGRCOM* from .04, MGMTOR* from .015). | Tim + attribute pull |
+| D15 | **Cost fields get STATIC DEFAULT VALUES in SF** (supersedes the null-=derive design): more visible and admin-editable. The calc ALWAYS reads the Cost field (never derives). Semantics: flat adders = per-UNIT cost (calc × qty); per-watt adders = per-watt cost (calc × watts when selected). Consequence: changing a job's PRICE does not auto-move its COST — the user adjusts both if needed. Defaults computed from the sheet derivation, see §4c. | Tim, 2026-08-20 |
+| D16 | **Internal deals: payroll only, NO POs** (resolves Q2). They share the SAME attributes as 3rd-party deals (SLSCOM1/2 filled with the internal 75/25 split) but hit the SLPC·SALESCOMM cost line. Deal type determined by which rep PPW is populated: 3rd-party PPW > 0 → 3rd-party (POs, capped M1 split); Internal PPW > 0 → internal (no PO, 75/25). Both populated = validation error, fail loudly. | Tim, 2026-08-20 |
+| D17 | **Setter commission rule (resolves Q9):** applies when `Setter__c` is populated (any setter — Geovanna today, others possible). Amount from Geo_Commission_Amount__c (default 70). Empty Setter__c → 0. **⚠️ NOT YET IMPLEMENTABLE — `Setter__c` exists on Customer only (Lookup → Sundial_User__c, plus `Setter_Name__c` Text(120)); `Sundial_Solar__c` has NO setter field, and the create-mapping deliberately excludes it. The calc is Solar-side. Needs a Solar field + mapping entry before this rule can fire (see §4d addendum / TASKS).** | Tim, 2026-08-20; describe-verified 2026-08-20 |
+| D11 | **All cost lines now roll into totals** — REVISED fixes the BRADS anomaly: Job Cost J28 = SUM(J15:J25,J27) includes SUBCON Engineering (E55), SUBCON Subcontractor (E56), SOFTWARE (E60), REFERRAL (E63). GP nets them too (N13 "Total Other*" = GENO+stamps+subcon+software+referral). Resolves old Q3/Q4. | REVISED sheet |
+| D12 | **GENO now includes Active Monitoring + LightReach Battery Warranty** (J16 = Material Other + CO fee + permit + E61 + E62). They are cost lines, not revenue-only. Resolves old Q5(a). | REVISED sheet |
+| D13 | **REFERRAL is its own budget line**: `REFERRAL - OTHER - REFERRAL FEE` ← Referral Fee adder (500 × qty). NEW task code — the v1 sandbox scaffold (38 lines) had NO REFERRAL line; the live template must be re-harvested and MUST contain it or push fails. | REVISED sheet |
+| D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
 
 ## 1. What survives from v1 (do not rebuild)
 
-- lib/acumatica.js (auth, GET/PUT helpers), secret `sundial/acumatica/connected-app` (now live-tenant), API Gateway routes, CORS.
-- ProjectBudget write machinery: fresh filter-read → 4-part-key match (ProjectTaskID+AccountGroup+InventoryID+Type) → PUT-by-guid; sum-into-one-line; skip-zero on expense lines; income always written; fail-loud on 0 scaffold lines or ambiguous key; 429/5xx backoff; per-PUT logging; dryRun mode.
-- Async push pattern: HTTP 202 → self-invoke worker → SF status write-back (Budget_Push_Status__c / Pushed_At / Error / Finalized). Re-push idempotent by construction.
-- Unified Create Project button (3-state), recalc button, Update Budget button, snapshot→S3→Files-tab→XFiles→Dropbox chain, Supabase file metadata registration.
-- Layer-1 customer/project push incl. tax-zone map, skip-guards, RESIDENT class. Only change: template selection RS vs RSDC.
-- Known facts that still hold: GET-by-guid returns empty (never use); Acumatica misspells `RESIDENTAL`; income lines always written; API GW 29s cap on the synchronous /acumatica/push call.
+- lib/acumatica.js (auth, GET/PUT helpers), secret `sundial/acumatica/connected-app` (live-tenant), API Gateway routes, CORS.
+- ProjectBudget write machinery: fresh filter-read → 4-part-key match → PUT-by-guid; sum-into-one-line; skip-zero on expense lines; income always written; fail-loud on 0 lines or ambiguous key; backoff; per-PUT logging; dryRun.
+- Async push pattern (202 → self-invoke worker → SF status write-back). Re-push idempotent.
+- Unified Create Project button (3-state), recalc button, Update Budget button, snapshot→S3→Files/XFiles/Dropbox chain, Supabase metadata registration.
+- Layer-1 push incl. tax zones, skip-guards, RESIDENT. Only change: RS/RSDC template selection.
+- Standing facts: GET-by-guid empty (never use); `RESIDENTAL` misspelling; API GW 29s cap on the synchronous /acumatica/push.
 
 ## 2. What is rebuilt / net-new
 
 | Area | Action |
 |---|---|
-| budgetCalc.js | REWRITE to BRADS math; re-pin test.js to BRADS cached values. HOLLAND fixture retired. |
-| budget-template.xlsx | REPLACE with BRADS workbook (writer only addresses cells — cell map must be rebuilt to BRADS layout). |
-| MAPPING_ROWS | REWRITE (new line set, see §5). Re-harvest keys from a live RS scaffold + first RSDC scaffold via reconcile read before any push. |
-| SF field model | New fields per §4. Old strictly-budget Customer fields drop OUT of the create-mapping (fields not deleted — data safety). |
-| Portal Budget UI | New input sections (commissions v2, COST adders), Customer read-only Adder/Commission tabs per D7. |
-| PO engine | NET-NEW: stage in push worker after budget lines. See §6. |
-| Attribute sync | NET-NEW: tied to budget/PO path + portal-save trigger for date fields. See §7. |
+| budgetCalc.js | REWRITE to REVISED math; test.js re-pinned to REVISED cached values (D1). HOLLAND retired. |
+| budget-template.xlsx | REPLACE with REVISED workbook; cell map targets REVISED layout. |
+| MAPPING_ROWS | REWRITE per §5. Re-harvest live RS + RSDC scaffolds (must contain REFERRAL, SOFTWARE, ENGR/SUBCON lines) before any push. |
+| SF field model | §4 (package built) + §4d addendum (1 new field pair). Old strictly-budget Customer fields drop out of create-mapping. |
+| Portal Budget UI | Commissions v3 inputs, COST adders, Customer read-only tabs (D7), PO status. |
+| PO engine | NET-NEW stage in push worker. §6. |
+| Attribute sync | NET-NEW, two triggers. §7. |
 | resolveProjectTemplate | RS / RSDC by Domestic Content. |
 
-## 3. New sheet mechanics (teardown findings)
+## 3. REVISED sheet mechanics (final)
 
-### Commissions (inputs → 4 values)
-- J7 Total salesperson commission PPW (per-job input) → sheet maps to `SLPC OUT | OTHER | M1&M2COM` (label H7)
-- J8 Manager (Ralph) PPW, default 0.04 → `SLMC | LABOR | SALESCOMM`
-- J10 Overhead (Daniel) PPW, default 0.015 → `SLPC | LABOR | SALESCOMM`
-- J9 Setter (Geo) flat, $70 when Geovanna Macedo is Setter, else 0 → line label not shown on sheet (v1 used APPT COM — confirm)
-- Burden = 75% × (manager + geo + overhead). Salesperson total NOT burdened. → `BURDENEXR | SALESCOMM`
-- ⚠ OPEN (Q1/Q2 §9): Tim suspects the sheet's Daniel/Ralph treatment and the internal-vs-outside salesperson routing may be wrong. Do not freeze commission mapping until Harmon answers.
+### Inputs (complete list — these define the Solar-side input model)
+- **Project/contract:** Contract Amount (N6) · Dealer Fee (N8) · DC Rebate toggle (D3 YES/NO → $0.45/W) · System Size kW (D7) · Module type (B7) · Module STC wattage (B8).
+- **Cost parameters (defaulted, per-job overridable):** Module cost/DC-watt 0.6 · Combiner 604.81 + qty · Tesla Expansion Pack 6,009.03 + qty (reuses Gateway_* fields, relabel) · Enphase micro 109.93 + qty · Powerwall III 7,383.33 + qty · BOS Solar 0.17 · BOS Electrical 0.10 · Roof material/pen 24 · Pens/module 1.75 · Blended labor rate 28.25 · Burden 75% · Audit hrs 2 · QA hrs 2 · Roofing cost/pen 21 · Roofing pens/mod 1.75 · Hours/module 2 · Material Other 250 · CO fee 850 · Permit 750 · Powerwall labor rate 33 · **Hours/Battery 16 (was 20 in BRADS — existing field default change, follow-up package)**.
+- **Commissions (4 inputs):** 3rd-Party Rep PPW (per-job) · Internal Rep PPW (per-job) · Management PPW (stored as .04 + .015 per D10, summed) · Geo flat ($70 Geovanna rule).
+- **Adders:** Price + Qty per catalog row (§4a + existing) · COST overrides (§4c, null = derive) · NS blocks 1-5 (markup dflt 25%, materials, hours, description).
 
-### Materials/labor changes vs HOLLAND
-- Equipment rows: Combiner (604.81) · **Tesla Expansion Pack 6,009.03 (replaces Gateway row — reuse Gateway_* fields, relabel; note "*Add 4 Hrs Labor")** · Enphase micro (109.93) · Powerwall III (7,383.33, "*Add 16 Hrs Labor"). ⚠ OPEN Q6: are the +4/+16 hrs meant to be automatic in the calc, or manual? Sheet formulas do NOT add them automatically.
-- Module cost/W default 0.6. QA hours default 2 (was 6). Hours/Battery = 20 — but formula G32=B29×rate does NOT multiply by battery qty (same flat-total quirk as v1; preserved unless Harmon says otherwise).
-- S1/S2 split unchanged (S2 = install/3, S1 = rest). Roofing piece-rate unchanged.
-- Material Other default 250 (was 890.15 in HOLLAND example — that was a value, not a default). CO fee 850, permit 750.
+### Calc mechanics
+- Burden J12 = 75% × (internal + mgmt + geo commissions). 3rd-party excluded.
+- Adder cost derivation unchanged: Price×Qty − labor − burden → Balance ÷ 1.25 = material cost (COST field overrides when populated). Per-watt adders (Conduit/Flat Roof/Roof Tile/Bird Blocking) work in per-watt terms; labor 0.02×W (0.005×W roof tile).
+- Adder labor at Powerwall rate except Site Audit + Travel (blended). Adder labor+hours → S3; burden → BURDENEXR·RESIDENTAL; material → GENM.
+- NS blocks ×5: labor at Powerwall rate, burden 75%, markup on materials; material → GENM, labor → S3.
+- Structural renamed "Structural-Electrical Engineer Stamp": cost E55 = 250 if selected → SUBCON Engineering. Bird Blocking cost E56 = 0.06×W → SUBCON Subcontractor.
+- Battery labor still B29×rate flat (NOT ×qty) — preserved quirk. ⚠ Q6 still open (+4/+16 hrs notes are manual today).
+- Summary rollups per D1/D11.
 
-### Adders — PRICE vs COST model
-Sheet computes per adder: `Price×Qty → minus labor (hours×rate) → minus burden (75%) → Balance → Material COST = Balance ÷ 1.25` (strips 25% markup). Adder labor rate is Powerwall rate (B28=33) for most rows; Site Audit + Travel use blended rate (B18).
-- COST OVERRIDE SEMANTICS (design decision, pending Tim veto): new `Adder_<X>_Cost__c` fields are NULLABLE. Null → calc derives cost per sheet formula (the "default"). Populated → override wins. No constant-maintenance of defaults in SF.
-- PPW-style adders (Conduit in Attic, Flat Roof, Roof Tile, Bird Blocking): price and cost are per-watt values; labor formulas are watt-based (e.g. 0.02×W). Cost fields for these hold per-watt values.
-- REVENUE-ONLY adders (no cost side): Small System 10-12 (1250), Small System 13-15 (1000), Active Monitoring (100), LightReach Battery Warranty (600, "DEALER FEE?" ⚠ Q5), Referral Fee (500), Software Fee (30 — ⚠ contradicts its own SOFTWARE budget label, Q4).
-- Labor-only adders (no material cost): Site Audit (350, 2h blended), Travel (750, 12h blended).
-- NS adders: now FIVE blocks (was 3). Markup default 25% (editable). Labor at Powerwall rate (was blended in v1). Materials→GENM, labor→S3, burden→BURDENEXR.
+## 4. Field inventory
 
-### Confirmed sheet anomalies (⚠ Harmon must answer — Q3/Q4)
-1. `SUBCON - ENGINEERING COSTS` (Structural, E55=250) and `SUBCON - SUBCONTRACTOR` (Bird Blocking, E56=0.06×W) are labeled as budget lines but feed NO summary cell — Total Job Cost (K28) excludes them entirely.
-2. Software Fee: marked REVENUE ONLY in col E but labeled `SOFTWARE - AUDIT SOFTWARE` (a cost-budget task) in col F. Both cannot be true.
-3. Income side: sheet shows Contract (N6) + DC Rebate (N7) revenue lines; v1's BALANCE/GENM-BILLING income split is not restated on this sheet — assume unchanged (BALANCE = contract − material income; GENM/BILLING = material) unless Harmon corrects. DC Rebate is a THIRD income line on RSDC projects.
+> **§4a + §4b + §4c + §4d: PACKAGE BUILT AND AMENDED (`salesforce/v2-budget-adder-fields/`), PENDING DEPLOY — 2026-08-20.** **58 fields** (Customer 23 / Solar 35), collision-checked clean including `Internal_Rep_Commission_PPW__c`. REVISED sheet re-checked: the adder catalog is UNCHANGED from BRADS, so §4a/§4b remain as built.
+> **Amendment applied 2026-08-20 (D15 + §4d):** the 12 Cost fields now carry the STATIC DEFAULTS in the §4c table below; all null-=derive language is gone from the field descriptions, replaced with the per-UNIT vs per-WATT semantic and the "price changes do not auto-move cost" note. `Internal_Rep_Commission_PPW__c` added to both objects — type cloned from `Sales_Rep_Commission_PPW__c`, which is a **Number** despite its "$/W" label: `Number(4,3)` on Customer, `Number(15,3)` on Solar, default 0.
+> Type findings + follow-ups (NS divergence, per-watt Number(15,3), NS 1-3 markup default alignment, Upgrade_225 relabel) recorded in the package README; per-watt 3dp CONFIRMED (all four D15 defaults land within 3dp).
+> **⚠️ D17 BLOCKER — `Setter__c` does not exist on `Sundial_Solar__c`.** Verified against the live describe 2026-08-20: Customer has `Setter__c` (Lookup → `Sundial_User__c`) plus `Setter_Name__c` Text(120); **Solar has no setter field of any kind**, and `customer-to-solar-map.ts` explicitly excludes it (*"Sundial_Solar__c has no corresponding field"*). The calc runs Solar-side, so D17's rule cannot fire until a Solar setter field exists and is mapped. Not a package item — see TASKS.md.
+> **Follow-up existing-field package additions:** Battery hours default 20→16; Structural label → "Structural-Electrical Engineer Stamp"; `Sales_Rep_Commission_PPW__c` relabel → "3rd Party Rep Commission PPW" (§4d); Gateway_* relabel → Tesla Expansion Pack; NS 1-3 markup default → 25.
 
-### Summary rollups (new expected-output set for test.js)
-K24 Total Material = equipment+BOS+roofing material + std-adder material + NS material. K25 Other = Material Other only. K26 Total Labor (incl. adder+NS labor). K27 Total Burden. K22/K23 CO fee + permit. K28 = SUM(K22:K27). K29 = K28 + commissions. Hours: GENA=audit+QA, S1, S2, S3=battery hrs+adder hrs+NS hrs. GP = Balance of Revenue − material − other − labor − burden − CO/permit, where Balance of Revenue = contract + DC rebate − dealer fee − commissions.
+### 4a. NEW adders — Price + Qty, BOTH objects (28) — AS BUILT
+Upgrade_225_UG 2500 · Gateway3 2950 · Site_Audit 350 · Travel 750 · Active_Monitoring 100 · LR_Battery_Warranty 600 · Referral_Fee 500.
 
-## 4. Field inventory (the buildable list)
+### 4b. NS blocks 4 + 5, BOTH objects (16) — AS BUILT.
 
-Naming follows existing convention (`Adder_<Base>_Price__c` / `_Qty__c` / new `_Cost__c`).
-
-> **§4a + §4b + §4c: PACKAGE BUILT, PENDING DEPLOY — 2026-08-20.**
-> All 56 fields are in `salesforce/v2-budget-adder-fields/` (Metadata API v62.0,
-> package.xml + two `.object` files + README). Collision-checked against the live
-> describe on 2026-08-20: **none of the 56 API names already exist** on either object.
-> Tim deploys (Check Only first) + grants FLS — see TASKS.md.
->
-> **Three type findings from the live describe changed what got built** (full detail in
-> the package README, "What the describe said"):
-> 1. **The two objects diverge on the NS blocks.** Customer NS 1-3 are
->    `Percent(3,3)` / `Number(5,1)`; Solar NS 1-3 are `Percent(14,4)` / `Number(17,1)`.
->    Neither matches the `Percent(3,4)` / `Number(16,2)` written below. Blocks 4-5 clone
->    whichever object they sit on, so all five blocks behave alike within an object.
-> 2. **Per-watt price fields are `Number` with 3 decimals, not 4** —
->    `Adder_Flat_Roof_Price__c` is `Number(15,3)` on Solar. The four per-watt Cost fields
->    match at `Number(15,3)` so cost and price for the same adder carry identical
->    precision. Overridable before deploy if 4 dp is wanted.
-> 3. **`NS_Adder_1-3_Markup_Percent__c` defaults to 0 on Solar and has no default on
->    Customer.** New blocks 4-5 default to 25 per §3, so the five blocks will not behave
->    alike until 1-3 are aligned — logged as a follow-up, not in the additive package.
->
-> Also not in the package (all changes to *existing* fields, so they stay out of an
-> additive deploy): relabelling `Adder_Upgrade_225` to "225 Upgrade-Overhead", and the
-> NS 1-3 markup default alignment.
-
-### 4a. NEW adders — Price + Qty on BOTH Customer and Solar (7 adders × 2 fields × 2 objects = 28 fields)
-| Base | Default price | Notes |
+### 4c. COST fields, SOLAR only (12) — **AMEND PACKAGE BEFORE DEPLOY (D15): add static defaults, drop null-=derive**
+Defaults derived from the sheet (per-unit: (price − hours×rate×1.75) ÷ 1.25; rate 33 except Site Audit/Travel n/a):
+| Field | Default | Basis |
 |---|---|---|
-| Adder_Upgrade_225_UG | 2500 | "225 Upgrade-Underground" (existing Upgrade_225 relabels to "225 Upgrade-Overhead") |
-| Adder_Gateway3 | 2950 | 4h labor |
-| Adder_Site_Audit | 350 | 2h blended labor, no material |
-| Adder_Travel | 750 | 12h blended labor, no material |
-| Adder_Active_Monitoring | 100 | revenue-only. Distinct from existing Active_System_Monitoring__c Yes/No — do not conflate |
-| Adder_LR_Battery_Warranty | 600 | revenue-only / "DEALER FEE?" pending Q5 |
-| Adder_Referral_Fee | 500 | revenue-only |
+| Adder_Sub_Panel_Cost__c | 261.40 | 500, 3h |
+| Adder_Derate_Cost__c | 341.40 | 600, 3h |
+| Adder_Heat_Detector_Cost__c | 175.20 | 450, 4h |
+| Adder_Upgrade_225_Cost__c | 1540.80 | 2850, 16h |
+| Adder_Upgrade_400_Cost__c | 3220.80 | 4950, 16h |
+| Adder_Upgrade_225_UG_Cost__c | 1260.80 | 2500, 16h |
+| Adder_Gateway3_Cost__c | 2175.20 | 2950, 4h |
+| Adder_Structural_Cost__c | 250.00 | direct (engineer stamp, SUBCON) |
+| Adder_Conduit_Attic_Cost__c | 0.052 /W | (0.1−0.02×1.75)÷1.25 |
+| Adder_Flat_Roof_Cost__c | 0.052 /W | same |
+| Adder_Roof_Tile_Cost__c | 0.009 /W | (0.02−0.005×1.75)÷1.25 |
+| Adder_Bird_Blocking_Cost__c | 0.06 /W | direct (SUBCON) |
+Field descriptions must state the per-unit / per-watt semantic and that price changes don't auto-move cost.
 
-### 4b. NS adder blocks 4 and 5 — BOTH objects (2 blocks × 4 fields × 2 objects = 16 fields)
-`NS_Adder_4_Description__c` (Text 255), `NS_Adder_4_Markup_Percent__c` (Percent, default 25), `NS_Adder_4_Material_Cost__c` (Currency), `NS_Adder_4_Labor_Hours__c` (Number) — and the same ×5.
+### 4d. Commission inputs — **UPDATED for REVISED sheet**
+- **NEW FIELD (addendum package): `Internal_Rep_Commission_PPW__c`** — Number/Currency-per-watt, default 0, on BOTH objects (rep-entered at sale, copied by Create Project).
+- `Sales_Rep_Commission_PPW__c` → RELABEL "3rd Party Rep Commission PPW" (repurposed; per-job value like 0.25).
+- `Sales_Mgr_Commission_PPW__c` (.04) + `Overhead_Commission_PPW__c` (.015) RETAINED per D10; calc sums → SLMC line.
+- `Geo_Commission_Amount__c` ($70 rule) + `Commission_Burden_Rate__c` (75) unchanged.
 
-### 4c. COST adder fields — SOLAR ONLY (12 fields, all Currency except noted, all NULLABLE = "use sheet-derived default")
-Adder_Sub_Panel_Cost__c · Adder_Derate_Cost__c · Adder_Heat_Detector_Cost__c · Adder_Upgrade_225_Cost__c · Adder_Upgrade_400_Cost__c · Adder_Upgrade_225_UG_Cost__c · Adder_Gateway3_Cost__c · Adder_Structural_Cost__c (default derives to 250 engineering) · Adder_Conduit_Attic_Cost__c (per-watt) · Adder_Flat_Roof_Cost__c (per-watt) · Adder_Roof_Tile_Cost__c (per-watt) · Adder_Bird_Blocking_Cost__c (per-watt, default derives to 0.06)
-(No cost fields for: Site Audit, Travel (labor-only) or the revenue-only adders. NS blocks' Material_Cost inputs ARE their cost fields.)
+### 4e. Per-adder commission FORMULA fields — BOTH objects (⚠ Q7 pending). Never mapped (self-computing).
 
-### 4d. Commission inputs — reuse existing fields, semantics change (0 new fields, pending Q1/Q2)
-- Sales_Rep_Commission_PPW__c → REPURPOSED: total salesperson commission PPW (relabel "Salesperson Commission PPW")
-- Sales_Mgr_Commission_PPW__c (default .04), Overhead_Commission_PPW__c (default .015), Geo_Commission_Amount__c ($70 Geovanna rule), Commission_Burden_Rate__c (75) — unchanged.
+### 4f. PO tracking fields — SOLAR only (draft, pending Q2/Q5b).
 
-### 4e. Per-adder commission FORMULA fields — BOTH objects (pending formula confirmation)
-One formula field per priced adder: `Adder_<Base>_Comm_Amt__c` = Price × Qty (flat adders) or Price × Watts × Qty (per-watt adders — needs watts source on Customer: Final_System_Size_kW__c × 1000), plus rollup `Total_Adder_Comm_Amt__c`. ~21 per object. NOTE: formula fields are NOT mapped by Create Project (they self-compute on Solar because price+qty are mapped); they are excluded from the mapping table by design. ⚠ Q7: confirm the commission formula per adder type before building.
+### 4g. Create Project mapping deltas
+ADD: §4a ×14 Customer pairs, §4b ×8 Customer NS fields, `Internal_Rep_Commission_PPW__c`.
+REMOVE: strictly-budget Customer fields (exact list = CC diff of customer-to-solar-map.ts vs v3 input model, Tim-reviewed). `Overhead_Commission_PPW__c`/`Sales_Mgr_Commission_PPW__c` REMAIN mapped (still inputs per D10).
+NEVER MAP: formula fields, COST fields.
 
-### 4f. PO tracking fields — SOLAR ONLY (draft, pending §6 answers)
-Commission_PO_M1_Number__c · Commission_PO_M1_Amount__c · Commission_PO_M2_Number__c · Commission_PO_M2_Amount__c · Commission_PO_Status__c (picklist) · Commission_PO_Error__c · Commission_PO_Synced_At__c
-
-### 4g. Create Project mapping deltas (documented as they land — keep current)
-ADD to mapping: all §4a Price+Qty fields, §4b NS 4/5 sets. ALREADY MAPPED: existing adder price/qty, NS 1-3, commission PPW fields.
-REMOVE from mapping (fields stay on Customer, dropped from the copy + hidden per D7): strictly-budget parameters that now live Solar-side with defaults — Commission_Burden_Rate (if on Customer), labor rates, burden, module cost/W, BOS costs, hours params, Material_Other, CO fee, permit, and any Budget_*/Total_*/GP_* output fields currently in the ~133-field identity block. EXACT LIST: to be produced by CC by diffing customer-to-solar-map.ts against the v2 input model — reviewed by Tim before shipping.
-NEVER MAP: formula fields (4e), COST fields (4c — Solar-only, defaulted).
-
-## 5. MAPPING_ROWS v2 (draft — freeze only after Q1-Q4 + live re-harvest)
-| Budget element | Task · AG · INV · Type | Amount source (v2) |
+## 5. MAPPING_ROWS v3 (freeze after live re-harvest)
+| Budget element | Task · AG · INV · Type | Amount source (v3) |
 |---|---|---|
-| Income — Balance of Contract | BALANCE · BILLING · <N/A> · Income | contract − material income (assumed unchanged) |
+| Income — Balance of Contract | BALANCE · BILLING · <N/A> · Income | contract (+rebate?) − material income — confirm at re-harvest |
 | Income — Solar Material | GENM · BILLING · <N/A> · Income | Total material |
-| Income — DC Rebate (RSDC only) | (re-harvest from RSDC scaffold) · Income | 0.45 × watts when DC=true |
-| Salesperson commission | SLPC OUT · OTHER · M1&M2COM (⚠ Q1: internal vs third-party routing) | Total salesperson PPW × watts |
-| Manager commission | SLMC · LABOR · SALESCOMM | .04 dflt × watts |
-| Overhead commission | SLPC · LABOR · SALESCOMM (⚠ was rep+overhead sum in v1) | .015 dflt × watts |
-| Setter commission | APPT COM · LABOR · SALESCOMM (v1 answer — reconfirm) | $70 Geovanna rule |
-| Commission burden | BURDENEXR · LABOR · SALESCOMM | 75% × (mgr+geo+overhead) |
-| Audit+QA labor / hours | GENA · LABOR · RESIDENTAL | hours-bearing |
+| Income — DC Rebate (RSDC only) | re-harvest RSDC scaffold · Income | 0.45 × watts when DC true |
+| 3rd-party rep commission | SLPC OUT · OTHER · M1&M2COM | 3rdPartyPPW × watts |
+| Internal rep commission | SLPC · LABOR · SALESCOMM | InternalPPW × watts |
+| Management commission | SLMC · LABOR · SALESCOMM | (.04+.015) × watts |
+| Setter commission | APPT COM · LABOR · SALESCOMM | $70 Geovanna rule (⚠ Q9 source field) |
+| Commission burden | BURDENEXR · LABOR · SALESCOMM | 75% × (internal+mgmt+geo) |
+| Audit+QA labor/hours | GENA · LABOR · RESIDENTAL | J21 / 4 hrs |
 | Roofing labor | ROOFCOM · LABOR · RESIDENTAL | piece rate |
-| S1 / S2 labor | S1 / S2 · LABOR · RESIDENTAL | hours-bearing |
-| S3 labor | S3 · LABOR · RESIDENTAL | battery + ALL adder + NS labor + hours |
-| Labor burden | BURDENEXR · LABOR · RESIDENTAL | total burden |
-| Total material | GENM · MATERIAL · <N/A> | incl. adder + NS material |
-| Other | GENO · OTHER · <N/A> | Material Other (+CO fee, permit — v1 summed 3 rows; sheet now shows CO/permit under GENO labels K22/K23 — keep sum) |
-| Engineering (Structural) | SUBCON · SUBCON(?) · ENGR? (⚠ Q3 + re-harvest: v1 scaffold had ENGR·SUBCON and SUBCON·SUBCON lines) | E55 |
-| Subcontractor (Bird Blocking) | SUBCON · SUBCON · <N/A> (⚠ Q3) | E56 |
-| Audit software | SOFTWARE · OTHER · <N/A> (⚠ Q4) | Software fee? |
+| S1 / S2 labor+hours | S1 / S2 · LABOR · RESIDENTAL | splits |
+| S3 labor+hours | S3 · LABOR · RESIDENTAL | battery + adder + NS labor |
+| Labor burden | BURDENEXR · LABOR · RESIDENTAL | J27 |
+| Total material | GENM · MATERIAL · <N/A> | J15 |
+| Other | GENO · OTHER · <N/A> | MaterialOther + CO + permit + ActiveMonitoring + LRWarranty (J16) |
+| Engineer stamps | ENGR? · SUBCON · <N/A> — v1 scaffold had ENGR "Engineering Costs"; confirm at re-harvest | E55 |
+| Subcontractor | SUBCON · SUBCON · <N/A> | E56 |
+| Audit software | SOFTWARE · OTHER · <N/A> | E60 |
+| Referral fees | REFERRAL · OTHER · ? — **NOT in v1 scaffold; must exist in live template (D13)** | E63 |
 
-## 6. PO engine spec (net-new; runs as a stage in the push worker AFTER budget lines succeed)
-- Scope: salesperson/dealer commission ONLY. Manager, overhead, setter = payroll, never POs.
-- Total commission for PO purposes = salesperson total (M1&M2COM number).
-- Third-party dealer: M1 = min(50% × total, $2,500) at "Site Audit Complete"; M2 = total − M1 at "Glass on Roof".
-- Internal Harmon sales: M1 = 75%, M2 = 25%. ⚠ Q2: do internal deals get POs at all (vendor = whom?) or payroll-only?
-- Vendor = config map Dealer picklist value → Acumatica VendorID (D4). Missing mapping → fail loudly, no PO.
-- Lifecycle: first push creates both POs; every budget re-push recomputes and UPDATES them. FREEZE RULE: a PO already released/completed/closed in Acumatica is never modified; the delta lands in M2 (that is why M2 is "balance"). If M2 itself is closed and totals changed → fail loudly for human decision.
-- SF write-back: PO numbers/amounts/status per §4f, same one-PATCH pattern.
-- Hand-proof plan: PO create + update mechanics proven by hand against the BizRun SANDBOX first (hand-minted sandbox token — sandbox connected app still valid; live secret untouched), Gate-5a style: create PO, read it, update amount, verify no duplication. Need from Harmon: one example commission PO from live (screen or PO number) to clone the shape — PO Type, vendor, line inventory (M1&M2COM?), project/task references, description conventions (⚠ Q5b).
+## 6. PO engine spec (pending Q2/Q5b)
+Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complete, M2 = balance at Glass on Roof; internal 75/25 (⚠ Q2 PO-vs-payroll); vendor via D4 config map; freeze rule on released POs; SF write-back per §4f; sandbox hand-proof first. Live attribute pull CORROBORATES: R251282 shows SLSCOM1 = exactly 2500 (cap hit), SLSCOM2 = 4814 balance.
 
-## 7. Attribute sync spec (net-new)
-- Content: project-lifecycle DATE fields + commission-payment fields aligned with POs/cost lines (D5). Exact field→AttributeID map: from live `$expand=Attributes` pull + Tim's mapping.
-- Mechanism: PUT Project (and/or Customer) with Attributes array. Hand-prove once in sandbox.
-- Triggers (two paths, same idempotent sync function):
-  1. Budget/PO push worker updates the commission-payment attributes as part of its run.
-  2. Portal save path: after a save that changed any watched date field → async attribute-sync invoke for that record.
-- Attributes may be pre-created blank by the template (Harmon says same attributes on every job) — sync only fills values.
+## 7. Attribute map (live enumeration, project R251282 — now concrete)
+| AttributeID | Description | Fed by | When |
+|---|---|---|---|
+| AUDITDATE | Audit Date | **Audit_Date_and_DateTime__c** | portal-save trigger |
+| INDESIGN | In Design Date | **Approved_for_Design_Date__c** | portal-save |
+| INCOMDATE | Install Complete Date | **Scheduled_Install_Date__c** | portal-save |
+| GREENTAG | Green Tag Date | **Inspection_Pass_Date__c** | portal-save |
+| COMDATE | Commissioning Date | **Commission_of_System__c** | portal-save |
+| JOBTYPE | Job Type (RS / RSDC value observed "RS") | template code at creation | Layer-1 push |
+| KW | Kilowatts | System_Size__c | Layer-1 / budget push |
+| SALESPERSO | Sales Person (name) | rep/dealer name field (Tim to name) | Layer-1 / budget push |
+| SLSCOM1 / SLSCOM2 | Salesperson commission M1/M2 | PO engine amounts | budget/PO push |
+| MGRCOM1 / MGRCOM2 | Manager comm M1/M2 (75/25 of .04×W — verified 382.80/127.60 @12.76kW) | calc (mgr component) | budget/PO push |
+| MGMTOR1 / MGMTOR2 | Mgmt override M1/M2 (75/25 of .015×W — verified 143.55/47.85) | calc (overhead component) | budget/PO push |
+⚠ Q10: Tim supplies the five date-field API names + SALESPERSO source. Mechanism: PUT Project with Attributes array (id/AttributeID + Value); hand-prove once in sandbox.
 
-## 8. Template selection (RS / RSDC)
-- resolveProjectTemplate: Domestic_Content (Customer/Solar boolean — confirm exact source field) true → RSDC, else RS.
-- RSDC = RS + one revenue line (DC rebate, $0.45/W). Everything else identical (per Harmon).
-- Re-harvest an RSDC scaffold with the reconcile read before first RSDC push; add the rebate line's 4-part key to MAPPING_ROWS.
-- Edge (fail loudly): project created RS, Domestic Content later set true → scaffold lacks rebate line → push must abort with explicit message (add line manually in Acumatica or recreate project).
-- Edge: DC=true but project pushed with rebate 0 — income lines are always written; rebate line written at 0.45×W only when DC=true (confirm behavior when toggled off after creation on an RSDC project: write 0? income-always rule says write; confirm with Harmon).
+## 8. Template selection (RS / RSDC) — unchanged from prior draft; JOBTYPE attribute should carry the same code.
 
-## 9. Open questions (gate map)
-| # | Question | Gates |
+## 9. Open questions (updated 2026-08-20)
+| # | Status | Question |
 |---|---|---|
-| Q1 | Internal vs third-party salesperson commission: which budget line does each go to (SLPC OUT · M1&M2COM vs SLPC · SALESCOMM)? Sheet shows overhead on SLPC — Tim suspects wrong. | MAPPING_ROWS freeze, calc commission section |
-| Q2 | Do INTERNAL sales generate POs (to what vendor) or payroll-only? (75/25 split given for internal.) | PO engine |
-| Q3 | SUBCON engineering/subcontractor lines: should they roll into Total Job Cost (sheet currently excludes them) — and should they push to Acumatica? | calc totals, MAPPING_ROWS |
-| Q4 | Software Fee: revenue-only or SOFTWARE cost line (sheet says both)? | calc, MAPPING_ROWS |
-| Q5 | LightReach Battery Warranty "DEALER FEE?" — how is it treated? (b) One example live commission PO to clone shape. | calc; PO engine |
-| Q6 | Tesla Expansion Pack +4hrs / Powerwall +16hrs — automatic in calc or manual entry? | calc labor/hours |
-| Q7 | Per-adder commission formula: Price×Qty (flat) & Price×Watts×Qty (per-watt) — confirm, incl. which adders count toward commission. | formula fields (§4e) |
-| Q8 | Setter commission budget line still APPT COM? | MAPPING_ROWS |
-| Q9 | Geovanna rule: is Setter a field on Customer/Solar the calc can read to auto-apply $70? Field name? | calc |
+| Q1 | **RESOLVED (D9)** | Internal→SLPC·SALESCOMM, 3rd-party→SLPC OUT·M1&M2COM, mgmt combined→SLMC. |
+| Q2 | **RESOLVED (D16)** | Internal = payroll, no PO; same attributes (75/25), SLPC·SALESCOMM cost line. |
+| Q3 | **RESOLVED (D11)** | SUBCON lines contribute to totals + push. |
+| Q4 | **RESOLVED (D11)** | Software = SOFTWARE cost line, contributes. |
+| Q5 | **(a) RESOLVED (D12)**; (b) OPEN | LR Warranty → GENO cost. (b) Example live commission PO to clone shape. |
+| Q6 | OPEN | Expansion Pack +4h / Powerwall +16h — auto or manual? (Sheet: manual.) |
+| Q7 | OPEN | Per-adder commission formula for §4e formula fields. |
+| Q8 | **RESOLVED** | Setter line = APPT COM (sheet label "APPT COMM"). |
+| Q9 | **RESOLVED (D17)** | Setter__c populated → apply Geo_Commission_Amount__c ($70 dflt). |
+| Q10 | **RESOLVED (dates)** / SALESPERSO source still open | Five date fields mapped (§7); confirm SALESPERSO source (dealer/rep name field). |
+| Q11 | **RESOLVED (D10, Tim-confirmed)** | Two stored fields (.04/.015), summed for the SLMC line, split for attributes. |
+| Q12 | OPEN (re-harvest) | Live RS template contains REFERRAL + SOFTWARE + ENGR/SUBCON lines? BALANCE income treatment of rebate? |
 
-## 10. Execution plan (2 days)
-**Workstream A — SF metadata (Tim + CC package):** §4a-4c fields (56 confirmed) now; 4e/4f when Q7/Q2 answer. Workbench package(s), Tim deploys + FLS.
-**Workstream B — calc v2 (CC, sundial-core):** BRADS cell map + math + new template embed + re-pinned test fixture. Gated only on Q3/Q4/Q6 (can build with flags/TODOs and BRADS-example values immediately).
-**Workstream C — mapping + push (CC, sundial-core):** MAPPING_ROWS v2 after Q1-Q4; live RS re-harvest reconcile; RSDC harvest; template selection change.
-**Workstream D — PO engine (CC, sundial-core):** after Q2/Q5b + vendor config map + sandbox hand-proof.
-**Workstream E — attribute sync (CC, sundial-core):** after live attribute pull + Tim's field map; sandbox hand-proof.
-**Workstream F — frontend (CC, harmon-crm):** Budget input rework (commissions v2, COST adders w/ null-=default hint), Customer read-only Adder/Commission tabs sourced from linked Solar + hide editable Customer fields when Linked_Solar_Project__c set (D7), Create Project mapping additions (§4g), PO status display.
-**Verification gates:** BRADS fixture green → deploy calc; reconcile 0-problems on live RS + RSDC scaffolds → enable push; sandbox PO hand-proof → enable PO stage; one supervised live end-to-end incl. an RSDC + third-party-dealer job.
+## 10. Execution plan
+**A — SF metadata:** deploy built package now + addendum (Internal_Rep_Commission_PPW__c ×2) + follow-up existing-field package (defaults/relabels). Then FLS.
+**B — calc v2:** build to REVISED workbook (template file: `lambdas/sundial-budget/template/budget-template-v2.xlsx` = REVISED, not BRADS). Gated only on Q6 (TODO-flagged).
+**C — mapping+push:** MAPPING_ROWS v3; live RS re-harvest (must show REFERRAL etc. — Q12); RSDC harvest; template selection.
+**D — PO engine:** after Q2/Q5b + vendor map + sandbox hand-proof.
+**E — attribute sync:** after Q10; sandbox hand-proof.
+**F — frontend:** commissions v3 inputs, COST adders, D7 read-only tabs, mapping deltas, PO/attribute status display.
+**Gates:** REVISED fixture green → deploy calc; reconcile 0-problems live RS + RSDC → enable push; sandbox PO proof → enable PO stage; supervised live end-to-end (one 3rd-party + one RSDC job).
 
-## 11. Field-change log for Create Project button (append as work lands)
-- **2026-08-20 — fields BUILT (package, not deployed):** §4a ×28 + §4b ×16 + §4c ×12 in
-  `salesforce/v2-budget-adder-fields/`. The mapping additions below are **still pending** —
-  the Customer-side fields are inert until `customer-to-solar-map` copies them, so a
-  deployed package alone does nothing for Create Project.
-- (pending) ADD to mapping: §4a ×14 Customer Price/Qty pairs, §4b ×8 Customer NS 4/5 fields
-- (pending) REMOVE from mapping: exact list from customer-to-solar-map.ts diff, Tim-reviewed
-- Formula fields: never mapped (self-computing)
-- NEVER MAP: §4c Cost fields — Solar-only by design, and their whole semantic is
-  "null means derive", which a copy would destroy by writing an explicit value
+## 11. Field-change log for Create Project button
+- 2026-08-20 — §4a/4b/4c package BUILT, not deployed. Mapping additions pending.
+- 2026-08-20 — REVISED sheet: +`Internal_Rep_Commission_PPW__c` to create AND map; Overhead/Mgr PPW fields RETAINED in mapping (D10).
+- (pending) ADD to mapping: §4a ×14 + §4b ×8 Customer fields + Internal_Rep_Commission_PPW__c.
+- (pending) REMOVE from mapping: CC diff list, Tim-reviewed.
+- NEVER MAP: formula fields; §4c Cost fields (null = derive semantic would be destroyed by a copy).

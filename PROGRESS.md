@@ -1,5 +1,75 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — v2 budget field package amended for D15 + §4d (58 fields, still not deployed)
+
+Second pass on `salesforce/v2-budget-adder-fields/` against the REVISED-workbook update
+to the rework doc. Still package-only, still additive, still not deployed. 56 → 58.
+
+**D15 inverted the Cost fields, and the inversion is the whole change.** They shipped
+yesterday as nullable-with-no-default, where null meant "the calc derives the sheet
+value". D15 replaced that with static defaults on all 12, because a number sitting in
+Salesforce is visible and admin-editable in a way a number buried in calc code is not.
+So the semantic flipped end to end: **the calc now always reads the field and never
+derives, which makes a blank Cost field a bug rather than a signal.** Every trace of the
+old wording is gone from the descriptions and inline help — replaced with the per-UNIT
+(× Qty) vs per-WATT (× watts) distinction, and the consequence that matters operationally:
+**changing an adder's price does not move its cost.** The defaults are a snapshot of a
+derivation, not a live link to one, so an org-wide re-price means re-deriving the cost
+default by hand.
+
+**Every default was re-derived rather than transcribed.** `(price − hours × 33 × 1.75)
+÷ 1.25` for the eight flat ones, per-watt equivalents for the four others — all twelve
+reproduce the doc's §4c table exactly, so the table and the package agree because they
+were computed independently, not because one was copied from the other.
+
+**That also settled yesterday's open judgement call.** The per-watt fields were built at
+`Number(15,3)` to match the price side, flagged as overridable if 4 dp was wanted. The
+D15 defaults are 0.052 / 0.052 / 0.009 / 0.06 — all exactly inside 3 dp. Nothing is lost,
+so it is now confirmed rather than a trade-off, and the TASKS item is closed.
+
+**§4d addendum: `Internal_Rep_Commission_PPW__c` on both objects.** Type cloned from
+`Sales_Rep_Commission_PPW__c`, which turns out to be a **`Number`, not a Currency**,
+despite being labelled "Sales Rep Commission $/W" — and it diverges across objects the
+same way everything else does: `Number(4,3)` on Customer, `Number(15,3)` on Solar.
+Default 0 on both. Per D16 this field is not just another input: which of the two rep
+PPW fields is populated *decides the deal type* (3rd-party → SLPC OUT + commission POs;
+internal → SLPC · SALESCOMM, payroll only, no POs), and both populated is a validation
+error. That is in the field description so it survives away from the doc.
+
+Collision check re-run for the new name: absent from both objects.
+
+**The find worth acting on: D17 cannot be implemented as written.** D17 says the setter
+commission "applies when `Setter__c` is populated". The describe says:
+
+- `Sundial_Customer__c.Setter__c` — Lookup → `Sundial_User__c`, updateable, plus a
+  separate `Setter_Name__c` Text(120)
+- **`Sundial_Solar__c` — no setter field of any kind.** Nothing matching /setter/ at all.
+- `harmon-crm/src/config/customer-to-solar-map.ts` explicitly excludes it, with the
+  comment *"Setter__c — Sundial_Solar__c has no corresponding field"* sitting in its
+  deliberate-non-mapping list.
+
+The calc runs Solar-side, so the rule has nothing to read. Reported, not fixed: the task
+scoped it as report-only, and the fix is a design call (Solar lookup + mapping entry,
+versus a text mirror like the existing `Sales_Rep_Name__c` pattern, versus reading
+through to the Customer). Logged as a `[!]` blocker in TASKS and against D17 itself in
+the doc, so it surfaces when the calc work reaches the commission section rather than
+during it.
+
+**One inconsistency shipped deliberately.** The new field is labelled "Internal Rep
+Commission PPW" per the brief, while its siblings read "… Commission $/W". Flagged in
+the README and TASKS as a one-line change before deploy rather than silently
+"corrected" — the brief was explicit.
+
+The README's verify step is now **inverted**, and says so in as many words, because a
+stale checklist is worse than none here: a new Solar record must show every Cost field
+pre-populated, and a blank one means the default did not take. Under the previous build
+blank was the correct answer.
+
+Regenerated from `generate.mjs` (58 fields), re-verified: XML well-formedness on all
+three files, `<fields>` tag balance, 58 `<members>` in package.xml, all 58 labels under
+Salesforce's 40-char cap, zero occurrences of the retired null-=derive wording, and a
+printed manifest of every field's final type and default.
+
 ## 2026-08-20 — v2 budget rework: SF field package (56 fields, PACKAGE ONLY — not deployed)
 
 Workstream A of `docs/integrations/acumatica-budget-rework-v2.md`. `salesforce/v2-budget-adder-fields/`

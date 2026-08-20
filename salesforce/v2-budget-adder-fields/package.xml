@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: v2 budget rework adder fields.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md §4a / §4b / §4c.
+
+  56 new custom fields, additive only — no existing field is modified:
+    §4a  28  7 new adders x (Price + Qty) x (Customer + Solar)
+    §4b  16  NS adder blocks 4 and 5 x 4 fields x (Customer + Solar)
+    §4c  12  COST fields, Sundial_Solar__c ONLY, ALL NULLABLE with NO default
+             (null = the calc derives the sheet default; populated = per-job override)
+
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST.
+  After deploy, grant FLS per README.md — nothing works without it.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.Adder_Upgrade_225_UG_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Upgrade_225_UG_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_Gateway3_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Gateway3_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_Site_Audit_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Site_Audit_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_Travel_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Travel_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_Active_Monitoring_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Active_Monitoring_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_LR_Battery_Warranty_Price__c</members>
+        <members>Sundial_Customer__c.Adder_LR_Battery_Warranty_Qty__c</members>
+        <members>Sundial_Customer__c.Adder_Referral_Fee_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Referral_Fee_Qty__c</members>
+        <members>Sundial_Customer__c.NS_Adder_4_Description__c</members>
+        <members>Sundial_Customer__c.NS_Adder_4_Markup_Percent__c</members>
+        <members>Sundial_Customer__c.NS_Adder_4_Material_Cost__c</members>
+        <members>Sundial_Customer__c.NS_Adder_4_Labor_Hours__c</members>
+        <members>Sundial_Customer__c.NS_Adder_5_Description__c</members>
+        <members>Sundial_Customer__c.NS_Adder_5_Markup_Percent__c</members>
+        <members>Sundial_Customer__c.NS_Adder_5_Material_Cost__c</members>
+        <members>Sundial_Customer__c.NS_Adder_5_Labor_Hours__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_UG_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_UG_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_Gateway3_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Gateway3_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_Site_Audit_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Site_Audit_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_Travel_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Travel_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_Active_Monitoring_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Active_Monitoring_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_LR_Battery_Warranty_Price__c</members>
+        <members>Sundial_Solar__c.Adder_LR_Battery_Warranty_Qty__c</members>
+        <members>Sundial_Solar__c.Adder_Referral_Fee_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Referral_Fee_Qty__c</members>
+        <members>Sundial_Solar__c.NS_Adder_4_Description__c</members>
+        <members>Sundial_Solar__c.NS_Adder_4_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.NS_Adder_4_Material_Cost__c</members>
+        <members>Sundial_Solar__c.NS_Adder_4_Labor_Hours__c</members>
+        <members>Sundial_Solar__c.NS_Adder_5_Description__c</members>
+        <members>Sundial_Solar__c.NS_Adder_5_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.NS_Adder_5_Material_Cost__c</members>
+        <members>Sundial_Solar__c.NS_Adder_5_Labor_Hours__c</members>
+        <members>Sundial_Solar__c.Adder_Sub_Panel_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Derate_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Heat_Detector_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_400_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_UG_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Gateway3_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Structural_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Conduit_Attic_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Flat_Roof_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Roof_Tile_Cost__c</members>
+        <members>Sundial_Solar__c.Adder_Bird_Blocking_Cost__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

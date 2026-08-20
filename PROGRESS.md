@@ -1,5 +1,82 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — v2 budget rework: SF field package (56 fields, PACKAGE ONLY — not deployed)
+
+Workstream A of `docs/integrations/acumatica-budget-rework-v2.md`. `salesforce/v2-budget-adder-fields/`
+— package.xml + two `.object` files + README, Metadata API v62.0. No code changed, nothing
+deployed. §4a 28 + §4b 16 + §4c 12 = 56; Customer 22, Solar 34.
+
+**Collision check first, as asked: zero hits.** All 56 API names against the live describe
+on both objects — none already exist.
+
+**The describe contradicted the spec in three places, and reading it first is the only
+reason the package is right.** Every type signature was cloned from the live org rather
+than typed from the plan text:
+
+1. **The two objects diverge on the NS blocks.** Customer NS 1-3 are `Percent(3,3)` /
+   `Number(5,1)`; Solar NS 1-3 are `Percent(14,4)` / `Number(17,1)`. The brief said
+   `Percent(3,4)` / `Number(16,2)` — which matches *neither*. Blocks 4 and 5 clone
+   whichever object they sit on, so all five blocks behave alike within an object. The
+   cross-object divergence is pre-existing and harmless in the one direction it is used:
+   Customer → Solar (Create Project) widens every signature.
+
+2. **The per-watt price fields are `Number` with 3 decimals, not 4.**
+   `Adder_Flat_Roof_Price__c` is `Number(15,3)` on Solar, `Number(6,3)` on Customer. That
+   settles the Number-vs-Currency question the brief left open, but at 3 dp rather than
+   the suggested 4. The four per-watt Cost fields match at `Number(15,3)`, so cost and
+   price for the same adder carry identical precision — a cost expressible more finely
+   than its own price is an odd asymmetry. Flagged as the one judgement call worth
+   overriding: 0.001/W granularity is ~$4 of rounding on a 10 kW job, and it is a
+   one-character change per field *before* deploy.
+
+3. **`NS_Adder_1-3_Markup_Percent__c` defaults to 0 on Solar and has no default on
+   Customer** — not 25. New blocks 4/5 default to 25 per §3, so the five blocks will not
+   behave alike until 1-3 are aligned. That is a change to *existing* fields, so it stays
+   out of an additive package and is logged as a follow-up instead.
+
+A fourth, smaller one: Customer's adder Price fields carry **no defaults at all** while
+Solar's do (`Adder_Sub_Panel_Price__c` defaults to 500 on Solar, nothing on Customer). The
+brief asked for defaults on both, which is right — a defaulted price with a 0 default
+quantity contributes nothing until a quantity is set, and it saves the rep typing the
+price book from memory. Noted so it does not read as an accident later.
+
+**Null is the whole point of §4c, so it is stated three times.** Every `Adder_*_Cost__c`
+is nullable with no default: null = the calc derives the sheet default, populated = a
+per-job override. The sentence is in each field's `description`, in its `inlineHelpText`
+(so it is on the record page, not just in Setup), and in the README — plus the corollary
+that nothing may ever write `0` to mean "unset", because 0 is a real override meaning the
+adder costs nothing. The README's verify step includes "a Cost field showing 0.00 instead
+of blank means a default crept in — stop before anyone enters data".
+
+**One label could not carry the sheet wording.** Salesforce caps field labels at 40 chars
+and `Adder: LightReach Battery Warranty — Price` is 42. That field is labelled
+`LR Battery Warranty`, matching its API name `Adder_LR_Battery_Warranty_*`, with the full
+wording in the description and inline help. All 56 labels were length-checked
+programmatically; that was the only one over. Labels otherwise follow each object's own
+style — Customer `Adder: <name> — Price` (colon, em dash), Solar `Adder <name> - Price`
+(no colon, ASCII hyphen).
+
+**FLS could not be enumerated from here, and the README says so rather than guessing.**
+The integration user lacks *View Setup and Configuration*, so `SELECT ... FROM
+FieldPermissions` returns `INVALID_TYPE` for it. What *was* verifiable: the integration
+user holds `updateable = true` on the existing adder Price/Qty and NS fields on both
+objects, so the "mirror that grant" instruction is grounded. For the rep-facing profile
+list the README carries the exact SOQL for Tim to run as himself. Mirroring matters more
+than it sounds: the new adders land in the same page-layout section as the existing ones,
+so a profile that can edit Sub Panel but not Site Audit gets a half-greyed section and
+files a bug.
+
+**Generated, not hand-typed.** 56 fields × ~10 XML elements is exactly the kind of thing
+where a transposed precision hides for weeks; the package is emitted from a small script
+holding the per-object conventions in one place, then verified: XML well-formedness on all
+three files, `<fields>` tag balance, 56 members in package.xml, and every label under 40
+chars.
+
+**Downstream reminders logged, not built:** §4g Create Project mapping additions (the 22
+new Customer fields are **inert until `customer-to-solar-map` copies them** — a deployed
+package alone does nothing for Create Project), and the harmon-crm portal config-sheet
+additions. Both in TASKS.md.
+
 ## 2026-08-18 — @-mention email alerts + user preferences (D-056, NOT APPLIED / NOT DEPLOYED)
 
 Backend half of two features harmon-crm is waiting on. **Nothing is live** — the

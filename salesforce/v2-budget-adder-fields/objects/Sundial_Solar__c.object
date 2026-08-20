@@ -1,0 +1,435 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v2 budget rework — new adder fields for Sundial_Solar__c.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md §4 (canonical inventory).
+
+  ALL TYPE SIGNATURES BELOW WERE CLONED FROM THE LIVE DESCRIBE (2026-08-20), not from
+  the spec prose. The two objects genuinely differ — Customer's NS blocks are
+  Percent(3,3)/Number(5,1) while Solar's are Percent(14,4)/Number(17,1) — so blocks 4
+  and 5 match whichever object they sit on. See README.md "What the describe said".
+
+  Additive only: a collision check against the live describe on 2026-08-20 found NONE
+  of these 34 API names already present on Sundial_Solar__c.
+
+  Field count: 34
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Adder_Upgrade_225_UG_Price__c</fullName>
+        <defaultValue>2500</defaultValue>
+        <description>v2 budget rework §4a. "225 Upgrade-Underground" — PRICE (commission side, per D6). Default 2500. Flat price. The existing Adder_Upgrade_225 relabels to "225 Upgrade-Overhead" (separate change, not in this package).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the 225 Upgrade-Underground adder. Defaults to 2500; override per job.</inlineHelpText>
+        <label>Adder 225 Upgrade-Underground - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_225_UG_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "225 Upgrade-Underground" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many 225 Upgrade-Underground adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder 225 Upgrade-Underground - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Gateway3_Price__c</fullName>
+        <defaultValue>2950</defaultValue>
+        <description>v2 budget rework §4a. "Gateway3" — PRICE (commission side, per D6). Default 2950. Flat price. 4h labor at the Powerwall rate.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the Gateway3 adder. Defaults to 2950; override per job.</inlineHelpText>
+        <label>Adder Gateway3 - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Gateway3_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "Gateway3" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many Gateway3 adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder Gateway3 - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Site_Audit_Price__c</fullName>
+        <defaultValue>350</defaultValue>
+        <description>v2 budget rework §4a. "Site Audit" — PRICE (commission side, per D6). Default 350. Flat price. Labor-only adder: 2h at the blended rate, no material cost — so it has no _Cost__c field.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the Site Audit adder. Defaults to 350; override per job.</inlineHelpText>
+        <label>Adder Site Audit - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Site_Audit_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "Site Audit" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many Site Audit adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder Site Audit - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Travel_Price__c</fullName>
+        <defaultValue>750</defaultValue>
+        <description>v2 budget rework §4a. "Travel Adder" — PRICE (commission side, per D6). Default 750. Flat price. Labor-only adder: 12h at the blended rate, no material cost — so it has no _Cost__c field.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the Travel Adder adder. Defaults to 750; override per job.</inlineHelpText>
+        <label>Adder Travel Adder - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Travel_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "Travel Adder" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many Travel Adder adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder Travel Adder - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Active_Monitoring_Price__c</fullName>
+        <defaultValue>100</defaultValue>
+        <description>v2 budget rework §4a. "Active Monitoring" — PRICE (commission side, per D6). Default 100. Flat price. REVENUE-ONLY (no cost side). DISTINCT from the existing Active_System_Monitoring__c Yes/No flag — do not conflate the two.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the Active Monitoring adder. Defaults to 100; override per job.</inlineHelpText>
+        <label>Adder Active Monitoring - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Active_Monitoring_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "Active Monitoring" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many Active Monitoring adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder Active Monitoring - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_LR_Battery_Warranty_Price__c</fullName>
+        <defaultValue>600</defaultValue>
+        <description>v2 budget rework §4a. "LightReach Battery Warranty" — PRICE (commission side, per D6). Default 600. Flat price. REVENUE-ONLY. Sheet annotates this "DEALER FEE?" — treatment pending open question Q5 in the v2 rework doc.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the LightReach Battery Warranty adder. Defaults to 600; override per job.</inlineHelpText>
+        <label>Adder LR Battery Warranty - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_LR_Battery_Warranty_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "LightReach Battery Warranty" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many LightReach Battery Warranty adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder LR Battery Warranty - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Referral_Fee_Price__c</fullName>
+        <defaultValue>500</defaultValue>
+        <description>v2 budget rework §4a. "Referral Fee" — PRICE (commission side, per D6). Default 500. Flat price. REVENUE-ONLY (no cost side).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Customer-facing price for the Referral Fee adder. Defaults to 500; override per job.</inlineHelpText>
+        <label>Adder Referral Fee - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Referral_Fee_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4a. "Referral Fee" — QUANTITY. Shared between the price (commission) and cost (budget) sides per D6; there is no separate cost quantity.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>How many Referral Fee adders on this job. 0 = not applicable.</inlineHelpText>
+        <label>Adder Referral Fee - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_4_Description__c</fullName>
+        <description>v2 budget rework §4b. Free-text description of non-standard adder 4. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 4 Description</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_4_Markup_Percent__c</fullName>
+        <defaultValue>25</defaultValue>
+        <description>v2 budget rework §4b. Markup applied to NS adder 4 material cost. Default 25%. NOTE: NS blocks 1-3 on this object currently default to 0 — aligning them to 25 is a separate change (see TASKS.md).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Markup on the material cost for this non-standard adder. Defaults to 25%.</inlineHelpText>
+        <label>NS Adder 4 Markup %</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_4_Material_Cost__c</fullName>
+        <description>v2 budget rework §4b. Material cost for non-standard adder 4, BEFORE markup. This is the NS block's own cost field — NS blocks do not get a separate _Cost__c field. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 4 Material Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_4_Labor_Hours__c</fullName>
+        <description>v2 budget rework §4b. Labor hours for non-standard adder 4. Costed at the Powerwall rate in v2 (was the blended rate in v1). Rolls into S3. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 4 Labor Hours</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>1</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_5_Description__c</fullName>
+        <description>v2 budget rework §4b. Free-text description of non-standard adder 5. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 5 Description</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_5_Markup_Percent__c</fullName>
+        <defaultValue>25</defaultValue>
+        <description>v2 budget rework §4b. Markup applied to NS adder 5 material cost. Default 25%. NOTE: NS blocks 1-3 on this object currently default to 0 — aligning them to 25 is a separate change (see TASKS.md).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Markup on the material cost for this non-standard adder. Defaults to 25%.</inlineHelpText>
+        <label>NS Adder 5 Markup %</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_5_Material_Cost__c</fullName>
+        <description>v2 budget rework §4b. Material cost for non-standard adder 5, BEFORE markup. This is the NS block's own cost field — NS blocks do not get a separate _Cost__c field. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 5 Material Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_5_Labor_Hours__c</fullName>
+        <description>v2 budget rework §4b. Labor hours for non-standard adder 5. Costed at the Powerwall rate in v2 (was the blended rate in v1). Rolls into S3. Type signature cloned from NS_Adder_1-3 on this object.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 5 Labor Hours</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>1</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Sub_Panel_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Sub Panel adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Sub Panel - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Derate_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Derate adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Derate - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Heat_Detector_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Heat Detector adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Heat Detector - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_225_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the 225 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder 225 Upgrade - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_400_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the 400 Upgrade adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder 400 Upgrade - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_225_UG_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the 225 Upgrade-Underground adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder 225 Upgrade-Underground - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Gateway3_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Gateway3 adder (budget), as opposed to the PRICE side (commission) per D6. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Gateway3 - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Structural_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Structural adder (budget), as opposed to the PRICE side (commission) per D6. Sheet default derives to 250 (SUBCON engineering). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Structural - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Conduit_Attic_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Conduit in Attic adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Conduit in Attic - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Flat_Roof_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Flat Roof adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Flat Roof - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Roof_Tile_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Roof Tile adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Roof Tile - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Bird_Blocking_Cost__c</fullName>
+        <description>v2 budget rework §4c. COST side of the Bird Blocking adder (budget), as opposed to the PRICE side (commission) per D6. PER-WATT value — type cloned from this object's Adder_*_Price__c per-watt fields (Number, 3 dp). Sheet default derives to 0.06 per watt. NULL IS SEMANTICALLY MEANINGFUL: null = the calc derives the sheet default for this adder; a populated value is a per-job override that wins. Never default this field and never write 0 to mean "unset" — 0 is a real override meaning the adder costs nothing.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Per-watt cost override. LEAVE BLANK to let the budget calc derive the sheet default. Enter a value only to override it for this job.</inlineHelpText>
+        <label>Adder Bird Blocking - Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+</CustomObject>

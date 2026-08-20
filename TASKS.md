@@ -4,6 +4,22 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## v2 budget rework — SF field package (2026-08-20, Workstream A)
+
+Plan: `docs/integrations/acumatica-budget-rework-v2.md` §4. Package: `salesforce/v2-budget-adder-fields/` (56 fields, Metadata API v62.0). **Package only — nothing deployed, no code changed.**
+
+- [x] **§4a — 28 fields.** 7 new adders × Price + Qty × both objects. Price `Currency(16,2)` defaulted per the sheet catalog (2500 / 2950 / 350 / 750 / 100 / 600 / 500), Qty `Number(18,0)` default 0. All seven are flat-priced; the per-watt pricing note applies to none of them.
+- [x] **§4b — 16 fields.** NS adder blocks 4 and 5 × 4 fields × both objects. **Types cloned per object from NS 1-3 on the live describe, which diverge:** Customer is `Percent(3,3)`/`Number(5,1)`, Solar is `Percent(14,4)`/`Number(17,1)` — neither matches the `Percent(3,4)`/`Number(16,2)` in the plan text. Markup defaults to 25 on both.
+- [x] **§4c — 12 fields, Solar only, ALL NULLABLE WITH NO DEFAULT.** Null = the calc derives the sheet default; populated = per-job override. That sentence is in every field's description, its inline help, and the README. The four per-watt ones (Conduit Attic, Flat Roof, Roof Tile, Bird Blocking) are `Number(15,3)` — cloned from `Adder_Flat_Roof_Price__c` on Solar, i.e. **Number not Currency, and 3 dp not 4**.
+- [x] **Collision check:** all 56 API names vs the live describe, 2026-08-20 — **zero hits** on either object.
+- [ ] **TIM: deploy the package.** Zip the folder *contents* (package.xml at zip root) → Workbench → Migration → Deploy → Single Package → **Check Only first**, expect 56/56, then deploy for real.
+- [ ] **TIM: FLS — three audiences, and nothing works without it.** (a) integration user Edit on all 34 Solar + all 22 Customer fields (it already holds Edit on the existing adder fields — mirror that); (b) rep-facing profiles Edit on the Customer Price/Qty + NS fields, **mirroring whatever the existing adder fields grant** — the exact profile list could NOT be read from this session (the integration user lacks *View Setup and Configuration*, so `FieldPermissions` returns `INVALID_TYPE`); the README carries the SOQL to run as yourself; (c) **Cost fields are back-office-edit-only pending your call** — a rep editing a cost override changes margin without changing what the customer pays.
+- [ ] **TIM: decide the Cost-field FLS** (recommendation: integration + back-office/PM Edit, reps read-only or hidden). Apply consistently across all 12 — the portal renders them as one section.
+- [ ] **Consider 4 dp on the per-watt Cost fields.** Built at 3 dp to match the price side. At 0.001/W granularity a rounding error is ~$4 on a 10 kW job; these only ever hold hand-entered overrides, so 3 dp matching price is the better default — but it is a one-character change per field **before** deploy if you disagree.
+- [ ] **Follow-up (changes to EXISTING fields, deliberately not in the additive package):** relabel `Adder_Upgrade_225` → "225 Upgrade-Overhead"; align `NS_Adder_1-3_Markup_Percent__c` default to 25 (currently 0 on Solar, unset on Customer — so the five NS blocks will not behave alike until this lands).
+- [ ] **DOWNSTREAM, NOT BUILT — §4g Create Project mapping additions.** The 22 new Customer fields are **inert until `customer-to-solar-map` copies them**; a deployed package alone does nothing for Create Project. Add the 14 §4a Price/Qty pairs + 8 §4b NS 4/5 fields. **Never map the §4c Cost fields** — Solar-only by design, and a copy would write an explicit value over the "null means derive" semantic.
+- [ ] **DOWNSTREAM, NOT BUILT — portal config-sheet additions (harmon-crm).** Budget input sections for the 7 new adders, NS blocks 4/5, and the COST adders with a "blank = use sheet default" hint. Per §10 Workstream F.
+
 ## @-mention alerts + user preferences (2026-08-18, D-056)
 
 Runbook: `docs/integrations/comment-mention-alerts.md`. **Backend ships first** — harmon-crm's Settings UI cannot read a table that doesn't exist. Nothing here is applied or deployed yet.

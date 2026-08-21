@@ -108,28 +108,60 @@ ADD: §4a ×14 Customer pairs, §4b ×8 Customer NS fields, `Internal_Rep_Commis
 REMOVE: strictly-budget Customer fields (exact list = CC diff of customer-to-solar-map.ts vs v3 input model, Tim-reviewed). `Overhead_Commission_PPW__c`/`Sales_Mgr_Commission_PPW__c` REMAIN mapped (still inputs per D10).
 NEVER MAP: formula fields, COST fields.
 
-## 5. MAPPING_ROWS v3 (freeze after live re-harvest)
-| Budget element | Task · AG · INV · Type | Amount source (v3) |
-|---|---|---|
-| Income — Balance of Contract | BALANCE · BILLING · <N/A> · Income | contract (+rebate?) − material income — confirm at re-harvest |
-| Income — Solar Material | GENM · BILLING · <N/A> · Income | Total material |
-| Income — DC Rebate (RSDC only) | re-harvest RSDC scaffold · Income | 0.45 × watts when DC true |
-| 3rd-party rep commission | SLPC OUT · OTHER · M1&M2COM | 3rdPartyPPW × watts |
-| Internal rep commission | SLPC · LABOR · SALESCOMM | InternalPPW × watts |
-| Management commission | SLMC · LABOR · SALESCOMM | (.04+.015) × watts |
-| Setter commission | APPT COM · LABOR · SALESCOMM | $70 Geovanna rule (⚠ Q9 source field) |
-| Commission burden | BURDENEXR · LABOR · SALESCOMM | 75% × (internal+mgmt+geo) |
-| Audit+QA labor/hours | GENA · LABOR · RESIDENTAL | J21 / 4 hrs |
-| Roofing labor | ROOFCOM · LABOR · RESIDENTAL | piece rate |
-| S1 / S2 labor+hours | S1 / S2 · LABOR · RESIDENTAL | splits |
-| S3 labor+hours | S3 · LABOR · RESIDENTAL | battery + adder + NS labor |
-| Labor burden | BURDENEXR · LABOR · RESIDENTAL | J27 |
-| Total material | GENM · MATERIAL · <N/A> | J15 |
-| Other | GENO · OTHER · <N/A> | MaterialOther + CO + permit + ActiveMonitoring + LRWarranty (J16) |
-| Engineer stamps | ENGR? · SUBCON · <N/A> — v1 scaffold had ENGR "Engineering Costs"; confirm at re-harvest | E55 |
-| Subcontractor | SUBCON · SUBCON · <N/A> | E56 |
-| Audit software | SOFTWARE · OTHER · <N/A> | E60 |
-| Referral fees | REFERRAL · OTHER · ? — **NOT in v1 scaffold; must exist in live template (D13)** | E63 |
+## 5. MAPPING_ROWS v3 — **BUILT 2026-08-20, NOT VERIFIED** (`lambdas/sundial-acumatica-budget-push/index.js`)
+
+Status per row. `harvested` = key verbatim from the R269999 scaffold; `provisional` = this
+table's best reading, **confirmed or refuted by the re-harvest**; `unknown` = no key yet.
+
+| Budget element | Task · AG · INV · Type | Amount source (v3, as coded) | Key |
+|---|---|---|---|
+| Income — Balance of Contract | BALANCE · BILLING · &lt;N/A&gt; · Income | `Contract_Amount__c - Total_Material_Budget__c` — **excludes the rebate**, which has its own line (Q12b) | harvested |
+| Income — Solar Material | GENM · BILLING · &lt;N/A&gt; · Income | `Total_Material_Budget__c` | harvested |
+| Income — DC Rebate (RSDC only) | **TBD from the RSDC harvest** | `DC_Rebate_Amount__c` | **unknown** — in `PENDING_HARVEST_ROWS`, guarded |
+| 3rd-party rep commission | SLPC  OUT · OTHER · M1&M2COM · Expense | `Sales_Rep_Commission_Amt__c` (third-party only now) | **provisional** |
+| Internal rep commission | SLPC · LABOR · SALESCOMM · Expense | `Internal_Rep_Commission_Amt__c` | harvested |
+| Management commission | SLMC · LABOR · SALESCOMM · Expense | `Management_Commission_Amt__c` (the .04+.015 **sum** — do not also map the components) | harvested |
+| Setter commission | APPT COM · LABOR · SALESCOMM · Expense | `Setter_Commission_Amt__c` — what **applied**, not the always-70 input | harvested |
+| Commission burden | BURDENEXR · LABOR · SALESCOMM · Expense | `Commission_Burden_Amt__c` | harvested |
+| Audit+QA labor / hours | GENA · LABOR · RESIDENTAL · Expense | `Audit_Labor_Cost__c` (**already audit+QA**) / `GENA_Hours__c` | harvested |
+| Roofing labor | ROOFCOM · LABOR · RESIDENTAL · Expense | `Roofing_Labor_Cost__c` (piece rate, no hours) | harvested |
+| S1 / S2 labor + hours | S1 / S2 · LABOR · RESIDENTAL · Expense | `S1_/S2_Labor_Cost__c` + `_Hours__c` | harvested |
+| S3 labor + hours | S3 · LABOR · RESIDENTAL · Expense | `S3_Labor_Cost__c` / `S3_Hours__c` | harvested |
+| Labor burden | BURDENEXR · LABOR · RESIDENTAL · Expense | `Total_Labor_Burden_Budget__c` | harvested |
+| Total material | GENM · MATERIAL · &lt;N/A&gt; · Expense | `Total_Material_Budget__c` | harvested |
+| Other (GENO) | GENO · OTHER · &lt;N/A&gt; · Expense | `Total_Other_Budget__c` — **ONE row**, J16 group | harvested |
+| Dealer fee | DLR · OTHER · &lt;N/A&gt; · Expense | `Dealer_Fee__c` — carried from v1, **not in this table before** (Q12c) | harvested |
+| Engineer stamps | ENGR · SUBCON · &lt;N/A&gt; · Expense | `Engineer_Stamps_Cost__c` | **provisional** |
+| Subcontractor | SUBCON · SUBCON · &lt;N/A&gt; · Expense | `Subcontractor_Cost__c` | **provisional** |
+| Audit software | SOFTWARE · OTHER · &lt;N/A&gt; · Expense | `Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` | **provisional** |
+| Referral fees | REFERRAL · OTHER · &lt;N/A&gt; · Expense | `Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c` | **provisional** |
+
+### Three v1 rows that would now DOUBLE-COUNT — collapsed
+
+The v2 field-meaning changes (`budget-v2-output-gap.md` §A) land directly on the mapping,
+and each of these would have posted a silently inflated number rather than failing:
+
+1. **GENO was three rows** (Total_Other + CO fee + permit). `Total_Other_Budget__c` is now
+   the whole J16 group including CO fee and permit → **one row**.
+2. **GENA summed Audit + QA.** `Audit_Labor_Cost__c` is now the whole GENA line → **one field**.
+3. **SLMC + the SLPC overhead row** are now the single `Management_Commission_Amt__c`.
+
+And GENO is deliberately **not** `Total_Other_Summary__c` (N13): that figure also contains
+the four standalone lines below it, so using it would double-count those instead.
+
+### Guards added with v3
+
+- **`commission_deal_type_ambiguous`** — both rep amounts non-zero aborts before any PUT.
+  D16 defense in depth: the calc already rejects this input, but the push reads *stored*
+  amounts which can be stale, and skip-zero cannot catch it because neither is zero.
+- **`pending_harvest_line_has_value`** — a non-zero `DC_Rebate_Amount__c` with no harvested
+  key aborts rather than dropping thousands in income silently.
+
+### Re-harvest gate
+
+**`docs/integrations/acumatica-budget-push.md` → "v3 RE-HARVEST RUNBOOK"** has the exact
+invoke payloads for a live RS and a live RSDC project, what to read out of each, and the
+five conditions that must all be true before a v3 push.
 
 ## 6. PO engine spec (pending Q2/Q5b)
 Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complete, M2 = balance at Glass on Roof; internal 75/25 (⚠ Q2 PO-vs-payroll); vendor via D4 config map; freeze rule on released POs; SF write-back per §4f; sandbox hand-proof first. Live attribute pull CORROBORATES: R251282 shows SLSCOM1 = exactly 2500 (cap hit), SLSCOM2 = 4814 balance.
@@ -176,7 +208,16 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
   - **Existing-field changes packaged separately** as `salesforce/v2-field-alignments/` (**MODIFY** package, 20 fields, pending deploy): Battery hours default 0→16 and NS 1-3 markup →25 on BOTH objects (both are create-mapped, so Solar-only would be overwritten by a blank Customer value), plus the Upgrade_225 / Gateway_* relabels. `Sales_Rep_Commission_PPW__c` was **already relabelled in the UI** to "3rd Party Rep Commission $/W" and is excluded. Generated by reading each field's live definition and changing one attribute — regenerate before deploying.
   - **Field package is LIVE:** all 111 INPUT_FIELDS resolve against the org and every §4c Cost default landed (261.40 … 0.06), verified 2026-08-20.
   - **Follow-up still open:** `Battery_Install_Hours__c` default is **0** in the org, not 16 — a fresh record gets zero battery labor until someone sets it.
-**C — mapping+push:** MAPPING_ROWS v3; live RS re-harvest (must show REFERRAL etc. — Q12); RSDC harvest; template selection.
+**C — mapping+push: 🔶 IN PROGRESS 2026-08-20** (branch `feat/mapping-v3`, build + report only, **no deploy, no live push**).
+  - **MAPPING_ROWS v3 written** — 20 active rows replacing v1's 18. Four commission lines (SLPC OUT / SLPC / SLMC / APPT COM) each with ONE source; the four D11 standalone lines (ENGR / SUBCON / SOFTWARE / REFERRAL); GENM material; GENO as a **single** row; both income lines; Dealer Fee carried over. Every v1 safety rule preserved: exact literals, `RESIDENTAL` misspelling, `<N/A>` literal, sum-into-one machinery, skip-zero on expense only, income-always, fail-loud on ≠1 match.
+  - **Three v1 rows would now DOUBLE-COUNT and were collapsed:** GENO was 3 rows (Total_Other + CO fee + permit) but v2's `Total_Other_Budget__c` already contains CO fee and permit; GENA was `Audit + QA` summed but v2's `Audit_Labor_Cost__c` is already both; SLMC + the SLPC overhead row are now the single `Management_Commission_Amt__c`. Each is pinned by a test named for the double-count it prevents.
+  - **Setter source changed** from `Geo_Commission_Amount__c` (the input rate, always 70) to `Setter_Commission_Amt__c` (what applied — 0 with no setter). v1 would have posted 70 on every job.
+  - **`*` added to the amount-expression grammar** — SOFTWARE and REFERRAL have no dedicated output field (extras-only per the gap doc), so their rows read `Price__c*Qty__c`, which is what the calc computes for a pass-through row.
+  - **Two new fail-loud guards:** both rep commission amounts non-zero → `commission_deal_type_ambiguous` (D16 defense in depth — skip-zero cannot catch it because neither is zero); and a non-zero `DC_Rebate_Amount__c` with no harvested key → `pending_harvest_line_has_value` rather than silently dropping the income.
+  - **5 of 20 keys are `provisional`** (3rd-party commission + the four standalone lines) and the **DC rebate has no key at all** — it is declared in `PENDING_HARVEST_ROWS`, deliberately out of the active mapping so RS projects still push.
+  - **23 tests added** (the Lambda had none); suite 316 green.
+  - **⛔ GATE: the live re-harvest has NOT run.** Payloads and the full read-the-output procedure are in `docs/integrations/acumatica-budget-push.md` → "v3 RE-HARVEST RUNBOOK". No v3 push until both reconciles come back with zero problems.
+**C (remaining):** RSDC template selection; MAPPING_ROWS freeze after the harvest.
 **D — PO engine:** after Q2/Q5b + vendor map + sandbox hand-proof.
 **E — attribute sync:** after Q10; sandbox hand-proof.
 **F — frontend:** commissions v3 inputs, COST adders, D7 read-only tabs, mapping deltas, PO/attribute status display.

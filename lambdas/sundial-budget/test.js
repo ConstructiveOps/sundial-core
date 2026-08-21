@@ -204,6 +204,15 @@ const FIELD_EXPECTED = {
   GP_Dollars__c: 8775.02,
   GP_Percent_With_Comm__c: 24.04,
   GP_Percent_No_Comm__c: 26.33,
+
+  // The §D output fields, promoted out of `extras` once they were deployed.
+  Internal_Rep_Commission_Amt__c: 0,
+  Management_Commission_Amt__c: 484,     // (.04 + .015) × 8800 — the SLMC line
+  Setter_Commission_Amt__c: 70,
+  DC_Rebate_Amount__c: 0,
+  Engineer_Stamps_Cost__c: 250,
+  Subcontractor_Cost__c: 528,
+  Total_Other_Summary__c: 3858,          // N13 — NOT Total_Other_Budget__c (2550)
 };
 
 /** v2 values with no Salesforce home yet — see the output gap list. */
@@ -260,6 +269,42 @@ const it = (name, fn) => {
   checks++;
   try { fn(); } catch (e) { console.error(`FAIL ${name}: ${e.message}`); failures++; }
 };
+
+it('Commission_Deal_Type__c writes the PICKLIST LABEL, never the internal token', () => {
+  // The field is a RESTRICTED picklist — 'third_party' would be rejected on save.
+  assert.strictEqual(fields.Commission_Deal_Type__c, '3rd Party');
+  assert.strictEqual(extras.dealType, 'third_party');
+
+  const internal = calculateBudget({
+    ...REVISED, Sales_Rep_Commission_PPW__c: 0, Internal_Rep_Commission_PPW__c: 0.25,
+  });
+  assert.strictEqual(internal.fields.Commission_Deal_Type__c, 'Internal');
+
+  const none = calculateBudget({
+    ...REVISED, Sales_Rep_Commission_PPW__c: 0, Internal_Rep_Commission_PPW__c: 0,
+  });
+  assert.strictEqual(none.fields.Commission_Deal_Type__c, 'None');
+
+  // Every emitted label must be one the picklist actually accepts.
+  const ALLOWED = new Set(['3rd Party', 'Internal', 'None']);
+  for (const r of [fields, internal.fields, none.fields]) {
+    assert.ok(ALLOWED.has(r.Commission_Deal_Type__c), `bad picklist value ${r.Commission_Deal_Type__c}`);
+  }
+});
+
+it('the §D fields track their extras twins exactly', () => {
+  const pairs = [
+    ['Internal_Rep_Commission_Amt__c', 'internalCommissionAmt'],
+    ['Management_Commission_Amt__c', 'managementCommissionAmt'],
+    ['Setter_Commission_Amt__c', 'setterCommissionAmt'],
+    ['DC_Rebate_Amount__c', 'dcRebateAmount'],
+    ['Engineer_Stamps_Cost__c', 'engineerStampsCost'],
+    ['Subcontractor_Cost__c', 'subcontractorCost'],
+    ['Total_Other_Summary__c', 'summaryTotalOther'],
+  ];
+  // They are deliberately in both maps; if they ever disagree, one of them is stale.
+  for (const [f, x] of pairs) assert.strictEqual(fields[f], extras[x], `${f} != extras.${x}`);
+});
 
 it('D16: both rep PPWs populated throws, it does not pick one', () => {
   assert.throws(

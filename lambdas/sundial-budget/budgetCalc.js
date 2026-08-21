@@ -53,6 +53,20 @@ const DC_REBATE_PPW = 0.45;
  */
 const ADDER_BURDEN_RATE = 0.75;
 
+/**
+ * Internal deal-type token -> the `Commission_Deal_Type__c` picklist LABEL.
+ *
+ * The field is a RESTRICTED picklist, so a raw token ('third_party') is not merely
+ * ugly — Salesforce rejects the save outright. The tokens stay snake_case in `extras`
+ * because that is what the push worker and the portal branch on; the label is a
+ * presentation concern that belongs at the boundary.
+ */
+const DEAL_TYPE_PICKLIST = {
+  third_party: '3rd Party',
+  internal: 'Internal',
+  none: 'None',
+};
+
 /** Per-watt labor coefficients, sheet F49/F50 (0.02) and F51 (0.005). */
 const PPW_LABOR_CONDUIT = 0.02;
 const PPW_LABOR_FLAT_ROOF = 0.02;
@@ -465,6 +479,10 @@ function calculateBudget(rec) {
   const costPPW = watts > 0 ? totalJobCost / watts : 0;            // J30
   const costPPWWithComm = costPPW + commissionPPW;                 // J31
 
+  // Deal type (D16). Computed once here so `fields` (as a picklist label) and
+  // `extras` (as a token) cannot disagree.
+  const dealType = thirdPartyPPW > 0 ? 'third_party' : internalPPW > 0 ? 'internal' : 'none';
+
   // =========================================================================
   // Salesforce output fields
   // =========================================================================
@@ -539,16 +557,36 @@ function calculateBudget(rec) {
     GP_Dollars__c: r2(gpDollars),
     GP_Percent_With_Comm__c: r2(gpPctWithComm * 100),
     GP_Percent_No_Comm__c: r2(gpPctNoComm * 100),
+
+    // ---- The §D output fields (deployed 2026-08-20) ----------------------
+    // Promoted out of `extras` now that they have somewhere to land. Reviewed and
+    // approved in docs/integrations/budget-v2-output-gap.md §D.
+    Internal_Rep_Commission_Amt__c: r2(internalComm),
+    Management_Commission_Amt__c: r2(mgmtComm),
+    Setter_Commission_Amt__c: r2(setterComm),
+    // MUST be a picklist LABEL, not the internal token. Commission_Deal_Type__c is a
+    // RESTRICTED picklist (`3rd Party` / `Internal` / `None`), so writing the raw
+    // 'third_party' would be rejected by Salesforce on every save.
+    Commission_Deal_Type__c: DEAL_TYPE_PICKLIST[dealType],
+    DC_Rebate_Amount__c: r2(dcRebate),
+    Engineer_Stamps_Cost__c: r2(engineerStamps),
+    Subcontractor_Cost__c: r2(subcontractor),
+    Total_Other_Summary__c: r2(summaryTotalOther),
   };
 
   /**
-   * Computed v2 values with NO Salesforce field to land in — returned so the push
-   * worker, the portal and the tests can use them today, and so the gap list is
-   * derivable from code rather than from a doc that drifts.
-   * See docs/integrations/budget-v2-output-gap.md.
+   * Computed v2 values, ALL of them — including the eight that now have Salesforce
+   * fields (see `fields` above and the disposition table in
+   * docs/integrations/budget-v2-output-gap.md).
+   *
+   * The eight are deliberately in BOTH maps rather than moved: `fields` is what gets
+   * PATCHed to Salesforce, `extras` is the calc's computed-value surface that the push
+   * worker and the portal read. Keeping them here means a consumer that already reads
+   * `extras.dealType` does not break, and the duplication is free because both come
+   * from the same local.
    */
   const extras = {
-    dealType: thirdPartyPPW > 0 ? 'third_party' : internalPPW > 0 ? 'internal' : 'none',
+    dealType,
     thirdPartyCommissionAmt: r2(thirdPartyComm),
     internalCommissionAmt: r2(internalComm),
     managementCommissionAmt: r2(mgmtComm),

@@ -238,3 +238,137 @@ janitor. This is expected and recoverable:
   Budget" again runs the full push and resets the status to `Pushed` (or `Failed` with a
   reason). No manual Acumatica cleanup is needed.
 - If it recurs, check CloudWatch for the worker's exit cause before re-pushing.
+
+---
+
+# v3 RE-HARVEST RUNBOOK (Workstream C gate — run before any v3 push)
+
+> **Status 2026-08-20: MAPPING_ROWS v3 is BUILT and NOT VERIFIED.** Five of its twenty
+> rows carry a **provisional** key — a best reading of §5, not something harvested — and
+> the DC rebate line has no key at all. Nothing may be pushed with v3 until the two
+> reconciles below come back clean. The write path already refuses on any key that
+> matches ≠ 1 line, so a wrong guess aborts rather than mis-posting; the point of the
+> harvest is to find out *before* someone presses the button.
+
+## What the harvest has to answer
+
+| # | Question | Where the answer is |
+|---|---|---|
+| **Q12a** | Do `REFERRAL`, `SOFTWARE`, `ENGR` and `SUBCON` lines exist in the LIVE RS scaffold? D13 says REFERRAL is a **new task code absent from the v1 sandbox scaffold** — if it is missing from live too, the template must be fixed in Acumatica before any push. | `lines[]` in the RS reconcile |
+| **Q12b** | Does the BALANCE income line's amount include the DC rebate, or does the rebate stand alone? v3 assumes **stand-alone** (BALANCE = contract − material) so the two do not double-count. | RSDC reconcile + Harmon |
+| **Q12c** | Is `DLR` (Dealer Fee) genuinely an expense line, given the calc already subtracts the dealer fee from Balance of Revenue? Carried over from v1; possibly a v1 double-count. | RS reconcile + Harmon |
+| **DC key** | The DC REBATE income line's full 4-part key (`ProjectTaskID` · `AccountGroup` · `InventoryID` · `Type`). | `lines[]` in the **RSDC** reconcile |
+| **1:1** | Do all 20 v3 rows match exactly one scaffold line each? | `mappingMatch.problems` — must be `[]` |
+
+## (a) LIVE RS PROJECT — reconcile
+
+Read-only. No PUT, no Salesforce write-back.
+
+**PowerShell (payload via file — the AWS CLI's inline-JSON quoting is unreliable under
+PS 5.1, see the wire-script notes):**
+
+```powershell
+$NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText("$env:TEMP\rs-payload.json", '{"recordId":"<SUNDIAL_SOLAR_ID_RS>"}', $NoBom)
+
+aws lambda invoke --function-name sundial-acumatica-budget-push --region us-west-1 `
+  --cli-binary-format raw-in-base64-out `
+  --payload "file://$env:TEMP\rs-payload.json" `
+  "$env:TEMP\rs-reconcile.json"
+
+Get-Content "$env:TEMP\rs-reconcile.json" | ConvertFrom-Json | ConvertTo-Json -Depth 8 |
+  Out-File -Encoding utf8 "$env:TEMP\rs-reconcile.pretty.json"
+```
+
+`{"acumaticaProjectId":"R2xxxxx"}` works too if you have the Acumatica ID but not the
+Salesforce record.
+
+**Read the result for:**
+
+```powershell
+$r = Get-Content "$env:TEMP\rs-reconcile.json" | ConvertFrom-Json
+
+$r.lineCount                                   # how many scaffold lines exist
+$r.mappingMatch.problems                       # MUST be empty
+$r.mappingMatch.problems | Select reason, key  # if not, this names every miss
+
+# Q12a — do the four new task codes exist at all?
+$r.lines | Where-Object { $_.taskId -in 'REFERRAL','SOFTWARE','ENGR','SUBCON' } |
+  Select taskId, accountGroup, inventoryId, type, description
+
+# The full scaffold, for the key table
+$r.lines | Select taskId, accountGroup, inventoryId, type, uom | Sort taskId | Format-Table
+```
+
+**Expected failures on a first run, and what each means:**
+
+| `problems` entry | Meaning | Fix |
+|---|---|---|
+| `no scaffolded line matched` for `SLPC  OUT \| OTHER \| M1&M2COM \| Expense` | the third-party commission task code or its spacing is wrong | take the real key from `lines[]` and correct the row |
+| same for `ENGR \| SUBCON \| <N/A>` | §5's "ENGR?" guess is wrong — the v1 scaffold had **both** an ENGR "Engineering Costs" and a SUBCON line | pick the right one from `lines[]` |
+| same for `REFERRAL \| OTHER \| <N/A>` | either the InventoryID guess is wrong **or the line does not exist** (D13) | if absent from `lines[]` entirely → **Acumatica template change**, not a code change |
+| same for `SOFTWARE \| OTHER \| <N/A>` | InventoryID guess wrong | correct from `lines[]` |
+
+## (b) LIVE RSDC PROJECT — reconcile
+
+Same invoke, different record. **This is the only way to learn the DC rebate key.**
+
+```powershell
+[System.IO.File]::WriteAllText("$env:TEMP\rsdc-payload.json", '{"recordId":"<SUNDIAL_SOLAR_ID_RSDC>"}', $NoBom)
+
+aws lambda invoke --function-name sundial-acumatica-budget-push --region us-west-1 `
+  --cli-binary-format raw-in-base64-out `
+  --payload "file://$env:TEMP\rsdc-payload.json" `
+  "$env:TEMP\rsdc-reconcile.json"
+```
+
+```powershell
+$d = Get-Content "$env:TEMP\rsdc-reconcile.json" | ConvertFrom-Json
+
+# The DC rebate line — an Income line that the RS scaffold does NOT have.
+$d.lines | Where-Object { $_.type -eq 'Income' } |
+  Select taskId, accountGroup, inventoryId, type, description
+
+# Diff against RS: whatever is here and not there is the RSDC delta (should be 1 line).
+$rs = (Get-Content "$env:TEMP\rs-reconcile.json" | ConvertFrom-Json).lines.key
+$d.lines | Where-Object { $_.key -notin $rs } | Select taskId, accountGroup, inventoryId, type
+```
+
+Then fill the key into `PENDING_HARVEST_ROWS` in
+`lambdas/sundial-acumatica-budget-push/index.js` and **move the row up into
+`MAPPING_ROWS`**. Until that happens, any job with a non-zero `DC_Rebate_Amount__c`
+aborts with `pending_harvest_line_has_value` rather than silently dropping the income.
+
+## (c) Optional — dry-run the amounts
+
+Once both reconciles are clean, this shows exactly what each line *would* receive,
+still without writing:
+
+```powershell
+[System.IO.File]::WriteAllText("$env:TEMP\dry-payload.json", '{"dryRunWrite":true,"recordId":"<SUNDIAL_SOLAR_ID>"}', $NoBom)
+
+aws lambda invoke --function-name sundial-acumatica-budget-push --region us-west-1 `
+  --cli-binary-format raw-in-base64-out `
+  --payload "file://$env:TEMP\dry-payload.json" `
+  "$env:TEMP\dry-run.json"
+
+(Get-Content "$env:TEMP\dry-run.json" | ConvertFrom-Json).results |
+  Select key, action, amount, qty | Format-Table
+```
+
+Sanity-check against the record's own fields: the GENM/MATERIAL amount should equal
+`Total_Material_Budget__c`, GENO should equal `Total_Other_Budget__c` (**not** the sum of
+that plus CO fee plus permit — that was the v1 shape), and the two income amounts should
+sum to `Contract_Amount__c`.
+
+## Gate — do not push until all of these are true
+
+1. RS reconcile: `problems` is empty and all 20 rows matched.
+2. RSDC reconcile: `problems` is empty, and the DC rebate key is recorded and moved
+   into `MAPPING_ROWS`.
+3. Q12a answered: all four new task codes exist live (or the Acumatica template has been
+   fixed so they do).
+4. Q12b and Q12c answered by Harmon — the rebate's effect on BALANCE, and whether the
+   dealer fee belongs as an expense line.
+5. Every remaining `keyStatus: "provisional"` has been changed to `"harvested"` to
+   record that a real scaffold confirmed it.

@@ -80,27 +80,81 @@ export const PENDING_HARMON_SIGNOFF = {
 };
 
 export const MAPPING_ROWS = [
-  // line, taskId, accountGroup, type, inventoryId, amountField, hoursField, note.
-  // Full 4-part key verbatim from the R269999 harvest.
-  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Contract_Amount__c-Total_Material_Budget__c", hoursField: null, note: "Income 1 of 2. BALANCE/BILLING/Income, InventoryID <N/A>. Amount = contract value net of the material billing (which posts to GENM/BILLING) so the two income lines sum to Contract_Amount__c." },
-  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null, note: "Income 2 of 2. GENM/BILLING/Income — distinct from GENM/MATERIAL cost via AccountGroup+Type. Material billed to the customer at cost (Total_Material_Budget__c, same value as the GENM/MATERIAL expense line)." },
-  { line: "Dealer Fee", taskId: "DLR", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Dealer_Fee__c", hoursField: null, note: "DLR/OTHER/<N/A>. Only send when > 0." },
-  { line: "Sales Rep Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, note: "Sums with Overhead Commission into the single SLPC/LABOR/SALESCOMM line." },
-  { line: "Sales Manager Commission", taskId: "SLMC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Sales_Mgr_Commission_Amt__c", hoursField: null },
-  { line: "Geo Commission", taskId: "APPT COM", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Geo_Commission_Amount__c", hoursField: null, note: "Confirmed from role semantics (appointment-setter flat commission); Harmon sign-off required before first PRODUCTION push (PENDING_HARMON_SIGNOFF)." },
-  { line: "Overhead Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Overhead_Commission_Amt__c", hoursField: null, note: "Sums with Sales Rep Commission into the single SLPC/LABOR/SALESCOMM line." },
-  { line: "Commission Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Commission_Burden_Amt__c", hoursField: null, note: "BURDENEXR/LABOR/SALESCOMM — InventoryID SALESCOMM separates it from Labor Burden (RESIDENTAL)." },
-  { line: "Audit + QA Labor", taskId: "GENA", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Audit_Labor_Cost__c+QA_Labor_Cost__c", hoursField: "GENA_Hours__c", note: "Labor line GENA/LABOR/RESIDENTAL, UOM=HOUR, qty from GENA_Hours__c. NOT the GENA/OTHER/AUDIT SVCS outside-services line — this is internal employee audit/QA labor." },
-  { line: "Roofing Labor", taskId: "ROOFCOM", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Roofing_Labor_Cost__c", hoursField: null },
-  { line: "S1 Install Labor", taskId: "S1", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S1_Labor_Cost__c", hoursField: "S1_Hours__c" },
-  { line: "S2 Install Labor", taskId: "S2", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S2_Labor_Cost__c", hoursField: "S2_Hours__c" },
-  { line: "S3 Labor (Battery + Adders)", taskId: "S3", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S3_Labor_Cost__c", hoursField: "S3_Hours__c" },
-  { line: "Labor Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Total_Labor_Burden_Budget__c", hoursField: null, note: "BURDENEXR/LABOR/RESIDENTAL — InventoryID RESIDENTAL separates it from Commission Burden (SALESCOMM)." },
-  { line: "Total Material", taskId: "GENM", accountGroup: "MATERIAL", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null },
-  { line: "Other Material", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Other_Budget__c", hoursField: null, note: "Sums with CO Fee + Permit into the single GENO/OTHER/<N/A> line." },
-  { line: "Constructive Ops Fee", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Constructive_Ops_Fee__c", hoursField: null, note: "Sums into the GENO/OTHER/<N/A> line." },
-  { line: "Permit Pass-Through", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Permit_Pass_Through_Cost__c", hoursField: null, note: "Sums into the GENO/OTHER/<N/A> line." },
+  // line, taskId, accountGroup, type, inventoryId, amountField, hoursField, keyStatus, note.
+  //
+  // keyStatus: "harvested"   = the 4-part key came verbatim from the R269999 scaffold
+  //            "provisional" = v3-only line whose key is this doc's best reading of §5
+  //                            and is CONFIRMED OR REFUTED BY THE RE-HARVEST. A
+  //                            provisional key that matches nothing aborts the push
+  //                            loudly, which is exactly what a guess should do.
+
+  // ---- INCOME (always written, never skip-zero) ---------------------------
+  { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Contract_Amount__c-Total_Material_Budget__c", hoursField: null, keyStatus: "harvested", note: "Income 1 of 2. Contract net of the material billing (GENM/BILLING) so the two income lines sum to the contract. DELIBERATELY EXCLUDES the DC rebate: the rebate gets its OWN income line, so adding it here too would double-count the revenue. Confirm at re-harvest (Q12b)." },
+  { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null, keyStatus: "harvested", note: "Income 2 of 2. Distinct from the GENM/MATERIAL cost line via AccountGroup+Type." },
+
+  // ---- COMMISSIONS (D9/D10/D16/D17) ---------------------------------------
+  // FOUR lines now, not two, each with exactly ONE source field. The v1 shape
+  // (SLPC = rep + overhead summed) is gone: overhead moved into the SLMC management
+  // line, and the rep split in two by deal type.
+  { line: "3rd Party Rep Commission", taskId: "SLPC  OUT", accountGroup: "OTHER", type: "Expense", inventoryId: "M1&M2COM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, keyStatus: "provisional", note: "D9/D16. Sales_Rep_Commission_Amt__c now holds the THIRD-PARTY amount only (the field was relabelled '3rd Party Rep Commission $/W'). ZERO on an internal deal, so skip-zero leaves this line alone. AccountGroup OTHER + InventoryID M1&M2COM per §5 - NOT LABOR/SALESCOMM like the other three. The sheet label at H7 is 'SLPC  OUT' with TWO spaces; that spacing is reproduced here and MUST be confirmed by the re-harvest." },
+  { line: "Internal Rep Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Internal_Rep_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D9/D16. Zero on a third-party deal. Same key v1 used for the rep+overhead sum, but the amount source is now the INTERNAL rep alone." },
+  { line: "Management Commission", taskId: "SLMC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Management_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D10. ONE line from the COMBINED (.04 + .015) amount. Do NOT sum Sales_Mgr_Commission_Amt__c + Overhead_Commission_Amt__c here - Management_Commission_Amt__c already IS that sum, and adding the components too would double it. The components stay on the record only so the attribute sync can split them (MGRCOM* / MGMTOR*)." },
+  { line: "Setter Commission", taskId: "APPT COM", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Setter_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D17. Source CHANGED from Geo_Commission_Amount__c (the INPUT rate, always 70) to Setter_Commission_Amt__c (what actually APPLIED - 0 when the Customer has no Setter__c). v1 would have posted 70 to every job regardless. Still needs Harmon sign-off on the APPT COM code (PENDING_HARMON_SIGNOFF)." },
+  { line: "Commission Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Commission_Burden_Amt__c", hoursField: null, keyStatus: "harvested", note: "75% of (internal + management + setter); third-party is NOT burdened. InventoryID SALESCOMM separates it from the RESIDENTAL labor burden." },
+
+  // ---- LABOR + HOURS ------------------------------------------------------
+  { line: "Audit + QA Labor", taskId: "GENA", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Audit_Labor_Cost__c", hoursField: "GENA_Hours__c", keyStatus: "harvested", note: "WARNING: v1 summed Audit_Labor_Cost__c + QA_Labor_Cost__c. In v2 Audit_Labor_Cost__c IS the whole GENA line (audit + QA, sheet J21), so keeping the v1 sum would DOUBLE-COUNT QA. See budget-v2-output-gap.md section A." },
+  { line: "Roofing Labor", taskId: "ROOFCOM", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Roofing_Labor_Cost__c", hoursField: null, keyStatus: "harvested", note: "Piece rate - no hours source, so the scaffold qty is left alone." },
+  { line: "S1 Install Labor", taskId: "S1", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S1_Labor_Cost__c", hoursField: "S1_Hours__c", keyStatus: "harvested" },
+  { line: "S2 Install Labor", taskId: "S2", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S2_Labor_Cost__c", hoursField: "S2_Hours__c", keyStatus: "harvested" },
+  { line: "S3 Labor (Battery + Adders + NS)", taskId: "S3", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "S3_Labor_Cost__c", hoursField: "S3_Hours__c", keyStatus: "harvested", note: "v2 S3 = battery + ALL standard-adder + ALL NS-block labor (five blocks now, at the Powerwall rate)." },
+  { line: "Labor Burden", taskId: "BURDENEXR", accountGroup: "LABOR", type: "Expense", inventoryId: "RESIDENTAL", amountField: "Total_Labor_Burden_Budget__c", hoursField: null, keyStatus: "harvested", note: "InventoryID RESIDENTAL separates it from the SALESCOMM commission burden." },
+
+  // ---- MATERIAL / OTHER ---------------------------------------------------
+  { line: "Total Material", taskId: "GENM", accountGroup: "MATERIAL", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null, keyStatus: "harvested", note: "Sheet J15: equipment + BOS + roofing + standard-adder material + NS material (no markup)." },
+  { line: "Other (GENO)", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Total_Other_Budget__c", hoursField: null, keyStatus: "harvested", note: "WARNING: ONE ROW, not three. v1 summed Total_Other_Budget__c + Constructive_Ops_Fee__c + Permit_Pass_Through_Cost__c into this key. In v2 Total_Other_Budget__c IS the whole J16 group - Material Other + CO fee + permit + Active Monitoring + LR Battery Warranty (D12) - so the v1 rows would double-count CO fee and permit. This is the GENO group (J16), deliberately NOT Total_Other_Summary__c (N13), which also contains the four standalone lines below and would double-count those instead." },
+  { line: "Dealer Fee", taskId: "DLR", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Dealer_Fee__c", hoursField: null, keyStatus: "harvested", note: "CARRIED OVER FROM v1 AND NOT IN THE section 5 v3 TABLE. Kept because the line exists in the live scaffold and dropping it silently would leave a real line unwritten. Note the dealer fee is ALSO subtracted from Balance of Revenue in the calc - confirm at re-harvest whether it belongs as an expense line too, or whether that was a v1 double-count (Q12c)." },
+
+  // ---- STANDALONE COST LINES (D11/D13) - NEW IN v3 ------------------------
+  // All four were computed in BRADS and then EXCLUDED from Total Job Cost; D11 fixed
+  // that. None existed in the v1 sandbox scaffold, so every key here is provisional.
+  { line: "Engineer Stamps", taskId: "ENGR", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Engineer_Stamps_Cost__c", hoursField: null, keyStatus: "provisional", note: "Sheet J17 / E55, from the Structural-Electrical Engineer Stamp adder. Section 5 writes the task as 'ENGR?' - the v1 scaffold had BOTH an ENGR 'Engineering Costs' line and a SUBCON line, so which one this is MUST come from the re-harvest." },
+  { line: "Subcontractor", taskId: "SUBCON", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Subcontractor_Cost__c", hoursField: null, keyStatus: "provisional", note: "Sheet J18 / E56, from the Bird Blocking adder (per-watt cost x watts)." },
+  { line: "Audit Software", taskId: "SOFTWARE", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c", hoursField: null, keyStatus: "provisional", note: "Sheet J19 / E60. There is NO dedicated SF output field (left extras-only per gap doc section D), so the amount is the PRODUCT of the two adder fields - identical to what the calc computes, where a pass-through row's cost IS price x qty." },
+  { line: "Referral Fees", taskId: "REFERRAL", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "provisional", note: "Sheet J20 / E63. D13: this is a NEW task code absent from the v1 scaffold - the live template MUST contain it or the push aborts. Section 5 leaves the InventoryID as '?'; <N/A> is the guess, matching the other OTHER lines. Same price x qty product as Software." },
 ];
+
+/**
+ * The DC REBATE income line - DECLARED BUT NOT ACTIVE.
+ *
+ * Its 4-part key is unknown until an RSDC project is harvested (section 5, D2/D3), and
+ * the line only exists on RSDC scaffolds at all. It is kept OUT of MAPPING_ROWS on
+ * purpose, because both alternatives are worse:
+ *
+ *   - putting it in with a null key would make matchMappingToLines flag a missing key
+ *     part and abort EVERY push, including plain RS projects that correctly have no
+ *     rebate line;
+ *   - leaving it out entirely would silently drop $0.45/W of income on RSDC jobs.
+ *
+ * So: absent from the mapping, and GUARDED in writeBudgetLines - a job whose
+ * DC_Rebate_Amount__c is non-zero cannot be pushed until this key is filled in. Once the
+ * RSDC reconcile reports it, fill taskId/accountGroup/inventoryId and move the row up
+ * into MAPPING_ROWS.
+ */
+export const PENDING_HARVEST_ROWS = [
+  {
+    line: "Income - DC Rebate (RSDC only)",
+    taskId: null,
+    accountGroup: null,
+    inventoryId: null,
+    type: "Income",
+    amountField: "DC_Rebate_Amount__c",
+    hoursField: null,
+    keyStatus: "unknown",
+    note: "0.45 x watts when Domestic Content is set (D2). Key TBD from the RSDC scaffold harvest.",
+  },
+];
+
 
 // Unwrap an Acumatica field value ({ value: x } or scalar).
 function av(v) {
@@ -215,31 +269,48 @@ function round2(n) {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
-// Evaluate a field expression against record values. Supports + and - across field
-// names — e.g. "Audit_Labor_Cost__c+QA_Labor_Cost__c" or
-// "Contract_Amount__c-Total_Material_Budget__c" (BALANCE income). Field API names
-// contain no + or -, so splitting on them is safe. Missing/blank fields count as 0.
+// Evaluate a field expression against record values.
+//
+// Grammar: TERMS separated by + / -, each term a PRODUCT of field names joined by *.
+//   "Contract_Amount__c-Total_Material_Budget__c"                  (BALANCE income)
+//   "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c"        (v3 pass-throughs)
+// Salesforce API names contain none of + - *, so splitting on them is unambiguous.
+// Missing/blank fields count as 0.
+//
+// WHY MULTIPLICATION EXISTS (added for v3): the SOFTWARE and REFERRAL budget lines have
+// no dedicated Salesforce output field — the gap review left them extras-only because
+// they are "trivially price × qty". True, but the push reads FIELDS off the record, not
+// the calc's return value, so it needs to do that multiplication itself. The product is
+// identical to what budgetCalc computes for a pass-through row.
+//
+// A missing factor zeroes the whole term, which is a sharper failure than in a sum — but
+// every field named here is included in budgetFieldNames() and therefore in the SOQL, so
+// a name that does not exist fails loudly at query time rather than quietly returning 0.
 function evalFieldExpr(spec, values) {
   let total = 0;
   for (const term of String(spec).match(/[+-]?[^+-]+/g) || []) {
-    const t = term.trim();
+    let t = term.trim();
     if (!t) continue;
     let sign = 1;
-    let name = t;
-    if (name[0] === "+") name = name.slice(1).trim();
-    else if (name[0] === "-") { sign = -1; name = name.slice(1).trim(); }
-    total += sign * numOf(values?.[name]);
+    if (t[0] === "+") t = t.slice(1).trim();
+    else if (t[0] === "-") { sign = -1; t = t.slice(1).trim(); }
+    let product = 1;
+    for (const factor of t.split("*")) product *= numOf(values?.[factor.trim()]);
+    total += sign * product;
   }
   return total;
 }
 
 // Every distinct Sundial_Solar__c field referenced by MAPPING_ROWS (amount + hours
 // sources; +/- expressions split), so a caller can SELECT exactly these.
+// Includes PENDING_HARVEST_ROWS' sources so the DC-rebate guard below can see
+// DC_Rebate_Amount__c on the record — a guard that cannot read its own trigger field
+// is not a guard.
 export function budgetFieldNames() {
   const names = new Set();
-  for (const r of MAPPING_ROWS) {
+  for (const r of [...MAPPING_ROWS, ...PENDING_HARVEST_ROWS]) {
     if (r.amountField)
-      for (const f of r.amountField.split(/[+-]/)) {
+      for (const f of r.amountField.split(/[+\-*]/)) {
         const n = f.trim();
         if (n) names.add(n);
       }
@@ -303,6 +374,53 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
       aborted: "no_scaffolded_lines",
       acumaticaProjectId,
       message: "ProjectBudget returned 0 lines — never create lines from scratch.",
+    };
+  }
+
+  // 1a) DEAL-TYPE GUARD (D16) — defense in depth.
+  //
+  // budgetCalc already throws when both rep PPWs are populated, so a record that
+  // reaches here should be unambiguous. But the push reads STORED AMOUNTS, which could
+  // be stale (calculated before the second PPW was entered, or written by something
+  // other than the calc). Two non-zero rep amounts would post commission to BOTH the
+  // SLPC OUT and SLPC lines — paying the same commission twice in the budget — and
+  // skip-zero would not catch it, because neither is zero. Refuse.
+  const thirdPartyAmt = numOf(budgetValues?.Sales_Rep_Commission_Amt__c);
+  const internalAmt = numOf(budgetValues?.Internal_Rep_Commission_Amt__c);
+  if (thirdPartyAmt > 0 && internalAmt > 0) {
+    return {
+      ok: false,
+      aborted: "commission_deal_type_ambiguous",
+      acumaticaProjectId,
+      message:
+        `Both Sales_Rep_Commission_Amt__c (${thirdPartyAmt}, 3rd party) and ` +
+        `Internal_Rep_Commission_Amt__c (${internalAmt}) are non-zero. A deal is either ` +
+        "third-party or internal (D16) and they post to different budget lines; writing " +
+        "both would double-pay the commission. Recalculate the budget — the calc rejects " +
+        "this input — then re-push.",
+    };
+  }
+
+  // 1b) PENDING-HARVEST GUARD — a line we cannot key yet must not be silently dropped.
+  //
+  // The DC rebate is the live case: its 4-part key is unknown until an RSDC scaffold is
+  // harvested. On a plain RS job the amount is 0 and this is a no-op. On an RSDC job it
+  // is real income (0.45 × watts), and pushing without it would understate revenue by
+  // thousands with nothing in the output to say so.
+  const pendingWithValue = PENDING_HARVEST_ROWS
+    .map((r) => ({ row: r, amount: sumFields([r.amountField], budgetValues) }))
+    .filter((p) => p.amount !== 0);
+  if (pendingWithValue.length > 0) {
+    return {
+      ok: false,
+      aborted: "pending_harvest_line_has_value",
+      acumaticaProjectId,
+      message:
+        "A budget line whose Acumatica key is still unknown has a non-zero amount, so " +
+        "pushing would silently drop it. Harvest the key from an RSDC scaffold " +
+        "(reconcile), fill it into PENDING_HARVEST_ROWS, and move the row into " +
+        "MAPPING_ROWS.",
+      lines: pendingWithValue.map((p) => ({ line: p.row.line, amount: p.amount, source: p.row.amountField })),
     };
   }
 

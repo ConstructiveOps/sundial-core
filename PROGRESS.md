@@ -1,5 +1,77 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — MAPPING_ROWS v3 + re-harvest prep (build + report; nothing pushed)
+
+Workstream C. Branch `feat/mapping-v3`, and the first thing worth recording is where it
+is cut from: **`feat/budget-calc-v2` was never merged to master.** Master still carries
+the v1 HOLLAND calc, so a branch off it could not have done the calc follow-up at all —
+`extras` does not exist there. Branched off `feat/budget-calc-v2` instead; merging that
+first makes this fast-forward cleanly. Both Salesforce field packages *are* deployed
+(verified against the org, all eight output fields present, every Cost default and
+alignment landed) — it is only the git merge that is outstanding.
+
+**Calc follow-up: the eight §D outputs are written back now.** Promoted into the `fields`
+map rather than bolted onto handler.js, so the fixture covers them; kept in `extras` too,
+so anything already reading `extras.dealType` keeps working, with a test asserting the two
+never disagree. One thing that would have failed on the first real save:
+`Commission_Deal_Type__c` is a **restricted** picklist, so the internal token
+`'third_party'` had to be mapped to the label `'3rd Party'` — a raw token is rejected
+outright, not coerced. Fixture 166 → 175.
+
+**MAPPING_ROWS v3: 20 rows, and three of the v1 rows had become double-counts.** This is
+the §A field-meaning problem arriving where it actually costs money:
+
+- **GENO was three rows** — Total_Other + CO fee + permit — but v2's
+  `Total_Other_Budget__c` *is* the whole J16 group including CO fee and permit. Left
+  alone it would have posted those twice.
+- **GENA summed Audit + QA.** `Audit_Labor_Cost__c` is now already both.
+- **SLMC plus the SLPC overhead row** are now the single `Management_Commission_Amt__c`.
+
+None of the three would have thrown. Each is now one row with one source and a test named
+for the double-count it prevents.
+
+Also worth its own line: the **setter row read the wrong field in v1**. It mapped
+`Geo_Commission_Amount__c`, which is the *input rate* and is always 70 — so v1 would have
+posted a $70 setter commission on every job whether or not one existed. v3 reads
+`Setter_Commission_Amt__c`, which is 0 when the Customer has no `Setter__c` (D17).
+
+**Two structural things the v3 table forced.** SOFTWARE and REFERRAL have no dedicated
+output field — the gap review left them extras-only as "trivially price × qty", which is
+true but the push reads *fields off the record*, not the calc's return value. So the
+amount-expression grammar gained `*`, and those two rows read `Price__c*Qty__c`, which is
+exactly what the calc computes for a pass-through row. And the **DC rebate has no key at
+all** until an RSDC scaffold is harvested; it is declared in `PENDING_HARVEST_ROWS`
+outside the active mapping, because putting it in with a null key would abort every push
+including plain RS jobs, while leaving it out entirely would silently drop $0.45/W of
+income on RSDC ones.
+
+**Two new fail-loud guards.** Both rep commission amounts non-zero aborts before any PUT
+— D16 defense in depth, and the case skip-zero specifically cannot catch, because neither
+amount is zero and both lines would post. And a non-zero `DC_Rebate_Amount__c` with no
+harvested key aborts rather than dropping the income.
+
+**23 tests for a Lambda that had none.** It writes real money into Acumatica and half its
+rows changed meaning; the suite pins the things that would post a *wrong number* rather
+than fail — one GENO row, one GENA field, no component double-map, the applied-setter
+source, the deal-type refusal, the DC guard — alongside the v1 safety rules the rewrite
+had to preserve. The first run failed six of them for a good reason: the Acumatica stub
+returned already-mapped line objects while `readProjectBudgetLines` maps from the raw
+`ProjectTaskID` shape itself, so every key came out undefined. Moving the stub to the real
+boundary fixed it and is the right place for it to sit. Suite 316.
+
+**Nothing is verified against Acumatica, and five keys are guesses.** The third-party
+commission line and the four D11 standalone lines carry `keyStatus: "provisional"` — §5's
+best reading, not something harvested. A wrong guess aborts the push loudly (the ≠1-match
+rule) rather than mis-posting, which is the correct failure, but they have to be
+confirmed. The re-harvest runbook is in `acumatica-budget-push.md` with the exact invoke
+payloads for a live RS and a live RSDC project, what to read out of each output, and five
+gate conditions. It also flags two questions for Harmon that the code cannot settle:
+whether BALANCE income includes the rebate (v3 assumes not, so the two cannot
+double-count), and whether `DLR` is genuinely an expense line given the calc already
+subtracts the dealer fee from Balance of Revenue — that one may be a v1 double-count, and
+it is carried over rather than dropped because removing a line that exists in the live
+scaffold would leave it unwritten.
+
 ## 2026-08-20 — v2 budget: output-field package + field-alignment package (both PACKAGE-ONLY)
 
 Gap list approved, so two packages on `feat/budget-calc-v2`. Neither deployed.

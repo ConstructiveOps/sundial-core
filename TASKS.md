@@ -4,6 +4,26 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## MAPPING_ROWS v3 + re-harvest prep (2026-08-20, Workstream C)
+
+Branch `feat/mapping-v3`. **Build + report only — no deploy, no live push.** Gate discipline: nothing pushes until the re-harvest verifies.
+
+- [!] **BRANCH BASE NOTE: `feat/budget-calc-v2` was NOT merged to master.** This branch is cut from `feat/budget-calc-v2`, not master — master still has the v1 HOLLAND calc, so a branch off it could not have done step 1 at all. Merge `feat/budget-calc-v2` first and this fast-forwards cleanly. (Both SF field packages ARE deployed — verified in the org; it is only the git merge that is outstanding.)
+- [x] **Calc follow-up: the 8 §D outputs are now written back.** Promoted into budgetCalc's `fields` map (which is what handler.js PATCHes) and kept in `extras` so existing readers don't break. `Commission_Deal_Type__c` maps the internal token to the **picklist label** — writing `'third_party'` to a restricted picklist would be rejected on every save. Fixture 166 → **175** (7 new field assertions + 2 behaviours).
+- [x] **MAPPING_ROWS v3** — 20 active rows. Four commission lines each with ONE source, the four D11 standalone lines, GENM, single-row GENO, both income lines, Dealer Fee. All v1 safety rules preserved (exact literals, `RESIDENTAL`, `<N/A>`, sum-into-one, skip-zero expense-only, income-always, fail-loud on ≠1).
+- [x] **Three v1 rows collapsed because v2 field meanings changed them into double-counts:** GENO 3→1 (`Total_Other_Budget__c` already contains CO fee + permit), GENA sum→1 field (`Audit_Labor_Cost__c` is already audit+QA), SLMC + SLPC-overhead → the single `Management_Commission_Amt__c`. Each has a test named for the double-count it prevents.
+- [x] **Setter source fixed:** `Geo_Commission_Amount__c` (input rate, always 70) → `Setter_Commission_Amt__c` (what applied, 0 with no setter). v1 would have posted 70 on every job.
+- [x] **`*` added to the amount-expression grammar** so SOFTWARE and REFERRAL can read `Price__c*Qty__c` — they have no dedicated output field (extras-only by the gap review) and the push reads fields, not the calc's return value.
+- [x] **Two fail-loud guards:** `commission_deal_type_ambiguous` (both rep amounts non-zero — skip-zero can't catch it since neither is zero) and `pending_harvest_line_has_value` (a non-zero DC rebate with no harvested key aborts rather than dropping the income).
+- [x] **23 tests** for a Lambda that had none; suite **316** green.
+- [!] **⛔ GATE — TIM: run the two reconciles.** Payloads, output-reading commands and the five pass conditions: `docs/integrations/acumatica-budget-push.md` → "v3 RE-HARVEST RUNBOOK". Supply a live **RS** Solar record id and a live **RSDC** one. **No v3 push until both come back with `problems: []`.**
+- [ ] **5 of 20 keys are `provisional`** — 3rd-party commission (`SLPC  OUT · OTHER · M1&M2COM`, note the TWO spaces) and the four standalone lines (ENGR / SUBCON / SOFTWARE / REFERRAL). A wrong guess aborts the push loudly rather than mis-posting, but each must be confirmed and flipped to `harvested`.
+- [ ] **DC REBATE has no key at all** — declared in `PENDING_HARVEST_ROWS`, deliberately outside the active mapping so RS projects still push. Fill it from the RSDC reconcile and move the row into `MAPPING_ROWS`.
+- [ ] **Q12a — does the live RS scaffold contain REFERRAL / SOFTWARE / ENGR / SUBCON?** D13 says REFERRAL is a new task code absent from the v1 sandbox scaffold. If it is missing from live too, that is an **Acumatica template change**, not a code fix.
+- [ ] **Q12b (Harmon):** does BALANCE income include the DC rebate, or does the rebate stand alone? v3 assumes stand-alone so the two cannot double-count.
+- [ ] **Q12c (Harmon):** is `DLR` genuinely an expense line? The calc already subtracts the dealer fee from Balance of Revenue, so carrying the v1 expense row may be a v1 double-count. Kept for now because dropping a line that exists in the live scaffold would leave it unwritten.
+- [ ] **Then:** MAPPING_ROWS freeze, RSDC template selection (`resolveProjectTemplate`), and the supervised live end-to-end.
+
 ## v2 budget — output fields + field alignments (2026-08-20, two packages)
 
 Gap list reviewed + approved. **Both packages are PACKAGE-ONLY — Tim deploys.** Then MAPPING_ROWS v3.

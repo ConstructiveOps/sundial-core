@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "deploy": "echo \"Use .\\\\deploy.ps1 <function-name> on Windows\"",
-    "test": "node lambdas/sundial-budget/test.js && node --experimental-test-module-mocks --test lambdas/sundial-aurora-push/test.js lambdas/sundial-list-files/test.js lambdas/sundial-aurora-webhook/test.js lambdas/sundial-aurora-inbound/test.js lambdas/sundial-cache-sync/test.js lambdas/sundial-sf-query/test.js lambdas/sundial-welcome-call/test.js lambdas/sundial-comment-notify/test.js lambdas/sundial-acumatica-push/test.js"
+    "test": "node lambdas/sundial-budget/test.js && node --experimental-test-module-mocks --test lambdas/sundial-aurora-push/test.js lambdas/sundial-list-files/test.js lambdas/sundial-aurora-webhook/test.js lambdas/sundial-aurora-inbound/test.js lambdas/sundial-cache-sync/test.js lambdas/sundial-sf-query/test.js lambdas/sundial-welcome-call/test.js lambdas/sundial-comment-notify/test.js lambdas/sundial-acumatica-budget-push/test.js lambdas/sundial-acumatica-push/test.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.1"

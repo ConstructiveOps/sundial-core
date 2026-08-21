@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  D19 REDLINE commission model — FORMULA fields for Sundial_Solar__c.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md D19.
+
+  Total Commission ($) = Contract Amount - (Redline x system watts) - Total Adder Price.
+  Redlines (D19): External+Lightreach 1.75, External+other 1.85, Internal+Lightreach 2.10, Internal+other 2.20.
+
+  ALL FOUR ARE FORMULA FIELDS: nothing writes them, they cannot drift from their inputs,
+  and they are safe to add to a page layout for reps to see before the calc ever runs.
+
+  Object-appropriate sources (verified against the live describe 2026-08-21):
+    deal type : Sales_Company_Harmon_Solar_or_Third__c = "Harmon Solar" => INTERNAL
+    finance   : Sales_Type_Partner__c = "LightReach" => Lightreach
+    watts     : System_Size__c x 1000
+
+  Additive: collision-checked against the live describe, none of these four API names
+  exists on Sundial_Solar__c. NOTE the pre-existing Commission_PPW__c on this object is a
+  different thing (a calc OUTPUT covering all commissions) and is untouched.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Commission_Redline_PPW__c</fullName>
+        <description>D19 REDLINE model. The dollars-per-watt redline for this deal, chosen by deal type x finance source. Redlines (D19): External+Lightreach 1.75, External+other 1.85, Internal+Lightreach 2.10, Internal+other 2.20. Deal type: INTERNAL when Sales_Company_Harmon_Solar_or_Third__c = "Harmon Solar", EXTERNAL otherwise. Sales_Company_Harmon_Solar_or_Third__c holds "Harmon Solar" or one of ~55 dealer names, so INTERNAL is an equality test and EXTERNAL is everything else. Finance: Lightreach when Sales_Type_Partner__c = "LightReach". Sales_Type_Partner__c is the finance source on Solar (this object has no Financing_Partner__c). BLANK Sales_Company_Harmon_Solar_or_Third__c =&gt; NULL (never falls through to the external rate).</description>
+        <externalId>false</externalId>
+        <formula>IF(ISBLANK(TEXT(Sales_Company_Harmon_Solar_or_Third__c)),NULL,IF(TEXT(Sales_Company_Harmon_Solar_or_Third__c)="Harmon Solar",IF(TEXT(Sales_Type_Partner__c)="LightReach",2.10,2.20),IF(TEXT(Sales_Type_Partner__c)="LightReach",1.75,1.85)))</formula>
+        <formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>
+        <inlineHelpText>The $/W redline used to work out commission. Blank if the sales company is not set.</inlineHelpText>
+        <label>Commission Redline $/W</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Total_Adder_Price__c</fullName>
+        <description>D19. Every priced adder at PRICE (the commission side), never cost: 16 flat adders at Price x Qty, 4 per-watt adders at Price x Watts x Qty, and NS blocks 1-5 at their MARKED-UP total Material x (1 + Markup/100) + Hours x 33 x 1.75. Referral Fee IS included. THE 33 IS HARDCODED, like the redlines themselves: it is the Powerwall labor rate the commission model is defined against, not a per-job parameter, so reading Battery_Labor_Rate__c here would let a per-job override silently change everybody's commission. 1.75 is labor + 75% burden. If Harmon re-rates either number, this formula and the redline table change together.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(Adder_Sub_Panel_Price__c,0)*BLANKVALUE(Adder_Sub_Panel_Qty__c,0)+BLANKVALUE(Adder_Derate_Price__c,0)*BLANKVALUE(Adder_Derate_Qty__c,0)+BLANKVALUE(Adder_Heat_Detector_Price__c,0)*BLANKVALUE(Adder_Heat_Detector_Qty__c,0)+BLANKVALUE(Adder_Upgrade_225_Price__c,0)*BLANKVALUE(Adder_Upgrade_225_Qty__c,0)+BLANKVALUE(Adder_Upgrade_400_Price__c,0)*BLANKVALUE(Adder_Upgrade_400_Qty__c,0)+BLANKVALUE(Adder_Upgrade_225_UG_Price__c,0)*BLANKVALUE(Adder_Upgrade_225_UG_Qty__c,0)+BLANKVALUE(Adder_Gateway3_Price__c,0)*BLANKVALUE(Adder_Gateway3_Qty__c,0)+BLANKVALUE(Adder_Site_Audit_Price__c,0)*BLANKVALUE(Adder_Site_Audit_Qty__c,0)+BLANKVALUE(Adder_Travel_Price__c,0)*BLANKVALUE(Adder_Travel_Qty__c,0)+BLANKVALUE(Adder_Structural_Price__c,0)*BLANKVALUE(Adder_Structural_Qty__c,0)+BLANKVALUE(Adder_Small_System_10_12_Price__c,0)*BLANKVALUE(Adder_Small_System_10_12_Qty__c,0)+BLANKVALUE(Adder_Small_System_13_15_Price__c,0)*BLANKVALUE(Adder_Small_System_13_15_Qty__c,0)+BLANKVALUE(Adder_Software_Fee_Price__c,0)*BLANKVALUE(Adder_Software_Fee_Qty__c,0)+BLANKVALUE(Adder_Active_Monitoring_Price__c,0)*BLANKVALUE(Adder_Active_Monitoring_Qty__c,0)+BLANKVALUE(Adder_LR_Battery_Warranty_Price__c,0)*BLANKVALUE(Adder_LR_Battery_Warranty_Qty__c,0)+BLANKVALUE(Adder_Referral_Fee_Price__c,0)*BLANKVALUE(Adder_Referral_Fee_Qty__c,0)+(BLANKVALUE(Adder_Conduit_Attic_Price__c,0)*BLANKVALUE(Adder_Conduit_Attic_Qty__c,0)+BLANKVALUE(Adder_Flat_Roof_Price__c,0)*BLANKVALUE(Adder_Flat_Roof_Qty__c,0)+BLANKVALUE(Adder_Roof_Tile_Price__c,0)*BLANKVALUE(Adder_Roof_Tile_Qty__c,0)+BLANKVALUE(Adder_Bird_Blocking_Price__c,0)*BLANKVALUE(Adder_Bird_Blocking_Qty__c,0))*(BLANKVALUE(System_Size__c,0)*1000)+BLANKVALUE(NS_Adder_1_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_1_Markup_Percent__c,0)/100)+BLANKVALUE(NS_Adder_1_Labor_Hours__c,0)*33*1.75+BLANKVALUE(NS_Adder_2_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_2_Markup_Percent__c,0)/100)+BLANKVALUE(NS_Adder_2_Labor_Hours__c,0)*33*1.75+BLANKVALUE(NS_Adder_3_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_3_Markup_Percent__c,0)/100)+BLANKVALUE(NS_Adder_3_Labor_Hours__c,0)*33*1.75+BLANKVALUE(NS_Adder_4_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_4_Markup_Percent__c,0)/100)+BLANKVALUE(NS_Adder_4_Labor_Hours__c,0)*33*1.75+BLANKVALUE(NS_Adder_5_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_5_Markup_Percent__c,0)/100)+BLANKVALUE(NS_Adder_5_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>
+        <inlineHelpText>Sum of every priced adder on this job, used as a deduction in the commission calculation.</inlineHelpText>
+        <label>Total Adder Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Commission_Total__c</fullName>
+        <description>D19. Contract Amount - (Redline x system watts) - Total Adder Price. This is the REP commission in DOLLARS and it supersedes the old PPW-input model entirely: Sales_Rep_Commission_PPW__c and Internal_Rep_Commission_PPW__c are retired as calc inputs (the fields remain for history). The budget calc reads THIS field and routes it to SLPC OUT (external) or SLPC (internal) by the sales-company field. BLANK HANDLING: every input is wrapped in BLANKVALUE(...,0), and a blank sales company or zero watts makes this field NULL rather than producing a number. A wrong redline is worse than no redline, so the formula refuses rather than defaulting.</description>
+        <externalId>false</externalId>
+        <formula>IF(OR(ISBLANK(Commission_Redline_PPW__c),(BLANKVALUE(System_Size__c,0)*1000)=0),NULL,BLANKVALUE(Contract_Amount__c,0)-Commission_Redline_PPW__c*(BLANKVALUE(System_Size__c,0)*1000)-BLANKVALUE(Total_Adder_Price__c,0))</formula>
+        <formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>
+        <inlineHelpText>Total rep commission in dollars. Blank if the sales company is not set or the system size is zero.</inlineHelpText>
+        <label>Commission Total</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Commission_Total_PPW__c</fullName>
+        <description>D19. Commission Total / system watts — the DERIVED per-watt rate, i.e. what the redline model works out to for this job. NOT to be confused with the pre-existing Commission_PPW__c on this object, which is a budget-calc OUTPUT covering ALL commissions (rep + management + setter + burden) divided by watts. This one is the rep commission only, and it is a formula. BLANK HANDLING: every input is wrapped in BLANKVALUE(...,0), and a blank sales company or zero watts makes this field NULL rather than producing a number. A wrong redline is worse than no redline, so the formula refuses rather than defaulting.</description>
+        <externalId>false</externalId>
+        <formula>IF((BLANKVALUE(System_Size__c,0)*1000)=0,NULL,Commission_Total__c/(BLANKVALUE(System_Size__c,0)*1000))</formula>
+        <formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>
+        <inlineHelpText>The rep commission expressed per watt. Derived, not an input.</inlineHelpText>
+        <label>Commission Total $/W</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

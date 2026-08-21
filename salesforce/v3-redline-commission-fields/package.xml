@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  D19 REDLINE commission model — 8 FORMULA fields (4 x 2 objects), additive only.
+
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST — that is
+  what compiles the formulas and proves they fit inside Salesforce's 5,000-byte
+  compiled limit. See README.md.
+
+  ⚠️ ZIP WITH WINDOWS EXPLORER "Send to > Compressed (zipped) folder".
+  NEVER PowerShell 5.1 Compress-Archive — it writes BACKSLASH path separators and
+  Workbench cannot read the entries.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.Commission_Redline_PPW__c</members>
+        <members>Sundial_Customer__c.Total_Adder_Price__c</members>
+        <members>Sundial_Customer__c.Commission_Total__c</members>
+        <members>Sundial_Customer__c.Commission_Total_PPW__c</members>
+        <members>Sundial_Solar__c.Commission_Redline_PPW__c</members>
+        <members>Sundial_Solar__c.Total_Adder_Price__c</members>
+        <members>Sundial_Solar__c.Commission_Total__c</members>
+        <members>Sundial_Solar__c.Commission_Total_PPW__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

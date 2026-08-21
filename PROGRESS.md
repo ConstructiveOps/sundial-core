@@ -1,5 +1,77 @@
 # Sundial — Progress Log
 
+## 2026-08-21 — D19 redline commission model, Stage 1: formula-field package (pending deploy)
+
+New commission design, recorded as D19 and superseding the PPW-input model entirely:
+`Total Commission ($) = Contract − (Redline × watts) − Total Adder Price`, redline chosen
+by deal type × finance source. Stage 1 is the Salesforce side only — eight formula
+fields, four per object, package-only, stopping for Tim's deploy.
+
+Formulas rather than number fields is the whole shape of it: nothing writes them, they
+cannot drift from their inputs, and a rep can see the commission on the layout before the
+budget calc has ever run.
+
+**Three things the live describe settled before a line was written.** The Lightreach
+picklist value is spelled **`Lightreach` on Customer and `LightReach` on Solar** —
+harmless because Salesforce formula `=` on text is case-insensitive (which is why
+`EXACT()` exists), but each formula uses its own object's spelling so nobody has to know
+that. Customer's `Sales_Type_Partner__c` is an **unconfigured placeholder holding only
+"Value 1"**, so the Customer formulas use `Financing_Partner__c` as the brief specified —
+worth recording, because pointing Customer at the "matching" field name would look like a
+tidy-up and would silently break every Customer redline. And **`Commission_PPW__c`
+already exists on BOTH objects** (not just Solar): it is a calc output covering *all*
+commissions ÷ watts, so the new field is `Commission_Total_PPW__c` and the difference is
+spelled out in the README, since the two will sit next to each other on a layout.
+
+**Compiled size was the real constraint, and it did not fit on the first attempt.**
+Salesforce inlines a referenced formula, so `Commission_Total` carries copies of both
+fields it names and `Commission_Total_PPW` carries copies of all three;
+`Total_Adder_Price` alone is ~40 field references. The natural
+
+    IF(OR(ISBLANK(Commission_Total__c), watts=0), NULL, Commission_Total__c/watts)
+
+names `Commission_Total__c` twice and compiled to **~6,000 bytes against a 5,000-byte
+limit**. Two restructures fixed it: reference it exactly once (the ISBLANK branch is
+redundant under `BlankAsBlanks`, since a blank numerator divided by anything is blank),
+and factor the watts term out of the four per-watt adders instead of repeating it. Worst
+case is now **3,086 bytes, 62% of the limit**, and the generator prints source and
+inlined size on every run so the next person changing a formula sees the headroom.
+
+**`verify.mjs` is the piece I would keep if I could only keep one.** It reads the actual
+`<formula>` text out of the generated `.object` files, transpiles the small subset of the
+formula language into JavaScript, and evaluates it against worked examples — deliberately
+not a reimplementation of the maths, because the thing under test is the text that gets
+deployed. On its very first run it caught a **precedence bug**:
+`Commission_Total__c/BLANKVALUE(System_Size__c,0)*1000` parses left-to-right as
+`(Total / kW) × 1000`, out by a factor of a million, and it would have shipped looking
+entirely plausible. Watts is parenthesised everywhere now. 22 checks pass, covering the
+worked example on both objects, all four redlines, the casing difference, blank company,
+zero watts, blank finance, no adders, per-watt × qty, and NS markup + labour.
+
+**Blank handling is where the design has an opinion.** A blank sales company yields
+**NULL, not the external rate** — defaulting it would quietly pay the wrong commission on
+every record someone forgot to fill in, and a blank field is a question somebody answers
+whereas a wrong number is one nobody asks. A blank *finance source* does fall through to
+"other", which is different and deliberate: "not Lightreach" is the common case and a
+genuine default, while "no sales company" is missing data.
+
+The one thing the offline harness cannot prove is Salesforce's `BlankAsBlanks`
+propagation, which the null-handling leans on. So the README ends with a 30-second
+post-deploy check on a real record: flip through all four redlines, then blank the sales
+company and confirm all three downstream fields go blank rather than showing a number.
+
+**33 and 1.75 are hardcoded in the NS term, like the redlines themselves**, and the
+README says why: they are constants of the commission *model*, not per-job parameters.
+Reading `Battery_Labor_Rate__c` there would let a per-job budget override silently change
+what a rep is paid.
+
+Also recorded: **Q7 is obsoleted and §4e is cancelled.** Per-adder commission formula
+fields have nothing left to compute — adders now reduce the commission pool in aggregate
+rather than each earning a rate.
+
+Stage 2 (the calc amendment, the PPW-field retirement, and re-pinning the fixture to the
+redline example) does not start until Tim confirms the package is deployed.
+
 ## 2026-08-21 — harvest results applied to MAPPING_ROWS v3 (D18)
 
 The two live reconciles came back (R261077 RS, 38 lines; R261066 RSDC, 39) and settled

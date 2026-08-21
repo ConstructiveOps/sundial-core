@@ -26,6 +26,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D13 | **REFERRAL is its own budget line**: `REFERRAL - OTHER - REFERRAL FEE` ← Referral Fee adder (500 × qty). NEW task code — the v1 sandbox scaffold (38 lines) had NO REFERRAL line; the live template must be re-harvested and MUST contain it or push fails. | REVISED sheet |
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
 | D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — Harmon must add it before any job can push a referral fee. (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
+| D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history. | Tim, 2026-08-21 |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -100,7 +101,36 @@ Field descriptions must state the per-unit / per-watt semantic and that price ch
 - `Sales_Mgr_Commission_PPW__c` (.04) + `Overhead_Commission_PPW__c` (.015) RETAINED per D10; calc sums → SLMC line.
 - `Geo_Commission_Amount__c` ($70 rule) + `Commission_Burden_Rate__c` (75) unchanged.
 
-### 4e. Per-adder commission FORMULA fields — BOTH objects (⚠ Q7 pending). Never mapped (self-computing).
+### 4e. Per-adder commission FORMULA fields — **CANCELLED (D19)**
+The redline model makes per-adder commission rates meaningless: adders now reduce the
+commission pool in aggregate (`− Total Adder Price`), so there is nothing per-adder to
+compute. Q7 is obsoleted. **Replaced by §4h.**
+
+### 4h. D19 REDLINE commission formula fields — BOTH objects (8) — **PACKAGE BUILT, PENDING DEPLOY**
+`salesforce/v3-redline-commission-fields/`, additive, collision-checked clean 2026-08-21.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `Commission_Redline_PPW__c` | Currency(14,4) | the $/W redline for this deal |
+| `Total_Adder_Price__c` | Currency(16,2) | every priced adder, at price |
+| `Commission_Total__c` | Currency(16,2) | **the rep commission in dollars** — what the calc reads |
+| `Commission_Total_PPW__c` | Currency(14,4) | the derived per-watt rate |
+
+All four are FORMULAS, so nothing writes them and they cannot drift. Object-appropriate
+sources per D19. **Blank sales company ⇒ NULL, never the external rate.** `33` (Powerwall
+labor rate) and `1.75` (labor + burden) are hardcoded in the NS term like the redlines
+themselves — they are constants of the commission MODEL, and reading a per-job override
+there would let one job's budget change what a rep is paid.
+
+⚠️ **Do not confuse `Commission_Total_PPW__c` with the pre-existing `Commission_PPW__c`**
+on both objects: that one is a calc OUTPUT covering all commissions (rep + management +
+setter + burden) ÷ watts.
+
+Compiled size was the real constraint — Salesforce inlines referenced formulas, and the
+first draft of `Commission_Total_PPW__c` compiled to ~6,000 bytes (limit 5,000) because it
+named `Commission_Total__c` twice. Restructured to one reference; worst case is now 3,086
+bytes (62%). Figures printed by `generate.mjs`; formulas validated offline by
+`verify.mjs` (22 checks), which caught a watts precedence bug on its first run.
 
 ### 4f. PO tracking fields — SOLAR only (draft, pending Q2/Q5b).
 
@@ -263,7 +293,7 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
 | Q4 | **RESOLVED (D11)** | Software = SOFTWARE cost line, contributes. |
 | Q5 | **(a) RESOLVED (D12)**; (b) OPEN | LR Warranty → GENO cost. (b) Example live commission PO to clone shape. |
 | Q6 | OPEN | Expansion Pack +4h / Powerwall +16h — auto or manual? (Sheet: manual.) |
-| Q7 | OPEN | Per-adder commission formula for §4e formula fields. |
+| Q7 | **OBSOLETED by D19** | The per-adder commission question disappears: commission is now Contract − Redline×W − Total Adder Price, so adders reduce commission in aggregate rather than each earning a per-adder rate. §4e per-adder commission formula fields are **not needed and will not be built**. |
 | Q8 | **RESOLVED** | Setter line = APPT COM (sheet label "APPT COMM"). |
 | Q9 | **RESOLVED (D17)** | Setter__c populated → apply Geo_Commission_Amount__c ($70 dflt). |
 | Q10 | **RESOLVED (dates)** / SALESPERSO source still open | Five date fields mapped (§7); confirm SALESPERSO source (dealer/rep name field). |

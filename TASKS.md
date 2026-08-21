@@ -4,6 +4,36 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## D19 REDLINE commission model (2026-08-21) — supersedes the PPW-input model
+
+Branch `feat/redline-commissions`. Two stages with a boundary; **Stage 1 is package-only and STOPS for Tim's deploy.**
+
+`Total Commission ($) = Contract − (Redline × watts) − Total Adder Price`. Redlines: External+Lightreach 1.75 · External+other 1.85 · Internal+Lightreach 2.10 · Internal+other 2.20.
+
+### Stage 1 — `salesforce/v3-redline-commission-fields/` (8 FORMULA fields, 4 × 2 objects) — BUILT, PENDING DEPLOY
+- [x] `Commission_Redline_PPW__c` · `Total_Adder_Price__c` · `Commission_Total__c` · `Commission_Total_PPW__c`, all formulas so nothing writes them and they cannot drift. **Collision-checked clean on both objects.**
+- [x] **Name chosen to avoid the existing `Commission_PPW__c`** — which exists on BOTH objects (not just Solar) and is a calc OUTPUT covering all commissions ÷ watts. The new one is rep-only. Flagged in the README since they will sit near each other on a layout.
+- [x] **Object-appropriate sources verified live:** Customer `Sales_Company__c` (2 values) + `Financing_Partner__c` = "Lightreach" + `Final_System_Size_kW__c`; Solar `Sales_Company_Harmon_Solar_or_Third__c` (Harmon Solar or ~55 dealers) + `Sales_Type_Partner__c` = "**LightReach**" + `System_Size__c`. **The Lightreach casing differs between objects** — harmless because formula `=` is case-insensitive, but each formula uses its own object's spelling. **Customer's `Sales_Type_Partner__c` is an unconfigured placeholder ("Value 1") and must NOT be used** — Customer uses `Financing_Partner__c`.
+- [x] **Compiled size measured, and it did NOT fit on the first attempt.** Salesforce inlines referenced formulas; the natural `Commission_Total_PPW__c` named `Commission_Total__c` twice and compiled to ~6,000 bytes against a 5,000 limit. Restructured to one reference (the ISBLANK branch is redundant under BlankAsBlanks) plus factoring the watts term out of the four per-watt adders. **Worst case now 3,086 bytes = 62%.** `generate.mjs` prints source + inlined size every run.
+- [x] **Blank handling:** everything BLANKVALUE'd, `formulaTreatBlanksAs = BlankAsBlanks`. **Blank sales company ⇒ NULL, never the external rate** — a wrong redline is worse than no redline. Blank finance DOES fall through to "other" (that is a real default, not missing data). Full behaviour table in the README.
+- [x] **`verify.mjs` — 22 offline checks against the generated formula TEXT** (transpiled to JS and evaluated, not a reimplementation). Caught a **precedence bug on its first run**: `Total/BLANKVALUE(kW,0)*1000` parses as `(Total/kW)*1000`, out by 10^6. Watts is parenthesised everywhere now.
+- [x] Worked example reproduces: contract 36502, 8800 W, external non-Lightreach, adders 3110 → **redline 1.85, commission 17112, $/W 1.9445**.
+- [ ] **TIM: deploy.** Explorer-zip → Workbench → **Check Only FIRST** (that is the only thing that proves the compiled size; expect 8/8) → deploy → FLS **Read** (formulas have no Edit); integration user needs Read for Stage 2.
+- [ ] **TIM: 30-second post-deploy check on a real record** — flip Sales Company and finance through all four redlines, then **blank the Sales Company and confirm all three downstream fields go BLANK, not 0**. That is the one `BlankAsBlanks` assumption the offline harness cannot prove. If any shows a number, stop before Stage 2.
+
+### Stage 2 — calc amendment — **NOT STARTED, waits on Tim's deploy confirmation**
+- [ ] budgetCalc reads `Commission_Total__c` (dollars) off the Solar record and routes it to **SLPC OUT** (external) or **SLPC** (internal) by the sales-company field. Replaces both the PPW×watts computation and D16's which-PPW-populated discriminator.
+- [ ] New validation: blank/unrecognised sales-company value → **fail loudly**.
+- [ ] Manager (.04+.015), setter (Setter__c read-through), burden 75% on (internal+mgmt+setter) — all unchanged.
+- [ ] Retire `Sales_Rep_Commission_PPW__c` + `Internal_Rep_Commission_PPW__c` from INPUT_FIELDS and every calc read (fields stay on the objects).
+- [ ] Snapshot workbook: write the derived commission $/W into the sheet's rate cell so the snapshot stays self-consistent.
+- [ ] Fixture: non-commission cells stay pinned to the REVISED workbook; commission cells re-pin to the redline example. Assert the old 2200-based expectations are **gone**.
+- [ ] Confirm the calc still sets `Commission_Deal_Type__c` (the push's v2 marker) from the NEW rule, and that the push's deal-type guard follows it.
+- [ ] Docs: PPW-field retirement note, TASKS/PROGRESS.
+
+### Consequences already recorded
+- [x] **Q7 OBSOLETED and §4e CANCELLED.** Per-adder commission formula fields are not needed and will not be built — adders now reduce the commission pool in aggregate, so there is no per-adder rate to define.
+
 ## MAPPING_ROWS v3 + re-harvest prep (2026-08-20, Workstream C)
 
 Branch `feat/mapping-v3`. **Build + report only — no deploy, no live push.** Gate discipline: nothing pushes until the re-harvest verifies.

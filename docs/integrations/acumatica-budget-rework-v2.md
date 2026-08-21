@@ -25,6 +25,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D12 | **GENO now includes Active Monitoring + LightReach Battery Warranty** (J16 = Material Other + CO fee + permit + E61 + E62). They are cost lines, not revenue-only. Resolves old Q5(a). | REVISED sheet |
 | D13 | **REFERRAL is its own budget line**: `REFERRAL - OTHER - REFERRAL FEE` ← Referral Fee adder (500 × qty). NEW task code — the v1 sandbox scaffold (38 lines) had NO REFERRAL line; the live template must be re-harvested and MUST contain it or push fails. | REVISED sheet |
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
+| D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — Harmon must add it before any job can push a referral fee. (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -108,17 +109,18 @@ ADD: §4a ×14 Customer pairs, §4b ×8 Customer NS fields, `Internal_Rep_Commis
 REMOVE: strictly-budget Customer fields (exact list = CC diff of customer-to-solar-map.ts vs v3 input model, Tim-reviewed). `Overhead_Commission_PPW__c`/`Sales_Mgr_Commission_PPW__c` REMAIN mapped (still inputs per D10).
 NEVER MAP: formula fields, COST fields.
 
-## 5. MAPPING_ROWS v3 — **BUILT 2026-08-20, NOT VERIFIED** (`lambdas/sundial-acumatica-budget-push/index.js`)
+## 5. MAPPING_ROWS v3 — **HARVEST-VERIFIED 2026-08-20 (D18)** (`lambdas/sundial-acumatica-budget-push/index.js`)
 
-Status per row. `harvested` = key verbatim from the R269999 scaffold; `provisional` = this
-table's best reading, **confirmed or refuted by the re-harvest**; `unknown` = no key yet.
+Status per row. `harvested` = key confirmed against a live scaffold. **Every key is now
+harvested (D18)** — the 2026-08-20 reconcile of R261077 (RS) and R261066 (RSDC) settled
+all five that were provisional, and confirmed one line simply does not exist.
 
 | Budget element | Task · AG · INV · Type | Amount source (v3, as coded) | Key |
 |---|---|---|---|
 | Income — Balance of Contract | BALANCE · BILLING · &lt;N/A&gt; · Income | `Contract_Amount__c - Total_Material_Budget__c` — **excludes the rebate**, which has its own line (Q12b) | harvested |
 | Income — Solar Material | GENM · BILLING · &lt;N/A&gt; · Income | `Total_Material_Budget__c` | harvested |
-| Income — DC Rebate (RSDC only) | **TBD from the RSDC harvest** | `DC_Rebate_Amount__c` | **unknown** — in `PENDING_HARVEST_ROWS`, guarded |
-| 3rd-party rep commission | SLPC  OUT · OTHER · M1&M2COM · Expense | `Sales_Rep_Commission_Amt__c` (third-party only now) | **provisional** |
+| Income — DC Rebate (RSDC only) | DCREBATE · BILLING · &lt;N/A&gt; · Income | `DC_Rebate_Amount__c` | harvested — **conditional**, see below |
+| 3rd-party rep commission | SLPC OUT · OTHER · M1&M2COM · Expense (**ONE space**) | `Sales_Rep_Commission_Amt__c` (third-party only now) | harvested |
 | Internal rep commission | SLPC · LABOR · SALESCOMM · Expense | `Internal_Rep_Commission_Amt__c` | harvested |
 | Management commission | SLMC · LABOR · SALESCOMM · Expense | `Management_Commission_Amt__c` (the .04+.015 **sum** — do not also map the components) | harvested |
 | Setter commission | APPT COM · LABOR · SALESCOMM · Expense | `Setter_Commission_Amt__c` — what **applied**, not the always-70 input | harvested |
@@ -131,10 +133,10 @@ table's best reading, **confirmed or refuted by the re-harvest**; `unknown` = no
 | Total material | GENM · MATERIAL · &lt;N/A&gt; · Expense | `Total_Material_Budget__c` | harvested |
 | Other (GENO) | GENO · OTHER · &lt;N/A&gt; · Expense | `Total_Other_Budget__c` — **ONE row**, J16 group | harvested |
 | Dealer fee | DLR · OTHER · &lt;N/A&gt; · Expense | `Dealer_Fee__c` — carried from v1, **not in this table before** (Q12c) | harvested |
-| Engineer stamps | ENGR · SUBCON · &lt;N/A&gt; · Expense | `Engineer_Stamps_Cost__c` | **provisional** |
-| Subcontractor | SUBCON · SUBCON · &lt;N/A&gt; · Expense | `Subcontractor_Cost__c` | **provisional** |
-| Audit software | SOFTWARE · OTHER · &lt;N/A&gt; · Expense | `Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` | **provisional** |
-| Referral fees | REFERRAL · OTHER · &lt;N/A&gt; · Expense | `Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c` | **provisional** |
+| Engineer stamps | ENGR · SUBCON · &lt;N/A&gt; · Expense | `Engineer_Stamps_Cost__c` | harvested |
+| Subcontractor | SUBCON · SUBCON · &lt;N/A&gt; · Expense | `Subcontractor_Cost__c` | harvested |
+| Audit software | SOFTWARE · OTHER · &lt;N/A&gt; · Expense | `Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` | harvested |
+| Referral fees | REFERRAL · OTHER · &lt;N/A&gt; · Expense | `Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c` | **absent from the template** — conditional, see below |
 
 ### Three v1 rows that would now DOUBLE-COUNT — collapsed
 
@@ -182,11 +184,54 @@ rather than the calc's return value, so it does the multiplication itself — wh
 budgetCalc computes for a pass-through row (`cost = priceTotal = price × qty`), so the
 two cannot disagree.
 
-### Re-harvest gate
+### Two CONDITIONAL rows (new after the harvest)
 
-**`docs/integrations/acumatica-budget-push.md` → "v3 RE-HARVEST RUNBOOK"** has the exact
-invoke payloads for a live RS and a live RSDC project, what to read out of each, and the
-five conditions that must all be true before a v3 push.
+Both are `scaffoldOptional`: the line may legitimately be missing, and the row's own
+`missingLineMessage` is what the abort says when it matters.
+
+| Row | Present | Absent + amount 0 | Absent + amount > 0 |
+|---|---|---|---|
+| **DC rebate** (`DCREBATE`) | income-always — written even at 0 | inactive (a normal RS project) | **ABORT**: "Domestic Content is set on a project built from the RS template… must be created from the RSDC template" |
+| **Referral fees** (`REFERRAL`) | n/a today | inactive (almost every job) | **ABORT**: "Acumatica template has no REFERRAL line — Harmon must add it before pushing referral fees." |
+
+### Skip-zero now runs BEFORE the match, and that ordering is the fix
+
+An expense row whose amount is 0 has nothing to write, so whether a line exists for it is
+irrelevant. Under the old order (match, *then* skip) the missing REFERRAL line failed
+**every** push — including the overwhelming majority of jobs with no referral fee.
+Requiring a line you are not going to write to is not a safety property.
+
+Applied generally to any zero expense row, with two deliberate exemptions:
+
+- **Income is exempt.** Income-always means an income line must match or the push fails,
+  even at 0 — except a `scaffoldOptional` income row (the DC rebate), which genuinely
+  does not exist on RS.
+- **Reconcile stays strict.** With no amounts supplied the check is purely structural, so
+  every non-optional row must still match. The leniency exists only where there is
+  nothing to write, and reconcile is the run whose job is to catch a broken key.
+
+A third bucket, `inactive`, now sits alongside `matched` and `problems`: rows correctly
+doing nothing on this project. Surfaced rather than swallowed, so "why is REFERRAL not in
+the output" has an answer.
+
+### Verification status
+
+Re-verified offline against the two committed live scaffolds
+(`lambdas/sundial-acumatica-budget-push/harvest/`):
+
+| Project | Scaffold lines | Matched | Inactive | Problems |
+|---|---|---|---|---|
+| R261077 (RS) | 38 | **19** | DC rebate, Referral fees | **0** |
+| R261066 (RSDC) | 39 | **20** (incl. `DCREBATE`) | Referral fees | **0** |
+
+> The task brief predicted 18 / 19. The extra one is the `SLPC OUT` fix: it was one of
+> the two harvest problems, so correcting the spacing moves it from `problems` into
+> `matched`. 21 mapping rows = 19 matched + 2 inactive (RS), 20 + 1 (RSDC).
+
+**Still to do before a live push:** Tim re-runs the live reconcile after merge/deploy to
+confirm against the org rather than the saved dumps; Q12c (the `DLR` line); Harmon
+sign-off on APPT COM; and Harmon adding a REFERRAL line if referral fees are to be pushed
+at all.
 
 ## 6. PO engine spec (pending Q2/Q5b)
 Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complete, M2 = balance at Glass on Roof; internal 75/25 (⚠ Q2 PO-vs-payroll); vendor via D4 config map; freeze rule on released POs; SF write-back per §4f; sandbox hand-proof first. Live attribute pull CORROBORATES: R251282 shows SLSCOM1 = exactly 2500 (cap hit), SLSCOM2 = 4814 balance.
@@ -223,7 +268,9 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
 | Q9 | **RESOLVED (D17)** | Setter__c populated → apply Geo_Commission_Amount__c ($70 dflt). |
 | Q10 | **RESOLVED (dates)** / SALESPERSO source still open | Five date fields mapped (§7); confirm SALESPERSO source (dealer/rep name field). |
 | Q11 | **RESOLVED (D10, Tim-confirmed)** | Two stored fields (.04/.015), summed for the SLMC line, split for attributes. |
-| Q12 | OPEN (re-harvest) | Live RS template contains REFERRAL + SOFTWARE + ENGR/SUBCON lines? BALANCE income treatment of rebate? |
+| Q12a | **RESOLVED (D18)** | SOFTWARE + ENGR + SUBCON exist in the live template. **REFERRAL does NOT** — the mapping treats it as `scaffoldOptional`, so a job with no referral fee is unaffected, but one that HAS a referral fee aborts loudly. **Harmon action: add a REFERRAL line to the RS/RSDC templates.** |
+| Q12b | **RESOLVED (D18)** | BALANCE income **excludes** the DC rebate — confirmed by the live math. The rebate posts to its own `DCREBATE` income line. No change to the BALANCE row. |
+| Q12c | OPEN (Harmon) | Is the `DLR` dealer-fee expense line correct, given the calc already nets the dealer fee out of Balance of Revenue? Carried over from v1 rather than dropped, because the line exists in the live scaffold. |
 
 ## 10. Execution plan
 **A — SF metadata:** deploy built package now + addendum (Internal_Rep_Commission_PPW__c ×2) + follow-up existing-field package (defaults/relabels). Then FLS.
@@ -239,9 +286,11 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
   - **Setter source changed** from `Geo_Commission_Amount__c` (the input rate, always 70) to `Setter_Commission_Amt__c` (what applied — 0 with no setter). v1 would have posted 70 on every job.
   - **`*` added to the amount-expression grammar** — SOFTWARE and REFERRAL have no dedicated output field (extras-only per the gap doc), so their rows read `Price__c*Qty__c`, which is what the calc computes for a pass-through row.
   - **Two new fail-loud guards:** both rep commission amounts non-zero → `commission_deal_type_ambiguous` (D16 defense in depth — skip-zero cannot catch it because neither is zero); and a non-zero `DC_Rebate_Amount__c` with no harvested key → `pending_harvest_line_has_value` rather than silently dropping the income.
-  - **5 of 20 keys are `provisional`** (3rd-party commission + the four standalone lines) and the **DC rebate has no key at all** — it is declared in `PENDING_HARVEST_ROWS`, deliberately out of the active mapping so RS projects still push.
+  - **HARVEST DONE 2026-08-20 (D18)** — all five provisional keys resolved against live scaffolds R261077 (RS, 38 lines) and R261066 (RSDC, 39). `SLPC OUT` has ONE space (the sheet's two-space label is a typo); ENGR / SUBCON / SOFTWARE exist as guessed; **REFERRAL does not exist at all**; DC rebate is `DCREBATE · BILLING · <N/A> · Income` and is the only RS↔RSDC difference. Both dumps are committed and regression-tested.
+  - **Skip-zero now runs BEFORE the ≠1-match check** for expense rows, so a template that lacks a line no job needs cannot fail every push. Income stays exempt, and reconcile stays structurally strict. Two rows are `scaffoldOptional` (DC rebate, Referral) — absent + zero is inactive; absent + non-zero aborts with a message naming the actual fix.
+  - Offline re-verify: **RS 19 matched / 2 inactive / 0 problems; RSDC 20 matched / 1 inactive / 0 problems.**
   - **23 tests added** (the Lambda had none); suite 316 green.
-  - **⛔ GATE: the live re-harvest has NOT run.** Payloads and the full read-the-output procedure are in `docs/integrations/acumatica-budget-push.md` → "v3 RE-HARVEST RUNBOOK". No v3 push until both reconciles come back with zero problems.
+  - **GATE: the harvest has run and both scaffolds reconcile clean offline.** Remaining before a live push: Tim re-runs the live reconcile after merge/deploy (to confirm against the org, not the saved dumps), Q12c on the `DLR` line, Harmon sign-off on APPT COM, and Harmon adding a REFERRAL line if referral fees are ever to be pushed.
 **C (remaining):** RSDC template selection; MAPPING_ROWS freeze after the harvest.
 **D — PO engine:** after Q2/Q5b + vendor map + sandbox hand-proof.
 **E — attribute sync:** after Q10; sandbox hand-proof.

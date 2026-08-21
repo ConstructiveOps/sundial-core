@@ -26,6 +26,23 @@ Branch `feat/mapping-v3`. **Build + report only — no deploy, no live push.** G
 - [ ] **Q12c (Harmon):** is `DLR` genuinely an expense line? The calc already subtracts the dealer fee from Balance of Revenue, so carrying the v1 expense row may be a v1 double-count. Kept for now because dropping a line that exists in the live scaffold would leave it unwritten.
 - [ ] **Then:** MAPPING_ROWS freeze, RSDC template selection (`resolveProjectTemplate`), and the supervised live end-to-end.
 
+### Harvest applied (2026-08-20, D18) — R261077 RS / R261066 RSDC
+
+- [x] **`SLPC OUT` is ONE space.** Both live scaffolds agree; the REVISED sheet's two-space H7 label is a typo. Key fixed, `keyStatus` → harvested, test asserts the single-space form.
+- [x] **ENGR / SUBCON / SOFTWARE confirmed present** exactly as §5 guessed — all three flipped provisional → harvested. **No provisional keys remain.**
+- [x] **DCREBATE activated** with the harvested key `DCREBATE | BILLING | <N/A> | Income`, **conditional**: present (RSDC) → income-always, written even at 0; absent (RS) → inactive at 0, but **aborts** when the rebate is non-zero with a message saying the project needs the RSDC template. `PENDING_HARVEST_ROWS` is now empty — kept (not deleted) as the mechanism for the next unkeyed line.
+- [x] **Q12b settled by live math: BALANCE excludes the rebate.** No change to the BALANCE row.
+- [x] **REFERRAL confirmed ABSENT from the live template** (both projects, as D13 predicted). Marked `scaffoldOptional` with `keyStatus: harvested_absent`.
+- [x] **Skip-zero now runs BEFORE the ≠1-match check** for expense rows — the actual fix, and applied generally, not just to REFERRAL. Requiring a scaffold line for a row you are not going to write to is not a safety property, and under the old order the missing REFERRAL line failed **every** push including the ~all jobs with no referral fee. **Income stays exempt** (income-always must match or fail) and **reconcile stays structurally strict** (no amounts = every non-optional row must match), so the leniency exists only where there is genuinely nothing to write.
+- [x] **New `inactive` bucket** alongside `matched`/`problems` — rows correctly doing nothing on this project, surfaced rather than swallowed.
+- [x] **Reconcile output refreshed** from the v1-era `gate5b` strings to the v3 gates.
+- [x] **Harvest dumps committed** at `lambdas/sundial-acumatica-budget-push/harvest/` and regression-tested, so a template change under us fails a test instead of a push. 38 vs 39 lines; the RSDC delta is exactly the one DCREBATE line (asserted).
+- [x] **Offline re-verify: RS 19 matched / 2 inactive / 0 problems · RSDC 20 matched / 1 inactive / 0 problems.** (The brief predicted 18/19 — the extra one is the `SLPC OUT` fix moving a row from problems into matched.) 38 tests in this Lambda, suite **331** green.
+- [ ] **TIM: re-run the live reconcile after merge/deploy** to confirm against the org rather than the saved dumps.
+- [!] **HARMON: add a REFERRAL line to the RS + RSDC templates.** Until then any job carrying a referral fee aborts with "Acumatica template has no REFERRAL line…". Jobs without one are unaffected.
+- [ ] **Q12c still open (Harmon):** is the `DLR` dealer-fee expense line correct, given the calc already nets the dealer fee out of Balance of Revenue?
+- [ ] **Gate 5b still open:** Harmon sign-off on setter commission → APPT COM.
+
 ## v2 budget — output fields + field alignments (2026-08-20, two packages)
 
 Gap list reviewed + approved. **Both packages are PACKAGE-ONLY — Tim deploys.** Then MAPPING_ROWS v3.

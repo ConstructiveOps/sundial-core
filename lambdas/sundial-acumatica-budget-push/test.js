@@ -134,7 +134,7 @@ test("every mapping row has a complete 4-part key and an amount source", () => {
       assert.ok(r[part], `${r.line} is missing ${part}`);
     }
     assert.ok(r.amountField, `${r.line} has no amountField`);
-    assert.ok(["harvested", "provisional"].includes(r.keyStatus), `${r.line} keyStatus`);
+    assert.ok(["harvested", "provisional", "harvested_absent"].includes(r.keyStatus), `${r.line} keyStatus`);
   }
 });
 
@@ -145,7 +145,7 @@ test("the four v3 commission lines exist, each with ONE source", () => {
   const setter = MAPPING_ROWS.find((r) => r.line === "Setter Commission");
 
   assert.equal(thirdParty.amountField, "Sales_Rep_Commission_Amt__c");
-  assert.equal(naturalKey(thirdParty), "SLPC  OUT | OTHER | M1&M2COM | Expense");
+  assert.equal(naturalKey(thirdParty), "SLPC OUT | OTHER | M1&M2COM | Expense");
   assert.equal(internal.amountField, "Internal_Rep_Commission_Amt__c");
   assert.equal(naturalKey(internal), "SLPC | LABOR | SALESCOMM | Expense");
   assert.equal(naturalKey(mgmt), "SLMC | LABOR | SALESCOMM | Expense");
@@ -190,22 +190,31 @@ test("GENA reads the combined audit+QA field — v1's sum would double-count QA"
   assert.ok(!MAPPING_ROWS.map((r) => r.amountField).join(" ").includes("QA_Labor_Cost__c"));
 });
 
-test("the four D11 standalone cost lines are present and provisional", () => {
+test("the four D11 standalone cost lines are present, with harvest-confirmed keys", () => {
   for (const [line, task] of [["Engineer Stamps", "ENGR"], ["Subcontractor", "SUBCON"], ["Audit Software", "SOFTWARE"], ["Referral Fees", "REFERRAL"]]) {
     const r = MAPPING_ROWS.find((x) => x.line === line);
     assert.ok(r, `${line} missing`);
     assert.equal(r.taskId, task);
-    assert.equal(r.keyStatus, "provisional", `${line} key must be flagged until the re-harvest confirms it`);
   }
+  // Nothing is provisional any more — the 2026-08-20 harvest settled every key.
+  assert.equal(MAPPING_ROWS.filter((r) => r.keyStatus === "provisional").length, 0);
+  // REFERRAL is the one key that is confirmed ABSENT from the live template.
+  const ref = MAPPING_ROWS.find((r) => r.line === "Referral Fees");
+  assert.equal(ref.keyStatus, "harvested_absent");
+  assert.equal(ref.scaffoldOptional, true);
+  assert.match(ref.missingLineMessage, /Harmon must add it/);
 });
 
-test("the DC rebate is declared but NOT active — it has no key yet", () => {
-  assert.equal(PENDING_HARVEST_ROWS.length, 1);
-  const dc = PENDING_HARVEST_ROWS[0];
-  assert.equal(dc.amountField, "DC_Rebate_Amount__c");
-  assert.equal(dc.taskId, null);
-  // It must not leak into the active mapping, or every RS push would abort.
-  assert.ok(!MAPPING_ROWS.some((r) => r.amountField === "DC_Rebate_Amount__c"));
+test("the DC rebate is now ACTIVE with the harvested key, and conditional", () => {
+  assert.equal(PENDING_HARVEST_ROWS.length, 0, "nothing is awaiting a key any more");
+  const dc = MAPPING_ROWS.find((r) => r.amountField === "DC_Rebate_Amount__c");
+  assert.ok(dc, "the DC rebate must be in the active mapping now");
+  assert.equal(naturalKey(dc), "DCREBATE | BILLING | <N/A> | Income");
+  assert.equal(dc.type, "Income");
+  // Conditional: absent from the RS template, so it must be optional or every RS push
+  // would abort on a line that template legitimately does not have.
+  assert.equal(dc.scaffoldOptional, true);
+  assert.match(dc.missingLineMessage, /RSDC template/);
 });
 
 test("RESIDENTAL stays misspelled and <N/A> stays a literal", () => {
@@ -238,10 +247,11 @@ test("a key matching exactly one line matches; 0 or 2 fail loudly", () => {
   const lines = fullScaffold();
   const { matched, problems } = matchMappingToLines(MAPPING_ROWS, lines);
   assert.equal(problems.length, 0);
-  assert.equal(matched.length, 20);
+  assert.equal(matched.length, MAPPING_ROWS.length);
 
-  // Remove one line -> that key reports "no scaffolded line matched".
-  const missingOne = lines.filter((l) => l.taskId !== "REFERRAL");
+  // Remove a NON-optional line -> that key reports "no scaffolded line matched".
+  // (Structural reconcile: no budgetValues, so no amount can excuse it.)
+  const missingOne = lines.filter((l) => l.taskId !== "GENO");
   const r0 = matchMappingToLines(MAPPING_ROWS, missingOne);
   assert.equal(r0.problems.length, 1);
   assert.match(r0.problems[0].reason, /no scaffolded line matched/);
@@ -273,7 +283,7 @@ test("dry run computes every line and writes nothing", async () => {
 
   assert.equal(by["GENM | MATERIAL | <N/A> | Expense"].amount, 16140.73);
   assert.equal(by["GENO | OTHER | <N/A> | Expense"].amount, 2550);
-  assert.equal(by["SLPC  OUT | OTHER | M1&M2COM | Expense"].amount, 2200);
+  assert.equal(by["SLPC OUT | OTHER | M1&M2COM | Expense"].amount, 2200);
   assert.equal(by["SLMC | LABOR | SALESCOMM | Expense"].amount, 484);
   assert.equal(by["APPT COM | LABOR | SALESCOMM | Expense"].amount, 70);
   assert.equal(by["ENGR | SUBCON | <N/A> | Expense"].amount, 250);
@@ -374,15 +384,17 @@ test("an internal-only deal writes SLPC and skips SLPC OUT", async () => {
   );
   const by = Object.fromEntries(res.results.map((r) => [r.key, r]));
   assert.equal(by["SLPC | LABOR | SALESCOMM | Expense"].amount, 2200);
-  assert.equal(by["SLPC  OUT | OTHER | M1&M2COM | Expense"].action, "skip_zero");
+  assert.equal(by["SLPC OUT | OTHER | M1&M2COM | Expense"].action, "skip_zero");
 });
 
-test("a DC rebate with no harvested key REFUSES rather than dropping the income", async () => {
+test("a DC rebate on a scaffold with no DCREBATE line REFUSES — wrong template", async () => {
   reset();
+  // Simulate an RS-template project: drop the DCREBATE line from the scaffold.
+  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "DCREBATE");
   const res = await writeBudgetLines("R000001", { ...VALUES, DC_Rebate_Amount__c: 3960 }, { dryRun: true });
   assert.equal(res.ok, false);
-  assert.equal(res.aborted, "pending_harvest_line_has_value");
-  assert.equal(res.lines[0].amount, 3960);
+  assert.equal(res.aborted, "match_problems");
+  assert.match(res.problems[0].reason, /RSDC template/);
   assert.equal(ctx.puts.length, 0);
 });
 
@@ -420,5 +432,125 @@ test("a real run PUTs by GUID only — no inserts, no key upserts", async () => 
   }
   // Zero-amount expense lines were skipped, so fewer PUTs than matched groups.
   assert.ok(res.summary.skipped > 0);
-  assert.equal(res.summary.written + res.summary.skipped, 20);
+  assert.equal(res.summary.written + res.summary.skipped, MAPPING_ROWS.length);
+});
+
+// ===========================================================================
+// Skip-before-match ordering, and the conditional lines (harvest, 2026-08-20)
+// ===========================================================================
+
+test("a zero expense row with NO scaffold line is inactive, not a failure", async () => {
+  reset();
+  // REFERRAL is confirmed absent from the live template. The overwhelming majority of
+  // jobs have no referral fee, and they must not fail on a line nobody needs.
+  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "REFERRAL");
+  const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 0 }, { dryRun: true });
+  assert.equal(res.ok, true);
+  assert.ok(res.inactive.some((i) => i.rows.includes("Referral Fees")));
+});
+
+test("a NON-zero expense row with no scaffold line aborts with its own message", async () => {
+  reset();
+  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "REFERRAL");
+  const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 1 }, { dryRun: true });
+  assert.equal(res.ok, false);
+  assert.equal(res.aborted, "match_problems");
+  assert.match(res.problems[0].reason, /no REFERRAL line/);
+  assert.equal(res.problems[0].amount, 500);
+});
+
+test("skip-before-match applies to ANY zero expense row, not just the optional ones", async () => {
+  reset();
+  // GENO is a normal, non-optional row. With a zero amount and no line, there is
+  // nothing to write, so it is inactive rather than a hard failure on the WRITE path.
+  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "GENO");
+  const res = await writeBudgetLines("R000001", { ...VALUES, Total_Other_Budget__c: 0 }, { dryRun: true });
+  assert.equal(res.ok, true);
+  assert.ok(res.inactive.some((i) => i.rows.includes("Other (GENO)")));
+  // ...but with a real amount it still aborts.
+  const res2 = await writeBudgetLines("R000001", VALUES, { dryRun: true });
+  assert.equal(res2.ok, false);
+  assert.equal(res2.aborted, "match_problems");
+});
+
+test("RECONCILE stays strict — no amounts means every non-optional row must match", () => {
+  // The leniency above is write-path only. A structural check must still catch a
+  // broken key, because that is the run whose job is to catch broken keys.
+  const lines = fullScaffold().filter((l) => l.taskId !== "GENO");
+  const { problems } = matchMappingToLines(MAPPING_ROWS, lines); // no budgetValues
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].reason, /no scaffolded line matched/);
+});
+
+test("income is EXEMPT from skip-before-match — a missing income line still fails", () => {
+  const lines = fullScaffold().filter((l) => l.taskId !== "BALANCE");
+  const { problems } = matchMappingToLines(MAPPING_ROWS, lines, { ...VALUES, Contract_Amount__c: 0, Total_Material_Budget__c: 0 });
+  assert.equal(problems.length, 1, "income-always means a missing income line fails even at 0");
+});
+
+test("DCREBATE present + zero rebate still WRITES — income-always", async () => {
+  reset();
+  const res = await writeBudgetLines("R000001", { ...VALUES, DC_Rebate_Amount__c: 0 }, { dryRun: true });
+  const dc = res.results.find((r) => r.key.startsWith("DCREBATE"));
+  assert.equal(dc.action, "would_write");
+  assert.equal(dc.amount, 0);
+});
+
+// ===========================================================================
+// Regression against the REAL harvested scaffolds (out-rs.json / out-rsdc.json)
+// ===========================================================================
+// These are the actual live line dumps from R261077 (RS) and R261066 (RSDC), so this
+// is the closest thing to the live reconcile that can run offline. If the template
+// changes under us, this is what notices.
+
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const harvest = (f) => JSON.parse(fs.readFileSync(path.join(here, "harvest", f), "utf8")).lines;
+
+test("LIVE RS scaffold (R261077): all rows resolve, 0 problems", () => {
+  const lines = harvest("R261077-rs.json");
+  assert.equal(lines.length, 38);
+  const { matched, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines, {
+    ...VALUES, DC_Rebate_Amount__c: 0, Adder_Referral_Fee_Qty__c: 0,
+  });
+  assert.equal(problems.length, 0, JSON.stringify(problems));
+  assert.equal(matched.length, 19);
+  // Exactly two rows correctly do nothing on an RS project.
+  assert.deepEqual(
+    inactive.map((i) => i.rows).flat().sort(),
+    ["Income - DC Rebate (RSDC only)", "Referral Fees"]
+  );
+  // The harvest's headline fix: single-space SLPC OUT now resolves.
+  assert.ok(matched.some((m) => m.key === "SLPC OUT | OTHER | M1&M2COM | Expense"));
+});
+
+test("LIVE RSDC scaffold (R261066): DCREBATE resolves, 0 problems", () => {
+  const lines = harvest("R261066-rsdc.json");
+  assert.equal(lines.length, 39);
+  const { matched, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines, {
+    ...VALUES, DC_Rebate_Amount__c: 3960, Adder_Referral_Fee_Qty__c: 0,
+  });
+  assert.equal(problems.length, 0, JSON.stringify(problems));
+  assert.equal(matched.length, 20);
+  assert.ok(matched.some((m) => m.key === "DCREBATE | BILLING | <N/A> | Income"));
+  assert.deepEqual(inactive.map((i) => i.rows).flat(), ["Referral Fees"]);
+});
+
+test("LIVE RS scaffold + a domestic-content rebate = wrong template, loud abort", () => {
+  const { problems } = matchMappingToLines(MAPPING_ROWS, harvest("R261077-rs.json"), {
+    ...VALUES, DC_Rebate_Amount__c: 3960, Adder_Referral_Fee_Qty__c: 0,
+  });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0].reason, /RSDC template/);
+  assert.equal(problems[0].amount, 3960);
+});
+
+test("the RSDC scaffold is the RS scaffold plus exactly one line", () => {
+  const rs = new Set(harvest("R261077-rs.json").map((l) => l.key));
+  const delta = harvest("R261066-rsdc.json").filter((l) => !rs.has(l.key));
+  assert.equal(delta.length, 1);
+  assert.equal(delta[0].key, "DCREBATE | BILLING | <N/A> | Income");
 });

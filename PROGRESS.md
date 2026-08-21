@@ -1,5 +1,68 @@
 # Sundial — Progress Log
 
+## 2026-08-21 — harvest results applied to MAPPING_ROWS v3 (D18)
+
+The two live reconciles came back (R261077 RS, 38 lines; R261066 RSDC, 39) and settled
+every open key. Three fixes, one of which is a change to the matching *order* rather than
+to any row.
+
+**`SLPC OUT` has one space.** Both scaffolds agree, so the REVISED sheet's two-space H7
+label is a typo in the sheet, not the Acumatica task id. One of the two harvest problems.
+
+**`ENGR`, `SUBCON` and `SOFTWARE` all exist exactly as §5 guessed** — all three flip
+provisional → harvested. No provisional keys remain anywhere in the mapping.
+
+**DCREBATE is `DCREBATE | BILLING | <N/A> | Income`, and it is the *only* difference
+between the RS and RSDC templates** — 38 lines vs 39, one line apart. Activated out of
+`PENDING_HARVEST_ROWS` with conditional semantics: present (RSDC) → income-always, written
+even at 0; absent (RS) → inactive when the rebate is 0, but **aborts** when it is not,
+because a non-zero rebate on an RS-template project means someone ticked Domestic Content
+on a project built from the wrong template and the income would otherwise vanish
+silently. The abort message says exactly that. Q12b fell out of the same data: BALANCE
+excludes the rebate, so that row is unchanged.
+
+`PENDING_HARVEST_ROWS` is now empty but **kept**, along with its guard. It is the
+mechanism that stopped an unkeyed $0.45/W income line being dropped for the whole time
+its key was unknown; an empty array costs nothing and the next unkeyed line drops
+straight in.
+
+**REFERRAL genuinely does not exist in the live template**, on either project — D13
+predicted it. The interesting part is what that broke: under the old order (match, *then*
+skip-zero) a missing line failed **every** push, including the overwhelming majority of
+jobs that have no referral fee at all. So the ordering is now **skip-zero before the
+≠1-match check**, and applied generally rather than special-cased — requiring a scaffold
+line for a row you are not going to write to is not a safety property.
+
+Two exemptions keep that from eroding anything real. **Income is exempt**: income-always
+means an income line must match or the push fails even at 0, the sole exception being a
+`scaffoldOptional` income row (the DC rebate). And **reconcile stays structurally
+strict** — with no amounts supplied every non-optional row must match, so a genuinely
+broken key is still caught by the run whose job is catching broken keys. The leniency
+exists only on the write path and only where there is nothing to write.
+
+A third result bucket, `inactive`, now sits beside `matched` and `problems`: rows
+correctly doing nothing on this project. Surfaced rather than swallowed, so "why isn't
+REFERRAL in the output" has an answer instead of being an absence someone has to notice.
+
+**The harvest dumps are committed** at `lambdas/sundial-acumatica-budget-push/harvest/`
+and the mapping is regression-tested against them, including an assertion that the RSDC
+scaffold is the RS scaffold plus exactly one line. That is the closest thing to the live
+reconcile that runs offline, and it means a template change under us fails a test rather
+than a push.
+
+Offline re-verify: **RS 19 matched / 2 inactive / 0 problems; RSDC 20 matched / 1 inactive
+/ 0 problems.** The brief predicted 18 and 19 — the extra one each is the `SLPC OUT` fix,
+which moves a row out of `problems` and into `matched`; the 18 came from the harvest
+output taken before the fix. 21 rows = 19 + 2 and 20 + 1.
+
+Also refreshed the reconcile's `gate5b` strings, which were still describing v1 gates.
+
+38 tests in this Lambda, suite 331. Nothing deployed; Tim re-runs the live reconcile
+after merge/deploy to confirm against the org rather than the saved dumps. Two things
+still sit with Harmon: adding a REFERRAL line (until then a job with a referral fee
+aborts, and one without is unaffected), and Q12c on whether the `DLR` dealer-fee expense
+line is a v1 double-count.
+
 ## 2026-08-20 — v2-data rollout guard on the push worker (feat/mapping-v3)
 
 Small addition, but it closes the one failure mode in this whole rework that would have

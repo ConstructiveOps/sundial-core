@@ -92,11 +92,13 @@ export const MAPPING_ROWS = [
   { line: "Income - Balance of Contract", taskId: "BALANCE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Contract_Amount__c-Total_Material_Budget__c", hoursField: null, keyStatus: "harvested", note: "Income 1 of 2. Contract net of the material billing (GENM/BILLING) so the two income lines sum to the contract. DELIBERATELY EXCLUDES the DC rebate: the rebate gets its OWN income line, so adding it here too would double-count the revenue. Confirm at re-harvest (Q12b)." },
   { line: "Income - Solar Material", taskId: "GENM", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "Total_Material_Budget__c", hoursField: null, keyStatus: "harvested", note: "Income 2 of 2. Distinct from the GENM/MATERIAL cost line via AccountGroup+Type." },
 
+  { line: "Income - DC Rebate (RSDC only)", taskId: "DCREBATE", accountGroup: "BILLING", type: "Income", inventoryId: "<N/A>", amountField: "DC_Rebate_Amount__c", hoursField: null, keyStatus: "harvested", scaffoldOptional: true, missingLineMessage: "Domestic Content is set on a project built from the RS template, which has no DCREBATE line. The project must be created from the RSDC template before the rebate can be pushed.", note: "HARVEST-CONFIRMED 2026-08-20: DCREBATE | BILLING | <N/A> | Income is the ONLY difference between the RSDC scaffold (R261066, 39 lines) and the RS one (R261077, 38). CONDITIONAL: present (RSDC) => income-always, written even at 0; absent (RS) => inactive when the rebate is 0, but ABORTS with missingLineMessage when it is not, because a non-zero rebate on an RS-template project means the wrong template was chosen and the income would silently vanish." },
+
   // ---- COMMISSIONS (D9/D10/D16/D17) ---------------------------------------
   // FOUR lines now, not two, each with exactly ONE source field. The v1 shape
   // (SLPC = rep + overhead summed) is gone: overhead moved into the SLMC management
   // line, and the rep split in two by deal type.
-  { line: "3rd Party Rep Commission", taskId: "SLPC  OUT", accountGroup: "OTHER", type: "Expense", inventoryId: "M1&M2COM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, keyStatus: "provisional", note: "D9/D16. Sales_Rep_Commission_Amt__c now holds the THIRD-PARTY amount only (the field was relabelled '3rd Party Rep Commission $/W'). ZERO on an internal deal, so skip-zero leaves this line alone. AccountGroup OTHER + InventoryID M1&M2COM per §5 - NOT LABOR/SALESCOMM like the other three. The sheet label at H7 is 'SLPC  OUT' with TWO spaces; that spacing is reproduced here and MUST be confirmed by the re-harvest." },
+  { line: "3rd Party Rep Commission", taskId: "SLPC OUT", accountGroup: "OTHER", type: "Expense", inventoryId: "M1&M2COM", amountField: "Sales_Rep_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D9/D16. Sales_Rep_Commission_Amt__c now holds the THIRD-PARTY amount only (the field was relabelled '3rd Party Rep Commission $/W'). ZERO on an internal deal, so skip-zero leaves this line alone. AccountGroup OTHER + InventoryID M1&M2COM per §5 - NOT LABOR/SALESCOMM like the other three. HARVEST-CONFIRMED 2026-08-20 (R261077 + R261066): the live scaffolds both carry 'SLPC OUT' with a SINGLE space. The REVISED sheet's H7 label shows two — that is a typo in the sheet, not the Acumatica task id." },
   { line: "Internal Rep Commission", taskId: "SLPC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Internal_Rep_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D9/D16. Zero on a third-party deal. Same key v1 used for the rep+overhead sum, but the amount source is now the INTERNAL rep alone." },
   { line: "Management Commission", taskId: "SLMC", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Management_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D10. ONE line from the COMBINED (.04 + .015) amount. Do NOT sum Sales_Mgr_Commission_Amt__c + Overhead_Commission_Amt__c here - Management_Commission_Amt__c already IS that sum, and adding the components too would double it. The components stay on the record only so the attribute sync can split them (MGRCOM* / MGMTOR*)." },
   { line: "Setter Commission", taskId: "APPT COM", accountGroup: "LABOR", type: "Expense", inventoryId: "SALESCOMM", amountField: "Setter_Commission_Amt__c", hoursField: null, keyStatus: "harvested", note: "D17. Source CHANGED from Geo_Commission_Amount__c (the INPUT rate, always 70) to Setter_Commission_Amt__c (what actually APPLIED - 0 when the Customer has no Setter__c). v1 would have posted 70 to every job regardless. Still needs Harmon sign-off on the APPT COM code (PENDING_HARMON_SIGNOFF)." },
@@ -117,43 +119,28 @@ export const MAPPING_ROWS = [
 
   // ---- STANDALONE COST LINES (D11/D13) - NEW IN v3 ------------------------
   // All four were computed in BRADS and then EXCLUDED from Total Job Cost; D11 fixed
-  // that. None existed in the v1 sandbox scaffold, so every key here is provisional.
-  { line: "Engineer Stamps", taskId: "ENGR", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Engineer_Stamps_Cost__c", hoursField: null, keyStatus: "provisional", note: "Sheet J17 / E55, from the Structural-Electrical Engineer Stamp adder. Section 5 writes the task as 'ENGR?' - the v1 scaffold had BOTH an ENGR 'Engineering Costs' line and a SUBCON line, so which one this is MUST come from the re-harvest." },
-  { line: "Subcontractor", taskId: "SUBCON", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Subcontractor_Cost__c", hoursField: null, keyStatus: "provisional", note: "Sheet J18 / E56, from the Bird Blocking adder (per-watt cost x watts)." },
-  { line: "Audit Software", taskId: "SOFTWARE", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c", hoursField: null, keyStatus: "provisional", note: "Sheet J19 / E60. There is NO dedicated SF output field (left extras-only per gap doc section D), so the amount is the PRODUCT of the two adder fields - identical to what the calc computes, where a pass-through row's cost IS price x qty." },
-  { line: "Referral Fees", taskId: "REFERRAL", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "provisional", note: "Sheet J20 / E63. D13: this is a NEW task code absent from the v1 scaffold - the live template MUST contain it or the push aborts. Section 5 leaves the InventoryID as '?'; <N/A> is the guess, matching the other OTHER lines. Same price x qty product as Software." },
+  // that. None existed in the v1 sandbox scaffold; the 2026-08-20 harvest confirmed
+  // ENGR / SUBCON / SOFTWARE exist in the LIVE template and REFERRAL does not.
+  { line: "Engineer Stamps", taskId: "ENGR", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Engineer_Stamps_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J17 / E55, from the Structural-Electrical Engineer Stamp adder. HARVEST-CONFIRMED 2026-08-20 (R261077 + R261066): ENGR | SUBCON | <N/A> | Expense is present in both live scaffolds, so the section 5 'ENGR?' guess was right and it is ENGR, not the neighbouring SUBCON line." },
+  { line: "Subcontractor", taskId: "SUBCON", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Subcontractor_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J18 / E56, from the Bird Blocking adder (per-watt cost x watts). HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds." },
+  { line: "Audit Software", taskId: "SOFTWARE", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c", hoursField: null, keyStatus: "harvested", note: "Sheet J19 / E60. HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds. There is NO dedicated SF output field (left extras-only per gap doc section D), so the amount is the PRODUCT of the two adder fields - identical to what the calc computes, where a pass-through row's cost IS price x qty." },
+  { line: "Referral Fees", taskId: "REFERRAL", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "harvested_absent", scaffoldOptional: true, missingLineMessage: "Acumatica template has no REFERRAL line - Harmon must add it before pushing referral fees.", note: "Sheet J20 / E63. HARVEST 2026-08-20 CONFIRMED THE LINE DOES NOT EXIST in either live scaffold (R261077, R261066) - D13 predicted this. It is therefore scaffoldOptional: a job with no referral fee skips it silently (nothing to write, no line to write it to), but the moment a job actually carries a referral fee the push ABORTS with missingLineMessage rather than dropping the cost. Flip keyStatus to harvested and drop scaffoldOptional once Harmon adds the line to the template." },
 ];
 
 /**
- * The DC REBATE income line - DECLARED BUT NOT ACTIVE.
+ * Rows whose Acumatica key is not yet known.
  *
- * Its 4-part key is unknown until an RSDC project is harvested (section 5, D2/D3), and
- * the line only exists on RSDC scaffolds at all. It is kept OUT of MAPPING_ROWS on
- * purpose, because both alternatives are worse:
+ * EMPTY as of 2026-08-20 - the DC rebate was the only occupant and its key came back
+ * from the RSDC harvest (DCREBATE | BILLING | <N/A> | Income), so it now lives in
+ * MAPPING_ROWS above with scaffoldOptional semantics.
  *
- *   - putting it in with a null key would make matchMappingToLines flag a missing key
- *     part and abort EVERY push, including plain RS projects that correctly have no
- *     rebate line;
- *   - leaving it out entirely would silently drop $0.45/W of income on RSDC jobs.
- *
- * So: absent from the mapping, and GUARDED in writeBudgetLines - a job whose
- * DC_Rebate_Amount__c is non-zero cannot be pushed until this key is filled in. Once the
- * RSDC reconcile reports it, fill taskId/accountGroup/inventoryId and move the row up
- * into MAPPING_ROWS.
+ * The array and its guard in writeBudgetLines are KEPT rather than deleted. They are the
+ * mechanism that stopped an unkeyed $0.45/W income line from being silently dropped for
+ * the whole time its key was unknown, and the next line in that position (a new task
+ * code, another template variant) drops straight in. An empty array costs nothing;
+ * re-inventing the guard under time pressure costs a real number on a real job.
  */
-export const PENDING_HARVEST_ROWS = [
-  {
-    line: "Income - DC Rebate (RSDC only)",
-    taskId: null,
-    accountGroup: null,
-    inventoryId: null,
-    type: "Income",
-    amountField: "DC_Rebate_Amount__c",
-    hoursField: null,
-    keyStatus: "unknown",
-    note: "0.45 x watts when Domestic Content is set (D2). Key TBD from the RSDC scaffold harvest.",
-  },
-];
+export const PENDING_HARVEST_ROWS = [];
 
 
 // Unwrap an Acumatica field value ({ value: x } or scalar).
@@ -198,15 +185,42 @@ export async function readProjectBudgetLines(acumaticaProjectId) {
 }
 
 // Match mapping rows to existing scaffold lines by the FULL natural key
-// (ProjectTaskID + AccountGroup + InventoryID + Type). Two rules:
-//  - Several mapping rows sharing ONE key (e.g. the GENO adders: Other Material,
-//    CO Fee, Permit) SUM into that single scaffold line — never duplicated.
-//  - FAIL LOUDLY (never guess, never merge on a partial key): a row missing any
-//    key part (especially InventoryID) is flagged; a key matching 0 or >1 lines
-//    is flagged. Only a key matching exactly one line is a match.
-export function matchMappingToLines(mappingRows, lines) {
+// (ProjectTaskID + AccountGroup + InventoryID + Type). The rules, in the order they
+// are applied — and the ORDER IS THE POINT (changed 2026-08-20 after the harvest):
+//
+//  1. SKIP-ZERO IS EVALUATED BEFORE THE MATCH, not after. An expense row whose amount
+//     is 0 has nothing to write, so whether a line exists for it is irrelevant. Under
+//     the old order (match, then skip) a template that simply lacks a line — REFERRAL,
+//     confirmed absent from the live template on 2026-08-20 — failed EVERY push,
+//     including the overwhelming majority of jobs that have no referral fee at all.
+//     Requiring a line you are not going to write to is not a safety property.
+//  2. INCOME IS EXEMPT from that: income-always means an income line must match or the
+//     push fails, even at 0. The one exception is a `scaffoldOptional` income row (the
+//     DC rebate), which legitimately does not exist on an RS scaffold.
+//  3. `scaffoldOptional` rows may be absent. Absent + zero = inactive. Absent +
+//     NON-ZERO = a loud abort carrying the row's `missingLineMessage`, because that is
+//     the case where a real amount would silently vanish.
+//  4. Several rows sharing ONE key still SUM into that single line (no v3 row does
+//     today, but the machinery is intact and the GENO history is why it exists).
+//  5. Otherwise: FAIL LOUDLY. A key matching 0 or >1 lines, or a row missing any key
+//     part, is a problem. Never guess, never merge on a partial key.
+//
+// `budgetValues` is OPTIONAL and that distinction matters:
+//   - WRITE PATH (values supplied): amount-aware, so rules 1-3 apply.
+//   - RECONCILE (omitted): purely STRUCTURAL. Every non-optional row must match or it
+//     is reported as a problem, regardless of what any record's amounts happen to be.
+//     That keeps the structural safety net intact — the leniency in rule 1 exists only
+//     where there is genuinely nothing to write, and reconcile is where a broken key is
+//     supposed to be caught.
+//
+// Returns { matched, problems, inactive }. `inactive` is neither success nor failure:
+// rows correctly doing nothing on this project (an absent optional line, a zero expense
+// with no line). Surfaced rather than swallowed so "why is REFERRAL not in the output"
+// has an answer.
+export function matchMappingToLines(mappingRows, lines, budgetValues = null) {
   const matched = [];
   const problems = [];
+  const inactive = [];
 
   // Partition out rows we can't key completely (can't match or group them safely).
   const complete = [];
@@ -237,27 +251,65 @@ export function matchMappingToLines(mappingRows, lines) {
 
   for (const [key, rows] of groups) {
     const hits = lines.filter((l) => l.key === key);
-    if (hits.length !== 1) {
-      problems.push({
-        key,
-        count: hits.length,
-        rows: rows.map((r) => r.line),
-        reason: hits.length === 0 ? "no scaffolded line matched" : "matched multiple lines",
-      });
+    const isIncome = rows[0].type === "Income";
+    const optional = rows.some((r) => r.scaffoldOptional === true);
+    const rowNames = rows.map((r) => r.line);
+
+    if (hits.length > 1) {
+      problems.push({ key, count: hits.length, rows: rowNames, reason: "matched multiple lines" });
       continue;
     }
+
+    if (hits.length === 0) {
+      const amount = budgetValues
+        ? sumFields(rows.map((r) => r.amountField).filter(Boolean), budgetValues)
+        : null;
+
+      // Rule 3 (write path): an optional line that is absent while carrying a real
+      // amount is the dangerous case — abort with the row's own message.
+      if (optional && amount !== null && amount !== 0) {
+        problems.push({
+          key,
+          count: 0,
+          rows: rowNames,
+          amount,
+          reason: rows.find((r) => r.missingLineMessage)?.missingLineMessage
+            ?? "no scaffolded line matched and the amount is non-zero",
+        });
+        continue;
+      }
+      // Rule 3 (write path) / rule 1: absent + nothing to write = inactive.
+      if (optional && (amount === 0 || amount === null)) {
+        inactive.push({
+          key,
+          rows: rowNames,
+          ...(amount !== null ? { amount } : {}),
+          reason: "line is not on this scaffold and there is nothing to write (optional row)",
+        });
+        continue;
+      }
+      // Rule 1: a NON-optional expense row with a zero amount. Nothing to write, so a
+      // missing line cannot hurt. Reconcile (amount === null) still reports it.
+      if (!isIncome && amount === 0) {
+        inactive.push({ key, rows: rowNames, amount, reason: "no scaffolded line matched, but the amount is 0" });
+        continue;
+      }
+      problems.push({ key, count: 0, rows: rowNames, ...(amount !== null ? { amount } : {}), reason: "no scaffolded line matched" });
+      continue;
+    }
+
     matched.push({
       key,
       lineId: hits[0].id,
       uom: hits[0].uom, // scaffold line UOM; HOUR lines also get an OriginalBudgetedQty
       type: rows[0].type, // Income lines are ALWAYS written (no skip-zero)
-      rows: rows.map((r) => r.line),
+      rows: rowNames,
       summed: rows.length > 1, // multiple mapping rows -> summed into this one line
       amountFields: rows.map((r) => r.amountField).filter(Boolean),
       hoursFields: rows.map((r) => r.hoursField).filter(Boolean),
     });
   }
-  return { matched, problems };
+  return { matched, problems, inactive };
 }
 
 // --- Budget field resolution ------------------------------------------------
@@ -465,9 +517,11 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
 
   // 2) Re-match against the fresh read. Any key not matching exactly one line
   //    aborts BEFORE any PUT.
-  const { matched, problems } = matchMappingToLines(MAPPING_ROWS, lines);
+  // budgetValues IS passed here (unlike reconcile) so the matcher can apply skip-zero
+  // before requiring a line — see matchMappingToLines' header.
+  const { matched, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines, budgetValues);
   if (problems.length > 0) {
-    return { ok: false, aborted: "match_problems", acumaticaProjectId, problems };
+    return { ok: false, aborted: "match_problems", acumaticaProjectId, problems, inactive };
   }
 
   // 3) Income lines are always written, so their amount source must exist. Refuse
@@ -543,8 +597,18 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
     ok: failed === 0,
     dryRun,
     acumaticaProjectId,
-    summary: { matchedGroups: matched.length, written, skipped, failed },
+    summary: {
+      matchedGroups: matched.length,
+      written,
+      skipped,
+      failed,
+      // Rows correctly doing nothing on this project (absent optional line, or a zero
+      // expense with no line). Reported so a missing line is visible rather than just
+      // absent from the output.
+      inactive: inactive.length,
+    },
     results,
+    inactive,
   };
 }
 
@@ -827,20 +891,30 @@ async function handleReconcile(event) {
       return { ok: false, error: "no_scaffolded_lines", acumaticaProjectId, message: "ProjectBudget returned 0 lines — project not created or scaffold failed. Do NOT create lines from scratch." };
     }
 
-    const { matched, problems } = matchMappingToLines(MAPPING_ROWS, lines);
+    // No budgetValues: a purely STRUCTURAL check. Every non-optional row must match.
+    const { matched, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines);
     return {
       ok: true,
       mode: "reconcile_read_only",
       acumaticaProjectId,
       lineCount: lines.length,
-      lines, // full existing scaffold, keyed by natural key + GUID (Gate 5a table)
-      mappingMatch: { matchedCount: matched.length, matched, problems },
-      // Data blockers resolved from the R269999 harvest (2026-08-07). What remains
-      // before a PRODUCTION write is Gate 5b sign-off, not more data.
-      gate5b: [
-        "Confirm this run shows all mapping rows matched with 0 problems.",
-        "Harmon finance sign-off on the Geo commission -> APPT COM (LABOR/SALESCOMM) mapping.",
-        "Tim approves the hand-proven write plan before writeBudgetLines is implemented.",
+      lines, // full existing scaffold, keyed by natural key + GUID
+      mappingMatch: {
+        matchedCount: matched.length,
+        matched,
+        problems,
+        // Expected-absent rows. On an RS project this should be exactly the DC rebate
+        // (no DCREBATE line on that template) and Referral Fees (not in the template at
+        // all yet). Anything else here wants explaining.
+        inactive,
+      },
+      gates: [
+        "problems must be EMPTY. A provisional key that matches nothing shows up here.",
+        "inactive should contain ONLY: 'Income - DC Rebate (RSDC only)' on an RS project, and 'Referral Fees' until Harmon adds a REFERRAL line to the template.",
+        "An RSDC project must show DCREBATE | BILLING | <N/A> | Income in matched, not inactive.",
+        "Harmon sign-off on the setter commission -> APPT COM (LABOR/SALESCOMM) mapping (PENDING_HARMON_SIGNOFF).",
+        "Q12c: confirm the DLR dealer-fee expense line is correct, given the calc already nets the dealer fee out of Balance of Revenue.",
+        "The push itself additionally refuses v1-calculated records (blank Commission_Deal_Type__c) and records with both rep commission amounts set.",
       ],
     };
   } catch (err) {

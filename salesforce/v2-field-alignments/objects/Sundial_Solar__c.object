@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ⚠️ MODIFY PACKAGE — these fields ALREADY EXIST. Deploying REPLACES their full
+  definition, so every attribute below was READ FROM THE LIVE ORG (2026-08-21) and is
+  reproduced verbatim; exactly one attribute per field differs. Regenerate with
+  `node salesforce/v2-field-alignments/generate.mjs` immediately before deploying so
+  the carried-over attributes match production at deploy time, not at authoring time.
+
+  Sundial_Solar__c — 10 field(s). See README.md for the change table.
+
+  NOT reproducible from any API the integration user can reach: trackTrending
+  (assumed false — see README). Everything else is live-sourced.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Battery_Install_Hours__c</fullName>
+        <defaultValue>16</defaultValue>
+        <description>TOTAL battery install hours (S3). CAUTION: sheet label reads 'Hours / Battery' but the formula uses this as a flat total - it is NOT multiplied by battery qty. Confirm intent with Harmon.</description>
+        <externalId>false</externalId>
+        <label>Battery Install Hours</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>1</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_1_Markup_Percent__c</fullName>
+        <defaultValue>25</defaultValue>
+        <description>Markup % applied to this adder's materials. Included in the adder total (revenue side) but NOT in any cost budget line.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 1 Markup %</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_2_Markup_Percent__c</fullName>
+        <defaultValue>25</defaultValue>
+        <description>Markup % applied to this adder's materials. Included in the adder total (revenue side) but NOT in any cost budget line.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 2 Markup %</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_3_Markup_Percent__c</fullName>
+        <defaultValue>25</defaultValue>
+        <description>Markup % applied to this adder's materials. Included in the adder total (revenue side) but NOT in any cost budget line.</description>
+        <externalId>false</externalId>
+        <label>NS Adder 3 Markup %</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_225_Price__c</fullName>
+        <defaultValue>2850</defaultValue>
+        <description>Unit price for 225 Upgrade adder (flat $). Editable per project; default is current catalog rate. Standard-adder labor = qty x 16 hrs x Battery Labor Rate ($33), burden 75%.</description>
+        <externalId>false</externalId>
+        <label>Adder 225 Upgrade-Overhead - Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Adder_Upgrade_225_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Quantity / select flag (0 = not included) for 225 Upgrade adder.</description>
+        <externalId>false</externalId>
+        <label>Adder 225 Upgrade-Overhead - Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Gateway_Unit_Cost__c</fullName>
+        <defaultValue>878.64</defaultValue>
+        <description>Unit cost of Tesla Gateway (or equivalent).</description>
+        <externalId>false</externalId>
+        <label>Tesla Expansion Pack Unit Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Gateway_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Gateway quantity.</description>
+        <externalId>false</externalId>
+        <label>Tesla Expansion Pack Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+    <fields>
+        <fullName>Gateway_Cost__c</fullName>
+        <description>CALCULATED by the budget Lambda - do not edit manually. Maps to sheet cell G14. Calc: Gateway_Unit_Cost__c x Gateway_Qty__c</description>
+        <externalId>false</externalId>
+        <label>Tesla Expansion Pack Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Internal_Rep_Commission_PPW__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>v2 budget rework §4d / D9 / D16. Internal (Harmon) sales rep commission in dollars per watt. The COMPANION to Sales_Rep_Commission_PPW__c, which is being repurposed as the 3rd-party rep input. WHICH ONE IS POPULATED DETERMINES THE DEAL TYPE: 3rd-party &gt; 0 posts to SLPC OUT · OTHER · M1&amp;M2COM and generates commission POs; internal &gt; 0 posts to SLPC · LABOR · SALESCOMM and is payroll only, NO POs (D16). Both populated is a validation error — the calc fails loudly rather than guessing. Internal commission IS burdened (75%); 3rd-party is not. Type cloned from Sales_Rep_Commission_PPW__c on this object (Number, not Currency).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Dollars per watt for an INTERNAL Harmon rep. Leave at 0 for a third-party dealer deal and fill 3rd Party Rep Commission PPW instead — never both.</inlineHelpText>
+        <label>Internal Rep Commission $/W</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+    </fields>
+</CustomObject>

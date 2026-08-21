@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: v2 budget output fields (§D of budget-v2-output-gap.md).
+  8 new custom fields on Sundial_Solar__c, additive only.
+
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST.
+
+  ⚠️ ZIP WITH WINDOWS EXPLORER "Send to > Compressed (zipped) folder".
+  NEVER PowerShell 5.1 Compress-Archive — it writes BACKSLASH path separators into
+  the zip and Workbench cannot read the entries. See README.md.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Solar__c.Internal_Rep_Commission_Amt__c</members>
+        <members>Sundial_Solar__c.Management_Commission_Amt__c</members>
+        <members>Sundial_Solar__c.Setter_Commission_Amt__c</members>
+        <members>Sundial_Solar__c.Commission_Deal_Type__c</members>
+        <members>Sundial_Solar__c.DC_Rebate_Amount__c</members>
+        <members>Sundial_Solar__c.Engineer_Stamps_Cost__c</members>
+        <members>Sundial_Solar__c.Subcontractor_Cost__c</members>
+        <members>Sundial_Solar__c.Total_Other_Summary__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

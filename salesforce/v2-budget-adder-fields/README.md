@@ -181,6 +181,21 @@ Custom Objects → pick the object → scan for `Adder_Upgrade_225_UG`, `NS_Adde
 
 ---
 
+## ⚠️ Zipping — Explorer only, never `Compress-Archive`
+
+**Zip with Windows Explorer: select the files → right-click → *Send to* → *Compressed
+(zipped) folder*.**
+
+**Do NOT use PowerShell 5.1's `Compress-Archive`.** It writes entry paths with
+**backslash** separators (`objects\Sundial_Solar__c.object`). The ZIP spec requires
+forward slashes, and Workbench/the Metadata API cannot read those entries — the deploy
+fails with a confusing "no components"/empty-package error rather than anything naming
+the real cause.
+
+(7-Zip and `git archive` are fine too. Only PS 5.1's built-in cmdlet is the problem.)
+
+---
+
 ## Deploy (Workbench)
 
 1. Zip the **contents** of this folder so `package.xml` sits at the zip root:

@@ -1,5 +1,78 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — v2 budget: output-field package + field-alignment package (both PACKAGE-ONLY)
+
+Gap list approved, so two packages on `feat/budget-calc-v2`. Neither deployed.
+
+**Package 1 — `salesforce/v2-budget-output-fields/`, additive, 8 fields, Solar only.**
+The §D set exactly as proposed: internal / management / setter commission amounts, deal
+type (a restricted picklist, so a future typo is a save error rather than silent bad
+data), DC rebate, engineer stamps, subcontractor, and the N13 summary "other". Collision
+check clean. The other seven gap values stay `extras`-only by decision and the gap doc
+now carries a disposition table saying which got homes and which didn't.
+
+**Worth being explicit about, because it is the obvious way to be disappointed:
+deploying these eight does not populate them.** `budgetCalc.js` still returns all fifteen
+in `extras` and `handler.js` writes only the `fields` map. Promoting the eight is a small
+calc-side change, tracked, and deliberately not bundled so the metadata can land first.
+
+**Package 2 — `salesforce/v2-field-alignments/`, a MODIFY package, 20 fields.** This is
+the risky shape: a `<CustomField>` in a deploy replaces the *whole* definition, so any
+attribute the XML omits reverts — omit `<description>` and it is gone.
+
+So none of it is hand-written. The generator **reads each field's current definition out
+of the live org and re-emits it verbatim with exactly one attribute changed**, and it
+re-reads on every run, so regenerating immediately before deploy is what stops the
+package reverting an edit someone made in Setup meanwhile. The README makes that step
+mandatory rather than advisory.
+
+**Getting the current definitions took three attempts, and the first two failed in ways
+worth recording.** The Metadata API — the correct source — rejects the integration
+user's JWT session outright (`/services/Soap/m` → `INVALID_SESSION_ID`), and the Tooling
+API's `CustomField` object is not exposed to it either. What does work is the pair
+`FieldDefinition` (label, description, history flag) plus the REST describe — and the
+describe turns out to expose `inlineHelpText`, which is the attribute that would
+otherwise have been silently destroyed. Between the two, everything is recoverable
+except `trackTrending`, which is written `false` and flagged in the README as a known
+assumption rather than left as a silent one.
+
+**Two findings changed the package's contents.**
+
+`Sales_Rep_Commission_PPW__c` **was already relabelled in the UI**, on both objects, to
+"3rd Party Rep Commission $/W". Excluded — redeploying an unchanged definition is pure
+risk for nothing. The generator asserts the expected label and would print a warning if
+it ever found otherwise, so this stays true rather than being a note that rots. It also
+means the `$/W` form won over `PPW`, which makes the `Internal_Rep_Commission_PPW__c`
+label I shipped last session the odd one out; that relabel is included but marked
+`[OPT]` and is two deletable lines, because it was not in the brief.
+
+`Battery_Install_Hours__c` and `NS_Adder_1_Markup_Percent__c` are **copied Customer →
+Solar by Create Project**. Setting the new defaults on Solar alone would have looked
+correct and then been overwritten by a blank Customer value on every new project, so
+both objects get them — with each object's divergent type preserved (Solar
+`Percent(14,4)`, Customer `Percent(3,3)`).
+
+**The thing most likely to be misread about package 2: defaults do not backfill.** Every
+existing Solar record keeps `Battery_Install_Hours__c = 0` and will keep producing zero
+battery labor until someone changes it. That is a data decision, not a metadata one, and
+it is called out in both the README and TASKS rather than buried.
+
+**Excluded as instructed, and I agree with the reasoning:** the `Domestic_Content__c`
+text→checkbox conversion. A type change rewrites stored data, can fail partway on rows
+that do not convert, and is not cleanly reversible — a different risk class from a
+default or a label. The calc's permissive affirmative parse means nothing is blocked.
+Logged as its own item, to be done with a data audit first.
+
+**Zip discipline** is now in all three v2 package READMEs: Explorer "Send to →
+Compressed (zipped) folder" only, never PS 5.1 `Compress-Archive`, which writes
+backslash path separators that Workbench cannot read and fails with a "no components"
+error naming nothing useful.
+
+Also updated: the gap doc (disposition table + a new §E making the four v2
+meaning-changes an explicit **Workstream F prerequisite** — a Budget UI on v1 semantics
+shows zero commission on internal deals and double-counts CO fee + permit, and none of
+it throws), and the rework doc's Workstream B/F entries.
+
 ## 2026-08-20 — budgetCalc v2: rewritten to the REVISED workbook (build + fixture, NOT deployed)
 
 Workstream B. Branch `feat/budget-calc-v2`. The engine, the template, the cell map and

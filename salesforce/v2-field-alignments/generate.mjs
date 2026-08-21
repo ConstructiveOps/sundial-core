@@ -1,0 +1,312 @@
+// Generates salesforce/v2-field-alignments/{package.xml,objects/*.object}
+//
+// ⚠️ THIS IS A **MODIFY** PACKAGE. A <CustomField> in a deploy REPLACES the whole field
+// definition — every attribute you omit reverts to its default. Omit <description> and
+// the description is GONE; omit <defaultValue> and the default is GONE.
+//
+// So this generator does NOT hand-write field XML. It READS EACH FIELD'S CURRENT
+// DEFINITION FROM THE LIVE ORG and re-emits it verbatim with exactly ONE attribute
+// changed. Run it against the org immediately before deploying; the output is a
+// snapshot of production plus the intended delta, not a reconstruction from memory.
+//
+// WHERE THE CURRENT DEFINITION COMES FROM (the Metadata API is NOT reachable — the JWT
+// bearer session is rejected by /services/Soap/m with INVALID_SESSION_ID, and the
+// Tooling API's CustomField is not exposed to the integration user):
+//   REST describe      -> type, precision, scale, length, defaultValueFormula,
+//                         inlineHelpText, nillable, externalId, unique, caseSensitive
+//   FieldDefinition    -> label, description, IsFieldHistoryTracked
+//   NOT READABLE       -> trackTrending (see the note where it is written)
+//
+// Usage:  node salesforce/v2-field-alignments/generate.mjs
+import fs from "node:fs";
+import path from "node:path";
+import { describeObject, sfQuery } from "../../lib/salesforce.js";
+
+const OUT = path.resolve("salesforce/v2-field-alignments");
+fs.mkdirSync(path.join(OUT, "objects"), { recursive: true });
+
+const esc = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/**
+ * The intended deltas. `change` receives the CURRENT values and returns ONLY the keys
+ * to override — anything it does not return is carried through untouched.
+ *
+ * Per-object entries because the two objects diverge in both type and label style.
+ */
+const CHANGES = {
+  Sundial_Solar__c: [
+    // ---- Default-value corrections -------------------------------------
+    {
+      api: "Battery_Install_Hours__c",
+      why: "§3: Hours/Battery is 16 in the REVISED sheet (was 20 in BRADS). The org has 0, so a fresh record gets ZERO battery labor until someone types it.",
+      change: () => ({ defaultValue: "16" }),
+    },
+    ...[1, 2, 3].map((n) => ({
+      api: `NS_Adder_${n}_Markup_Percent__c`,
+      why: "§3: NS markup defaults to 25%. Blocks 4-5 shipped at 25; 1-3 are at 0, so the five blocks do not behave alike.",
+      change: () => ({ defaultValue: "25" }),
+    })),
+
+    // ---- Relabels --------------------------------------------------------
+    {
+      api: "Adder_Upgrade_225_Price__c",
+      why: '§4a: disambiguated from the new Underground variant.',
+      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+    },
+    {
+      api: "Adder_Upgrade_225_Qty__c",
+      why: "§4a: same.",
+      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+    },
+    {
+      api: "Gateway_Unit_Cost__c",
+      why: "§3: the Gateway_* fields are REUSED for the Tesla Expansion Pack; the sheet row is gone.",
+      change: () => ({ label: "Tesla Expansion Pack Unit Cost" }),
+    },
+    { api: "Gateway_Qty__c", why: "§3: same.", change: () => ({ label: "Tesla Expansion Pack Qty" }) },
+    { api: "Gateway_Cost__c", why: "§3: same (calc output).", change: () => ({ label: "Tesla Expansion Pack Cost" }) },
+
+    // ---- NOT IN THE BRIEF — see the README, delete this block to drop it --
+    {
+      api: "Internal_Rep_Commission_PPW__c",
+      optional: true,
+      why: 'CONSISTENCY ONLY: Sales_Rep_Commission_PPW__c was relabelled in the UI to "3rd Party Rep Commission $/W". This field shipped as "…PPW", so the two commission inputs now read differently side by side.',
+      change: () => ({ label: "Internal Rep Commission $/W" }),
+    },
+  ],
+
+  Sundial_Customer__c: [
+    {
+      api: "Battery_Install_Hours__c",
+      why: "Same as Solar AND load-bearing: this field is COPIED to Solar by Create Project (customer-to-solar-map.ts line 83). Leaving Customer blank would overwrite Solar's new 16 default on every new project.",
+      change: () => ({ defaultValue: "16" }),
+    },
+    ...[1, 2, 3].map((n) => ({
+      api: `NS_Adder_${n}_Markup_Percent__c`,
+      why: "Same as Solar; NS_Adder_1_Markup_Percent__c is likewise in the create-map.",
+      change: () => ({ defaultValue: "25" }),
+    })),
+    {
+      api: "Adder_Upgrade_225_Price__c",
+      why: "§4a.",
+      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+    },
+    {
+      api: "Adder_Upgrade_225_Qty__c",
+      why: "§4a.",
+      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+    },
+    { api: "Gateway_Unit_Cost__c", why: "§3.", change: () => ({ label: "Tesla Expansion Pack Unit Cost" }) },
+    { api: "Gateway_Qty__c", why: "§3.", change: () => ({ label: "Tesla Expansion Pack Qty" }) },
+    { api: "Gateway_Cost__c", why: "§3.", change: () => ({ label: "Tesla Expansion Pack Cost" }) },
+    {
+      api: "Internal_Rep_Commission_PPW__c",
+      optional: true,
+      why: "CONSISTENCY ONLY — see the Solar entry.",
+      change: () => ({ label: "Internal Rep Commission $/W" }),
+    },
+  ],
+};
+
+/**
+ * Fields the brief listed that are ALREADY DONE in the org. Verified, reported, and
+ * deliberately left out of the package — re-deploying an unchanged definition is pure
+ * risk for zero gain.
+ */
+const ALREADY_DONE = [
+  { api: "Sales_Rep_Commission_PPW__c", expectLabel: "3rd Party Rep Commission $/W" },
+];
+
+/** Metadata type name for a describe type. */
+function metaType(f) {
+  switch (f.type) {
+    case "currency": return "Currency";
+    case "percent": return "Percent";
+    case "double": return "Number";
+    case "string": return "Text";
+    case "textarea": return f.length > 255 ? "LongTextArea" : "TextArea";
+    case "boolean": return "Checkbox";
+    case "date": return "Date";
+    case "datetime": return "DateTime";
+    case "email": return "Email";
+    case "phone": return "Phone";
+    case "url": return "Url";
+    case "picklist": return "Picklist";
+    default: throw new Error(`unmapped describe type "${f.type}" on ${f.name}`);
+  }
+}
+
+function buildFieldXml(cur, overrides) {
+  const v = { ...cur, ...overrides };
+  const L = ["    <fields>", `        <fullName>${v.api}</fullName>`];
+
+  // Order matches the Metadata API's own alphabetical emission so a retrieved file and
+  // this one diff cleanly.
+  if (v.caseSensitive !== undefined && v.type === "Text") {
+    L.push(`        <caseSensitive>${v.caseSensitive}</caseSensitive>`);
+  }
+  if (v.defaultValue !== null && v.defaultValue !== undefined) {
+    L.push(`        <defaultValue>${esc(v.defaultValue)}</defaultValue>`);
+  }
+  if (v.description) L.push(`        <description>${esc(v.description)}</description>`);
+  L.push(`        <externalId>${v.externalId}</externalId>`);
+  if (v.help) L.push(`        <inlineHelpText>${esc(v.help)}</inlineHelpText>`);
+  L.push(`        <label>${esc(v.label)}</label>`);
+  if (v.length !== undefined) L.push(`        <length>${v.length}</length>`);
+  if (v.precision !== undefined) L.push(`        <precision>${v.precision}</precision>`);
+  L.push(`        <required>${v.required}</required>`);
+  if (v.scale !== undefined) L.push(`        <scale>${v.scale}</scale>`);
+  L.push(`        <trackHistory>${v.trackHistory}</trackHistory>`);
+  // NOT READABLE from any API available to the integration user. Every field in this
+  // package is a plain number/currency/percent created by us with the default (false),
+  // and trackTrending only affects historical-trending reports, which this org does not
+  // use. Stated in the README so it is a known assumption rather than a silent one.
+  L.push("        <trackTrending>false</trackTrending>");
+  L.push(`        <type>${v.type}</type>`);
+  if (v.type === "Text") L.push(`        <unique>${v.unique}</unique>`);
+  L.push("    </fields>");
+  return L.join("\n");
+}
+
+const run = async () => {
+  const manifest = [];
+  const skipped = [];
+
+  for (const [objName, entries] of Object.entries(CHANGES)) {
+    const d = await describeObject(objName);
+    const byName = new Map(d.fields.map((f) => [f.name, f]));
+
+    // FieldDefinition supplies label + description + history flag (the describe has
+    // neither label-with-fidelity concerns nor description at all).
+    const list = entries.map((e) => `'${e.api}'`).join(",");
+    const defs = await sfQuery(
+      `SELECT QualifiedApiName, Label, Description, IsFieldHistoryTracked FROM FieldDefinition ` +
+        `WHERE EntityDefinition.QualifiedApiName = '${objName}' AND QualifiedApiName IN (${list})`
+    );
+    const byDef = new Map(defs.map((r) => [r.QualifiedApiName, r]));
+
+    const out = [];
+    for (const e of entries) {
+      const f = byName.get(e.api);
+      const def = byDef.get(e.api);
+      if (!f || !def) throw new Error(`${objName}.${e.api} not found in the org — refusing to guess.`);
+      if (f.calculated) throw new Error(`${objName}.${e.api} is a FORMULA field; this generator does not handle formulas.`);
+
+      const cur = {
+        api: f.name,
+        label: def.Label,
+        description: def.Description || null,
+        help: f.inlineHelpText || null,
+        type: metaType(f),
+        precision: ["Currency", "Percent", "Number"].includes(metaType(f)) ? f.precision : undefined,
+        scale: ["Currency", "Percent", "Number"].includes(metaType(f)) ? f.scale : undefined,
+        length: ["Text", "TextArea", "LongTextArea"].includes(metaType(f)) ? f.length : undefined,
+        defaultValue: f.defaultValueFormula ?? null,
+        externalId: f.externalId === true,
+        required: f.nillable === false,
+        unique: f.unique === true,
+        caseSensitive: f.caseSensitive === true,
+        trackHistory: def.IsFieldHistoryTracked === true,
+      };
+
+      const overrides = e.change(cur);
+      const changedKeys = Object.keys(overrides).filter((k) => String(cur[k]) !== String(overrides[k]));
+
+      if (changedKeys.length === 0) {
+        // Already matches the target — leave it out rather than redeploy a no-op.
+        skipped.push({ object: objName, api: e.api, reason: "already at target value" });
+        continue;
+      }
+
+      out.push(buildFieldXml(cur, overrides));
+      manifest.push({
+        object: objName,
+        api: e.api,
+        attribute: changedKeys.join(","),
+        from: changedKeys.map((k) => JSON.stringify(cur[k])).join(","),
+        to: changedKeys.map((k) => JSON.stringify(overrides[k])).join(","),
+        optional: e.optional === true,
+        why: e.why,
+      });
+    }
+
+    if (out.length === 0) continue;
+    const header = `<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ⚠️ MODIFY PACKAGE — these fields ALREADY EXIST. Deploying REPLACES their full
+  definition, so every attribute below was READ FROM THE LIVE ORG (${new Date().toISOString().slice(0, 10)}) and is
+  reproduced verbatim; exactly one attribute per field differs. Regenerate with
+  \`node salesforce/v2-field-alignments/generate.mjs\` immediately before deploying so
+  the carried-over attributes match production at deploy time, not at authoring time.
+
+  ${objName} — ${out.length} field(s). See README.md for the change table.
+
+  NOT reproducible from any API the integration user can reach: trackTrending
+  (assumed false — see README). Everything else is live-sourced.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+`;
+    fs.writeFileSync(
+      path.join(OUT, "objects", `${objName}.object`),
+      header + out.join("\n") + "\n</CustomObject>\n",
+      "utf8"
+    );
+  }
+
+  // Verify the already-done relabels really are done.
+  for (const objName of Object.keys(CHANGES)) {
+    const defs = await sfQuery(
+      `SELECT QualifiedApiName, Label FROM FieldDefinition WHERE EntityDefinition.QualifiedApiName = '${objName}' ` +
+        `AND QualifiedApiName IN (${ALREADY_DONE.map((a) => `'${a.api}'`).join(",")})`
+    );
+    for (const a of ALREADY_DONE) {
+      const got = defs.find((r) => r.QualifiedApiName === a.api);
+      skipped.push({
+        object: objName,
+        api: a.api,
+        reason:
+          got && got.Label === a.expectLabel
+            ? `already relabelled in the UI ("${got.Label}") — excluded`
+            : `⚠️ EXPECTED "${a.expectLabel}" BUT FOUND "${got?.Label ?? "(absent)"}" — CHECK BEFORE DEPLOY`,
+      });
+    }
+  }
+
+  const members = manifest.map((m) => `        <members>${m.object}.${m.api}</members>`).join("\n");
+  fs.writeFileSync(
+    path.join(OUT, "package.xml"),
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ⚠️ MODIFY PACKAGE — v2 field alignments. These ${manifest.length} fields ALREADY EXIST and this
+  deploy REPLACES their definitions. Generated from the live org; see README.md.
+
+  Run CHECK ONLY first, then deploy. Zip with Windows Explorer "Send to > Compressed
+  (zipped) folder" — NEVER PowerShell 5.1 Compress-Archive (backslash entries break
+  Workbench).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+${members}
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>
+`,
+    "utf8"
+  );
+
+  console.log(`\n=== v2-field-alignments: ${manifest.length} field(s) modified ===`);
+  for (const m of manifest) {
+    console.log(
+      `  ${m.optional ? "[OPT] " : "      "}${(m.object.replace("Sundial_", "").replace("__c", "") + "." + m.api).padEnd(52)} ${m.attribute.padEnd(13)} ${m.from} -> ${m.to}`
+    );
+  }
+  console.log(`\n=== skipped (${skipped.length}) ===`);
+  for (const s of skipped) console.log(`  ${s.object}.${s.api}: ${s.reason}`);
+};
+
+run().catch((e) => {
+  console.error("FAILED:", e.message);
+  process.exit(1);
+});

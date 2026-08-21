@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v2 budget rework — the §D output-field set for Sundial_Solar__c.
+  Reference: docs/integrations/budget-v2-output-gap.md §D (reviewed + approved 2026-08-20).
+
+  8 NEW fields, ADDITIVE ONLY — no existing field is touched. Every one is a
+  budgetCalc v2 output that currently has nowhere to land and is returned only in the
+  calc's `extras` object.
+
+  ALL WRITTEN BY THE BUDGET LAMBDA. None is a user input, none belongs on
+  Sundial_Customer__c, and none goes in the Create Project mapping.
+
+  Collision-checked against the live describe 2026-08-20: none of these 8 API names
+  exists on Sundial_Solar__c.
+
+  Deliberately NOT included (derivable from fields already on the record, see §D):
+  softwareCost, referralCost, genoAdderCost, stdAdderPriceTotal, nsAdder4Total, nsAdder5Total.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Internal_Rep_Commission_Amt__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. Internal (Harmon) rep commission = Internal_Rep_Commission_PPW__c × watts. Posts to SLPC · LABOR · SALESCOMM and IS burdened (75%). The counterpart to Sales_Rep_Commission_Amt__c, which holds the THIRD-PARTY amount — on an internal deal that field is 0 and this one carries the commission (D9/D16).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Internal Harmon rep commission for this job. Zero on a third-party dealer deal.</inlineHelpText>
+        <label>Internal Rep Commission Amt</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Management_Commission_Amt__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. The single SLMC · LABOR · SALESCOMM line = (Sales_Mgr_Commission_PPW__c + Overhead_Commission_PPW__c) × watts. The two components stay stored separately (D10) because the Acumatica attribute sync splits them again — MGRCOM* from the .04, MGMTOR* from the .015. This is their sum, stored so every consumer reads one number instead of re-deriving it and drifting.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Combined Ralph + Daniel commission (the SLMC budget line). Components are in Sales Mgr / Overhead Commission Amt.</inlineHelpText>
+        <label>Management Commission Amt</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Setter_Commission_Amt__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. The setter commission that ACTUALLY APPLIED, posting to APPT COM. Distinct from Geo_Commission_Amount__c, which is the INPUT rate ($70) and is always populated: this is 0 when the linked Customer has no Setter__c (D17). Without it there is no way to tell a job that paid a setter from one that did not.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Setter commission applied to this job. Zero when the Customer record has no Setter.</inlineHelpText>
+        <label>Setter Commission Amt</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Commission_Deal_Type__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. Which rep commission input is populated, and therefore how this deal is treated (D16): 3rd Party → SLPC OUT · OTHER · M1&amp;M2COM plus commission POs; Internal → SLPC · LABOR · SALESCOMM, payroll only, NO POs; None → neither PPW is set. The PO engine reads this rather than re-deriving it. Both PPWs populated is a hard calc error, so this can never be ambiguous.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Set by the budget calc from which rep PPW is populated. Drives whether commission POs are created.</inlineHelpText>
+        <label>Commission Deal Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>3rd Party</fullName>
+                    <default>false</default>
+                    <label>3rd Party</label>
+                </value>
+                <value>
+                    <fullName>Internal</fullName>
+                    <default>false</default>
+                    <label>Internal</label>
+                </value>
+                <value>
+                    <fullName>None</fullName>
+                    <default>false</default>
+                    <label>None</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>DC_Rebate_Amount__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. LightReach domestic-content rebate = $0.45 × watts when Domestic_Content__c is affirmative, else 0 (D2). A THIRD income line on RSDC projects — it raises Balance of Revenue and GP, so without it there is no record on the job of why the margin differs from a non-DC one.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Domestic-content rebate revenue ($0.45/W). Zero unless Domestic Content is set.</inlineHelpText>
+        <label>DC Rebate Amount</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Engineer_Stamps_Cost__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. The SUBCON · ENGINEERING COSTS line, from the Structural-Electrical Engineer Stamp adder (Adder_Structural_Cost__c × qty). Inside Total Job Cost since D11 fixed the BRADS anomaly that excluded it.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Engineer stamp cost pushed to the SUBCON Engineering budget line.</inlineHelpText>
+        <label>Engineer Stamps Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Subcontractor_Cost__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. The SUBCON · SUBCONTRACTOR line, from the Bird Blocking adder (Adder_Bird_Blocking_Cost__c × watts, selection-gated). Inside Total Job Cost since D11.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Subcontractor cost pushed to the SUBCON budget line.</inlineHelpText>
+        <label>Subcontractor Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Total_Other_Summary__c</fullName>
+        <description>CALCULATED by the budget Lambda (lambdas/sundial-budget) — do not edit manually; the next recalc overwrites it. Sheet N13 "Total Other*" = GENO + engineer stamps + subcontractor + software + referral. THIS is the figure the GP calculation nets, and it is NOT Total_Other_Budget__c, which holds only the GENO line (J16). They differ by the four D11 lines — 2,550 vs 3,858 in the pinned fixture. Stored so a margin question can be answered from the record.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>The 'other' total the GP figure nets. Larger than Total Other Budget, which is GENO only.</inlineHelpText>
+        <label>Total Other (GP Summary)</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

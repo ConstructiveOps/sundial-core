@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ⚠️ MODIFY PACKAGE — v2 field alignments. These 20 fields ALREADY EXIST and this
+  deploy REPLACES their definitions. Generated from the live org; see README.md.
+
+  Run CHECK ONLY first, then deploy. Zip with Windows Explorer "Send to > Compressed
+  (zipped) folder" — NEVER PowerShell 5.1 Compress-Archive (backslash entries break
+  Workbench).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Solar__c.Battery_Install_Hours__c</members>
+        <members>Sundial_Solar__c.NS_Adder_1_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.NS_Adder_2_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.NS_Adder_3_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_Price__c</members>
+        <members>Sundial_Solar__c.Adder_Upgrade_225_Qty__c</members>
+        <members>Sundial_Solar__c.Gateway_Unit_Cost__c</members>
+        <members>Sundial_Solar__c.Gateway_Qty__c</members>
+        <members>Sundial_Solar__c.Gateway_Cost__c</members>
+        <members>Sundial_Solar__c.Internal_Rep_Commission_PPW__c</members>
+        <members>Sundial_Customer__c.Battery_Install_Hours__c</members>
+        <members>Sundial_Customer__c.NS_Adder_1_Markup_Percent__c</members>
+        <members>Sundial_Customer__c.NS_Adder_2_Markup_Percent__c</members>
+        <members>Sundial_Customer__c.NS_Adder_3_Markup_Percent__c</members>
+        <members>Sundial_Customer__c.Adder_Upgrade_225_Price__c</members>
+        <members>Sundial_Customer__c.Adder_Upgrade_225_Qty__c</members>
+        <members>Sundial_Customer__c.Gateway_Unit_Cost__c</members>
+        <members>Sundial_Customer__c.Gateway_Qty__c</members>
+        <members>Sundial_Customer__c.Gateway_Cost__c</members>
+        <members>Sundial_Customer__c.Internal_Rep_Commission_PPW__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

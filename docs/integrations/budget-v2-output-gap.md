@@ -1,11 +1,44 @@
 # budgetCalc v2 — output field gap list
 
-> **STOP / REVIEW ITEM.** budgetCalc v2 computes values that have nowhere to land on
-> `Sundial_Solar__c`. This is the list. **No fields were invented** — the values are
-> returned in the calc's `extras` object so nothing is lost, and nothing is written.
+> **✅ REVIEWED AND APPROVED 2026-08-20.** The §D set of 8 was approved and built as
+> `salesforce/v2-budget-output-fields/` (additive, collision-checked, **pending
+> deploy**). Section A's meaning-changes are now a **Workstream F prerequisite**.
+> Everything else stays `extras`-only — fine for now, and marked below.
+>
+> Original framing: budgetCalc v2 computes values that have nowhere to land on
+> `Sundial_Solar__c`. **No fields were invented** — the values are returned in the
+> calc's `extras` object, and the calc still writes none of the new eight until the
+> follow-up in TASKS.md lands.
 >
 > Produced 2026-08-20 against the live describe. Reference:
 > `acumatica-budget-rework-v2.md` §4, D9/D10/D11/D12/D13/D16.
+
+---
+
+## Disposition (2026-08-20)
+
+| Value | `extras` key | Outcome |
+|---|---|---|
+| Internal rep commission | `internalCommissionAmt` | ✅ **`Internal_Rep_Commission_Amt__c`** |
+| Management combined (SLMC line) | `managementCommissionAmt` | ✅ **`Management_Commission_Amt__c`** |
+| Setter commission applied | `setterCommissionAmt` | ✅ **`Setter_Commission_Amt__c`** |
+| Deal type | `dealType` | ✅ **`Commission_Deal_Type__c`** (restricted picklist) |
+| DC rebate amount | `dcRebateAmount` | ✅ **`DC_Rebate_Amount__c`** |
+| Engineer stamps | `engineerStampsCost` | ✅ **`Engineer_Stamps_Cost__c`** |
+| Subcontractor | `subcontractorCost` | ✅ **`Subcontractor_Cost__c`** |
+| Summary "Total Other*" (N13) | `summaryTotalOther` | ✅ **`Total_Other_Summary__c`** |
+| Software | `softwareCost` | ⬜ extras-only — trivially `Adder_Software_Fee_Price__c × Qty` |
+| Referral | `referralCost` | ⬜ extras-only — trivially `Adder_Referral_Fee_Price__c × Qty` |
+| GENO adder portion | `genoAdderCost` | ⬜ extras-only |
+| NS block 4 / 5 totals | `nsAdder4Total`, `nsAdder5Total` | ⬜ extras-only — `NS_Adder_1/2/3_Total__c` stay inconsistent by choice |
+| Std adder price total (K39) | `stdAdderPriceTotal` | ⬜ extras-only — revisit with §4e |
+| Setter user id | `setterUserId` | ⬜ extras-only — readable via `Sundial_Customer__r.Setter__c` |
+| Milestone splits (SLSCOM/MGRCOM/MGMTOR) | — | ⬜ **not computed** — PO/attribute stage, §C below |
+
+> **The eight fields being deployed does not make the calc write them.** `budgetCalc.js`
+> still returns all fifteen in `extras`; `handler.js` writes only the `fields` map.
+> Promoting the eight is a small calc-side follow-up, tracked in TASKS.md and
+> deliberately not bundled with the metadata.
 
 ---
 
@@ -106,10 +139,11 @@ Listed here only so the gap is visible in one place.
 
 ---
 
-## D. Recommended shape (for review — NOT built)
+## D. The approved set — ✅ BUILT as `salesforce/v2-budget-output-fields/`
 
-If you want these stored, the minimum set that removes real ambiguity is **eight**
-fields on `Sundial_Solar__c`:
+Approved 2026-08-20 and built exactly as proposed. Additive, collision-checked clean,
+**pending deploy**. All eight are Solar-only, Lambda-written, and **not** in the Create
+Project mapping.
 
 | Suggested API name | Type | Source |
 |---|---|---|
@@ -130,3 +164,20 @@ others don't.
 **Nothing is blocked on this.** The calc runs, the fixture passes, and the push worker
 can read `extras` directly. Storing them matters for the portal, for reconcile, and for
 anyone asking "why did this job's margin move" three months from now.
+
+---
+
+## E. Section A is a Workstream F prerequisite
+
+The four meaning-changes in **§A** are not informational — they are a **gate on the
+portal work**. A Budget UI that still assumes v1 semantics will:
+
+- show **zero commission** on every internal deal (`Sales_Rep_Commission_Amt__c` is
+  third-party-only now),
+- **double-count CO fee + permit** if it sums `Total_Other_Budget__c` and
+  `Constructive_Ops_Total__c`,
+- **double-count QA** if it sums `Audit_Labor_Cost__c` and `QA_Labor_Cost__c`,
+- and understate labor if it treats `Total_Labor_Budget__c` as labor+burden.
+
+None of those throws. They all render a plausible wrong number, which is the worst
+failure mode for a margin screen. Recorded against Workstream F in the rework doc.

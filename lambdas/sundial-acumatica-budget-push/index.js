@@ -303,11 +303,20 @@ function evalFieldExpr(spec, values) {
 
 // Every distinct Sundial_Solar__c field referenced by MAPPING_ROWS (amount + hours
 // sources; +/- expressions split), so a caller can SELECT exactly these.
+/**
+ * Fields the GUARDS need that are not amount sources for any line.
+ *
+ * `Commission_Deal_Type__c` is the v2-engine marker: only budgetCalc v2 writes it, so a
+ * blank value means the record's stored budget numbers came from the v1 engine (or were
+ * never calculated). See the guard in writeBudgetLines.
+ */
+export const GUARD_FIELDS = ["Commission_Deal_Type__c"];
+
 // Includes PENDING_HARVEST_ROWS' sources so the DC-rebate guard below can see
-// DC_Rebate_Amount__c on the record — a guard that cannot read its own trigger field
-// is not a guard.
+// DC_Rebate_Amount__c on the record, and GUARD_FIELDS for the same reason — a guard
+// that cannot read its own trigger field is not a guard.
 export function budgetFieldNames() {
-  const names = new Set();
+  const names = new Set(GUARD_FIELDS);
   for (const r of [...MAPPING_ROWS, ...PENDING_HARVEST_ROWS]) {
     if (r.amountField)
       for (const f of r.amountField.split(/[+\-*]/)) {
@@ -374,6 +383,36 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
       aborted: "no_scaffolded_lines",
       acumaticaProjectId,
       message: "ProjectBudget returned 0 lines — never create lines from scratch.",
+    };
+  }
+
+  // 1z) V2-ENGINE GUARD — the rollout guard. Runs FIRST, before anything else looks at
+  // an amount, because if this fails every number below is from the wrong engine.
+  //
+  // v3 mapping against v1-calculated numbers is the dangerous combination during the
+  // rollout window, and it is dangerous SILENTLY: the keys all still match, so the push
+  // succeeds and posts a plausible, wrong budget. Concretely a v1 record would post
+  // GENO without CO fee and permit (they lived in separate v1 fields that v3 no longer
+  // reads), zero to the four D11 standalone lines, and nothing to SLPC OUT — because
+  // Internal_Rep_Commission_Amt__c and friends are simply blank on a v1 record.
+  //
+  // Commission_Deal_Type__c is the marker: ONLY budgetCalc v2 writes it. Blank means v1
+  // (or never calculated). Note 'None' is a perfectly valid v2 value — it means the v2
+  // calc ran and found neither rep PPW populated — so the test is emptiness, NOT
+  // "not one of the three labels".
+  const dealTypeMarker = String(budgetValues?.Commission_Deal_Type__c ?? "").trim();
+  if (dealTypeMarker === "") {
+    return {
+      ok: false,
+      aborted: "budget_calculated_by_previous_engine",
+      acumaticaProjectId,
+      message:
+        "Budget was calculated with the previous engine — run Recalculate Budget first.",
+      detail:
+        "Commission_Deal_Type__c is blank. Only budgetCalc v2 sets it, so the stored " +
+        "budget values on this record predate the v2 engine and do not populate the v3 " +
+        "mapping's lines (SLPC OUT, the four SUBCON/SOFTWARE/REFERRAL lines, and the " +
+        "combined GENO figure). Pushing them would post a plausible but wrong budget.",
     };
   }
 
@@ -614,7 +653,7 @@ async function handleHttp(event) {
   // Load the project TENANT-SCOPED with the two gate inputs + the linked customer's
   // Acumatica-sync flag. Not owned / missing is indistinguishable -> 404.
   const soql =
-    `SELECT Id, Acumatica_Project_ID__c, Budget_Calc_Status__c, ` +
+    `SELECT Id, Acumatica_Project_ID__c, Budget_Calc_Status__c, Commission_Deal_Type__c, ` +
     `Sundial_Customer__r.Synced_to_Acumatica__c ` +
     `FROM ${SOLAR_SF_OBJECT} ` +
     `WHERE Id = '${soqlEscapeString(recordId)}' ` +
@@ -634,6 +673,24 @@ async function handleHttp(event) {
       error: "budget_not_calculated",
       code: "BUDGET_NOT_CALCULATED",
       message: `Budget_Calc_Status__c is '${calcStatus || "(blank)"}', must be 'Calculated'.`,
+    });
+  }
+  // Gate 1b (v2 ROLLOUT GUARD): 'Calculated' does not say WHICH engine calculated it.
+  // A record calculated before the v2 rollout still reads 'Calculated' but carries v1
+  // numbers, which the v3 mapping would post as a plausible, wrong budget rather than
+  // failing. Commission_Deal_Type__c is only ever written by budgetCalc v2.
+  //
+  // Checked HERE as well as in writeBudgetLines so the button gets an immediate, honest
+  // 409 instead of a 202 followed by an async failure the user has to go find. The
+  // deeper guard still stands for the worker / dry-run / direct-invoke paths.
+  //
+  // The fix is a click: Recalculate Budget, then Update Budget.
+  if (String(rec.Commission_Deal_Type__c || "").trim() === "") {
+    return jsonResponse(409, cors, {
+      error: "budget_calculated_by_previous_engine",
+      code: "BUDGET_CALCULATED_BY_PREVIOUS_ENGINE",
+      message:
+        "Budget was calculated with the previous engine — run Recalculate Budget first.",
     });
   }
   // Gate 2: the Acumatica project + budget scaffold must already exist (Layer 1).

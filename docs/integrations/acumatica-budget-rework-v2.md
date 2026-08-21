@@ -151,11 +151,36 @@ the four standalone lines below it, so using it would double-count those instead
 
 ### Guards added with v3
 
+- **`budget_calculated_by_previous_engine`** — the **rollout guard**, and it runs first.
+  `Budget_Calc_Status__c = 'Calculated'` does not say WHICH engine calculated it, so a
+  record last recalculated before the v2 rollout would push v1 numbers through the v3
+  mapping — and do it *silently*, because every key still matches. It would post GENO
+  without CO fee and permit (those lived in separate v1 fields v3 no longer reads), zero
+  to the four D11 standalone lines, and nothing to SLPC OUT. `Commission_Deal_Type__c` is
+  the marker: only budgetCalc v2 writes it. **`'None'` is a valid v2 value** (the calc ran
+  and found neither rep PPW populated), so the test is emptiness, not "one of the three
+  labels". Enforced in **two** places: `handleHttp` Gate 1b returns
+  **409 `BUDGET_CALCULATED_BY_PREVIOUS_ENGINE`** — *"Budget was calculated with the
+  previous engine — run Recalculate Budget first."* — so the Update Budget button fails
+  immediately instead of returning 202 and failing asynchronously; and `writeBudgetLines`
+  aborts as well, covering the worker, dry-run and direct-invoke paths.
 - **`commission_deal_type_ambiguous`** — both rep amounts non-zero aborts before any PUT.
   D16 defense in depth: the calc already rejects this input, but the push reads *stored*
   amounts which can be stale, and skip-zero cannot catch it because neither is zero.
 - **`pending_harvest_line_has_value`** — a non-zero `DC_Rebate_Amount__c` with no harvested
   key aborts rather than dropping thousands in income silently.
+
+### Where SOFTWARE and REFERRAL amounts come from at push time
+
+Confirmed: **price × qty, read straight off the adder fields on `Sundial_Solar__c`** —
+`Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` and
+`Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c`. All four fields are in the
+push's SOQL. Neither line has a dedicated output field (both were left `extras`-only in
+the gap review as "trivially price × qty"), and the push reads *fields off the record*
+rather than the calc's return value, so it does the multiplication itself — which is why
+`*` exists in the amount-expression grammar. The product is identical to what
+budgetCalc computes for a pass-through row (`cost = priceTotal = price × qty`), so the
+two cannot disagree.
 
 ### Re-harvest gate
 

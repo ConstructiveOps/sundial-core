@@ -111,6 +111,8 @@ const VALUES = {
   Adder_Software_Fee_Price__c: 30, Adder_Software_Fee_Qty__c: 1,
   Adder_Referral_Fee_Price__c: 500, Adder_Referral_Fee_Qty__c: 1,
   DC_Rebate_Amount__c: 0,
+  // Only budgetCalc v2 writes this; its presence is the rollout guard's v2 marker.
+  Commission_Deal_Type__c: "3rd Party",
 };
 
 function reset() {
@@ -302,6 +304,57 @@ test("hours are written only where the mapping has an hours source", async () =>
   assert.equal(by["GENA | LABOR | RESIDENTAL | Expense"].qty, 4);
   // ROOFCOM is piece-rate: no hours source, so the scaffold qty is left alone.
   assert.equal(by["ROOFCOM | LABOR | RESIDENTAL | Expense"].qty, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// v2-engine rollout guard
+// ---------------------------------------------------------------------------
+
+test("a v1-calculated record REFUSES before any PUT", async () => {
+  reset();
+  // A v1 record: the numbers the v3 mapping reads are simply absent, and
+  // Commission_Deal_Type__c — only ever written by budgetCalc v2 — is blank.
+  const { Commission_Deal_Type__c, ...v1Values } = { ...VALUES, Commission_Deal_Type__c: null };
+  const res = await writeBudgetLines("R000001", v1Values);
+  assert.equal(res.ok, false);
+  assert.equal(res.aborted, "budget_calculated_by_previous_engine");
+  assert.match(res.message, /Recalculate Budget first/);
+  assert.equal(ctx.puts.length, 0);
+});
+
+test("the v2 guard runs BEFORE any amount is considered", async () => {
+  reset();
+  // Deliberately also ambiguous (both rep amounts) and carrying a DC rebate. The v2
+  // guard must win, because on a v1 record every other reading is meaningless.
+  const res = await writeBudgetLines("R000001", {
+    ...VALUES,
+    Commission_Deal_Type__c: "",
+    Internal_Rep_Commission_Amt__c: 1800,
+    DC_Rebate_Amount__c: 3960,
+  });
+  assert.equal(res.aborted, "budget_calculated_by_previous_engine");
+});
+
+test("'None' is a VALID v2 marker — it means the calc ran and found no rep commission", async () => {
+  reset();
+  const res = await writeBudgetLines(
+    "R000001",
+    { ...VALUES, Commission_Deal_Type__c: "None", Sales_Rep_Commission_Amt__c: 0 },
+    { dryRun: true }
+  );
+  // Must NOT be mistaken for a v1 record.
+  assert.equal(res.ok, true);
+  assert.notEqual(res.aborted, "budget_calculated_by_previous_engine");
+});
+
+test("whitespace-only is treated as blank, not as a marker", async () => {
+  reset();
+  const res = await writeBudgetLines("R000001", { ...VALUES, Commission_Deal_Type__c: "   " });
+  assert.equal(res.aborted, "budget_calculated_by_previous_engine");
+});
+
+test("the guard's field is in the SOQL — a guard that can't read its trigger is not a guard", () => {
+  assert.ok(budgetFieldNames().includes("Commission_Deal_Type__c"));
 });
 
 test("D16: both rep amounts non-zero REFUSES before any PUT", async () => {

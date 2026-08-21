@@ -1,5 +1,47 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — v2-data rollout guard on the push worker (feat/mapping-v3)
+
+Small addition, but it closes the one failure mode in this whole rework that would have
+been **silent**: a record last recalculated before the v2 rollout, pushed through the v3
+mapping by someone pressing Update Budget.
+
+Nothing about that combination fails on its own. `Budget_Calc_Status__c` still reads
+`Calculated` — it records *that* a calc ran, never *which engine* ran it — and every
+4-part key still matches its scaffold line, so the ≠1-match rule sees nothing wrong. The
+push succeeds and posts a plausible, wrong budget: GENO without CO fee and permit (they
+lived in separate v1 fields the v3 row no longer reads), zero to all four D11 standalone
+lines, and nothing at all to SLPC OUT — because `Internal_Rep_Commission_Amt__c`,
+`Engineer_Stamps_Cost__c` and the rest are simply blank on a v1 record.
+
+`Commission_Deal_Type__c` is the marker, because only budgetCalc v2 ever writes it. The
+subtlety worth pinning: **`'None'` is a perfectly valid v2 value** — it means the v2 calc
+ran and found neither rep PPW populated — so the test is *emptiness*, not "one of the
+three labels". Whitespace counts as empty. Both are tested.
+
+Enforced in two places on purpose. `handleHttp` gets Gate 1b, returning
+**409 `BUDGET_CALCULATED_BY_PREVIOUS_ENGINE`** with the message the user asked for, so the
+button fails immediately rather than returning 202 and failing asynchronously somewhere
+the user has to go looking for it. `writeBudgetLines` aborts as well, which covers the
+worker, the dry-run and any direct invoke — and it runs FIRST, before the deal-type and
+DC-rebate guards, since on a v1 record every other reading is meaningless anyway (there
+is a test asserting it wins over both).
+
+The guard needed its own field in the SOQL, so `GUARD_FIELDS` now unions into
+`budgetFieldNames()` alongside the mapping's amount sources and the pending rows'. A
+guard that cannot read its own trigger field is not a guard, and that is also a test.
+
+5 new tests, 28 in this Lambda, suite 321.
+
+**Confirmed as asked:** SOFTWARE and REFERRAL amounts are **price × qty read straight off
+the adder fields** — `Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` and the
+Referral equivalent, all four in the push's SOQL. Neither line has a dedicated output
+field (both left `extras`-only in the gap review as "trivially price × qty"), and the
+push reads record fields rather than the calc's return value, so it does the
+multiplication itself — which is why `*` was added to the amount-expression grammar. It
+produces the identical number to the calc's own pass-through rule
+(`cost = priceTotal = price × qty`), so the two cannot drift.
+
 ## 2026-08-20 — MAPPING_ROWS v3 + re-harvest prep (build + report; nothing pushed)
 
 Workstream C. Branch `feat/mapping-v3`, and the first thing worth recording is where it

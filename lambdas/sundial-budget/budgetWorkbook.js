@@ -1,8 +1,8 @@
 /**
  * budgetWorkbook.js — builds the filled budget workbook snapshot.
  *
- * Loads the bundled template (a faithful reconstruction of Harmon's Sunbase budget
- * sheet — swap in the original file any time, the writer only addresses cells) and
+ * Loads the bundled template (the REVISED workbook, Harmon's current budget
+ * sheet — swap the file any time, the writer only addresses cells) and
  * writes every input + computed value from budgetCalc's `cells` map as plain values.
  * Formula cells are overwritten with their computed results so the snapshot is a
  * frozen, self-consistent record copy that can never drift from what Salesforce shows.
@@ -10,11 +10,11 @@
 const path = require('path');
 const ExcelJS = require('exceljs');
 
-const TEMPLATE_PATH = path.join(__dirname, 'template', 'budget-template.xlsx');
+const TEMPLATE_PATH = path.join(__dirname, 'template', 'budget-template-v2.xlsx');
 
 // Runtime template source. `template.generated.js` is a BUILD ARTIFACT produced by
-// prebuild.mjs at deploy time — it base64-encodes template/budget-template.xlsx so
-// the single esbuild bundle carries the exact HOLLAND-verified bytes with no file
+// prebuild.mjs at deploy time — it base64-encodes template/budget-template-v2.xlsx so
+// the single esbuild bundle carries the exact REVISED-workbook bytes with no file
 // on disk (the bundled Lambda has no template/ folder). It is gitignored and absent
 // during `npm test`, so tests read the source .xlsx directly — meaning the tested
 // template and the shipped template are the SAME bytes by construction and cannot

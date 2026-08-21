@@ -1,5 +1,79 @@
 # Sundial — Progress Log
 
+## 2026-08-20 — budgetCalc v2: rewritten to the REVISED workbook (build + fixture, NOT deployed)
+
+Workstream B. Branch `feat/budget-calc-v2`. The engine, the template, the cell map and
+the fixture all move to the REVISED workbook; HOLLAND is deleted, not archived. No
+MAPPING_ROWS changes, no push-lambda changes, nothing deployed.
+
+**The workbook was torn down, not read about.** Every formula and cached value came out
+of `budget-template-v2.xlsx` with exceljs before a line was written, so the fixture
+expectations are Excel's own results rather than numbers retyped from the plan doc.
+That is also how the arithmetic in the doc got independently confirmed — the two agree
+because they were derived separately.
+
+**166 checks green** on the first run: 86 workbook cells, 48 Salesforce fields, 14
+un-homed extras, 18 behaviours. Pinning every Acumatica-coded line (J15-J36) separately
+rather than only the totals is the point — a compensating pair of errors inside Total
+Job Cost is exactly the bug a totals-only fixture waves through.
+
+**Four things in v2 are genuinely different, and three of them are traps for a reader
+who skims:**
+
+1. **Commissions are four inputs on two different budget lines.** Third-party and
+   internal reps are separate fields now, and D16 makes *which one is populated* the
+   deal type — so both populated is not a number to reconcile, it is a record nobody
+   has decided about. It throws. Management stays two stored fields summed into one
+   cost line (D10) but the components survive into the outputs, because the attribute
+   sync splits them apart again and summing them in the only place they exist would
+   lose that. Setter is gated on the Customer's `Setter__c` read through the
+   relationship (D17) — no Solar field, no mirror, so a setter added later lands in the
+   next recalc with no backfill.
+2. **Costs are read, never derived (D15).** v1 backed material out of price. v2 reads
+   the Cost field and multiplies — by qty for flat adders, by watts for the four
+   per-watt ones. A blank Cost on a *selected* adder throws instead of costing zero:
+   the fields carry static defaults, so blank means the package didn't deploy, FLS is
+   missing, or a load cleared it, and silently costing zero would inflate margin. There
+   is a test asserting that changing an adder's PRICE alone does not move job cost —
+   the whole point of D15, and the thing most likely to regress.
+3. **Every cost line now rolls up (D11).** The BRADS anomaly where SUBCON / SOFTWARE /
+   REFERRAL were computed and then excluded from Total Job Cost is gone.
+4. **`Total_Labor_Budget__c` changed meaning.** Sheet J26 is labor only; N12 is labor
+   plus burden; they differ by 1,953.75 in the fixture and GP uses N12. Both are stored,
+   in different fields, and nothing in the names says so.
+
+**Sheet quirks preserved deliberately, each with a comment saying why:** battery hours
+are a flat total not per-battery; Travel's hours are a selection flag (two travel adders
+still bill twelve hours); per-watt adders scale PRICE by qty but not labor or cost; NS
+markup never reaches the material budget; adder burden is hardcoded 75% rather than
+reading the burden field. Q6 (+4h Expansion Pack / +16h Powerwall) stays manual,
+TODO-flagged, mirroring the sheet's own formulas.
+
+**The gap list is the deliverable to look at.** `docs/integrations/budget-v2-output-gap.md`
+— 13 computed values have no Salesforce field. No fields were invented; they come back
+in the calc's `extras` so nothing is lost and the push worker can use them today. The
+sharper half of that doc is section A: **four existing fields changed meaning**, and one
+pair is an active double-count trap — `Constructive_Ops_Total__c` is now a *subset* of
+`Total_Other_Budget__c`, so any UI adding both over-reports by CO fee + permit.
+
+**Two things the live describe said that the plan didn't.** The field package is
+**already deployed** — all 111 input fields resolve and every §4c Cost default landed
+(261.40 … 0.06), so the SOQL works today. But `Battery_Install_Hours__c` defaults to
+**0**, not the 16 §3 calls for, so a fresh Solar record gets zero battery labor until
+someone types it. And the DC source, `Sundial_Solar__c.Domestic_Content__c`, is an
+**unrestricted text field** — the only domestic-content field on the object the calc
+reads, so not ambiguous, but a free-text value driving a $0.45/W income line is fragile.
+Parsed permissively for affirmatives and defaulted to NO: a typo must never invent
+revenue. Both logged as follow-ups.
+
+**The fixture is now inside `npm test`.** It was a standalone script nothing ran, which
+for the single most consequential piece of math in the platform is the wrong place for
+it — a silent regression there is a wrong number on a real job's budget.
+
+Not deployed, deliberately: deploying swaps the live calc *and* the snapshot template in
+one step, so it should follow the gap-list decision and a portal update rather than
+precede them.
+
 ## 2026-08-20 — v2 budget field package amended for D15 + §4d (58 fields, still not deployed)
 
 Second pass on `salesforce/v2-budget-adder-fields/` against the REVISED-workbook update

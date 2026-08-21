@@ -39,8 +39,8 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 
 | Area | Action |
 |---|---|
-| budgetCalc.js | REWRITE to REVISED math; test.js re-pinned to REVISED cached values (D1). HOLLAND retired. |
-| budget-template.xlsx | REPLACE with REVISED workbook; cell map targets REVISED layout. |
+| budgetCalc.js | ✅ **DONE 2026-08-20** (branch `feat/budget-calc-v2`, build+fixture only, not deployed). Rewritten to REVISED math; test.js re-pinned to the REVISED cached values — 166 checks (86 cells / 48 fields / 14 extras / 18 behaviours), all green. HOLLAND template + fixture DELETED. |
+| budget-template.xlsx | ✅ **DONE** — `template/budget-template-v2.xlsx` committed and wired into `budgetWorkbook.js` + `prebuild.mjs`; cell map rebuilt to the REVISED layout. Old template deleted. |
 | MAPPING_ROWS | REWRITE per §5. Re-harvest live RS + RSDC scaffolds (must contain REFERRAL, SOFTWARE, ENGR/SUBCON lines) before any push. |
 | SF field model | §4 (package built) + §4d addendum (1 new field pair). Old strictly-budget Customer fields drop out of create-mapping. |
 | Portal Budget UI | Commissions v3 inputs, COST adders, Customer read-only tabs (D7), PO status. |
@@ -170,7 +170,11 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
 
 ## 10. Execution plan
 **A — SF metadata:** deploy built package now + addendum (Internal_Rep_Commission_PPW__c ×2) + follow-up existing-field package (defaults/relabels). Then FLS.
-**B — calc v2:** build to REVISED workbook (template file: `lambdas/sundial-budget/template/budget-template-v2.xlsx` = REVISED, not BRADS). Gated only on Q6 (TODO-flagged).
+**B — calc v2: ✅ BUILT 2026-08-20** (branch `feat/budget-calc-v2`, **build + fixture only — not deployed**, no MAPPING_ROWS or push-lambda changes). Rewritten to the REVISED workbook (`lambdas/sundial-budget/template/budget-template-v2.xlsx`, committed); cell map rebuilt to the REVISED layout; HOLLAND template + fixture deleted; `handler.js` INPUT_FIELDS updated to 112 fields incl. `Internal_Rep_Commission_PPW__c`, `Domestic_Content__c`, the 12 Cost fields, NS 4-5, and the `Sundial_Customer__r.Setter__c` read-through. **166 checks green** (86 workbook cells / 48 SF fields / 14 un-homed extras / 18 behaviours) and now wired into `npm test`. Q6 left manual, TODO-flagged in code, mirroring the sheet.
+  - **DC source resolved: `Sundial_Solar__c.Domestic_Content__c`** — the only domestic-content field on the object the calc reads. ⚠️ It is an unrestricted TEXT field; parsed permissively for affirmatives and defaulting to NO. Sheet D3 is a YES/NO validation list — a picklist or checkbox would model it properly (follow-up).
+  - **⚠️ STOP/REVIEW: `docs/integrations/budget-v2-output-gap.md`** — 13 v2 values have no Salesforce field, and 4 existing fields CHANGED MEANING (incl. a `Total_Other_Budget__c` / `Constructive_Ops_Total__c` double-count trap). No fields were invented; the values are returned in the calc's `extras`.
+  - **Field package is LIVE:** all 111 INPUT_FIELDS resolve against the org and every §4c Cost default landed (261.40 … 0.06), verified 2026-08-20.
+  - **Follow-up still open:** `Battery_Install_Hours__c` default is **0** in the org, not 16 — a fresh record gets zero battery labor until someone sets it.
 **C — mapping+push:** MAPPING_ROWS v3; live RS re-harvest (must show REFERRAL etc. — Q12); RSDC harvest; template selection.
 **D — PO engine:** after Q2/Q5b + vendor map + sandbox hand-proof.
 **E — attribute sync:** after Q10; sandbox hand-proof.

@@ -4,6 +4,25 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## budgetCalc v2 — REVISED workbook engine (2026-08-20, Workstream B)
+
+Plan: `docs/integrations/acumatica-budget-rework-v2.md` §3/§4, D1/D9-D17. Branch `feat/budget-calc-v2`. **Build + fixture only — NOT deployed. No MAPPING_ROWS, no push-lambda changes.**
+
+- [x] **`template/budget-template-v2.xlsx` committed** (was untracked) and wired into `budgetWorkbook.js` + `prebuild.mjs`. **HOLLAND template + fixture DELETED**, not commented out (D1).
+- [x] **`budgetCalc.js` rewritten to the REVISED layout.** Cell map rebuilt (E7 watts, F-column material, I/J summary block, adder rows 40-63, NS blocks 68/76/84/92/100).
+- [x] **Commission model v3** (D9/D10/D16/D17): four inputs; management stored as two fields and summed for the SLMC line but kept split in outputs (attributes need MGRCOM*/MGMTOR* apart); setter gated on `Sundial_Customer__r.Setter__c` read-through; burden 75% × (internal + mgmt + setter), third-party excluded. **Both rep PPWs > 0 → hard error** (`COMMISSION_DEAL_TYPE_AMBIGUOUS`).
+- [x] **Cost model** (D15): always reads `Adder_<X>_Cost__c`, never derives. Per-UNIT × qty flat; per-WATT × watts for Conduit Attic / Flat Roof / Roof Tile / Bird Blocking. **A blank Cost on a SELECTED adder throws** (`ADDER_COST_MISSING`) rather than costing zero.
+- [x] **Full catalog + rollups** (§3, D11/D12/D13/D14): Tesla Expansion Pack on `Gateway_*`; adder labor at the Powerwall rate except Site Audit + Travel (blended); NS ×5 at the Powerwall rate; SUBCON stamps + subcontractor, SOFTWARE, REFERRAL as their own lines and all inside Total Job Cost; GENO absorbs Active Monitoring + LR Warranty; small systems revenue-only.
+- [x] **DC rebate** 0.45 × watts. **Source field: `Sundial_Solar__c.Domestic_Content__c`.**
+- [x] **`handler.js` INPUT_FIELDS** → 112 (new price/qty, 12 Cost fields, NS 4-5, `Internal_Rep_Commission_PPW__c`, `Domestic_Content__c`, `Sundial_Customer__r.Setter__c`). Nothing else in handler.js changed. Read-through SOQL verified live.
+- [x] **166 checks green** (86 workbook cells / 48 SF fields / 14 extras / 18 behaviours), tolerance 0.011 — and the budget fixture is now **inside `npm test`** (it was a standalone script that could rot unnoticed).
+- [!] **TIM — REVIEW `docs/integrations/budget-v2-output-gap.md` and decide.** 13 v2 values have no Salesforce field (internal + management + setter commission amounts, deal type, DC rebate, the four SUBCON/SOFTWARE/REFERRAL lines, N13 summary other, NS 4/5 totals). **No fields were invented** — they are returned in the calc's `extras`. A suggested minimum set of 8 is in §D of that doc. **Nothing is blocked on this**; it matters for the portal, reconcile, and post-hoc "why did margin move".
+- [!] **TIM — 4 existing output fields CHANGED MEANING.** `Sales_Rep_Commission_Amt__c` is now third-party-only (0 on an internal deal); `Total_Other_Budget__c` is now the GENO line and **contains** `Constructive_Ops_Total__c` (double-count trap for any UI summing both); `Audit_Labor_Cost__c` is now audit+QA; `Total_Labor_Budget__c` is labor WITHOUT burden. Table in §A of the gap doc. The portal must be updated before it shows v2 numbers.
+- [ ] **Follow-up: `Battery_Install_Hours__c` default is 0 in the org**, not 16 (§3 wants 16, BRADS had 20). Describe-verified 2026-08-20. A fresh Solar record gets zero battery labor until someone sets it. Belongs in the existing-field follow-up package with the relabels.
+- [ ] **Follow-up: `Domestic_Content__c` is unrestricted TEXT.** A free-text field driving a $0.45/W income line is fragile; the calc parses affirmatives permissively and defaults to NO, but a picklist or checkbox is the right shape (sheet D3 is a YES/NO validation list).
+- [ ] **NOT deployed.** No `deploy.ps1` run. Deploying replaces the live calc AND the snapshot template in one step, so it should follow the gap-list decision and a portal update, not precede them.
+- [ ] **NEXT (Workstream C, separate task):** MAPPING_ROWS v3 + live RS/RSDC re-harvest (Q12). The calc emits every line the mapping needs, including the four D11 lines the v1 scaffold has no home for.
+
 ## v2 budget rework — SF field package (2026-08-20, Workstream A)
 
 Plan: `docs/integrations/acumatica-budget-rework-v2.md` §4. Package: `salesforce/v2-budget-adder-fields/` (**58 fields**, Metadata API v62.0). **Package only — nothing deployed, no code changed.** Amended 2026-08-20 for D15 + the §4d addendum.

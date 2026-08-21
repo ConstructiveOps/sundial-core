@@ -48,12 +48,47 @@ const BUCKET = process.env.S3_BUCKET || "sfsolproj";
 const SF_OBJECT = "Sundial_Solar__c";
 
 // Every input field the calculator reads (kept in one list so the SOQL stays honest)
+// Every adder base that carries Price + Qty (§4a + the pre-existing catalog).
+// Order mirrors the REVISED sheet's row order, so a diff against the workbook reads
+// straight down.
+const ADDER_BASES = [
+  "Sub_Panel", "Derate", "Heat_Detector", "Upgrade_225", "Upgrade_400",
+  "Upgrade_225_UG", "Gateway3", "Site_Audit", "Travel",
+  "Conduit_Attic", "Flat_Roof", "Roof_Tile",
+  "Structural", "Bird_Blocking",
+  "Small_System_10_12", "Small_System_13_15",
+  "Software_Fee", "Active_Monitoring", "LR_Battery_Warranty", "Referral_Fee",
+];
+
+// The 12 adders that have a COST field (§4c). Site Audit and Travel are labor-only;
+// the pass-through rows (Software / Active Monitoring / LR Warranty / Referral) cost
+// exactly their price; the small systems are revenue-only (D14). None of those get one.
+const ADDER_COST_BASES = [
+  "Sub_Panel", "Derate", "Heat_Detector", "Upgrade_225", "Upgrade_400",
+  "Upgrade_225_UG", "Gateway3", "Structural",
+  "Conduit_Attic", "Flat_Roof", "Roof_Tile", "Bird_Blocking",
+];
+
 const INPUT_FIELDS = [
   "Name", "Project_Name__c", "Panel_Type__c", "Contract_Amount__c", "Dealer_Fee__c",
   "System_Size__c", "Module_STC_Wattage__c", "Module_Cost_Per_Watt__c",
-  "Sales_Rep_Commission_PPW__c", "Sales_Mgr_Commission_PPW__c", "Geo_Commission_Amount__c",
-  "Overhead_Commission_PPW__c", "Commission_Burden_Rate__c",
-  "Combiner_Unit_Cost__c", "Combiner_Qty__c", "Gateway_Unit_Cost__c", "Gateway_Qty__c",
+  // DC rebate toggle (D2). Solar's Domestic_Content__c is the only domestic-content
+  // field on this object; Customer's Domestic_Content_Eligible__c answers a different
+  // question ("eligible", not "elected") and the calc is Solar-side.
+  "Domestic_Content__c",
+  // Commissions (D9/D10/§4d): FOUR inputs now. Sales_Rep_* is the third-party rep
+  // (relabel pending); Internal_Rep_* is new; Mgr + Overhead are stored separately and
+  // summed by the calc into the single SLMC line.
+  "Sales_Rep_Commission_PPW__c", "Internal_Rep_Commission_PPW__c",
+  "Sales_Mgr_Commission_PPW__c", "Overhead_Commission_PPW__c",
+  "Geo_Commission_Amount__c", "Commission_Burden_Rate__c",
+  // D17: the setter lives on the CUSTOMER and is deliberately not mirrored onto Solar,
+  // so it is read through the relationship. A setter added to the Customer after the
+  // project was created therefore lands in the next recalc with no backfill.
+  "Sundial_Customer__r.Setter__c",
+  "Combiner_Unit_Cost__c", "Combiner_Qty__c",
+  // Gateway_* is REUSED for the Tesla Expansion Pack (§3) — relabel pending.
+  "Gateway_Unit_Cost__c", "Gateway_Qty__c",
   "Microinverter_Unit_Cost__c", "Microinverter_Qty__c", "Battery_Unit_Cost__c", "Battery_Qty__c",
   "BOS_Solar_Cost_Per_Watt__c", "BOS_Electrical_Cost_Per_Watt__c",
   "Roof_Material_Cost_Per_Pen__c", "Penetrations_Per_Module__c",
@@ -61,9 +96,9 @@ const INPUT_FIELDS = [
   "Roofing_Cost_Per_Penetration__c", "Roofing_Pens_Per_Module__c", "Install_Hours_Per_Module__c",
   "Battery_Labor_Rate__c", "Battery_Install_Hours__c",
   "Material_Other_Cost__c", "Constructive_Ops_Fee__c", "Permit_Pass_Through_Cost__c",
-  ...["Sub_Panel", "Flat_Roof", "Bird_Blocking", "Derate", "Structural", "Small_System_10_12", "Small_System_13_15", "Heat_Detector", "Conduit_Attic", "Roof_Tile", "Software_Fee", "Upgrade_225", "Upgrade_400"]
-    .flatMap((b) => [`Adder_${b}_Price__c`, `Adder_${b}_Qty__c`]),
-  ...[1, 2, 3].flatMap((n) => [`NS_Adder_${n}_Description__c`, `NS_Adder_${n}_Markup_Percent__c`, `NS_Adder_${n}_Material_Cost__c`, `NS_Adder_${n}_Labor_Hours__c`]),
+  ...ADDER_BASES.flatMap((b) => [`Adder_${b}_Price__c`, `Adder_${b}_Qty__c`]),
+  ...ADDER_COST_BASES.map((b) => `Adder_${b}_Cost__c`),
+  ...[1, 2, 3, 4, 5].flatMap((n) => [`NS_Adder_${n}_Description__c`, `NS_Adder_${n}_Markup_Percent__c`, `NS_Adder_${n}_Material_Cost__c`, `NS_Adder_${n}_Labor_Hours__c`]),
 ];
 
 async function recalcOne(recordId, source, tenantId) {

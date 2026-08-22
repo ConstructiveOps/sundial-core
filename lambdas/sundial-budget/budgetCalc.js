@@ -316,8 +316,9 @@ function calculateBudget(rec) {
   const repCommission = num(repCommissionRaw);
 
   // ROUTING: one amount, two possible destinations, decided by deal type alone.
-  //   EXTERNAL → SLPC OUT · OTHER · M1&M2COM   (a dealer invoices us; NOT burdened)
-  //   INTERNAL → SLPC · LABOR · SALESCOMM      (payroll; IS burdened)
+  //   EXTERNAL → SLPC OUT · OTHER · M1&M2COM
+  //   INTERNAL → SLPC · LABOR · SALESCOMM
+  // NEITHER is burdened (D21) — the routing decides the Acumatica line and nothing else.
   const thirdPartyComm = isInternal ? 0 : repCommission;        // K7 → SLPC OUT · M1&M2COM
   const internalComm = isInternal ? repCommission : 0;          // K8 → SLPC · SALESCOMM
 
@@ -344,11 +345,23 @@ function calculateBudget(rec) {
   const setterComm = setterId ? g('Geo_Commission_Amount__c') : 0; // K10 → APPT COM
 
   const commSubtotal = thirdPartyComm + internalComm + mgmtComm + setterComm; // J11
-  // UNCHANGED: third-party is NOT burdened (they invoice us); the other three are
-  // payroll. Note what that now means under D19 — an INTERNAL deal carries 75% burden
-  // on the WHOLE redline commission, a far larger number than the old PPW model
-  // produced. Correct, and worth knowing before comparing a v2 figure to a v3 one.
-  const commBurden = (internalComm + mgmtComm + setterComm) * commBurdenRate; // J12
+
+  // D21 (Harmon ruling, 2026-08-22): burden is 75% of MANAGEMENT + SETTER ONLY.
+  //
+  // NEITHER rep line is burdened — not the external one (never was) and not the
+  // internal redline commission either. This CHANGES the D19 Stage 2 behaviour, where
+  // internal followed the old rule and carried burden on the whole rep amount: on the
+  // fixture job that was 10,939.50 of burden against 415.50 for the same job sold
+  // externally. D21 makes the two identical, which is the point of the ruling.
+  //
+  // ⚠️ THE SHEET DISAGREES AND THE SHEET IS SUPERSEDED. The REVISED workbook's J12
+  // includes K8 (the internal rep cell) in its burden array. Do not "restore" it to
+  // match the workbook — under the redline model the internal rep amount is an order of
+  // magnitude larger than it was when that array was written, and Harmon has ruled on
+  // what it should be. Note the fixture cannot catch a regression here on its own: it is
+  // an EXTERNAL deal, so K8 is zero and both formulas agree. The internal-deal
+  // behaviour test is the only thing pinning this.
+  const commBurden = (mgmtComm + setterComm) * commBurdenRate;                // J12
   const totalCommissions = commSubtotal + commBurden;                         // J13 / N9
   const commissionPPW = watts > 0 ? totalCommissions / watts : 0;             // J14
 

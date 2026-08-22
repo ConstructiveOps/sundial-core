@@ -1,5 +1,38 @@
 # Sundial — Progress Log
 
+## 2026-08-22 — D21: neither rep commission line is burdened
+
+Harmon's ruling on the burden basis, one day after Stage 2 shipped it the other way:
+**commission burden = 75% × (management + setter) only.** Not the external rep line
+(which never was burdened) and **not the internal redline commission** (which Stage 2
+was). The REVISED workbook's J12 disagrees — its burden array includes the internal rep
+cell — and it is superseded rather than reconciled. The reason is the one Stage 2 flagged
+as "correct but surprising": under the redline model the internal rep amount is an order
+of magnitude larger than it was when that array was written, so a rule that was reasonable
+against a PPW-derived figure stopped being reasonable against a redline-derived one.
+
+Effect is confined to internal deals. On the fixture job, burden goes **10,939.50 →
+415.50**, which is exactly what the same job sold externally produces. That is the shape
+of the ruling in one number: routing now picks the Acumatica line and nothing else.
+
+**Nothing in the pinned fixture moved, and that is the risk.** The worked example is an
+EXTERNAL deal, so the internal rep cell is zero and the old and new burden formulas agree
+to the cent — all 88 cell and 55 field expectations passed the amendment untouched. A
+fixture that cannot fail is not evidence, so three behaviour tests carry D21 instead: the
+internal case pinned at 415.50, an equality assertion that external and internal burden
+match, and a scaling check that multiplying the rep amount by ten moves burden not at all.
+The last one is the useful one — a basis bug that happened to be small on the fixture
+would still show up there. The comment at the calc says the same thing, because the next
+person to compare the code against the workbook will find the workbook and think the code
+is wrong.
+
+The push side needed no arithmetic change: the BURDENEXR · SALESCOMM row reads the single
+`Commission_Burden_Amt__c` field, so the ruling reaches Acumatica through the calc. Its
+`note` did name the old component basis, and that is corrected — the note is what a
+reviewer checks the posted number against, so a stale one is worse than none.
+
+188 checks (was 186), 38/38 push tests.
+
 ## 2026-08-21 — D19 redline commission model, Stage 2: the calc stops computing the rep commission
 
 Stage 1's eight formula fields deployed clean, and the live org answered the one question
@@ -51,6 +84,11 @@ the old PPW model ever produced. In the fixture the same job burdens at 415.50 s
 externally and 10,939.50 sold internally. That is correct, and it is also exactly the kind
 of gap that looks like a bug to someone comparing a v2 figure to a v3 one.
 
+> **SUPERSEDED THE NEXT DAY — see the D21 entry above.** Flagging the 10,939.50 as
+> "correct but surprising" turned out to be flagging it to the right people: Harmon ruled
+> that neither rep line is burdened, so the internal figure is now 415.50 and the
+> paragraph above describes behaviour the code no longer has.
+
 **The snapshot rate cells now hold a derived rate.** J7/J8 used to echo the input PPW;
 under D19 there is no input PPW, so they carry `Commission_Total__c ÷ watts` on whichever
 side the deal routed to and zero on the other. Otherwise the snapshot would show a rate
@@ -89,7 +127,7 @@ description on `Internal_Rep_Commission_Amt__c` still says it equals
 `Internal_Rep_Commission_PPW__c × watts`, which is no longer how it is computed. Logged as
 a cosmetic description-only alignment, not worth a deploy on its own.
 
-Suite: **186 checks** (88 cells / 55 fields / 16 extras / 27 behaviours), up from 175. Every
+Suite: **186 checks** (88 cells / 55 fields / 16 extras / 27 behaviours) as built, up from 175 — 188 after the D21 amendment the next day. Every
 2200-based expectation is gone, grep-verified.
 
 ## 2026-08-21 — D19 redline commission model, Stage 1: formula-field package (DEPLOYED)

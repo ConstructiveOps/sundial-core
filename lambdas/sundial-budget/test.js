@@ -140,8 +140,12 @@ const INTERNAL_DEAL = {
  *   redline 1.85 (external, non-Lightreach)
  *   commission = 36502 − 1.85 × 8800 − 3110 = 17112     → $1.9445/W
  *   subtotal   = 17112 + 484 + 70 = 17666
- *   burden     = 0.75 × (0 + 484 + 70) = 415.50          (3rd-party is not burdened)
+ *   burden     = 0.75 × (484 + 70) = 415.50              (D21: mgmt + setter ONLY)
  *   total      = 18081.50                                → $2.0547/W all-in
+ *
+ * The 415.50 is unchanged by D21 — this is an EXTERNAL deal, so the rep amount was
+ * never in the basis either way. That also means these cells CANNOT catch a regression
+ * in the burden basis; the D21 behaviour tests are what pin it.
  *
  * The 3110 is `stdAdderPriceTotal`, which the workbook and the Salesforce
  * `Total_Adder_Price__c` formula agree on — that agreement is what lets the two halves
@@ -213,7 +217,7 @@ const FIELD_EXPECTED = {
   Sales_Mgr_Commission_Amt__c: 352,    // .04 × 8800 — component, not the SLMC line
   Overhead_Commission_Amt__c: 132,     // .015 × 8800
   Commission_Subtotal__c: 17666,
-  Commission_Burden_Amt__c: 415.5,     // unchanged: 3rd-party is not burdened
+  Commission_Burden_Amt__c: 415.5,     // D21: 0.75 × (mgmt 484 + setter 70), no rep
   Total_Commissions__c: 18081.5,
   Commission_PPW__c: 2.054715909090909,
   Module_Material_Cost__c: 5280,
@@ -373,17 +377,44 @@ it('the §D fields track their extras twins exactly', () => {
   for (const [f, x] of pairs) assert.strictEqual(fields[f], extras[x], `${f} != extras.${x}`);
 });
 
-it('D19: an INTERNAL deal routes to the internal amount and IS burdened', () => {
+it('D19: an INTERNAL deal routes to the internal amount, and D21: it is NOT burdened', () => {
   const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL });
   assert.strictEqual(r.extras.dealType, 'internal');
   assert.ok(Math.abs(r.extras.internalCommissionAmt - 14032) < TOL);
   assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt) < TOL);
-  // Burden now includes the rep: 0.75 × (14032 + 484 + 70) = 10939.50, against 415.50
-  // for the same job sold externally. That gap is the whole point of the routing.
+  // D21: burden is 0.75 × (484 + 70) = 415.50 — management and setter only. The rep
+  // amount is NOT in the basis, so this is the same 415.50 the external case produces.
+  // Before D21 it was 0.75 × (14032 + 484 + 70) = 10939.50.
   assert.ok(
-    Math.abs(r.fields.Commission_Burden_Amt__c - 10939.5) < TOL,
+    Math.abs(r.fields.Commission_Burden_Amt__c - 415.5) < TOL,
     `internal burden was ${r.fields.Commission_Burden_Amt__c}`
   );
+  // 14032 + 484 + 70 + 415.50
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - 15001.5) < TOL);
+});
+
+it('D21: burden is identical whichever way the deal is sold', () => {
+  // The single sentence of the ruling, as an assertion: routing picks the Acumatica
+  // line and nothing else. If someone restores the sheet's K8-in-the-burden-array
+  // behaviour, this fails — the main fixture cannot, because it is an external deal
+  // where the internal cell is zero and both formulas agree.
+  const ext = calculateBudget(REVISED).fields.Commission_Burden_Amt__c;
+  const int = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).fields.Commission_Burden_Amt__c;
+  assert.ok(Math.abs(ext - int) < TOL, `external ${ext} != internal ${int}`);
+  assert.ok(Math.abs(ext - 415.5) < TOL);
+});
+
+it('D21: the rep commission is absent from the burden basis at any size', () => {
+  // Scaling the rep amount by 10x must not move burden by a cent. A basis bug that
+  // happened to be small on the fixture would still show up here.
+  const base = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).fields.Commission_Burden_Amt__c;
+  for (const amt of [0, 1000, 140320]) {
+    const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL, Commission_Total__c: amt });
+    assert.ok(
+      Math.abs(r.fields.Commission_Burden_Amt__c - base) < TOL,
+      `rep ${amt} moved burden to ${r.fields.Commission_Burden_Amt__c}`
+    );
+  }
 });
 
 it('D19: "Harmon Solar" is matched case-insensitively, like the Salesforce formula', () => {

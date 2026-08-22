@@ -16,7 +16,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D6 | Existing adder Price/Qty fields on Customer + Solar are PRICE (commission-side). New COST fields (Solar only) feed the budget. Quantities shared. | Tim, confirmed |
 | D7 | After a Solar record exists, SOLAR is the source of truth for adders + commissions; Customer page shows read-only Solar values, editable Customer fields hidden. | Tim, confirmed |
 | D8 | Connection/auth/infra unchanged and proven. Mapping + math + field-model rework. | Tim |
-| D9 | **Commission model v3 (from REVISED sheet):** two separate rep inputs — 3rd-Party Rep PPW → `SLPC OUT · OTHER · M1&M2COM`, Internal Rep PPW → `SLPC · LABOR · SALESCOMM`. Management (Ralph & Daniel) COMBINED at 0.055 PPW → `SLMC · LABOR · SALESCOMM`. Geo $70 flat → `APPT COM`. Burden 75% × (internal + mgmt + geo); 3rd-party NOT burdened. This resolves old Q1 and the Ralph/Daniel routing suspicion. | REVISED sheet |
+| D9 | **Commission model v3 (from REVISED sheet):** two separate rep inputs — 3rd-Party Rep PPW → `SLPC OUT · OTHER · M1&M2COM`, Internal Rep PPW → `SLPC · LABOR · SALESCOMM`. Management (Ralph & Daniel) COMBINED at 0.055 PPW → `SLMC · LABOR · SALESCOMM`. Geo $70 flat → `APPT COM`. ~~Burden 75% × (internal + mgmt + geo); 3rd-party NOT burdened.~~ **AMENDED BY D21: burden is 75% × (mgmt + geo) only — neither rep line is burdened.** This resolves old Q1 and the Ralph/Daniel routing suspicion. | REVISED sheet |
 | D10 | **CONFIRMED (Tim 2026-08-20). Management PPW stays as TWO stored inputs** (Sales_Mgr .04 + Overhead .015); the calc sums them to the single SLMC cost line (0.055), while attributes break them apart (MGRCOM* from .04, MGMTOR* from .015). | Tim + attribute pull |
 | D15 | **Cost fields get STATIC DEFAULT VALUES in SF** (supersedes the null-=derive design): more visible and admin-editable. The calc ALWAYS reads the Cost field (never derives). Semantics: flat adders = per-UNIT cost (calc × qty); per-watt adders = per-watt cost (calc × watts when selected). Consequence: changing a job's PRICE does not auto-move its COST — the user adjusts both if needed. Defaults computed from the sheet derivation, see §4c. | Tim, 2026-08-20 |
 | D16 | **Internal deals: payroll only, NO POs** (resolves Q2). They share the SAME attributes as 3rd-party deals (SLSCOM1/2 filled with the internal 75/25 split) but hit the SLPC·SALESCOMM cost line. Deal type determined by which rep PPW is populated: 3rd-party PPW > 0 → 3rd-party (POs, capped M1 split); Internal PPW > 0 → internal (no PO, 75/25). Both populated = validation error, fail loudly. | Tim, 2026-08-20 |
@@ -27,6 +27,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
 | D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — Harmon must add it before any job can push a referral fee. (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
 | D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`, **deployed 2026-08-21**) plus the Stage 2 calc rewrite (**built 2026-08-21**, §4i). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history, and a test pins that repopulating one changes nothing. Blank sales company **throws** (`SALES_COMPANY_MISSING`, HTTP 422) rather than defaulting to external — see the 83%-blank rollout note in §4i. | Tim, 2026-08-21 |
+| D21 | **COMMISSION BURDEN = 75% × (management + setter) ONLY.** **Neither rep line is burdened** — not the external one (never was) and **not the internal redline commission** either. This **amends D9 and the D19 Stage 2 implementation**, both of which burdened the internal rep amount, and it **supersedes the REVISED sheet's J12**, whose burden array includes K8 (the internal rep cell). The sheet is not to be "restored" here: under the redline model the internal rep amount is an order of magnitude larger than when that array was written, and Harmon has ruled. Effect on the fixture job: internal-deal burden 10,939.50 → **415.50**, identical to the same job sold externally. Nothing else moves — the external worked example was already 75% × (mgmt + setter). | Harmon / Tim, 2026-08-22 |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -187,12 +188,22 @@ written to `Budget_Calc_Error__c` by `markError`.
 > in production depends on recalc today. Populating the field is a data task that has to
 > happen before any bulk recalc.
 
-**What did NOT change:** management (.04 + .015 summed into one SLMC line, D10), setter
-(gated on `Sundial_Customer__r.Setter__c`, D17), the 75% burden and the rule about which
-components it applies to. One consequence of leaving the burden rule alone is worth
-stating: an **internal** deal now carries 75% burden on the whole redline commission,
-which is a much bigger number than the old PPW model produced. Correct, but do not
-compare a v2 figure to a v3 one and assume a bug.
+**What did NOT change:** management (.04 + .015 summed into one SLMC line, D10) and
+setter (gated on `Sundial_Customer__r.Setter__c`, D17).
+
+**Burden DID change, one day later — see D21.** Stage 2 as originally built kept the old
+rule and burdened the internal rep amount, which under the redline model produced
+10,939.50 of burden on the fixture job against 415.50 for the same job sold externally.
+Harmon ruled on 2026-08-22 that **neither rep line is burdened**, so the basis is now
+`75% × (management + setter)` and the two routings burden identically. The external
+worked example is unaffected — it was already 75% × (mgmt + setter), which is why every
+cell and field expectation in the fixture survived the amendment untouched.
+
+> ⚠️ **The fixture cannot catch a regression in the burden basis.** It is an EXTERNAL
+> deal, so the rep cell is zero and the old and new formulas agree to the cent. Three
+> behaviour tests pin D21 instead: the internal case at 415.50, an equality assertion
+> that external and internal burden match, and a scaling check that a 10× rep amount
+> moves burden not at all.
 
 **Snapshot self-consistency.** Sheet cells J7/J8 used to hold the input PPW; they now hold
 the **derived** rate (`Commission_Total__c ÷ watts`) on whichever side the deal routed to,
@@ -220,7 +231,8 @@ the commission block and everything downstream is re-pinned to the D19 worked ex
 > fixture's contract until GP goes positive — that unpins the cost cells from the workbook
 > they came from. GP plausibility gets checked on a real record with real numbers.
 
-Test suite: **186 checks** (88 cells / 55 fields / 16 extras / 27 behaviours), up from 175.
+Test suite: **188 checks** (88 cells / 55 fields / 16 extras / 29 behaviours), up from 175
+(186 at Stage 2 as first built, +2 for D21).
 All old 2,200-based commission expectations removed — grep for `2200`, `2754`, `3169.5`,
 `33332.5`, `8775.02` returns nothing.
 

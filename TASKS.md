@@ -6,11 +6,11 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 ## D19 REDLINE commission model (2026-08-21) — supersedes the PPW-input model
 
-Branch `feat/redline-commissions`. Two stages with a boundary; **Stage 1 is package-only and STOPS for Tim's deploy.**
+Branch `feat/redline-commissions`. Three stages with a boundary at each; **Stage 1 is package-only and STOPPED for Tim's deploy (done).**
 
 `Total Commission ($) = Contract − (Redline × watts) − Total Adder Price`. Redlines: External+Lightreach 1.75 · External+other 1.85 · Internal+Lightreach 2.10 · Internal+other 2.20.
 
-### Stage 1 — `salesforce/v3-redline-commission-fields/` (8 FORMULA fields, 4 × 2 objects) — BUILT, PENDING DEPLOY
+### Stage 1 — `salesforce/v3-redline-commission-fields/` (8 FORMULA fields, 4 × 2 objects) — **DEPLOYED CLEAN 2026-08-21**
 - [x] `Commission_Redline_PPW__c` · `Total_Adder_Price__c` · `Commission_Total__c` · `Commission_Total_PPW__c`, all formulas so nothing writes them and they cannot drift. **Collision-checked clean on both objects.**
 - [x] **Name chosen to avoid the existing `Commission_PPW__c`** — which exists on BOTH objects (not just Solar) and is a calc OUTPUT covering all commissions ÷ watts. The new one is rep-only. Flagged in the README since they will sit near each other on a layout.
 - [x] **Object-appropriate sources verified live:** Customer `Sales_Company__c` (2 values) + `Financing_Partner__c` = "Lightreach" + `Final_System_Size_kW__c`; Solar `Sales_Company_Harmon_Solar_or_Third__c` (Harmon Solar or ~55 dealers) + `Sales_Type_Partner__c` = "**LightReach**" + `System_Size__c`. **The Lightreach casing differs between objects** — harmless because formula `=` is case-insensitive, but each formula uses its own object's spelling. **Customer's `Sales_Type_Partner__c` is an unconfigured placeholder ("Value 1") and must NOT be used** — Customer uses `Financing_Partner__c`.
@@ -19,18 +19,22 @@ Branch `feat/redline-commissions`. Two stages with a boundary; **Stage 1 is pack
 - [x] **`verify.mjs` — 20 offline checks against the generated formula TEXT** (transpiled to JS and evaluated, not a reimplementation). Caught a **precedence bug on its first run**: `Total/BLANKVALUE(kW,0)*1000` parses as `(Total/kW)*1000`, out by 10^6. Watts is parenthesised everywhere now.
 - [x] Worked example reproduces: contract 36502, 8800 W, external non-Lightreach, adders 3110 → **redline 1.85, commission 17112, $/W 1.9445**.
 - [x] **Check Only #1 FAILED and is fixed (2026-08-21).** `formulaTreatBlanksAs` was emitted as `BlankAsBlanks`; the enum is **`BlankAsBlank`** (singular) and all 8 fields were rejected. Fixed in the generator, regenerated, formulas and compiled sizes unchanged, `verify.mjs` still green. **Ready to re-zip and redeploy.** Note this class of error is invisible to `verify.mjs` by construction — it checks formula semantics, not the metadata envelope around them, so Check Only is the only gate for bad enums / attribute names / types.
-- [ ] **TIM: deploy.** Explorer-zip → Workbench → **Check Only FIRST** (that is the only thing that proves the compiled size; expect 8/8) → deploy → FLS **Read** (formulas have no Edit); integration user needs Read for Stage 2.
-- [ ] **TIM: 30-second post-deploy check on a real record** — flip Sales Company and finance through all four redlines, then **blank the Sales Company and confirm all three downstream fields go BLANK, not 0**. That is the one `BlankAsBlank` assumption the offline harness cannot prove. If any shows a number, stop before Stage 2.
+- [x] **TIM: deployed clean** (Check Only 8/8, then deploy). All four fields verified present, `calculated=true`, and readable by the integration user on both objects.
+- [x] **`BlankAsBlank` confirmed on live data.** A SOQL read of real records with no sales company returned blank redline / blank commission / blank $/W — the post-deploy assumption the offline harness could not prove, answered by production records rather than a hand-flipped test record.
 
-### Stage 2 — calc amendment — **NOT STARTED, waits on Tim's deploy confirmation**
-- [ ] budgetCalc reads `Commission_Total__c` (dollars) off the Solar record and routes it to **SLPC OUT** (external) or **SLPC** (internal) by the sales-company field. Replaces both the PPW×watts computation and D16's which-PPW-populated discriminator.
-- [ ] New validation: blank/unrecognised sales-company value → **fail loudly**.
-- [ ] Manager (.04+.015), setter (Setter__c read-through), burden 75% on (internal+mgmt+setter) — all unchanged.
-- [ ] Retire `Sales_Rep_Commission_PPW__c` + `Internal_Rep_Commission_PPW__c` from INPUT_FIELDS and every calc read (fields stay on the objects).
-- [ ] Snapshot workbook: write the derived commission $/W into the sheet's rate cell so the snapshot stays self-consistent.
-- [ ] Fixture: non-commission cells stay pinned to the REVISED workbook; commission cells re-pin to the redline example. Assert the old 2200-based expectations are **gone**.
-- [ ] Confirm the calc still sets `Commission_Deal_Type__c` (the push's v2 marker) from the NEW rule, and that the push's deal-type guard follows it.
-- [ ] Docs: PPW-field retirement note, TASKS/PROGRESS.
+### Stage 2 — calc amendment — **DONE 2026-08-21**
+- [x] budgetCalc reads `Commission_Total__c` (dollars) off the Solar record and routes it to **SLPC OUT** (external) or **SLPC** (internal) by `Sales_Company_Harmon_Solar_or_Third__c`. Replaces both the PPW×watts computation and D16's which-PPW-populated discriminator. Match is case-insensitive + trimmed, deliberately: SF formula `=` ignores case, and a calc stricter than the formula could hand a record the INTERNAL redline with EXTERNAL routing — right commission, wrong line.
+- [x] **Two fail-loud validations.** `SALES_COMPANY_MISSING` on a blank company (never defaults to external); `COMMISSION_TOTAL_UNAVAILABLE` when the formula reads blank with a company set — whose realistic cause is the **integration user missing Read FLS**, which SOQL reports as an absent field and would otherwise post a $0 commission that looks entirely plausible. Zero is explicitly NOT blank.
+- [x] **Both now return HTTP 422 `invalid_input` with the message**, not a bare 500 `server_error`. Small addition beyond the brief, and worth it given the next line.
+- [!] **ROLLOUT: 3,697 of 4,474 Solar records (83%) have a blank sales company** and will now refuse to recalculate. Survivable only because **exactly 1 record has a calculated budget today** — nothing in production depends on recalc. **Populating that field is a data task that must happen before any bulk recalc.**
+- [x] Manager (.04+.015), setter (Setter__c read-through), burden 75% on (internal+mgmt+setter) — all unchanged. Consequence worth knowing: an **internal** deal now carries burden on the whole redline commission, far larger than under the PPW model. Correct, but do not compare a v2 figure to a v3 one and assume a bug.
+- [x] Retired `Sales_Rep_Commission_PPW__c` + `Internal_Rep_Commission_PPW__c` from INPUT_FIELDS and every calc read. A test pins that they are **inert** — repopulating one out of habit changes no output and does not resurrect the old ambiguity error.
+- [x] Snapshot workbook: J7/J8 now carry the **derived** $/W on whichever side the deal routed to (0 on the other). Test asserts `J7 × watts = K7` and `J8 × watts = K8`, so the snapshot can never show a rate that fails to explain its own total.
+- [x] Fixture re-pinned: non-commission cells still the REVISED workbook's cached values, commission block and downstream to the redline example (17112 / $1.9445). All old 2200-based expectations **gone** (grep-verified for 2200, 2754, 3169.5, 33332.5, 8775.02). **186 checks pass**, up from 175.
+- [x] **GP is negative in the fixture (−6,136.98) and that is expected** — the workbook's COST example combined with the D19 COMMISSION model, which were never priced against each other. Documented at the assertion so nobody "fixes" it by tuning the contract, which would unpin the cost cells from the workbook.
+- [x] Push-lambda guards re-verified: `Commission_Deal_Type__c` is still always set (test pins it), the marker guard still tests emptiness not membership (a pre-D19 record can legitimately hold `None`), and guard 1a is now purely stale/foreign-data defence since the calc can no longer produce both amounts. Comments updated; **38/38 push tests still pass, no code change needed.**
+- [x] Docs: rework doc §4d (retirement, struck through), §4h (deployed), **new §4i** (the whole Stage 2 change), D19 row, guard note. TASKS/PROGRESS.
+- [ ] **Follow-up, cosmetic:** `Internal_Rep_Commission_Amt__c` was deployed with a description saying it equals `Internal_Rep_Commission_PPW__c × watts`, which is no longer true. Worth a description-only alignment pass eventually; not worth a deploy on its own.
 
 ### Consequences already recorded
 - [x] **Q7 OBSOLETED and §4e CANCELLED.** Per-adder commission formula fields are not needed and will not be built — adders now reduce the commission pool in aggregate, so there is no per-adder rate to define.

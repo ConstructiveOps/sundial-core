@@ -448,10 +448,12 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
   // reads), zero to the four D11 standalone lines, and nothing to SLPC OUT — because
   // Internal_Rep_Commission_Amt__c and friends are simply blank on a v1 record.
   //
-  // Commission_Deal_Type__c is the marker: ONLY budgetCalc v2 writes it. Blank means v1
-  // (or never calculated). Note 'None' is a perfectly valid v2 value — it means the v2
-  // calc ran and found neither rep PPW populated — so the test is emptiness, NOT
-  // "not one of the three labels".
+  // Commission_Deal_Type__c is the marker: ONLY budgetCalc v2/v3 writes it. Blank means
+  // v1 (or never calculated). The test is EMPTINESS, not "one of the three labels" —
+  // 'None' is a legitimate stored value on a record calculated before D19 (the old rule
+  // produced it when neither rep PPW was populated), and such a record is still a v2
+  // record whose amounts this mapping can read. Under D19 the calc emits only
+  // '3rd Party' or 'Internal', because a blank sales company now throws instead.
   const dealTypeMarker = String(budgetValues?.Commission_Deal_Type__c ?? "").trim();
   if (dealTypeMarker === "") {
     return {
@@ -468,14 +470,15 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
     };
   }
 
-  // 1a) DEAL-TYPE GUARD (D16) — defense in depth.
+  // 1a) DEAL-TYPE GUARD — defense in depth.
   //
-  // budgetCalc already throws when both rep PPWs are populated, so a record that
-  // reaches here should be unambiguous. But the push reads STORED AMOUNTS, which could
-  // be stale (calculated before the second PPW was entered, or written by something
-  // other than the calc). Two non-zero rep amounts would post commission to BOTH the
-  // SLPC OUT and SLPC lines — paying the same commission twice in the budget — and
-  // skip-zero would not catch it, because neither is zero. Refuse.
+  // Under D19 the calc routes ONE commission amount to ONE of the two lines by sales
+  // company, so it cannot itself produce both. This guard is therefore purely about
+  // STORED amounts being stale or foreign: a record calculated under the old D16 rule,
+  // a half-finished migration, or anything writing the fields other than the calc. Two
+  // non-zero rep amounts would post commission to BOTH the SLPC OUT and SLPC lines —
+  // paying the same commission twice in the budget — and skip-zero would not catch it,
+  // because neither is zero. Refuse.
   const thirdPartyAmt = numOf(budgetValues?.Sales_Rep_Commission_Amt__c);
   const internalAmt = numOf(budgetValues?.Internal_Rep_Commission_Amt__c);
   if (thirdPartyAmt > 0 && internalAmt > 0) {

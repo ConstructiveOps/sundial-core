@@ -26,7 +26,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D13 | **REFERRAL is its own budget line**: `REFERRAL - OTHER - REFERRAL FEE` ← Referral Fee adder (500 × qty). NEW task code — the v1 sandbox scaffold (38 lines) had NO REFERRAL line; the live template must be re-harvested and MUST contain it or push fails. | REVISED sheet |
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
 | D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — Harmon must add it before any job can push a referral fee. (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
-| D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history. | Tim, 2026-08-21 |
+| D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`, **deployed 2026-08-21**) plus the Stage 2 calc rewrite (**built 2026-08-21**, §4i). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history, and a test pins that repopulating one changes nothing. Blank sales company **throws** (`SALES_COMPANY_MISSING`, HTTP 422) rather than defaulting to external — see the 83%-blank rollout note in §4i. | Tim, 2026-08-21 |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -95,19 +95,37 @@ Defaults derived from the sheet (per-unit: (price − hours×rate×1.75) ÷ 1.25
 | Adder_Bird_Blocking_Cost__c | 0.06 /W | direct (SUBCON) |
 Field descriptions must state the per-unit / per-watt semantic and that price changes don't auto-move cost.
 
-### 4d. Commission inputs — **UPDATED for REVISED sheet**
-- **NEW FIELD (addendum package): `Internal_Rep_Commission_PPW__c`** — Number/Currency-per-watt, default 0, on BOTH objects (rep-entered at sale, copied by Create Project).
-- `Sales_Rep_Commission_PPW__c` → RELABEL "3rd Party Rep Commission PPW" (repurposed; per-job value like 0.25).
-- `Sales_Mgr_Commission_PPW__c` (.04) + `Overhead_Commission_PPW__c` (.015) RETAINED per D10; calc sums → SLMC line.
+### 4d. Commission inputs — **REP INPUTS RETIRED BY D19 (2026-08-21)**
+
+> ⚠️ **The two rep-PPW fields are no longer calc inputs.** Struck through below, kept for
+> the record. The fields still EXIST on both objects (history), but as of Stage 2 nothing
+> reads them: `handler.js` does not select them and `budgetCalc.js` does not reference
+> them. A test (`the retired PPW fields are inert`) pins that — repopulating one out of
+> habit changes no output.
+
+- ~~**NEW FIELD (addendum package): `Internal_Rep_Commission_PPW__c`** — Number/Currency-per-watt, default 0, on BOTH objects (rep-entered at sale, copied by Create Project).~~ **RETIRED as an input (D19).**
+- ~~`Sales_Rep_Commission_PPW__c` → RELABEL "3rd Party Rep Commission PPW" (repurposed; per-job value like 0.25).~~ **RETIRED as an input (D19).** The relabel row in `salesforce/v2-field-alignments/` is now cosmetic-only; harmless if deployed, pointless if not.
+- **REPLACED BY:** `Commission_Total__c` (dollars, formula — §4h) routed by
+  `Sales_Company_Harmon_Solar_or_Third__c`. See §4i for what the calc now reads.
+- `Sales_Mgr_Commission_PPW__c` (.04) + `Overhead_Commission_PPW__c` (.015) RETAINED per D10; calc sums → SLMC line. **Unchanged by D19.**
 - `Geo_Commission_Amount__c` ($70 rule) + `Commission_Burden_Rate__c` (75) unchanged.
+
+**Stale field DESCRIPTIONS in already-deployed packages** (cosmetic, no behaviour):
+`Internal_Rep_Commission_Amt__c` was deployed describing itself as
+"`Internal_Rep_Commission_PPW__c` × watts", which is no longer how it is computed. Worth a
+description-only alignment pass at some point; not worth a deploy on its own.
 
 ### 4e. Per-adder commission FORMULA fields — **CANCELLED (D19)**
 The redline model makes per-adder commission rates meaningless: adders now reduce the
 commission pool in aggregate (`− Total Adder Price`), so there is nothing per-adder to
 compute. Q7 is obsoleted. **Replaced by §4h.**
 
-### 4h. D19 REDLINE commission formula fields — BOTH objects (8) — **PACKAGE BUILT, PENDING DEPLOY**
+### 4h. D19 REDLINE commission formula fields — BOTH objects (8) — **DEPLOYED 2026-08-21**
 `salesforce/v3-redline-commission-fields/`, additive, collision-checked clean 2026-08-21.
+All four fields verified present and readable by the integration user on both objects
+after deploy; a live SOQL read returned the expected blank-propagation shape on records
+with no sales company set, which is the `BlankAsBlank` post-deploy check the README asked
+for, answered by real data.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -131,6 +149,80 @@ first draft of `Commission_Total_PPW__c` compiled to ~6,000 bytes (limit 5,000) 
 named `Commission_Total__c` twice. Restructured to one reference; worst case is now 3,086
 bytes (62%). Figures printed by `generate.mjs`; formulas validated offline by
 `verify.mjs` (20 checks), which caught a watts precedence bug on its first run.
+
+### 4i. D19 in budgetCalc — **BUILT 2026-08-21 (Stage 2)**
+
+The calc no longer computes the rep commission. It reads it.
+
+**Two new inputs, two retired.** `handler.js` `INPUT_FIELDS` gains
+`Commission_Total__c` and `Sales_Company_Harmon_Solar_or_Third__c`, and drops
+`Sales_Rep_Commission_PPW__c` / `Internal_Rep_Commission_PPW__c`.
+
+**Routing, by sales company alone:**
+
+| Sales company | Deal type | Line | Burdened? |
+|---|---|---|---|
+| `Harmon Solar` (case-insensitive, trimmed) | Internal | SLPC · LABOR · SALESCOMM | **yes** |
+| anything else non-blank | External | SLPC OUT · OTHER · M1&M2COM | no |
+| **blank** | — | — | **throws `SALES_COMPANY_MISSING`** |
+
+Case-insensitive on purpose: SF formula `=` on text ignores case, and a calc stricter
+than the formula could give a record the INTERNAL redline and the EXTERNAL routing — the
+right commission on the wrong line.
+
+**Two fail-loud validations.**
+
+| Code | When | Why not a default |
+|---|---|---|
+| `SALES_COMPANY_MISSING` | sales-company field blank | Defaulting to external would quietly pay the external redline on every unfilled record. The formula already returns NULL here; the calc matches it. |
+| `COMMISSION_TOTAL_UNAVAILABLE` | `Commission_Total__c` blank with a non-blank company | Should be impossible from the formula, so the realistic cause is the **integration user missing Read FLS** — SOQL then omits the field silently and a $0 commission looks entirely plausible. Zero is explicitly NOT blank: a redline that eats the contract is a legitimate answer. |
+
+Both surface as **HTTP 422 `invalid_input`** from the recalc button (added in Stage 2 —
+previously any `BudgetInputError` fell through to a 500 `server_error`) and are still
+written to `Budget_Calc_Error__c` by `markError`.
+
+> ⚠️ **ROLLOUT: 3,697 of 4,474 `Sundial_Solar__c` records (83%) have a blank sales
+> company**, so recalc will refuse on all of them until the field is populated. This is
+> survivable only because **exactly 1 record currently has a calculated budget** — nothing
+> in production depends on recalc today. Populating the field is a data task that has to
+> happen before any bulk recalc.
+
+**What did NOT change:** management (.04 + .015 summed into one SLMC line, D10), setter
+(gated on `Sundial_Customer__r.Setter__c`, D17), the 75% burden and the rule about which
+components it applies to. One consequence of leaving the burden rule alone is worth
+stating: an **internal** deal now carries 75% burden on the whole redline commission,
+which is a much bigger number than the old PPW model produced. Correct, but do not
+compare a v2 figure to a v3 one and assume a bug.
+
+**Snapshot self-consistency.** Sheet cells J7/J8 used to hold the input PPW; they now hold
+the **derived** rate (`Commission_Total__c ÷ watts`) on whichever side the deal routed to,
+zero on the other. Otherwise the snapshot would show a rate that does not multiply out to
+the amount beside it. A test asserts `J7 × watts = K7` and `J8 × watts = K8`.
+
+**Push-lambda guards re-verified, no code change needed.** `Commission_Deal_Type__c` is
+still the v2/v3 marker and the calc still always sets it (a test pins that, since D19
+changed *what* sets it). Note the marker guard tests **emptiness**, not membership: a
+record calculated under the old rule can legitimately hold `None`, and it is still a v2
+record. Under D19 the calc emits only `3rd Party` or `Internal`, because blank throws.
+Guard 1a (both rep amounts non-zero) is now purely stale/foreign-data defence — the calc
+can no longer produce that state itself. Both comments updated to say so.
+
+**Fixture.** Non-commission cells stay pinned to the REVISED workbook's cached values;
+the commission block and everything downstream is re-pinned to the D19 worked example
+(contract 36502, 8,800 W, external non-Lightreach, adders 3,110 → commission **17,112**,
+**$1.9445/W**). The two halves combine legitimately because the workbook and the
+`Total_Adder_Price__c` formula agree on the 3,110.
+
+> ⚠️ **GP goes NEGATIVE in the fixture (−6,136.98) and that is expected.** It is the
+> workbook's COST example bolted onto the D19 COMMISSION model, and the two were never
+> priced against each other: a 17,112 commission on a 36,502 contract leaves 18,420.50 to
+> cover 24,557.48 of job cost. Both halves are individually correct. Do **not** tune the
+> fixture's contract until GP goes positive — that unpins the cost cells from the workbook
+> they came from. GP plausibility gets checked on a real record with real numbers.
+
+Test suite: **186 checks** (88 cells / 55 fields / 16 extras / 27 behaviours), up from 175.
+All old 2,200-based commission expectations removed — grep for `2200`, `2754`, `3169.5`,
+`33332.5`, `8775.02` returns nothing.
 
 ### 4f. PO tracking fields — SOLAR only (draft, pending Q2/Q5b).
 
@@ -197,8 +289,10 @@ the four standalone lines below it, so using it would double-count those instead
   immediately instead of returning 202 and failing asynchronously; and `writeBudgetLines`
   aborts as well, covering the worker, dry-run and direct-invoke paths.
 - **`commission_deal_type_ambiguous`** — both rep amounts non-zero aborts before any PUT.
-  D16 defense in depth: the calc already rejects this input, but the push reads *stored*
-  amounts which can be stale, and skip-zero cannot catch it because neither is zero.
+  Since D19 the calc routes one amount to one line and **cannot** produce this state, so
+  the guard is now purely about *stored* amounts being stale or foreign (a record
+  calculated under the old D16 rule, a half-finished migration, something other than the
+  calc writing the fields). Skip-zero cannot catch it because neither is zero.
 - **`pending_harvest_line_has_value`** — a non-zero `DC_Rebate_Amount__c` with no harvested
   key aborts rather than dropping thousands in income silently.
 

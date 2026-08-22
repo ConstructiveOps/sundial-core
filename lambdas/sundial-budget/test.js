@@ -11,9 +11,15 @@
  *      total the way it can when only the totals are checked.
  *   2. FIELD expectations — what actually gets written back to Salesforce.
  *
- * Plus the v2 behaviours that have no cached cell because the fixture doesn't exercise
- * them: the D16 deal-type validation, the D15 missing-cost error, the D17 setter gate,
- * and the DC rebate.
+ * Plus the behaviours that have no cached cell because the fixture doesn't exercise
+ * them: the D19 sales-company routing and its two fail-loud validations, the D15
+ * missing-cost error, the D17 setter gate, and the DC rebate.
+ *
+ * ⚠️ THE COMMISSION EXPECTATIONS ARE NOT THE WORKBOOK'S. D19 replaced the PPW-input
+ * model after the workbook was cut, so the commission block and everything downstream
+ * of it is pinned to the redline worked example instead. See COMMISSION_REPIN below —
+ * it lists exactly which numbers moved and why, and one consequence (a negative GP) is
+ * expected rather than a bug.
  *
  * HOLLAND is retired (D1) — its template and fixture are deleted, not commented out.
  */
@@ -63,9 +69,14 @@ const REVISED = {
   // Other costs
   Material_Other_Cost__c: 250, Constructive_Ops_Fee__c: 850, Permit_Pass_Through_Cost__c: 750,
 
-  // Commissions (D9/D10): J9 0.055 on the sheet is stored as .04 + .015
-  Sales_Rep_Commission_PPW__c: 0.25,      // 3rd party (J7)
-  Internal_Rep_Commission_PPW__c: 0,      // J8
+  // Commissions — D19 REDLINE MODEL. The rep commission is READ in dollars off the
+  // Commission_Total__c formula field, not computed from a PPW input, so the two
+  // rep-PPW fields are gone from this fixture entirely (see COMMISSION_REPIN below for
+  // the arithmetic). External + non-Lightreach = redline 1.85:
+  //   36502 − 1.85 × 8800 − 3110 = 17112
+  Sales_Company_Harmon_Solar_or_Third__c: 'Blue Sky Solar',  // external
+  Commission_Total__c: 17112,
+  // Management is unchanged: J9 0.055 on the sheet is stored as .04 + .015
   Sales_Mgr_Commission_PPW__c: 0.04,
   Overhead_Commission_PPW__c: 0.015,
   Geo_Commission_Amount__c: 70,           // J10
@@ -106,15 +117,45 @@ const REVISED = {
 };
 
 /**
- * Cached values read out of budget-template-v2.xlsx. Every one of these is a formula
- * cell in the workbook; the numbers are Excel's own results, not hand arithmetic.
+ * The same job sold INTERNALLY. Only two fields move, and the second is not an
+ * independent input — it is what the deployed Salesforce formula returns once the first
+ * one changes, so the two must be edited together:
+ *
+ *   internal + non-Lightreach = redline 2.20
+ *   36502 − 2.20 × 8800 − 3110 = 14032
+ */
+const INTERNAL_DEAL = {
+  Sales_Company_Harmon_Solar_or_Third__c: 'Harmon Solar',
+  Commission_Total__c: 14032,
+};
+
+/**
+ * COMMISSION_REPIN — why the commission numbers here are NOT the workbook's.
+ *
+ * Every non-commission expectation below is still the REVISED workbook's own cached
+ * value, extracted cell-by-cell. The commission block and everything downstream of it
+ * (J7/J8/K7/J11/J13/J14, J29, J31, the N-column summary, the GP fields) is re-pinned to
+ * the D19 redline worked example instead, because the workbook predates the model:
+ *
+ *   redline 1.85 (external, non-Lightreach)
+ *   commission = 36502 − 1.85 × 8800 − 3110 = 17112     → $1.9445/W
+ *   subtotal   = 17112 + 484 + 70 = 17666
+ *   burden     = 0.75 × (0 + 484 + 70) = 415.50          (3rd-party is not burdened)
+ *   total      = 18081.50                                → $2.0547/W all-in
+ *
+ * The 3110 is `stdAdderPriceTotal`, which the workbook and the Salesforce
+ * `Total_Adder_Price__c` formula agree on — that agreement is what lets the two halves
+ * of this fixture be combined at all.
  */
 const CELL_EXPECTED = {
   // Basics
   E7: 8800, E9: 20,
-  // Commissions
-  K7: 2200, K8: 0, K9: 484, K10: 70,
-  J11: 2754, J12: 415.5, J13: 3169.5, J14: 0.36017045454545454,
+  // Commissions — RE-PINNED to the D19 redline worked example (see COMMISSION_REPIN).
+  // J7 is the DERIVED rate now, so it is asserted here rather than echoed from an input.
+  J7: 1.9445454545454546, K7: 17112,
+  J8: 0, K8: 0,
+  K9: 484, K10: 70,
+  J11: 17666, J12: 415.5, J13: 18081.5, J14: 2.054715909090909,
   // Material rows
   F12: 5280, F16: 7383.33, F17: 1496, F18: 880, F19: 840,
   // Labor rows
@@ -138,9 +179,9 @@ const CELL_EXPECTED = {
   J26: 2605,      // total labor
   J27: 1953.75,   // BURDENEXR
   J28: 24557.48,  // job cost, no commission (D11: everything included)
-  J29: 27726.98,  // with commission
+  J29: 42638.98,  // with commission — D19 re-pin
   J30: 2.7906227272727273,
-  J31: 3.150793181818182,
+  J31: 4.845338636363636,  // D19 re-pin
   // Hours
   J32: 63, J33: 4, J34: 26.666666666666664, J35: 13.333333333333334, J36: 19,
   // Adder rollups
@@ -149,22 +190,32 @@ const CELL_EXPECTED = {
   D40: 500, E40: 3, F40: 99, G40: 74.25, I40: 261.4,
   D55: 500, E55: 250, D56: 880, E56: 528,
   D60: 30, E60: 30, D61: 100, E61: 100, D62: 600, E62: 600, D63: 500, E63: 500,
-  // Summary / GP block
-  N9: 3169.5, N10: 33332.5, N11: 16140.73, N12: 4558.75, N13: 3858,
-  N14: 8775.02, N15: 0.24039833433784452, N16: 0.26325718142953575,
+  // Summary / GP block. N11/N12/N13 are cost-side and unmoved; N9/N10/N14/N15/N16 are
+  // the D19 re-pin.
+  //
+  // ⚠️ N14 IS NEGATIVE, and that is expected here rather than a failing assertion in
+  // disguise. The fixture is the REVISED workbook's COST example bolted onto the D19
+  // COMMISSION model, and the two were never priced against each other: a 17,112
+  // commission on a 36,502 contract leaves 18,420.50 to cover 24,557.48 of job cost.
+  // Both halves are individually correct, which is exactly what the test is for. Do NOT
+  // "fix" this by tuning the fixture's contract until GP goes positive — that would
+  // unpin the cost cells from the workbook they came from. A real record with real
+  // Harmon numbers is where GP plausibility gets checked.
+  N9: 18081.5, N10: 18420.5, N11: 16140.73, N12: 4558.75, N13: 3858,
+  N14: -6136.98, N15: -0.16812722590542983, N16: -0.3331603376672729,
 };
 
 /** What lands on the Salesforce record. */
 const FIELD_EXPECTED = {
   System_Size_Watts__c: 8800,
   Calculated_Module_Count__c: 20,
-  Sales_Rep_Commission_Amt__c: 2200,   // now the THIRD-PARTY amount (§4d relabel)
+  Sales_Rep_Commission_Amt__c: 17112,  // the THIRD-PARTY amount, straight from D19
   Sales_Mgr_Commission_Amt__c: 352,    // .04 × 8800 — component, not the SLMC line
   Overhead_Commission_Amt__c: 132,     // .015 × 8800
-  Commission_Subtotal__c: 2754,
-  Commission_Burden_Amt__c: 415.5,
-  Total_Commissions__c: 3169.5,
-  Commission_PPW__c: 0.36017045454545454,
+  Commission_Subtotal__c: 17666,
+  Commission_Burden_Amt__c: 415.5,     // unchanged: 3rd-party is not burdened
+  Total_Commissions__c: 18081.5,
+  Commission_PPW__c: 2.054715909090909,
   Module_Material_Cost__c: 5280,
   Battery_Material_Cost__c: 7383.33,
   BOS_Solar_Cost__c: 1496,
@@ -191,19 +242,20 @@ const FIELD_EXPECTED = {
   Total_Labor_Burden_Budget__c: 1953.75,
   Constructive_Ops_Total__c: 1600,
   Total_Job_Cost__c: 24557.48,
-  Total_Job_Cost_With_Comm__c: 27726.98,
+  Total_Job_Cost_With_Comm__c: 42638.98,
   Cost_PPW__c: 2.7906227272727273,
-  Cost_PPW_With_Comm__c: 3.150793181818182,
+  Cost_PPW_With_Comm__c: 4.845338636363636,
   GENA_Hours__c: 4,
   S1_Hours__c: 26.666666666666664,
   S2_Hours__c: 13.333333333333334,
   S3_Hours__c: 19,
   Total_Job_Hours__c: 63,
-  Balance_of_Revenue__c: 33332.5,
+  Balance_of_Revenue__c: 18420.5,
   Total_Labor_And_Burden__c: 4558.75,   // N12 — labor AND burden
-  GP_Dollars__c: 8775.02,
-  GP_Percent_With_Comm__c: 24.04,
-  GP_Percent_No_Comm__c: 26.33,
+  // Negative by construction — see the note on the N14 cell expectation.
+  GP_Dollars__c: -6136.98,
+  GP_Percent_With_Comm__c: -16.81,
+  GP_Percent_No_Comm__c: -33.32,
 
   // The §D output fields, promoted out of `extras` once they were deployed.
   Internal_Rep_Commission_Amt__c: 0,
@@ -217,7 +269,9 @@ const FIELD_EXPECTED = {
 
 /** v2 values with no Salesforce home yet — see the output gap list. */
 const EXTRAS_EXPECTED = {
-  thirdPartyCommissionAmt: 2200,
+  redlineCommissionAmt: 17112,
+  redlineCommissionPPW: 1.9445454545454546,
+  thirdPartyCommissionAmt: 17112,
   internalCommissionAmt: 0,
   managementCommissionAmt: 484,   // the SLMC line: (.04 + .015) × 8800
   setterCommissionAmt: 70,
@@ -256,6 +310,12 @@ if (extras.dealType !== 'third_party') {
   console.error(`FAIL extras.dealType: expected 'third_party', got ${extras.dealType}`);
   failures++;
 }
+// ...and so is the company that decided it (D19).
+checks++;
+if (extras.salesCompany !== 'Blue Sky Solar') {
+  console.error(`FAIL extras.salesCompany: expected 'Blue Sky Solar', got ${extras.salesCompany}`);
+  failures++;
+}
 checks++;
 if (extras.setterUserId !== SETTER_ID) {
   console.error(`FAIL extras.setterUserId: expected ${SETTER_ID}, got ${extras.setterUserId}`);
@@ -275,20 +335,27 @@ it('Commission_Deal_Type__c writes the PICKLIST LABEL, never the internal token'
   assert.strictEqual(fields.Commission_Deal_Type__c, '3rd Party');
   assert.strictEqual(extras.dealType, 'third_party');
 
-  const internal = calculateBudget({
-    ...REVISED, Sales_Rep_Commission_PPW__c: 0, Internal_Rep_Commission_PPW__c: 0.25,
-  });
+  const internal = calculateBudget({ ...REVISED, ...INTERNAL_DEAL });
   assert.strictEqual(internal.fields.Commission_Deal_Type__c, 'Internal');
 
-  const none = calculateBudget({
-    ...REVISED, Sales_Rep_Commission_PPW__c: 0, Internal_Rep_Commission_PPW__c: 0,
-  });
-  assert.strictEqual(none.fields.Commission_Deal_Type__c, 'None');
-
-  // Every emitted label must be one the picklist actually accepts.
+  // Every emitted label must be one the picklist actually accepts. ('None' is still a
+  // picklist value but is no longer reachable — a blank sales company throws.)
   const ALLOWED = new Set(['3rd Party', 'Internal', 'None']);
-  for (const r of [fields, internal.fields, none.fields]) {
+  for (const r of [fields, internal.fields]) {
     assert.ok(ALLOWED.has(r.Commission_Deal_Type__c), `bad picklist value ${r.Commission_Deal_Type__c}`);
+  }
+});
+
+it('D19: the push worker still gets its v2 marker — the calc always sets a deal type', () => {
+  // The push lambda refuses to write unless Commission_Deal_Type__c is populated (that
+  // is how it tells a v2/v3 budget from a v1 one). D19 changed WHAT sets the field, so
+  // this asserts the guard's precondition still holds under the new discriminator.
+  for (const variant of [{}, INTERNAL_DEAL, { ...INTERNAL_DEAL, Commission_Total__c: 0 }]) {
+    const r = calculateBudget({ ...REVISED, ...variant });
+    assert.ok(
+      r.fields.Commission_Deal_Type__c === '3rd Party' || r.fields.Commission_Deal_Type__c === 'Internal',
+      `deal type was ${r.fields.Commission_Deal_Type__c}`
+    );
   }
 });
 
@@ -306,33 +373,98 @@ it('the §D fields track their extras twins exactly', () => {
   for (const [f, x] of pairs) assert.strictEqual(fields[f], extras[x], `${f} != extras.${x}`);
 });
 
-it('D16: both rep PPWs populated throws, it does not pick one', () => {
-  assert.throws(
-    () => calculateBudget({ ...REVISED, Internal_Rep_Commission_PPW__c: 0.2 }),
-    (e) => e instanceof BudgetInputError && e.code === 'COMMISSION_DEAL_TYPE_AMBIGUOUS'
+it('D19: an INTERNAL deal routes to the internal amount and IS burdened', () => {
+  const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL });
+  assert.strictEqual(r.extras.dealType, 'internal');
+  assert.ok(Math.abs(r.extras.internalCommissionAmt - 14032) < TOL);
+  assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt) < TOL);
+  // Burden now includes the rep: 0.75 × (14032 + 484 + 70) = 10939.50, against 415.50
+  // for the same job sold externally. That gap is the whole point of the routing.
+  assert.ok(
+    Math.abs(r.fields.Commission_Burden_Amt__c - 10939.5) < TOL,
+    `internal burden was ${r.fields.Commission_Burden_Amt__c}`
   );
 });
 
-it('D16: an internal-only deal routes to the internal amount and IS burdened', () => {
+it('D19: "Harmon Solar" is matched case-insensitively, like the Salesforce formula', () => {
+  // SF formula `=` on text ignores case; if the calc were stricter than the formula, a
+  // record could get the INTERNAL redline from the formula and the EXTERNAL routing
+  // from the calc — the commission would be right and land on the wrong line.
+  for (const spelling of ['Harmon Solar', 'HARMON SOLAR', 'harmon solar', '  Harmon Solar  ']) {
+    const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL, Sales_Company_Harmon_Solar_or_Third__c: spelling });
+    assert.strictEqual(r.extras.dealType, 'internal', `"${spelling}" did not read as internal`);
+  }
+});
+
+it('D19: any other sales company is EXTERNAL — a new dealer needs no code change', () => {
+  for (const company of ['Blue Sky Solar', 'Some Dealer Added Next Tuesday', 'Harmon Roofing']) {
+    const r = calculateBudget({ ...REVISED, Sales_Company_Harmon_Solar_or_Third__c: company });
+    assert.strictEqual(r.extras.dealType, 'third_party', `"${company}" did not read as external`);
+    assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt - 17112) < TOL);
+  }
+});
+
+it('D19: a BLANK sales company throws — it does not default to external', () => {
+  // Defaulting would quietly pay the external redline on the ~83% of Solar records that
+  // have no company set. A blank field is a question someone answers; a wrong number is
+  // one nobody asks.
+  for (const blank of [null, undefined, '', '   ']) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, Sales_Company_Harmon_Solar_or_Third__c: blank }),
+      (e) => e instanceof BudgetInputError && e.code === 'SALES_COMPANY_MISSING',
+      `blank value ${JSON.stringify(blank)} did not throw`
+    );
+  }
+});
+
+it('D19: a blank Commission_Total__c throws rather than posting a $0 commission', () => {
+  // The realistic cause is the integration user missing Read FLS on the formula field,
+  // which makes SOQL omit it entirely. Silently reading that as zero would produce a
+  // plausible-looking budget with no commission on it at all.
+  for (const blank of [null, undefined, '']) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, Commission_Total__c: blank }),
+      (e) => e instanceof BudgetInputError && e.code === 'COMMISSION_TOTAL_UNAVAILABLE',
+      `blank value ${JSON.stringify(blank)} did not throw`
+    );
+  }
+  // Zero is NOT blank: a redline that eats the whole contract is a legitimate answer.
+  const zero = calculateBudget({ ...REVISED, Commission_Total__c: 0 });
+  assert.strictEqual(zero.extras.thirdPartyCommissionAmt, 0);
+  assert.strictEqual(zero.fields.Commission_Deal_Type__c, '3rd Party');
+});
+
+it('D19: the retired PPW fields are inert — setting them changes nothing', () => {
+  // They still exist on the object. If someone repopulates one out of habit, the calc
+  // must ignore it rather than resurrect the old model or throw the old ambiguity error.
   const r = calculateBudget({
-    ...REVISED, Sales_Rep_Commission_PPW__c: 0, Internal_Rep_Commission_PPW__c: 0.25,
+    ...REVISED,
+    Sales_Rep_Commission_PPW__c: 0.25,
+    Internal_Rep_Commission_PPW__c: 0.9,
   });
-  assert.strictEqual(r.extras.dealType, 'internal');
-  assert.ok(Math.abs(r.extras.internalCommissionAmt - 2200) < TOL);
-  assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt) < TOL);
-  // Burden now includes the rep: 0.75 × (2200 + 484 + 70) = 2065.5, vs 415.50 third-party.
-  assert.ok(
-    Math.abs(r.fields.Commission_Burden_Amt__c - 2065.5) < TOL,
-    `internal burden was ${r.fields.Commission_Burden_Amt__c}`
-  );
+  assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt - 17112) < TOL);
+  assert.strictEqual(r.extras.internalCommissionAmt, 0);
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - 18081.5) < TOL);
+});
+
+it('D19: the snapshot rate cell multiplies out to the amount cell beside it', () => {
+  // The workbook has to be internally consistent — J7 × watts must equal K7, or the
+  // snapshot shows a rate that does not explain its own total.
+  const ext = calculateBudget(REVISED).cells;
+  assert.ok(Math.abs(ext.J7 * ext.E7 - ext.K7) < TOL, `J7 × watts != K7 (${ext.J7 * ext.E7} vs ${ext.K7})`);
+  assert.strictEqual(ext.J8, 0);   // the unused side stays empty, not stale
+
+  const int = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).cells;
+  assert.ok(Math.abs(int.J8 * int.E7 - int.K8) < TOL, `J8 × watts != K8 (${int.J8 * int.E7} vs ${int.K8})`);
+  assert.strictEqual(int.J7, 0);
 });
 
 it('D17: no setter on the Customer means no setter commission', () => {
   const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { Setter__c: null } });
   assert.strictEqual(r.extras.setterCommissionAmt, 0);
-  // Burden drops by 0.75 × 70 = 52.50.
+  // Burden drops by 0.75 × 70 = 52.50, and the total by the 70 as well: 18081.50 − 122.50.
   assert.ok(Math.abs(r.fields.Commission_Burden_Amt__c - 363) < TOL);
-  assert.ok(Math.abs(r.fields.Total_Commissions__c - 3047) < TOL);
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - 17959) < TOL);
 });
 
 it('D17: the setter is also readable from a flattened relationship key', () => {
@@ -378,8 +510,12 @@ it('D15: per-watt cost multiplies by WATTS, not by qty', () => {
 it('D2: domestic content adds a 0.45/W revenue line and lifts GP by the same', () => {
   const r = calculateBudget({ ...REVISED, Domestic_Content__c: 'YES' });
   assert.ok(Math.abs(r.extras.dcRebateAmount - 3960) < TOL);         // 0.45 × 8800
-  assert.ok(Math.abs(r.fields.Balance_of_Revenue__c - (33332.5 + 3960)) < TOL);
-  assert.ok(Math.abs(r.fields.GP_Dollars__c - (8775.02 + 3960)) < TOL);
+  // The rebate is pure upside: it is NOT in the D19 commission formula (contract −
+  // redline×W − adders), so it lifts revenue and GP by its full amount and moves the
+  // commission not at all.
+  assert.ok(Math.abs(r.fields.Balance_of_Revenue__c - (18420.5 + 3960)) < TOL);
+  assert.ok(Math.abs(r.fields.GP_Dollars__c - (-6136.98 + 3960)) < TOL);
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - 18081.5) < TOL);
 });
 
 it('DC parsing is permissive on affirmatives and defaults to NO', () => {

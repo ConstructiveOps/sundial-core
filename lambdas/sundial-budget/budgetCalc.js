@@ -15,11 +15,13 @@
  *
  * WHAT CHANGED FROM v1 — the four things that will trip you up if you skim:
  *
- *  1. COMMISSIONS ARE FOUR INPUTS, NOT THREE (D9/D10/D16/D17). Third-party rep and
- *     internal rep are now SEPARATE fields hitting DIFFERENT budget lines, and which
- *     one is populated decides the deal type. Management is stored as two fields but
- *     SUMMED into one cost line. Setter is gated on the CUSTOMER's Setter__c, read
- *     through the relationship because Solar has no such field.
+ *  1. THE REP COMMISSION IS READ, NOT COMPUTED (D19 — the redline model). It comes in
+ *     dollars from the `Commission_Total__c` FORMULA field and is routed to the
+ *     third-party or internal budget line by `Sales_Company_Harmon_Solar_or_Third__c`.
+ *     Both rep-PPW input fields are RETIRED, and with them D16's which-PPW-is-populated
+ *     deal-type rule. Management is still stored as two fields but SUMMED into one cost
+ *     line (D10). Setter is still gated on the CUSTOMER's Setter__c, read through the
+ *     relationship because Solar has no such field (D17).
  *  2. COSTS ARE READ, NEVER DERIVED (D15). v1 backed material out of price
  *     (`price − labor − burden`, ÷1.25). v2 reads Adder_<X>_Cost__c and multiplies —
  *     by QTY for flat adders, by WATTS for per-watt adders. The sheet still SHOWS the
@@ -64,8 +66,36 @@ const ADDER_BURDEN_RATE = 0.75;
 const DEAL_TYPE_PICKLIST = {
   third_party: '3rd Party',
   internal: 'Internal',
+  // Retained because the restricted picklist still offers it and old records still hold
+  // it, but UNREACHABLE from this calc since D19: a blank sales company now throws
+  // rather than producing a 'None' deal.
   none: 'None',
 };
+
+// ---------------------------------------------------------------------------
+// D19 redline commission model — the three fields it turns on
+// ---------------------------------------------------------------------------
+
+/**
+ * The deal-type discriminator. On Sundial_Solar__c this holds either `Harmon Solar`
+ * (internal) or one of ~55 dealer names (external). It REPLACES D16's
+ * "whichever PPW field is populated is the deal type" rule.
+ */
+const SALES_COMPANY_FIELD = 'Sales_Company_Harmon_Solar_or_Third__c';
+
+/**
+ * The one value that means INTERNAL. Everything else is external, so a dealer added to
+ * the picklist tomorrow needs no code change here or in the Salesforce formula.
+ */
+const INTERNAL_SALES_COMPANY = 'Harmon Solar';
+
+/**
+ * The rep commission itself, in DOLLARS, as a Salesforce FORMULA field:
+ *   Contract_Amount__c − (Commission_Redline_PPW__c × watts) − Total_Adder_Price__c
+ * Deployed by `salesforce/v3-redline-commission-fields/`. The calc reads it; it never
+ * computes it, and never writes it.
+ */
+const COMMISSION_TOTAL_FIELD = 'Commission_Total__c';
 
 /** Per-watt labor coefficients, sheet F49/F50 (0.02) and F51 (0.005). */
 const PPW_LABOR_CONDUIT = 0.02;
@@ -223,30 +253,85 @@ function calculateBudget(rec) {
   const mods = moduleWatts > 0 ? watts / moduleWatts : 0; // E9
 
   // =========================================================================
-  // Commissions (D9 / D10 / D16 / D17)
+  // Commissions — D19 REDLINE MODEL (supersedes the PPW-input model)
   // =========================================================================
-  const thirdPartyPPW = g('Sales_Rep_Commission_PPW__c');       // J7 (repurposed)
-  const internalPPW = g('Internal_Rep_Commission_PPW__c');      // J8 (new, §4d)
+  //
+  // The rep commission is no longer computed here at all. It is READ, in dollars, off
+  // the `Commission_Total__c` FORMULA field on the record:
+  //
+  //     Commission_Total__c = Contract − (Redline × watts) − Total Adder Price
+  //
+  // with the redline chosen by deal type × finance source inside that formula. Two
+  // consequences worth being explicit about, because both DELETE code that used to live
+  // here:
+  //
+  //  1. `Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED
+  //     as inputs. Nothing in this file reads them and handler.js no longer selects
+  //     them. The fields stay on both objects for history.
+  //  2. D16's "whichever PPW is populated decides the deal type" discriminator is GONE.
+  //     Deal type is the sales-company field, full stop — a better discriminator,
+  //     because it is a thing a human deliberately sets rather than a side effect of
+  //     which of two numbers happens to be non-zero. There is consequently no
+  //     "both populated" ambiguity left to detect.
+  const salesCompany = String(rec[SALES_COMPANY_FIELD] ?? '').trim();
 
-  // D16: which rep field is populated IS the deal type, so both populated is not a
-  // number to reconcile — it is a record nobody has decided about. Fail loudly rather
-  // than pick one and quietly bill the wrong budget line (and, downstream, either
-  // create commission POs that shouldn't exist or skip ones that should).
-  if (thirdPartyPPW > 0 && internalPPW > 0) {
+  // FAIL LOUDLY on a blank sales company. The formula already refuses to guess (blank
+  // company → null redline → null Commission_Total), so carrying on would post a zero
+  // commission with no visible reason.
+  //
+  // Be aware this is not a rare edge today: 3,697 of 4,474 Solar records have no sales
+  // company set. That is the guard working, not a bug — but it does mean the field has
+  // to be populated before a record can be recalculated.
+  if (salesCompany === '') {
     throw new BudgetInputError(
-      'Both Sales_Rep_Commission_PPW__c (3rd party) and Internal_Rep_Commission_PPW__c ' +
-        'are greater than zero. A deal is either third-party or internal (D16) — the two ' +
-        'route to different budget lines and different PO behaviour. Clear one before recalculating.',
-      'COMMISSION_DEAL_TYPE_AMBIGUOUS'
+      `${SALES_COMPANY_FIELD} is blank. The D19 redline model needs the deal type ` +
+        `(INTERNAL when it is "${INTERNAL_SALES_COMPANY}", EXTERNAL for any dealer) both to ` +
+        'pick a redline and to route the commission to the right Acumatica line. Set the ' +
+        'sales company on the record, then recalculate.',
+      'SALES_COMPANY_MISSING'
     );
   }
 
-  const thirdPartyComm = thirdPartyPPW * watts;                 // K7 → SLPC OUT · M1&M2COM
-  const internalComm = internalPPW * watts;                     // K8 → SLPC · SALESCOMM
+  // INTERNAL is an equality test; EXTERNAL is everything else, so a new dealer name
+  // needs no change here. Case-insensitive to match the Salesforce formula, where `=`
+  // on text ignores case.
+  const isInternal = salesCompany.toLowerCase() === INTERNAL_SALES_COMPANY.toLowerCase();
+  const dealType = isInternal ? 'internal' : 'third_party';
 
-  // D10: two stored inputs, ONE cost line. The components survive into the outputs
-  // because the Acumatica attribute sync splits them apart again (MGRCOM* from .04,
-  // MGMTOR* from .015) — summing them here and nowhere else would lose that.
+  // A blank Commission_Total__c with a NON-blank sales company should be impossible —
+  // the formula only blanks when the company is blank or watts are zero. The likeliest
+  // real cause is the integration user lacking Read FLS on the formula, in which case
+  // SOQL silently omits it and a $0 commission would look entirely plausible. Refuse.
+  const repCommissionRaw = rec[COMMISSION_TOTAL_FIELD];
+  if (isBlank(repCommissionRaw)) {
+    throw new BudgetInputError(
+      `${COMMISSION_TOTAL_FIELD} is blank while ${SALES_COMPANY_FIELD} is "${salesCompany}". ` +
+        'The formula only returns blank when the sales company is blank or the system size ' +
+        'is zero, so check System_Size__c — and check that the integration user has Read ' +
+        'access to the formula field, because a missing FLS grant reads as blank here and ' +
+        'would otherwise post a zero commission.',
+      'COMMISSION_TOTAL_UNAVAILABLE'
+    );
+  }
+  const repCommission = num(repCommissionRaw);
+
+  // ROUTING: one amount, two possible destinations, decided by deal type alone.
+  //   EXTERNAL → SLPC OUT · OTHER · M1&M2COM   (a dealer invoices us; NOT burdened)
+  //   INTERNAL → SLPC · LABOR · SALESCOMM      (payroll; IS burdened)
+  const thirdPartyComm = isInternal ? 0 : repCommission;        // K7 → SLPC OUT · M1&M2COM
+  const internalComm = isInternal ? repCommission : 0;          // K8 → SLPC · SALESCOMM
+
+  // The DERIVED per-watt rate. Nothing downstream computes from it — it exists so the
+  // snapshot workbook's rate cell (J7/J8) stays self-consistent with its amount cell:
+  // rate × watts = the amount. Under the old model the rate was the input and the
+  // amount the derivation; D19 turns that around.
+  const repCommissionPPW = watts > 0 ? repCommission / watts : 0;
+  const thirdPartyPPW = isInternal ? 0 : repCommissionPPW;      // J7
+  const internalPPW = isInternal ? repCommissionPPW : 0;        // J8
+
+  // D10 UNCHANGED: two stored inputs, ONE cost line. The components survive into the
+  // outputs because the Acumatica attribute sync splits them apart again (MGRCOM* from
+  // .04, MGMTOR* from .015) — summing them here and nowhere else would lose that.
   const mgrPPW = g('Sales_Mgr_Commission_PPW__c');
   const overheadPPW = g('Overhead_Commission_PPW__c');
   const mgmtPPW = mgrPPW + overheadPPW;                         // J9 (0.055 in the fixture)
@@ -254,12 +339,15 @@ function calculateBudget(rec) {
   const overheadComm = overheadPPW * watts;
   const mgmtComm = mgmtPPW * watts;                             // K9 → SLMC · SALESCOMM
 
-  // D17: gated on the CUSTOMER's setter lookup, not on a name match.
+  // D17 UNCHANGED: gated on the CUSTOMER's setter lookup, not on a name match.
   const setterId = resolveSetterId(rec);
   const setterComm = setterId ? g('Geo_Commission_Amount__c') : 0; // K10 → APPT COM
 
   const commSubtotal = thirdPartyComm + internalComm + mgmtComm + setterComm; // J11
-  // Third-party is NOT burdened (they invoice us); the other three are payroll.
+  // UNCHANGED: third-party is NOT burdened (they invoice us); the other three are
+  // payroll. Note what that now means under D19 — an INTERNAL deal carries 75% burden
+  // on the WHOLE redline commission, a far larger number than the old PPW model
+  // produced. Correct, and worth knowing before comparing a v2 figure to a v3 one.
   const commBurden = (internalComm + mgmtComm + setterComm) * commBurdenRate; // J12
   const totalCommissions = commSubtotal + commBurden;                         // J13 / N9
   const commissionPPW = watts > 0 ? totalCommissions / watts : 0;             // J14
@@ -479,10 +567,6 @@ function calculateBudget(rec) {
   const costPPW = watts > 0 ? totalJobCost / watts : 0;            // J30
   const costPPWWithComm = costPPW + commissionPPW;                 // J31
 
-  // Deal type (D16). Computed once here so `fields` (as a picklist label) and
-  // `extras` (as a token) cannot disagree.
-  const dealType = thirdPartyPPW > 0 ? 'third_party' : internalPPW > 0 ? 'internal' : 'none';
-
   // =========================================================================
   // Salesforce output fields
   // =========================================================================
@@ -587,6 +671,13 @@ function calculateBudget(rec) {
    */
   const extras = {
     dealType,
+    // D19 provenance: the company that decided the deal type, the dollar figure read
+    // off the formula, and the rate it works out to. Exposed so a reviewer looking at a
+    // pushed budget can see WHY the commission landed on the line it did without
+    // re-reading the record.
+    salesCompany,
+    redlineCommissionAmt: r2(repCommission),
+    redlineCommissionPPW: repCommissionPPW,
     thirdPartyCommissionAmt: r2(thirdPartyComm),
     internalCommissionAmt: r2(internalComm),
     managementCommissionAmt: r2(mgmtComm),
@@ -634,7 +725,9 @@ function calculateBudget(rec) {
     // System size
     D7: g('System_Size__c'), E7: watts, F7: moduleWatts, C8: g('Module_Cost_Per_Watt__c'), E9: mods,
 
-    // Commissions block
+    // Commissions block. J7/J8 are the DERIVED redline rate (D19), not an input rate —
+    // the snapshot has to stay self-consistent, so the rate cell must be the one that
+    // multiplies out to the amount cell beside it.
     J7: thirdPartyPPW, K7: thirdPartyComm,
     J8: internalPPW, K8: internalComm,
     J9: mgmtPPW, K9: mgmtComm,

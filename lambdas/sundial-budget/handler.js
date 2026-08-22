@@ -76,10 +76,18 @@ const INPUT_FIELDS = [
   // field on this object; Customer's Domestic_Content_Eligible__c answers a different
   // question ("eligible", not "elected") and the calc is Solar-side.
   "Domestic_Content__c",
-  // Commissions (D9/D10/§4d): FOUR inputs now. Sales_Rep_* is the third-party rep
-  // (relabel pending); Internal_Rep_* is new; Mgr + Overhead are stored separately and
-  // summed by the calc into the single SLMC line.
-  "Sales_Rep_Commission_PPW__c", "Internal_Rep_Commission_PPW__c",
+  // Commissions — D19 redline model. The REP commission arrives in DOLLARS from the
+  // Commission_Total__c formula field and is routed by the sales company; the two
+  // rep-PPW inputs (Sales_Rep_Commission_PPW__c, Internal_Rep_Commission_PPW__c) are
+  // RETIRED and deliberately NOT selected here. They still exist on the object for
+  // history — do not re-add them expecting the calc to read them, because it does not.
+  //
+  // FLS: the integration user needs READ on Commission_Total__c. Without it SOQL
+  // silently omits the field and the calc throws COMMISSION_TOTAL_UNAVAILABLE, which is
+  // the intended failure — a missing grant must not read as a $0 commission.
+  "Commission_Total__c", "Sales_Company_Harmon_Solar_or_Third__c",
+  // Mgr + Overhead are still stored separately and summed by the calc into one SLMC
+  // line (D10) — the Acumatica attribute sync splits them apart again.
   "Sales_Mgr_Commission_PPW__c", "Overhead_Commission_PPW__c",
   "Geo_Commission_Amount__c", "Commission_Burden_Rate__c",
   // D17: the setter lives on the CUSTOMER and is deliberately not mirrored onto Solar,
@@ -235,6 +243,21 @@ export const handler = async (event) => {
         return jsonResponse(404, cors, {
           error: "not_found",
           code: "RECORD_NOT_FOUND",
+        });
+      }
+      // Bad DATA, not a broken calc — the record is missing something a human has to
+      // supply, and the message says exactly what. markError still writes it to
+      // Budget_Calc_Error__c, but a 500/"server_error" would send the person who
+      // pressed the button looking for an outage instead of at the empty field.
+      //
+      // This is the common case now, not an edge: D19 rejects a blank sales company,
+      // and most Solar records do not have one set yet.
+      if (err?.name === "BudgetInputError") {
+        await markError(recordId, err);
+        return jsonResponse(422, cors, {
+          error: "invalid_input",
+          code: err.code || "BUDGET_INPUT_ERROR",
+          message: err.message,
         });
       }
       console.error(

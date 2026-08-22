@@ -1,6 +1,98 @@
 # Sundial — Progress Log
 
-## 2026-08-21 — D19 redline commission model, Stage 1: formula-field package (pending deploy)
+## 2026-08-21 — D19 redline commission model, Stage 2: the calc stops computing the rep commission
+
+Stage 1's eight formula fields deployed clean, and the live org answered the one question
+the offline harness could not: a SOQL read of real Solar records with no sales company set
+came back with blank redline, blank commission and blank $/W rather than zeros. That is
+`BlankAsBlank` propagation confirmed on production data instead of a hand-flipped test
+record, which is a better proof than the README asked for.
+
+Stage 2 is the calc side. The shape of the change is that **budgetCalc no longer computes
+the rep commission at all** — it reads `Commission_Total__c` in dollars off the record and
+decides only where to put it. Routing is by sales company alone: `Harmon Solar` means
+INTERNAL (SLPC · LABOR · SALESCOMM, burdened), anything else non-blank means EXTERNAL
+(SLPC OUT · OTHER · M1&M2COM, not burdened). Management, setter and the 75% burden rule
+are untouched.
+
+**The comparison is case-insensitive and trimmed, and that is not tidiness.** Salesforce
+formula `=` on text ignores case, so the deployed formula already treats `HARMON SOLAR` as
+internal. If the calc were stricter than the formula, a record could take the *internal*
+redline from the formula and the *external* routing from the calc — the right commission
+posted to the wrong line, with both halves individually defensible. Four spellings are
+pinned in a test for exactly that reason.
+
+**Two things now fail loudly instead of producing a number.** A blank sales company throws
+`SALES_COMPANY_MISSING`: defaulting it to external would quietly pay the external redline
+on every record somebody forgot to fill in, and the formula already refuses to guess, so
+the calc matches it. A blank `Commission_Total__c` on a record that *does* have a company
+throws `COMMISSION_TOTAL_UNAVAILABLE` — that combination is impossible from the formula, so
+the realistic cause is the integration user lacking Read FLS on it, and a missing grant
+reads through SOQL as an absent field. Treating that as zero would post a budget with no
+commission on it and nothing to indicate why. Zero itself is explicitly *not* blank: a
+redline that eats the whole contract is a legitimate answer, and a test pins it.
+
+I also mapped `BudgetInputError` to **HTTP 422 with the message** rather than the bare 500
+`server_error` it used to fall through to. That is slightly beyond the brief, and the
+reason is the next paragraph.
+
+**The rollout finding, which is the thing to actually decide about: 3,697 of 4,474
+`Sundial_Solar__c` records — 83% — have no sales company set.** Every one of them will now
+refuse to recalculate. This is survivable only because **exactly one record currently has a
+calculated budget**, so nothing in production depends on recalc today. But populating that
+field is a data task that has to happen before any bulk recalc, and if the button had kept
+returning an opaque 500 the first person to hit it would have gone looking for an outage
+instead of at an empty field.
+
+**One consequence of leaving the burden rule alone is worth stating out loud.** Third-party
+commission is still unburdened and internal still is, which under D19 means an internal
+deal now carries 75% burden on the *whole* redline commission — a far bigger number than
+the old PPW model ever produced. In the fixture the same job burdens at 415.50 sold
+externally and 10,939.50 sold internally. That is correct, and it is also exactly the kind
+of gap that looks like a bug to someone comparing a v2 figure to a v3 one.
+
+**The snapshot rate cells now hold a derived rate.** J7/J8 used to echo the input PPW;
+under D19 there is no input PPW, so they carry `Commission_Total__c ÷ watts` on whichever
+side the deal routed to and zero on the other. Otherwise the snapshot would show a rate
+that does not multiply out to the amount printed beside it. A test asserts
+`J7 × watts = K7` and `J8 × watts = K8` rather than pinning the numbers, so it stays true
+if the example changes.
+
+**The fixture is now a deliberate hybrid, and it is documented as one.** Non-commission
+cells are still the REVISED workbook's own cached values, extracted cell-by-cell; the
+commission block and everything downstream is re-pinned to the D19 worked example (36502
+contract, 8,800 W, external non-Lightreach, 3,110 of adders → 17,112 at $1.9445/W). The two
+halves combine legitimately because the workbook and the `Total_Adder_Price__c` formula
+agree on the 3,110 — that agreement is the joint.
+
+**A visible consequence of the hybrid: GP comes out at −6,136.98.** The workbook's cost
+example and the D19 commission model were never priced against each other, so a 17,112
+commission on a 36,502 contract leaves 18,420.50 to cover 24,557.48 of job cost. Both
+halves are individually correct and the test is doing its job by reproducing that exactly.
+The note at the assertion says not to fix it by tuning the contract until GP goes positive,
+because that would unpin the cost cells from the workbook they came from. GP plausibility
+is a question for a real record with real Harmon numbers.
+
+**The push lambda needed no code change, but it needed checking.**
+`Commission_Deal_Type__c` is still its v2-engine marker, and D19 changed *what* sets it, so
+there is now a test asserting the calc always populates it under the new rule. Two comments
+were wrong and are fixed: the marker guard tests *emptiness*, not membership, and the
+reason matters — a record calculated before D19 can legitimately hold `None`, and it is
+still a v2 record whose amounts the mapping can read. Guard 1a (both rep amounts non-zero)
+is now purely stale-or-foreign-data defence, since the calc routes one amount to one line
+and can no longer produce that state itself. 38/38 push tests still pass.
+
+The two PPW fields are gone from `INPUT_FIELDS` and from every read, and a test pins that
+they are **inert** — setting them changes nothing and does not resurrect the old ambiguity
+error. The fields stay on the objects for history. One piece of collateral: the deployed
+description on `Internal_Rep_Commission_Amt__c` still says it equals
+`Internal_Rep_Commission_PPW__c × watts`, which is no longer how it is computed. Logged as
+a cosmetic description-only alignment, not worth a deploy on its own.
+
+Suite: **186 checks** (88 cells / 55 fields / 16 extras / 27 behaviours), up from 175. Every
+2200-based expectation is gone, grep-verified.
+
+## 2026-08-21 — D19 redline commission model, Stage 1: formula-field package (DEPLOYED)
 
 > **Amended after Tim's Check Only, 2026-08-21.** The package used
 > `<formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>`; the Metadata API enum is

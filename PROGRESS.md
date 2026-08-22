@@ -2,6 +2,19 @@
 
 ## 2026-08-21 — D19 redline commission model, Stage 1: formula-field package (pending deploy)
 
+> **Amended after Tim's Check Only, 2026-08-21.** The package used
+> `<formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>`; the Metadata API enum is
+> **`BlankAsBlank`**, singular, and Check Only rejected all eight fields with
+> *"'BlankAsBlanks' is not a valid value for the enum 'TreatBlanksAs'"*. One-word fix in
+> the generator, regenerated, formulas and sizes unchanged. Worth noting as the thing the
+> offline harness structurally cannot catch: `verify.mjs` evaluates formula *semantics*
+> and never touches the surrounding metadata envelope, so a bad enum, a bad attribute
+> name or a bad type sails straight through it. Check Only is the only gate for that half,
+> which is why it is step 1 of the deploy checklist.
+>
+> Also corrected here: the check count is **20**, not the 22 first reported. `verify.mjs`
+> now prints its own total so the number in a doc cannot drift from the number that runs.
+
 New commission design, recorded as D19 and superseding the PPW-input model entirely:
 `Total Commission ($) = Contract − (Redline × watts) − Total Adder Price`, redline chosen
 by deal type × finance source. Stage 1 is the Salesforce side only — eight formula
@@ -32,7 +45,7 @@ fields it names and `Commission_Total_PPW` carries copies of all three;
 
 names `Commission_Total__c` twice and compiled to **~6,000 bytes against a 5,000-byte
 limit**. Two restructures fixed it: reference it exactly once (the ISBLANK branch is
-redundant under `BlankAsBlanks`, since a blank numerator divided by anything is blank),
+redundant under `BlankAsBlank`, since a blank numerator divided by anything is blank),
 and factor the watts term out of the four per-watt adders instead of repeating it. Worst
 case is now **3,086 bytes, 62% of the limit**, and the generator prints source and
 inlined size on every run so the next person changing a formula sees the headroom.
@@ -44,7 +57,7 @@ not a reimplementation of the maths, because the thing under test is the text th
 deployed. On its very first run it caught a **precedence bug**:
 `Commission_Total__c/BLANKVALUE(System_Size__c,0)*1000` parses left-to-right as
 `(Total / kW) × 1000`, out by a factor of a million, and it would have shipped looking
-entirely plausible. Watts is parenthesised everywhere now. 22 checks pass, covering the
+entirely plausible. Watts is parenthesised everywhere now. 20 checks pass, covering the
 worked example on both objects, all four redlines, the casing difference, blank company,
 zero watts, blank finance, no adders, per-watt × qty, and NS markup + labour.
 
@@ -55,7 +68,7 @@ whereas a wrong number is one nobody asks. A blank *finance source* does fall th
 "other", which is different and deliberate: "not Lightreach" is the common case and a
 genuine default, while "no sales company" is missing data.
 
-The one thing the offline harness cannot prove is Salesforce's `BlankAsBlanks`
+The one thing the offline harness cannot prove is Salesforce's `BlankAsBlank`
 propagation, which the null-handling leans on. So the README ends with a 30-second
 post-deploy check on a real record: flip through all four redlines, then blank the sales
 company and confirm all three downstream fields go blank rather than showing a number.

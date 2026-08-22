@@ -140,7 +140,7 @@ function commissionTotalFormula(o) {
  * expansion TWICE and the field compiles to ~6,000 bytes, over the 5,000 limit. Measured,
  * not guessed; the generator prints both figures.
  *
- * Dropping the ISBLANK costs nothing because `formulaTreatBlanksAs = BlankAsBlanks`
+ * Dropping the ISBLANK costs nothing because `formulaTreatBlanksAs = BlankAsBlank`
  * propagates: a blank Commission_Total divided by anything is blank. The zero-watts guard
  * has to stay to avoid a division by zero.
  */
@@ -221,9 +221,9 @@ function fieldXml(f) {
     `        <description>${esc(f.description)}</description>`,
     "        <externalId>false</externalId>",
     `        <formula>${esc(f.formula)}</formula>`,
-    // BlankAsBlanks so a blank input stays blank instead of silently becoming 0 — the
+    // BlankAsBlank so a blank input stays blank instead of silently becoming 0 — the
     // whole null-propagation design above depends on it.
-    "        <formulaTreatBlanksAs>BlankAsBlanks</formulaTreatBlanksAs>",
+    "        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>",
     `        <inlineHelpText>${esc(f.help)}</inlineHelpText>`,
     `        <label>${esc(f.label)}</label>`,
     `        <precision>${f.precision}</precision>`,

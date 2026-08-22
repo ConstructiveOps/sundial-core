@@ -71,7 +71,7 @@ const num = (v) => (v === null || v === undefined || v === "" || Number.isNaN(Nu
 const str = (v) => (v === null || v === undefined ? "" : String(v));
 const isBlank = (v) => v === null || v === undefined || v === "";
 const or = (...a) => a.some(Boolean);
-// BlankAsBlanks: any blank operand makes the whole arithmetic result blank. iff() is
+// BlankAsBlank: any blank operand makes the whole arithmetic result blank. iff() is
 // where that surfaces, since the formulas guard with it.
 const iff = (c, a, b) => (c ? a : b);
 const eq = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
@@ -88,7 +88,7 @@ function evaluate(objName, values) {
   ]) {
     const fn = buildEvaluator(F[api]);
     let out = fn(V, num, str, isBlank, or, iff, eq);
-    // BlankAsBlanks propagation: an expression touching a blank formula field is blank.
+    // BlankAsBlank propagation: an expression touching a blank formula field is blank.
     if (typeof out === "number" && Number.isNaN(out)) out = null;
     V[api] = out;
   }
@@ -109,7 +109,9 @@ const ADDERS_3110 = {
 };
 
 let failures = 0;
+let checks = 0;
 const check = (label, got, exp, tol = 0.005) => {
+  checks++;
   const ok = exp === null ? got === null : typeof got === "number" && Math.abs(got - exp) <= tol;
   if (!ok) { console.error(`  FAIL ${label}: expected ${exp}, got ${got}`); failures++; }
   else console.log(`  ok   ${label} = ${got}`);
@@ -216,9 +218,11 @@ console.log("\n=== per-watt and NS handling ===");
   check("NS blocks marked up + labour", v.Total_Adder_Price__c, 1250 + 577.5 + 625 + 231);
 }
 
+// Print the COUNT rather than trusting a number written in a doc — an earlier draft of
+// the README claimed 22 checks when there were 20.
 console.log(
   failures === 0
-    ? "\nALL FORMULA CHECKS PASS (evaluated against the generated formula text)\n"
-    : `\n${failures} CHECK(S) FAILED\n`
+    ? `\nALL ${checks} FORMULA CHECKS PASS (evaluated against the generated formula text)\n`
+    : `\n${failures} of ${checks} CHECKS FAILED\n`
 );
 process.exitCode = failures === 0 ? 0 : 1;

@@ -96,7 +96,7 @@ this formula and the redline table change together, in one deliberate edit.
 ## Blank-input behaviour
 
 Every input is wrapped in `BLANKVALUE(...,0)`, and all four fields are set
-`formulaTreatBlanksAs = BlankAsBlanks` so blanks propagate rather than silently becoming
+`formulaTreatBlanksAs = BlankAsBlank` so blanks propagate rather than silently becoming
 zero.
 
 | Input state | Redline | Total Adder Price | Commission Total | Commission $/W |
@@ -116,7 +116,7 @@ A blank *finance source* does fall through to the "other" rate. That is delibera
 different — "not Lightreach" is the common case and a genuine default, whereas "not any
 sales company" is missing data.
 
-> **This design leans on `BlankAsBlanks` propagation** (a blank `Commission_Total` divided
+> **This design leans on `BlankAsBlank` propagation** (a blank `Commission_Total` divided
 > by watts stays blank). That is documented Salesforce behaviour, but **confirm it on a
 > real record** — the post-deploy check below takes 30 seconds and removes the assumption.
 
@@ -157,7 +157,7 @@ expansion twice and the field compiles to **~6,000 bytes: over the limit**. Two
 restructures fixed it:
 
 1. **Reference `Commission_Total__c` exactly once.** The `ISBLANK` branch is redundant
-   under `BlankAsBlanks` — a blank numerator divided by anything is blank — so dropping
+   under `BlankAsBlank` — a blank numerator divided by anything is blank — so dropping
    it costs nothing and halves the field.
 2. **Factor the watts expression** out of the four per-watt adder terms rather than
    repeating it, and keep the explicit `ISBLANK(redline)` guard only on
@@ -170,7 +170,7 @@ references, and inline the terms rather than chaining another formula field.
 
 ## Offline validation
 
-`node salesforce/v3-redline-commission-fields/verify.mjs` — **22 checks, all passing.**
+`node salesforce/v3-redline-commission-fields/verify.mjs` — **20 checks, all passing.**
 
 It reads the **actual `<formula>` text out of the generated `.object` files**, transpiles
 the small subset of the formula language they use into JavaScript, and evaluates it. That
@@ -231,7 +231,7 @@ On a real Solar record:
 2. Check `Total Adder Price` against the adders on the record.
 3. Check `Commission Total` = Contract − Redline×W − Total Adder Price.
 4. **Blank the Sales Company.** Redline, Commission Total and Commission $/W must all go
-   **blank** — not 0, not a number. This is the `BlankAsBlanks` assumption; if any of them
+   **blank** — not 0, not a number. This is the `BlankAsBlank` assumption; if any of them
    shows a value instead, stop and tell me before Stage 2.
 
 ## Then

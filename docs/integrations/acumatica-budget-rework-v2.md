@@ -130,7 +130,7 @@ Compiled size was the real constraint — Salesforce inlines referenced formulas
 first draft of `Commission_Total_PPW__c` compiled to ~6,000 bytes (limit 5,000) because it
 named `Commission_Total__c` twice. Restructured to one reference; worst case is now 3,086
 bytes (62%). Figures printed by `generate.mjs`; formulas validated offline by
-`verify.mjs` (22 checks), which caught a watts precedence bug on its first run.
+`verify.mjs` (20 checks), which caught a watts precedence bug on its first run.
 
 ### 4f. PO tracking fields — SOLAR only (draft, pending Q2/Q5b).
 

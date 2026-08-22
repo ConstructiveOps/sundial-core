@@ -23,10 +23,11 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D17 | **Setter commission rule (resolves Q9):** applies when the CUSTOMER's `Setter__c` (lookup → Sundial_User__c) is populated — any setter, Geovanna today. Amount from Geo_Commission_Amount__c (default 70); empty → 0. **AMENDED 2026-08-20: Setter__c does not exist on Solar and is NOT mirrored — the calc reads through via `Sundial_Customer__r.Setter__c` in its input SOQL.** Later setter changes on the Customer flow into the next recalc automatically. | Tim + describe findings |
 | D11 | **All cost lines now roll into totals** — REVISED fixes the BRADS anomaly: Job Cost J28 = SUM(J15:J25,J27) includes SUBCON Engineering (E55), SUBCON Subcontractor (E56), SOFTWARE (E60), REFERRAL (E63). GP nets them too (N13 "Total Other*" = GENO+stamps+subcon+software+referral). Resolves old Q3/Q4. | REVISED sheet |
 | D12 | **GENO now includes Active Monitoring + LightReach Battery Warranty** (J16 = Material Other + CO fee + permit + E61 + E62). They are cost lines, not revenue-only. Resolves old Q5(a). | REVISED sheet |
-| D13 | **REFERRAL is its own budget line**: `REFERRAL - OTHER - REFERRAL FEE` ← Referral Fee adder (500 × qty). NEW task code — the v1 sandbox scaffold (38 lines) had NO REFERRAL line; the live template must be re-harvested and MUST contain it or push fails. | REVISED sheet |
+| D13 | **REFERRAL is its own budget line** ← Referral Fee adder (500 × qty). ~~`REFERRAL - OTHER - REFERRAL FEE`; the live template must be re-harvested and MUST contain it or push fails.~~ **SUPERSEDED BY D20** on both counts: the key is `GENO · OTHER · REFERRAL`, and Harmon is NOT adding the line to the templates — the push creates it. | REVISED sheet |
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
-| D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — Harmon must add it before any job can push a referral fee. (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
+| D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — ~~Harmon must add it before any job can push a referral fee~~ **and never will: D20 has the push create it instead.** (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
 | D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`, **deployed 2026-08-21**) plus the Stage 2 calc rewrite (**built 2026-08-21**, §4i). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history, and a test pins that repopulating one changes nothing. Blank sales company **throws** (`SALES_COMPANY_MISSING`, HTTP 422) rather than defaulting to external — see the 83%-blank rollout note in §4i. | Tim, 2026-08-21 |
+| D20 | **THE REFERRAL LINE IS CREATED BY THE PUSH, NOT ADDED TO THE TEMPLATE — supersedes D13's template-ask.** Harmon will not add a REFERRAL line to the RS/RSDC templates. Authoritative line spec: ProjectTaskID **`GENO`** · AccountGroup **`OTHER`** · InventoryID **`REFERRAL`** · Description **"Referral Fee"** · UOM **`EA`** · Currency USD · no default qty or rate. **The mapping key therefore CHANGES from `REFERRAL · OTHER · <N/A>` to `GENO · OTHER · REFERRAL · Expense`** — a distinct InventoryID, so no collision with the `GENO · OTHER · <N/A>` other-costs sum row; they are two lines under one task. Three branches: present → update by guid; absent + 0 → inactive (the overwhelmingly common case); absent + non-zero → **create, then re-read and VERIFY before reporting success**, after which a re-push is an ordinary update. **This is the ONLY line the integration may ever create**, guarded on the exact key. Ships with `CREATE_GATE.enabled = false` — a repo constant, not an env var — until the sandbox hand-proof in `acumatica-referral-line-create-runbook.md` comes back clean. | Harmon / Tim, 2026-08-22 |
 | D21 | **COMMISSION BURDEN = 75% × (management + setter) ONLY.** **Neither rep line is burdened** — not the external one (never was) and **not the internal redline commission** either. This **amends D9 and the D19 Stage 2 implementation**, both of which burdened the internal rep amount, and it **supersedes the REVISED sheet's J12**, whose burden array includes K8 (the internal rep cell). The sheet is not to be "restored" here: under the redline model the internal rep amount is an order of magnitude larger than when that array was written, and Harmon has ruled. Effect on the fixture job: internal-deal burden 10,939.50 → **415.50**, identical to the same job sold externally. Nothing else moves — the external worked example was already 75% × (mgmt + setter). | Harmon / Tim, 2026-08-22 |
 
 ## 1. What survives from v1 (do not rebuild)
@@ -270,7 +271,7 @@ all five that were provisional, and confirmed one line simply does not exist.
 | Engineer stamps | ENGR · SUBCON · &lt;N/A&gt; · Expense | `Engineer_Stamps_Cost__c` | harvested |
 | Subcontractor | SUBCON · SUBCON · &lt;N/A&gt; · Expense | `Subcontractor_Cost__c` | harvested |
 | Audit software | SOFTWARE · OTHER · &lt;N/A&gt; · Expense | `Adder_Software_Fee_Price__c * Adder_Software_Fee_Qty__c` | harvested |
-| Referral fees | REFERRAL · OTHER · &lt;N/A&gt; · Expense | `Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c` | **absent from the template** — conditional, see below |
+| Referral fees | **GENO · OTHER · REFERRAL · Expense** (D20 — was `REFERRAL · OTHER · &lt;N/A&gt;`) | `Adder_Referral_Fee_Price__c * Adder_Referral_Fee_Qty__c` | **never in the template** — the push CREATES it, see §5b |
 
 ### Three v1 rows that would now DOUBLE-COUNT — collapsed
 
@@ -328,7 +329,68 @@ Both are `scaffoldOptional`: the line may legitimately be missing, and the row's
 | Row | Present | Absent + amount 0 | Absent + amount > 0 |
 |---|---|---|---|
 | **DC rebate** (`DCREBATE`) | income-always — written even at 0 | inactive (a normal RS project) | **ABORT**: "Domestic Content is set on a project built from the RS template… must be created from the RSDC template" |
-| **Referral fees** (`REFERRAL`) | n/a today | inactive (almost every job) | **ABORT**: "Acumatica template has no REFERRAL line — Harmon must add it before pushing referral fees." |
+| **Referral fees** (`GENO`/`REFERRAL`) | update by guid, as normal | inactive (almost every job) | **D20: CREATE the line, verify, then continue.** While `CREATE_GATE` is closed: **ABORT** telling the user to add the line by hand and re-push. |
+
+### 5b. D20 — the one line the integration may create — **BUILT 2026-08-22, SHIPS DISABLED**
+
+Harmon will not add a REFERRAL line to the templates, so a job that carries a referral fee
+has nowhere to post it. The push creates the line on demand. This is the only insert
+anywhere in the integration; everything else is update-by-guid, and stays that way.
+
+**Key change.** `REFERRAL · OTHER · <N/A>` → **`GENO · OTHER · REFERRAL · Expense`**. The
+new key shares its task with the other-costs sum row (`GENO · OTHER · <N/A>`) and differs
+on InventoryID, so they are two distinct lines under one task. That distinction is
+load-bearing and has its own test: if the two keys ever collapsed into one, the matcher
+would see two mapping rows for one line and **SUM** them — posting the referral fee into
+the GENO other-costs total, silently, with a plausible-looking result.
+
+**Three branches** (`writeBudgetLines`, via `matchMappingToLines`'s new `toCreate` bucket):
+
+| State | Behaviour |
+|---|---|
+| line PRESENT | update by guid, business as usual — no create, even with the gate open |
+| ABSENT, amount 0 | `inactive` row, exactly as before. Every job with no referral fee. |
+| ABSENT, amount > 0 | **CREATE → re-read → VERIFY → then continue.** A re-push afterwards takes branch 1, which is tested rather than assumed. |
+
+**Create-then-verify, and why the verify is not paranoia.** An update that half-fails
+leaves a wrong amount, which the next push corrects. A create that half-fails leaves either
+NOTHING (money silently unposted) or TWO lines — and a duplicate breaks the
+exactly-one-match invariant, so *every future push on that project aborts*. Neither is
+self-healing, so neither may be reported as success on the strength of a 200. The verifier
+re-reads the project and checks four things: exactly one line carries the key, it has a
+guid, the amount is what we sent, and `AccountGroup`/`Type` came back as expected.
+
+Those last two are the real question. Acumatica may **derive** them from the inventory
+item's posting class rather than taking what we send, and both are part of the natural key
+— so a derived value produces a real line under a key the mapping will never match again,
+and the next push would try to create a second one. The verifier looks up a near-match on
+task + inventory before concluding nothing exists, so the message names the key part that
+changed instead of reporting a line that is sitting right there as missing.
+
+An unverified create **aborts the whole push before any other line is written**, so the
+one case where the project's state is unknown is not buried under twenty successful
+updates.
+
+**The gate.** `CREATE_GATE = { enabled: false }` — a repo constant, deliberately **not** an
+environment variable, because an env var can be flipped in the AWS console with no commit
+and no review and this repo has already been burned by a load-bearing untracked dashboard
+setting. A test asserts the committed value is `false`, so enabling it is a visible diff.
+While closed, an absent line with a real referral fee produces **exactly the pre-D20
+behaviour** — a loud abort before any PUT — which is itself pinned by a test, because
+"disabled" has to mean unchanged rather than quietly different.
+
+To open it: run
+[`acumatica-referral-line-create-runbook.md`](acumatica-referral-line-create-runbook.md)
+by hand against sandbox **R269999**, paste the results, and flip the constant in the same
+PR. If `AccountGroup` or `Type` come back different, the mapping key changes too — that is
+a mapping fix, not a verifier fix.
+
+**Guarded to one key.** Three redundant conditions must all hold before anything is
+created: the row opts in (`createIfMissing`), its key is exactly `REFERRAL_LINE_KEY`, and
+the gate is open. A row that opts in without being the referral line falls through to the
+ordinary missing-line abort. The check is repeated at the top of the create function and
+again in the write loop — redundant on purpose, since this is the boundary of the only
+write capability that can add rows to Harmon's books.
 
 ### Skip-zero now runs BEFORE the match, and that ordering is the fix
 

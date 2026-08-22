@@ -24,7 +24,13 @@
 // The eventual write path (Layer 2, after Gate 5b sign-off): match each mapping row
 // to EXACTLY ONE existing line by ProjectTaskID+AccountGroup+InventoryID+Type, then
 // PUT /ProjectBudget/{id} updating OriginalBudgetedAmount (+ OriginalBudgetedQty /
-// UOM=HOUR on labor lines). Updates by GUID — never key-upsert, never insert.
+// UOM=HOUR on labor lines). Updates by GUID — never key-upsert.
+//
+// ONE EXCEPTION, and it is the only one (D20, 2026-08-22): the referral line
+// `GENO | OTHER | REFERRAL | Expense` may be CREATED when a job carries a referral fee
+// and the project has no such line, because Harmon will not add it to the templates.
+// It is create-then-verify-by-re-read, guarded to that single key, and it ships with
+// CREATE_GATE closed until the sandbox hand-proof runbook comes back clean.
 
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { sfQuery, soqlEscapeString, sfUpdateRecord } from "../../lib/salesforce.js";
@@ -124,8 +130,63 @@ export const MAPPING_ROWS = [
   { line: "Engineer Stamps", taskId: "ENGR", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Engineer_Stamps_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J17 / E55, from the Structural-Electrical Engineer Stamp adder. HARVEST-CONFIRMED 2026-08-20 (R261077 + R261066): ENGR | SUBCON | <N/A> | Expense is present in both live scaffolds, so the section 5 'ENGR?' guess was right and it is ENGR, not the neighbouring SUBCON line." },
   { line: "Subcontractor", taskId: "SUBCON", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Subcontractor_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J18 / E56, from the Bird Blocking adder (per-watt cost x watts). HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds." },
   { line: "Audit Software", taskId: "SOFTWARE", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c", hoursField: null, keyStatus: "harvested", note: "Sheet J19 / E60. HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds. There is NO dedicated SF output field (left extras-only per gap doc section D), so the amount is the PRODUCT of the two adder fields - identical to what the calc computes, where a pass-through row's cost IS price x qty." },
-  { line: "Referral Fees", taskId: "REFERRAL", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "harvested_absent", scaffoldOptional: true, missingLineMessage: "Acumatica template has no REFERRAL line - Harmon must add it before pushing referral fees.", note: "Sheet J20 / E63. HARVEST 2026-08-20 CONFIRMED THE LINE DOES NOT EXIST in either live scaffold (R261077, R261066) - D13 predicted this. It is therefore scaffoldOptional: a job with no referral fee skips it silently (nothing to write, no line to write it to), but the moment a job actually carries a referral fee the push ABORTS with missingLineMessage rather than dropping the cost. Flip keyStatus to harvested and drop scaffoldOptional once Harmon adds the line to the template." },
+  { line: "Referral Fees", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "REFERRAL", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "harvested_absent", scaffoldOptional: true, createIfMissing: true, missingLineMessage: "This job carries a referral fee and the project has no GENO | OTHER | REFERRAL line. Creating it is implemented (D20) but DISABLED pending the sandbox hand-proof - see CREATE_GATE. Until then, add the line by hand in Acumatica and re-push.", note: "Sheet J20 / E63. KEY CHANGED 2026-08-22 (D20): was REFERRAL | OTHER | <N/A>, now GENO | OTHER | REFERRAL per Harmon's authoritative line spec. Distinct InventoryID means NO collision with the GENO | OTHER | <N/A> sum row - they are different keys under the same task. Harmon will NOT add the line to the RS/RSDC templates, so the push creates it when a job actually carries a referral fee: see REFERRAL_CREATE_SPEC and the three-branch behaviour there. This is the ONLY line the integration may ever create." },
 ];
+
+/**
+ * D20 — the ONE line this integration is allowed to create, and its exact shape.
+ *
+ * Harmon will not add a REFERRAL line to the RS/RSDC templates (that was D13's ask, and
+ * it is superseded). Since a job that carries a referral fee has to post it somewhere,
+ * the push creates the line on demand. Three branches, in `writeBudgetLines`:
+ *
+ *   1. line PRESENT              -> update by guid, business as usual
+ *   2. ABSENT + amount 0         -> inactive row, exactly as today (the common case)
+ *   3. ABSENT + amount > 0       -> CREATE, then RE-READ AND VERIFY before reporting
+ *                                   success. A re-push afterwards takes branch 1.
+ *
+ * Field values are Harmon's, verbatim. Two deliberate omissions from the body:
+ *
+ *  - **Currency (USD).** Harmon's spec names it, but currency on a ProjectBudget line
+ *    follows the project, this is a single-company install, and guessing a field name
+ *    (`CuryID`? `Currency`?) risks a 400 on a write we only get one shot at. The runbook
+ *    proves what comes back instead of asserting what to send.
+ *  - **Qty / rate.** Harmon's spec says no defaults, and the verify step checks the
+ *    created line carries the amount and nothing spurious.
+ *
+ * `AccountGroup` IS sent, because it is in the authoritative spec — but Acumatica may
+ * well derive it from the inventory item's posting class and ignore what we send. That
+ * is exactly why verification re-reads and CHECKS it rather than trusting the write.
+ */
+export const REFERRAL_LINE_KEY = "GENO | OTHER | REFERRAL | Expense";
+export const REFERRAL_CREATE_SPEC = {
+  key: REFERRAL_LINE_KEY,
+  projectTaskId: "GENO",
+  accountGroup: "OTHER",
+  inventoryId: "REFERRAL",
+  description: "Referral Fee",
+  uom: "EA",
+  type: "Expense",
+};
+
+/**
+ * THE GATE. Line creation is an unproven write mechanic against a system where a bad
+ * write is not a bad row in a table — it is a wrong number in Harmon's books.
+ *
+ * SHIPS `false`. A test asserts that the committed value is `false`, so flipping it is a
+ * visible diff in review and cannot be done by accident. Deliberately NOT an environment
+ * variable: an env var can be flipped in the AWS console with no commit and no review,
+ * and this repo has already been burned once by a load-bearing untracked dashboard
+ * setting. Enabling this must be a code change someone signed off on.
+ *
+ * TO ENABLE: run `docs/integrations/acumatica-referral-line-create-runbook.md` against
+ * sandbox project R269999 by hand, paste the results in, and flip this in the same PR.
+ *
+ * While `false`, an absent line with a real referral fee behaves EXACTLY as it does
+ * today: a loud abort carrying `missingLineMessage`, before any PUT. That is not a
+ * degraded fallback, it is the current shipped behaviour, and a test pins it.
+ */
+export const CREATE_GATE = { enabled: false };
 
 /**
  * Rows whose Acumatica key is not yet known.
@@ -200,6 +261,9 @@ export async function readProjectBudgetLines(acumaticaProjectId) {
 //  3. `scaffoldOptional` rows may be absent. Absent + zero = inactive. Absent +
 //     NON-ZERO = a loud abort carrying the row's `missingLineMessage`, because that is
 //     the case where a real amount would silently vanish.
+// 3b. EXCEPT the referral line (D20), which may CREATE itself instead of aborting —
+//     write path only, one specific key only, and only while CREATE_GATE is open. With
+//     the gate closed this rule does not exist and rule 3 applies unchanged.
 //  4. Several rows sharing ONE key still SUM into that single line (no v3 row does
 //     today, but the machinery is intact and the GENO history is why it exists).
 //  5. Otherwise: FAIL LOUDLY. A key matching 0 or >1 lines, or a row missing any key
@@ -213,7 +277,7 @@ export async function readProjectBudgetLines(acumaticaProjectId) {
 //     where there is genuinely nothing to write, and reconcile is where a broken key is
 //     supposed to be caught.
 //
-// Returns { matched, problems, inactive }. `inactive` is neither success nor failure:
+// Returns { matched, problems, inactive, toCreate }. `inactive` is neither success nor failure:
 // rows correctly doing nothing on this project (an absent optional line, a zero expense
 // with no line). Surfaced rather than swallowed so "why is REFERRAL not in the output"
 // has an answer.
@@ -221,6 +285,11 @@ export function matchMappingToLines(mappingRows, lines, budgetValues = null) {
   const matched = [];
   const problems = [];
   const inactive = [];
+  // D20: absent lines this run is allowed to CREATE. Only ever the referral line, only
+  // on the write path, and only with the gate open — see rule 3b below. Empty on every
+  // other code path, including reconcile, which passes no budgetValues and therefore
+  // cannot know an amount is non-zero in the first place.
+  const toCreate = [];
 
   // Partition out rows we can't key completely (can't match or group them safely).
   const complete = [];
@@ -265,8 +334,28 @@ export function matchMappingToLines(mappingRows, lines, budgetValues = null) {
         ? sumFields(rows.map((r) => r.amountField).filter(Boolean), budgetValues)
         : null;
 
+      // Rule 3b (D20, WRITE PATH ONLY): the one row allowed to create its own line.
+      //
+      // Three conditions, ALL required, and they are deliberately redundant with each
+      // other: the row must opt in (`createIfMissing`), its key must be THE referral
+      // key (not merely "a key belonging to a row that opted in"), and the gate must be
+      // open. Any future row that sets `createIfMissing` without also being the referral
+      // line falls through to the abort below rather than quietly gaining the power to
+      // write new lines into Harmon's books.
+      const wantsCreate =
+        rows.length === 1 &&
+        rows[0].createIfMissing === true &&
+        key === REFERRAL_LINE_KEY &&
+        REFERRAL_CREATE_SPEC.key === REFERRAL_LINE_KEY;
+      if (wantsCreate && CREATE_GATE.enabled && amount !== null && amount !== 0) {
+        toCreate.push({ key, rows: rowNames, amount, amountFields: rows.map((r) => r.amountField).filter(Boolean) });
+        continue;
+      }
+
       // Rule 3 (write path): an optional line that is absent while carrying a real
-      // amount is the dangerous case — abort with the row's own message.
+      // amount is the dangerous case — abort with the row's own message. With the gate
+      // CLOSED the referral row lands here too, which is the point: closed means today's
+      // behaviour exactly, not a quieter version of it.
       if (optional && amount !== null && amount !== 0) {
         problems.push({
           key,
@@ -309,7 +398,7 @@ export function matchMappingToLines(mappingRows, lines, budgetValues = null) {
       hoursFields: rows.map((r) => r.hoursField).filter(Boolean),
     });
   }
-  return { matched, problems, inactive };
+  return { matched, problems, inactive, toCreate };
 }
 
 // --- Budget field resolution ------------------------------------------------
@@ -406,6 +495,140 @@ async function putBudgetLineWithRetry(body) {
     break;
   }
   return { ok: false, status: lastStatus, text: lastText };
+}
+
+/**
+ * D20 — create the referral budget line, then PROVE it exists before saying so.
+ *
+ * This is the only function in the integration that adds a row to Acumatica, and the
+ * asymmetry with the update path is the reason it is written this way. An update by guid
+ * that half-fails leaves a line with a wrong amount, which the next push corrects. A
+ * create that half-fails can leave NOTHING (money silently unposted) or TWO lines (the
+ * key stops matching uniquely and every future push on that project aborts). Neither is
+ * self-healing, so neither is allowed to be reported as success on the strength of a
+ * 200 alone.
+ *
+ * Hence: create, then re-read the project's lines and check four things — exactly one
+ * line carries the key, it has a guid, its amount is what we sent, and the fields
+ * Acumatica might have derived for itself (AccountGroup, Type) came back as expected.
+ * Anything else is a failure, and the failure message says a line may now exist so a
+ * human knows to go and look rather than assuming a no-op.
+ *
+ * @returns {Promise<{ok: boolean, action: string, ...}>} never throws for an API-level
+ *   failure; the caller folds the result into the push summary.
+ */
+async function createReferralLineAndVerify(acumaticaProjectId, amount) {
+  const spec = REFERRAL_CREATE_SPEC;
+
+  // Belt and braces at the last possible moment: this function is private, has exactly
+  // one caller, and that caller already checked the key — but it is the thing holding
+  // the create capability, so it re-checks its own preconditions rather than trusting
+  // that a future edit upstream kept them.
+  if (!CREATE_GATE.enabled) {
+    return { ok: false, action: "create_blocked", key: spec.key, reason: "CREATE_GATE is closed" };
+  }
+  if (!(Number.isFinite(amount) && amount !== 0)) {
+    return { ok: false, action: "create_refused", key: spec.key, reason: `refusing to create a line for amount ${amount}` };
+  }
+
+  // NO `id` — that is what makes this an insert rather than an update. Everything else
+  // is Harmon's authoritative line spec; see REFERRAL_CREATE_SPEC for the two fields
+  // deliberately left out.
+  const body = {
+    ProjectID: { value: acumaticaProjectId },
+    ProjectTaskID: { value: spec.projectTaskId },
+    AccountGroup: { value: spec.accountGroup },
+    InventoryID: { value: spec.inventoryId },
+    Description: { value: spec.description },
+    UOM: { value: spec.uom },
+    OriginalBudgetedAmount: { value: amount },
+  };
+
+  console.log(`budget-push CREATE ${spec.key} project=${acumaticaProjectId} amount=${amount}`);
+  const put = await putBudgetLineWithRetry(body);
+  if (!put.ok) {
+    return {
+      ok: false, action: "create_failed", key: spec.key, amount,
+      status: put.status, error: put.text,
+      message: "Creating the referral line failed. No line was created (the write was rejected), so nothing needs cleaning up — fix the cause and re-push.",
+    };
+  }
+
+  // VERIFY. A fresh read, not the PUT's echo: what we want to know is what the project
+  // looks like now, which is a different question from what the write claims it did.
+  let after;
+  try {
+    after = await readProjectBudgetLines(acumaticaProjectId);
+  } catch (err) {
+    return {
+      ok: false, action: "create_unverified", key: spec.key, amount,
+      message:
+        "The referral line was created but the verifying re-read FAILED, so this push " +
+        "cannot confirm the project's state. A line probably now exists — check the " +
+        "project before re-pushing, because a duplicate would break every future push.",
+      error: err?.message || String(err),
+    };
+  }
+
+  const hits = after.filter((l) => l.key === spec.key);
+  if (hits.length > 1) {
+    return {
+      ok: false, action: "create_unverified", key: spec.key, amount, count: hits.length,
+      message:
+        `The create produced ${hits.length} lines with the referral key. The key must match ` +
+        "EXACTLY ONE line or every future push on this project aborts. Delete the duplicates in Acumatica.",
+    };
+  }
+
+  // ZERO hits does NOT mean "nothing was created". AccountGroup and Type are the two
+  // fields Acumatica may derive from the inventory item's posting class instead of
+  // taking from the body — and both are part of the natural key, so a derived value
+  // produces a real line under a key we did not ask for. Look for it by the two parts
+  // Acumatica cannot reinterpret (task + inventory) before concluding nothing exists,
+  // or the message sends someone hunting for a missing line that is sitting right there
+  // under a different account group.
+  let line = hits[0];
+  if (!line) {
+    const near = after.filter(
+      (l) => l.taskId === spec.projectTaskId && l.inventoryId === spec.inventoryId
+    );
+    if (near.length === 0) {
+      return {
+        ok: false, action: "create_unverified", key: spec.key, amount, count: 0,
+        message:
+          "The create returned success but no GENO/REFERRAL line came back on the re-read at " +
+          "all. Do not re-push until someone has looked at the project.",
+      };
+    }
+    // Fall through to the field checks with the near-match, which will report exactly
+    // WHICH key part Acumatica changed.
+    line = near[0];
+  }
+
+  const mismatches = [];
+  if (!line.id) mismatches.push("the created line came back without a guid, so nothing can update it later");
+  if (round2(numOf(line.originalBudgetedAmount)) !== round2(amount))
+    mismatches.push(`amount is ${line.originalBudgetedAmount}, expected ${amount}`);
+  // The two derived-field checks. If either fires, the line is REAL but keyed
+  // differently, so the mapping row would never match it again and the next push would
+  // try to create a second one. Settling whether Acumatica does this is the entire
+  // purpose of the sandbox hand-proof runbook.
+  if (line.accountGroup !== spec.accountGroup)
+    mismatches.push(`AccountGroup came back "${line.accountGroup}", expected "${spec.accountGroup}" — the line exists but under key "${line.key}", which the mapping will never match`);
+  if (line.type !== spec.type)
+    mismatches.push(`Type came back "${line.type}", expected "${spec.type}" — the line exists but under key "${line.key}", which the mapping will never match`);
+
+  if (mismatches.length > 0) {
+    return {
+      ok: false, action: "create_unverified", key: spec.key, amount, lineId: line.id, mismatches,
+      message:
+        "A referral line was created but does not match the expected shape: " +
+        mismatches.join("; ") +
+        ". It exists in Acumatica — review it rather than re-pushing.",
+    };
+  }
+
+  return { ok: true, action: "created", key: spec.key, lineId: line.id, amount, uom: line.uom, type: line.type };
 }
 
 // Write the budget outputs onto the project's EXISTING scaffolded ProjectBudget
@@ -522,7 +745,7 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
   //    aborts BEFORE any PUT.
   // budgetValues IS passed here (unlike reconcile) so the matcher can apply skip-zero
   // before requiring a line — see matchMappingToLines' header.
-  const { matched, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines, budgetValues);
+  const { matched, problems, inactive, toCreate } = matchMappingToLines(MAPPING_ROWS, lines, budgetValues);
   if (problems.length > 0) {
     return { ok: false, aborted: "match_problems", acumaticaProjectId, problems, inactive };
   }
@@ -548,6 +771,43 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
   let written = 0;
   let skipped = 0;
   let failed = 0;
+  let created = 0;
+
+  // 3b) D20 LINE CREATION — before the update loop, and deliberately so.
+  //
+  // A create that fails verification is the one outcome where the project may be left in
+  // a state nobody has looked at, so it must not be buried under twenty successful
+  // updates. Doing it first means a failure here aborts with NOTHING else written, which
+  // is the state easiest to reason about from the outside.
+  //
+  // `toCreate` is empty unless the gate is open (see rule 3b in the matcher), so on the
+  // shipped configuration this whole block is dead code. That is intentional: the code
+  // path is here, tested, and reviewable, and turning it on is one literal.
+  for (const c of toCreate) {
+    if (c.key !== REFERRAL_LINE_KEY) {
+      // Unreachable via the matcher, which already checks this. Kept because "unreachable"
+      // is a property of today's code and this is the boundary of the create capability.
+      return {
+        ok: false, aborted: "create_not_permitted", acumaticaProjectId,
+        message: `Only ${REFERRAL_LINE_KEY} may be created by this integration; refused ${c.key}.`,
+      };
+    }
+    if (dryRun) {
+      results.push({ key: c.key, action: "would_create", amount: c.amount, rows: c.rows, spec: REFERRAL_CREATE_SPEC });
+      continue;
+    }
+    const res = await createReferralLineAndVerify(acumaticaProjectId, c.amount);
+    results.push({ ...res, rows: c.rows });
+    if (!res.ok) {
+      // Abort the whole push. Not a per-line `failed++`: an unverified create means the
+      // project's shape is unknown, and continuing to write to it would be guessing.
+      return {
+        ok: false, aborted: "referral_line_create_failed", acumaticaProjectId,
+        message: res.message || res.reason, create: res, results, inactive,
+      };
+    }
+    created++;
+  }
   for (const g of matched) {
     const isIncome = g.type === "Income";
     // Write OriginalBudgetedQty only when the line has an actual hours source in the
@@ -605,6 +865,10 @@ export async function writeBudgetLines(acumaticaProjectId, budgetValues, opts = 
       written,
       skipped,
       failed,
+      // D20: lines this run added rather than updated. Expected to be 0 on essentially
+      // every push — a non-zero value means a job carried a referral fee onto a project
+      // that had no line for it.
+      created,
       // Rows correctly doing nothing on this project (absent optional line, or a zero
       // expense with no line). Reported so a missing line is visible rather than just
       // absent from the output.
@@ -907,13 +1171,13 @@ async function handleReconcile(event) {
         matched,
         problems,
         // Expected-absent rows. On an RS project this should be exactly the DC rebate
-        // (no DCREBATE line on that template) and Referral Fees (not in the template at
-        // all yet). Anything else here wants explaining.
+        // (no DCREBATE line on that template) and Referral Fees (D20: never in the
+        // template — the push creates it on demand). Anything else here wants explaining.
         inactive,
       },
       gates: [
         "problems must be EMPTY. A provisional key that matches nothing shows up here.",
-        "inactive should contain ONLY: 'Income - DC Rebate (RSDC only)' on an RS project, and 'Referral Fees' until Harmon adds a REFERRAL line to the template.",
+        "inactive should contain ONLY: 'Income - DC Rebate (RSDC only)' on an RS project, and 'Referral Fees' on any project that has never carried a referral fee (D20: Harmon is NOT adding the line to the templates; the push creates it when a job needs it).",
         "An RSDC project must show DCREBATE | BILLING | <N/A> | Income in matched, not inactive.",
         "Harmon sign-off on the setter commission -> APPT COM (LABOR/SALESCOMM) mapping (PENDING_HARMON_SIGNOFF).",
         "Q12c: confirm the DLR dealer-fee expense line is correct, given the calc already nets the dealer fee out of Balance of Revenue.",

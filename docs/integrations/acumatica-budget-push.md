@@ -41,6 +41,17 @@ template already created the budget lines when the project was created.
    (scaffold `UOM = HOUR`) also set `OriginalBudgetedQty`. Address by the line's own
    GUID, not a key-field upsert.
 
+> **ONE EXCEPTION to "never insert" — D20, 2026-08-22.** The referral line
+> `GENO · OTHER · REFERRAL · Expense` does not exist on any template and Harmon is not
+> adding it, so the push CREATES it when a job actually carries a referral fee: a PUT
+> with **no `id`**, followed by a re-read that verifies exactly one line came back with a
+> guid, the right amount, and `AccountGroup`/`Type` as expected. Everything else stays
+> update-by-guid, and the create is guarded to that single key. It **ships disabled**
+> (`CREATE_GATE.enabled = false`) until the sandbox hand-proof in
+> [`acumatica-referral-line-create-runbook.md`](acumatica-referral-line-create-runbook.md)
+> comes back clean. Step 2's "never create budget lines from scratch" still holds as
+> written: a project with ZERO lines is a broken scaffold, not a create opportunity.
+
 ### Write semantics (per matched group)
 
 - **Amount** = sum of the mapping row(s)' `amountField`(s). Composites split on `+`
@@ -254,7 +265,7 @@ janitor. This is expected and recoverable:
 
 | # | Question | Where the answer is |
 |---|---|---|
-| **Q12a** | Do `REFERRAL`, `SOFTWARE`, `ENGR` and `SUBCON` lines exist in the LIVE RS scaffold? D13 says REFERRAL is a **new task code absent from the v1 sandbox scaffold** — if it is missing from live too, the template must be fixed in Acumatica before any push. | `lines[]` in the RS reconcile |
+| **Q12a** | ~~Do `REFERRAL`, `SOFTWARE`, `ENGR` and `SUBCON` lines exist in the LIVE RS scaffold?~~ **ANSWERED 2026-08-20 (D18):** ENGR/SUBCON/SOFTWARE yes, REFERRAL no. And the fix is **not** a template change: **D20** re-keys it to `GENO · OTHER · REFERRAL` and has the push CREATE the line on demand — see `acumatica-referral-line-create-runbook.md`. | `lines[]` in the RS reconcile |
 | **Q12b** | Does the BALANCE income line's amount include the DC rebate, or does the rebate stand alone? v3 assumes **stand-alone** (BALANCE = contract − material) so the two do not double-count. | RSDC reconcile + Harmon |
 | **Q12c** | Is `DLR` (Dealer Fee) genuinely an expense line, given the calc already subtracts the dealer fee from Balance of Revenue? Carried over from v1; possibly a v1 double-count. | RS reconcile + Harmon |
 | **DC key** | The DC REBATE income line's full 4-part key (`ProjectTaskID` · `AccountGroup` · `InventoryID` · `Type`). | `lines[]` in the **RSDC** reconcile |
@@ -306,7 +317,7 @@ $r.lines | Select taskId, accountGroup, inventoryId, type, uom | Sort taskId | F
 |---|---|---|
 | `no scaffolded line matched` for `SLPC  OUT \| OTHER \| M1&M2COM \| Expense` | the third-party commission task code or its spacing is wrong | take the real key from `lines[]` and correct the row |
 | same for `ENGR \| SUBCON \| <N/A>` | §5's "ENGR?" guess is wrong — the v1 scaffold had **both** an ENGR "Engineering Costs" and a SUBCON line | pick the right one from `lines[]` |
-| same for `REFERRAL \| OTHER \| <N/A>` | either the InventoryID guess is wrong **or the line does not exist** (D13) | if absent from `lines[]` entirely → **Acumatica template change**, not a code change |
+| ~~same for `REFERRAL \| OTHER \| <N/A>`~~ **now `GENO \| OTHER \| REFERRAL`** | the line does not exist on any template and will not be added (D18/D20) | **no template change and no code change** — the push creates it, once `CREATE_GATE` is opened by the sandbox hand-proof |
 | same for `SOFTWARE \| OTHER \| <N/A>` | InventoryID guess wrong | correct from `lines[]` |
 
 ## (b) LIVE RSDC PROJECT — reconcile

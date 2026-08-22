@@ -24,14 +24,64 @@ const ctx = {
   lines: [],
   puts: [],
   putStatus: 200,
+  /**
+   * What the fake Acumatica does when a PUT arrives with NO `id` — i.e. a create (D20).
+   *
+   *   "insert"        the honest one: appends the line, so the verifying re-read finds it
+   *   "reject"        4xx, nothing created
+   *   "silent"        200 but nothing actually appears (the failure that would otherwise
+   *                   report success and lose the money)
+   *   "duplicate"     200 and TWO lines appear (breaks the exactly-one-match invariant)
+   *   "wrong_group"   200 but Acumatica derives a different AccountGroup from the item
+   *
+   * The last three are the reason verification re-reads instead of trusting the 200.
+   */
+  createBehaviour: "insert",
+  createCount: 0,
 };
+
+/** Build the raw line Acumatica would return for a created referral row. */
+function rawCreatedReferralLine(body, overrides = {}) {
+  const v = (f) => body[f]?.value;
+  return {
+    id: "guid-created-referral",
+    ProjectTaskID: { value: v("ProjectTaskID") },
+    AccountGroup: { value: v("AccountGroup") },
+    InventoryID: { value: v("InventoryID") },
+    Type: { value: "Expense" }, // Acumatica derives this, we never send it
+    UOM: { value: v("UOM") },
+    Description: { value: v("Description") },
+    OriginalBudgetedAmount: { value: v("OriginalBudgetedAmount") },
+    OriginalBudgetedQty: { value: 0 },
+    ...overrides,
+  };
+}
 
 mock.module("../../lib/acumatica.js", {
   exports: {
     getAcumaticaEntity: async () => ({ ok: true, status: 200, data: ctx.lines }),
     putAcumaticaEntity: async (_entity, body) => {
       ctx.puts.push(body);
-      return { ok: ctx.putStatus < 400, status: ctx.putStatus, text: "" };
+      // An UPDATE (has id) behaves as before. Only a create is simulated.
+      if (body.id) return { ok: ctx.putStatus < 400, status: ctx.putStatus, text: "" };
+
+      ctx.createCount++;
+      switch (ctx.createBehaviour) {
+        case "reject":
+          return { ok: false, status: 400, text: "Inventory item REFERRAL not found" };
+        case "silent":
+          return { ok: true, status: 200, text: "" }; // ...but ctx.lines is untouched
+        case "duplicate":
+          ctx.lines.push(rawCreatedReferralLine(body));
+          ctx.lines.push(rawCreatedReferralLine(body, { id: "guid-created-referral-2" }));
+          return { ok: true, status: 200, text: "" };
+        case "wrong_group":
+          ctx.lines.push(rawCreatedReferralLine(body, { AccountGroup: { value: "MATERIAL" } }));
+          return { ok: true, status: 200, text: "" };
+        default:
+          ctx.lines.push(rawCreatedReferralLine(body));
+          return { ok: true, status: 200, text: "" };
+      }
     },
   },
 });
@@ -44,7 +94,28 @@ mock.module("../../lib/salesforce.js", {
 });
 
 const mod = await import("./index.js");
-const { MAPPING_ROWS, PENDING_HARVEST_ROWS, budgetFieldNames, matchMappingToLines, naturalKey, writeBudgetLines } = mod;
+const {
+  MAPPING_ROWS, PENDING_HARVEST_ROWS, budgetFieldNames, matchMappingToLines, naturalKey,
+  writeBudgetLines, CREATE_GATE, REFERRAL_LINE_KEY, REFERRAL_CREATE_SPEC,
+} = mod;
+
+/**
+ * Run `fn` with the D20 create gate open, then close it again no matter what.
+ *
+ * The gate is a mutable export precisely so the enabled path can be exercised here —
+ * a `const false` would leave the create branch untested until the day someone flipped
+ * it in production, which is the opposite of what a gate is for. The try/finally is
+ * load-bearing: a leaked-open gate would make the "ships CLOSED" test pass or fail
+ * depending on file order.
+ */
+async function withCreateEnabled(fn) {
+  CREATE_GATE.enabled = true;
+  try {
+    return await fn();
+  } finally {
+    CREATE_GATE.enabled = false;
+  }
+}
 
 /**
  * A scaffold line in the RAW Acumatica shape, which is what the stubbed
@@ -70,6 +141,19 @@ function rawScaffold() {
   const seen = new Map();
   for (const r of MAPPING_ROWS) if (!seen.has(naturalKey(r))) seen.set(naturalKey(r), rawScaffoldFor(r));
   return [...seen.values()];
+}
+
+/**
+ * The realistic scaffold: everything EXCEPT the referral line.
+ *
+ * This is what every live RS and RSDC project actually looks like (D18/D20 — Harmon is
+ * not adding the line to the templates), so it is the default state for the D20 tests
+ * rather than an edge case. Filtered on InventoryID, not task id: since the key change
+ * the referral line shares ProjectTaskID `GENO` with the other-costs sum line, and
+ * filtering by task would remove both.
+ */
+function withoutReferralLine() {
+  return rawScaffold().filter((l) => l.InventoryID.value !== "REFERRAL");
 }
 
 /** MAPPED scaffold, for the matchMappingToLines tests which take that shape directly. */
@@ -119,6 +203,8 @@ function reset() {
   ctx.lines = rawScaffold();
   ctx.puts = [];
   ctx.putStatus = 200;
+  ctx.createBehaviour = "insert";
+  ctx.createCount = 0;
 }
 
 const rowsFor = (taskId, accountGroup) =>
@@ -173,8 +259,12 @@ test("the setter line reads what APPLIED, never the always-70 input rate", () =>
 });
 
 test("GENO is ONE row — v1's three would double-count CO fee and permit", () => {
-  const geno = rowsFor("GENO");
-  assert.equal(geno.length, 1, `expected 1 GENO row, got ${geno.length}: ${geno.map((r) => r.line)}`);
+  // The GENO *sum* line is keyed by InventoryID <N/A>. Since D20 the referral line also
+  // lives under ProjectTaskID GENO, with InventoryID REFERRAL — a different key, and a
+  // different line in Acumatica. Filtering by task alone would now catch both, which is
+  // the collision this test has to be careful not to imagine.
+  const geno = rowsFor("GENO").filter((r) => r.inventoryId === "<N/A>");
+  assert.equal(geno.length, 1, `expected 1 GENO sum row, got ${geno.length}: ${geno.map((r) => r.line)}`);
   assert.equal(geno[0].amountField, "Total_Other_Budget__c");
   const all = MAPPING_ROWS.map((r) => r.amountField).join(" ");
   assert.ok(!all.includes("Constructive_Ops_Fee__c"), "CO fee is already inside Total_Other_Budget__c");
@@ -191,18 +281,63 @@ test("GENA reads the combined audit+QA field — v1's sum would double-count QA"
 });
 
 test("the four D11 standalone cost lines are present, with harvest-confirmed keys", () => {
-  for (const [line, task] of [["Engineer Stamps", "ENGR"], ["Subcontractor", "SUBCON"], ["Audit Software", "SOFTWARE"], ["Referral Fees", "REFERRAL"]]) {
+  for (const [line, task] of [["Engineer Stamps", "ENGR"], ["Subcontractor", "SUBCON"], ["Audit Software", "SOFTWARE"], ["Referral Fees", "GENO"]]) {
     const r = MAPPING_ROWS.find((x) => x.line === line);
     assert.ok(r, `${line} missing`);
     assert.equal(r.taskId, task);
   }
   // Nothing is provisional any more — the 2026-08-20 harvest settled every key.
   assert.equal(MAPPING_ROWS.filter((r) => r.keyStatus === "provisional").length, 0);
-  // REFERRAL is the one key that is confirmed ABSENT from the live template.
+  // Referral is the one key confirmed ABSENT from the live template, and since D20 it
+  // is the one row allowed to create its own line.
   const ref = MAPPING_ROWS.find((r) => r.line === "Referral Fees");
   assert.equal(ref.keyStatus, "harvested_absent");
   assert.equal(ref.scaffoldOptional, true);
-  assert.match(ref.missingLineMessage, /Harmon must add it/);
+  assert.equal(ref.createIfMissing, true);
+});
+
+// ===========================================================================
+// D20 — the referral line's key, and the only create capability in the system
+// ===========================================================================
+
+test("D20: the referral key is GENO | OTHER | REFERRAL, and does NOT collide with GENO sum", () => {
+  const ref = MAPPING_ROWS.find((r) => r.line === "Referral Fees");
+  assert.equal(naturalKey(ref), "GENO | OTHER | REFERRAL | Expense");
+  assert.equal(naturalKey(ref), REFERRAL_LINE_KEY);
+  // The old key is gone entirely — a stale REFERRAL task id would match nothing.
+  assert.ok(!MAPPING_ROWS.some((r) => r.taskId === "REFERRAL"));
+  // Same task, different InventoryID, therefore different key and different line. This
+  // is the assertion the whole key change rests on: if these two ever collapsed to one
+  // key, the matcher would see two rows for one line and SUM them — posting the referral
+  // fee into the GENO other-costs total, silently and with the right-looking total.
+  const sum = MAPPING_ROWS.find((r) => r.taskId === "GENO" && r.inventoryId === "<N/A>");
+  assert.notEqual(naturalKey(ref), naturalKey(sum));
+  assert.equal(MAPPING_ROWS.filter((r) => naturalKey(r) === REFERRAL_LINE_KEY).length, 1);
+});
+
+test("D20: the create gate ships CLOSED", () => {
+  // This test exists to make enabling line creation a visible, deliberate diff. If it
+  // fails, someone committed the gate open — that may be correct, but it is never
+  // incidental, and the sandbox hand-proof runbook has to be done first.
+  assert.equal(CREATE_GATE.enabled, false, "CREATE_GATE must ship false — see the runbook");
+});
+
+test("D20: only the referral row carries createIfMissing", () => {
+  const creators = MAPPING_ROWS.filter((r) => r.createIfMissing);
+  assert.deepEqual(creators.map((r) => r.line), ["Referral Fees"]);
+  assert.equal(REFERRAL_CREATE_SPEC.key, REFERRAL_LINE_KEY);
+});
+
+test("D20: the create spec is Harmon's line spec verbatim", () => {
+  assert.deepEqual(REFERRAL_CREATE_SPEC, {
+    key: "GENO | OTHER | REFERRAL | Expense",
+    projectTaskId: "GENO",
+    accountGroup: "OTHER",
+    inventoryId: "REFERRAL",
+    description: "Referral Fee",
+    uom: "EA",
+    type: "Expense",
+  });
 });
 
 test("the DC rebate is now ACTIVE with the harvested key, and conditional", () => {
@@ -290,7 +425,7 @@ test("dry run computes every line and writes nothing", async () => {
   assert.equal(by["SUBCON | SUBCON | <N/A> | Expense"].amount, 528);
   // The two product expressions.
   assert.equal(by["SOFTWARE | OTHER | <N/A> | Expense"].amount, 30);
-  assert.equal(by["REFERRAL | OTHER | <N/A> | Expense"].amount, 500);
+  assert.equal(by[REFERRAL_LINE_KEY].amount, 500);
   // BALANCE income is contract MINUS material, and excludes the rebate.
   assert.equal(by["BALANCE | BILLING | <N/A> | Income"].amount, 36502 - 16140.73);
 });
@@ -414,7 +549,7 @@ test("zero scaffold lines aborts — never create lines from scratch", async () 
 
 test("a missing scaffold line aborts before any PUT", async () => {
   reset();
-  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "REFERRAL");
+  ctx.lines = withoutReferralLine();
   const res = await writeBudgetLines("R000001", VALUES);
   assert.equal(res.ok, false);
   assert.equal(res.aborted, "match_problems");
@@ -443,7 +578,7 @@ test("a zero expense row with NO scaffold line is inactive, not a failure", asyn
   reset();
   // REFERRAL is confirmed absent from the live template. The overwhelming majority of
   // jobs have no referral fee, and they must not fail on a line nobody needs.
-  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "REFERRAL");
+  ctx.lines = withoutReferralLine();
   const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 0 }, { dryRun: true });
   assert.equal(res.ok, true);
   assert.ok(res.inactive.some((i) => i.rows.includes("Referral Fees")));
@@ -451,11 +586,11 @@ test("a zero expense row with NO scaffold line is inactive, not a failure", asyn
 
 test("a NON-zero expense row with no scaffold line aborts with its own message", async () => {
   reset();
-  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "REFERRAL");
+  ctx.lines = withoutReferralLine();
   const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 1 }, { dryRun: true });
   assert.equal(res.ok, false);
   assert.equal(res.aborted, "match_problems");
-  assert.match(res.problems[0].reason, /no REFERRAL line/);
+  assert.match(res.problems[0].reason, /GENO \| OTHER \| REFERRAL line/);
   assert.equal(res.problems[0].amount, 500);
 });
 
@@ -463,7 +598,13 @@ test("skip-before-match applies to ANY zero expense row, not just the optional o
   reset();
   // GENO is a normal, non-optional row. With a zero amount and no line, there is
   // nothing to write, so it is inactive rather than a hard failure on the WRITE path.
-  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "GENO");
+  //
+  // Removed by FULL KEY, not by task id: since D20 the referral line is also a GENO
+  // task, so dropping every GENO line would silently make this a two-missing-line test
+  // and it would fail on the referral row instead of proving anything about skip-zero.
+  ctx.lines = rawScaffold().filter(
+    (l) => !(l.ProjectTaskID.value === "GENO" && l.InventoryID.value === "<N/A>")
+  );
   const res = await writeBudgetLines("R000001", { ...VALUES, Total_Other_Budget__c: 0 }, { dryRun: true });
   assert.equal(res.ok, true);
   assert.ok(res.inactive.some((i) => i.rows.includes("Other (GENO)")));
@@ -471,6 +612,244 @@ test("skip-before-match applies to ANY zero expense row, not just the optional o
   const res2 = await writeBudgetLines("R000001", VALUES, { dryRun: true });
   assert.equal(res2.ok, false);
   assert.equal(res2.aborted, "match_problems");
+});
+
+// ===========================================================================
+// D20 — the three branches of the referral line, and the create mechanic
+// ===========================================================================
+//
+// Branch 1: line PRESENT        -> update by guid, business as usual
+// Branch 2: ABSENT + amount 0   -> inactive (the common case, every job with no referral)
+// Branch 3: ABSENT + amount > 0 -> create, verify by re-read, then business as usual
+//
+// Branch 2 is covered above ("a zero expense row with NO scaffold line is inactive").
+// The gate-closed form of branch 3 is covered above too ("a NON-zero expense row with
+// no scaffold line aborts with its own message") — that IS the shipped behaviour.
+
+test("D20 branch 1: the line PRESENT is a plain update by guid, no create", async () => {
+  reset();
+  const res = await writeBudgetLines("R000001", VALUES);
+  assert.equal(res.ok, true);
+  assert.equal(ctx.createCount, 0, "a present line must never trigger a create");
+  assert.equal(res.summary.created, 0);
+  const put = ctx.puts.find((b) => b.id === `guid-GENO-OTHER-REFERRAL-Expense`);
+  assert.ok(put, "the referral line should have been updated by guid");
+  assert.equal(put.OriginalBudgetedAmount.value, 500);
+});
+
+test("D20 branch 1 holds even with the gate OPEN — present means update, never create", async () => {
+  await withCreateEnabled(async () => {
+    reset();
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, true);
+    assert.equal(ctx.createCount, 0);
+    assert.equal(res.summary.created, 0);
+  });
+});
+
+test("D20 branch 2: absent + zero referral is inactive even with the gate OPEN", async () => {
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 0 });
+    assert.equal(res.ok, true);
+    assert.equal(ctx.createCount, 0, "nothing to write means nothing to create");
+    assert.ok(res.inactive.some((i) => i.rows.includes("Referral Fees")));
+  });
+});
+
+test("D20 branch 3: absent + non-zero CREATES the line and verifies it", async () => {
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    const res = await writeBudgetLines("R000001", VALUES);
+
+    assert.equal(res.ok, true);
+    assert.equal(res.summary.created, 1);
+    assert.equal(ctx.createCount, 1);
+
+    // The create body is Harmon's spec, and critically carries NO id — that is what
+    // makes it an insert rather than an update of some unrelated line.
+    const body = ctx.puts.find((b) => !b.id);
+    assert.ok(body, "a create PUT must have been issued");
+    assert.equal(body.id, undefined);
+    assert.equal(body.ProjectID.value, "R000001");
+    assert.equal(body.ProjectTaskID.value, "GENO");
+    assert.equal(body.AccountGroup.value, "OTHER");
+    assert.equal(body.InventoryID.value, "REFERRAL");
+    assert.equal(body.Description.value, "Referral Fee");
+    assert.equal(body.UOM.value, "EA");
+    assert.equal(body.OriginalBudgetedAmount.value, 500);
+    // No qty and no rate — Harmon's spec says no defaults.
+    assert.ok(!("OriginalBudgetedQty" in body));
+
+    const created = res.results.find((r) => r.action === "created");
+    assert.equal(created.key, REFERRAL_LINE_KEY);
+    assert.equal(created.amount, 500);
+    assert.ok(created.lineId, "verification must have found a guid");
+  });
+});
+
+test("D20 branch 3: a re-push after creation takes branch 1", async () => {
+  // The point of the whole design: creating is a one-off correction, not a mode. The
+  // second push must find the line and update it, or every referral job would grow a
+  // new line on every push until the key stopped matching uniquely.
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+
+    const first = await writeBudgetLines("R000001", VALUES);
+    assert.equal(first.summary.created, 1);
+
+    // ctx.lines now contains the created line — exactly what a fresh read would return.
+    ctx.puts = [];
+    ctx.createCount = 0;
+    const second = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Price__c: 750 });
+
+    assert.equal(second.ok, true);
+    assert.equal(second.summary.created, 0, "the second push must NOT create again");
+    assert.equal(ctx.createCount, 0);
+    const update = ctx.puts.find((b) => b.id === "guid-created-referral");
+    assert.ok(update, "the second push must update the created line by its guid");
+    assert.equal(update.OriginalBudgetedAmount.value, 750);
+    // And the project still has exactly one referral line.
+    assert.equal(ctx.lines.filter((l) => l.InventoryID.value === "REFERRAL").length, 1);
+  });
+});
+
+test("D20: a REJECTED create aborts the push and says nothing needs cleaning up", async () => {
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    ctx.createBehaviour = "reject";
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, false);
+    assert.equal(res.aborted, "referral_line_create_failed");
+    assert.equal(res.create.action, "create_failed");
+    assert.match(res.message, /nothing needs cleaning up/);
+  });
+});
+
+test("D20: a create that 200s but produces NO line fails verification", async () => {
+  // The dangerous one. Without the re-read this reports success and the referral fee
+  // silently never reaches Acumatica.
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    ctx.createBehaviour = "silent";
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, false);
+    assert.equal(res.aborted, "referral_line_create_failed");
+    assert.equal(res.create.action, "create_unverified");
+    assert.equal(res.create.count, 0);
+  });
+});
+
+test("D20: a create that produces TWO lines fails verification loudly", async () => {
+  // A duplicate breaks the exactly-one-match invariant, so every FUTURE push on the
+  // project would abort. Catching it in the run that caused it is the difference
+  // between one message and a mystery.
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    ctx.createBehaviour = "duplicate";
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, false);
+    assert.equal(res.create.action, "create_unverified");
+    assert.equal(res.create.count, 2);
+    assert.match(res.message, /Delete the duplicates/);
+  });
+});
+
+test("D20: a created line whose AccountGroup came back different fails verification", async () => {
+  // Acumatica may derive AccountGroup from the inventory item's posting class rather
+  // than taking what we send. If it does, the line is real but keyed differently and
+  // the mapping row would never match it again. This is the specific thing the sandbox
+  // hand-proof runbook exists to settle.
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    ctx.createBehaviour = "wrong_group";
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, false);
+    assert.equal(res.create.action, "create_unverified");
+    assert.match(res.message, /AccountGroup came back "MATERIAL"/);
+  });
+});
+
+test("D20: an unverified create aborts BEFORE any other line is written", async () => {
+  // Creates run first for exactly this reason: a project left in an unknown state must
+  // not also have twenty updated lines to reason about.
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    ctx.createBehaviour = "silent";
+    await writeBudgetLines("R000001", VALUES);
+    const updates = ctx.puts.filter((b) => b.id);
+    assert.equal(updates.length, 0, "no update PUTs may follow a failed create");
+  });
+});
+
+test("D20: dry run reports would_create and issues no PUT at all", async () => {
+  await withCreateEnabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    const res = await writeBudgetLines("R000001", VALUES, { dryRun: true });
+    assert.equal(res.ok, true);
+    assert.equal(ctx.puts.length, 0);
+    assert.equal(ctx.createCount, 0);
+    const would = res.results.find((r) => r.action === "would_create");
+    assert.ok(would);
+    assert.equal(would.amount, 500);
+    assert.equal(would.spec.inventoryId, "REFERRAL");
+  });
+});
+
+test("D20: with the gate CLOSED the create path does not exist", async () => {
+  // Not a softer failure — the SAME failure as before D20 was written. Pinned because
+  // "disabled" has to mean the shipped behaviour is unchanged, not merely quieter.
+  reset();
+  ctx.lines = withoutReferralLine();
+  const res = await writeBudgetLines("R000001", VALUES);
+  assert.equal(res.ok, false);
+  assert.equal(res.aborted, "match_problems");
+  assert.equal(ctx.puts.length, 0, "the abort must come before any write");
+  assert.equal(ctx.createCount, 0);
+  assert.match(res.problems[0].reason, /DISABLED pending the sandbox hand-proof/);
+});
+
+test("D20: reconcile never creates — it has no amounts and no write path", () => {
+  // matchMappingToLines with no budgetValues cannot know an amount is non-zero, so
+  // toCreate must be empty even with the gate open. Reconcile is read-only and stays so.
+  CREATE_GATE.enabled = true;
+  try {
+    const lines = fullScaffold().filter((l) => l.inventoryId !== "REFERRAL");
+    const { toCreate, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines);
+    assert.deepEqual(toCreate, []);
+    // It surfaces as INACTIVE, not a problem: reconcile allows a scaffoldOptional row to
+    // be absent (that is the whole point of the flag), and with no amounts it cannot
+    // know whether this project would need the line. Reported rather than swallowed, so
+    // "why is Referral Fees not in the output" still has an answer.
+    assert.ok(inactive.some((i) => i.key === REFERRAL_LINE_KEY));
+    assert.ok(!problems.some((p) => p.key === REFERRAL_LINE_KEY));
+  } finally {
+    CREATE_GATE.enabled = false;
+  }
+});
+
+test("D20: no row other than the referral line can reach the create path", async () => {
+  // The guard is three redundant conditions (opt-in flag, exact key, gate). This proves
+  // the KEY condition specifically: a row that opts in but is not the referral line
+  // aborts the way any other missing line does, rather than gaining create powers.
+  await withCreateEnabled(async () => {
+    reset();
+    const impostor = { ...MAPPING_ROWS.find((r) => r.line === "Engineer Stamps"), createIfMissing: true, scaffoldOptional: true };
+    const rows = MAPPING_ROWS.map((r) => (r.line === "Engineer Stamps" ? impostor : r));
+    const lines = fullScaffold().filter((l) => l.taskId !== "ENGR");
+    const { toCreate, problems } = matchMappingToLines(rows, lines, VALUES);
+    assert.deepEqual(toCreate, [], "only the referral key may be created");
+    assert.ok(problems.some((p) => p.key.startsWith("ENGR")));
+  });
 });
 
 test("RECONCILE stays strict — no amounts means every non-optional row must match", () => {

@@ -1,5 +1,86 @@
 # Sundial — Progress Log
 
+## 2026-08-22 — D20: the referral line the push creates, shipped disabled
+
+The REFERRAL question resolved the other way from D13's plan. Harmon will not add the line
+to the RS/RSDC templates, so a job carrying a referral fee has nowhere to post it and the
+push has to create the line itself. That makes this the only insert anywhere in the
+integration, which is the fact the whole design is arranged around.
+
+**The key changed, and the key change is the sharpest edge in this piece of work.**
+`REFERRAL | OTHER | <N/A>` becomes `GENO | OTHER | REFERRAL | Expense` — Harmon's
+authoritative spec. The new key shares its ProjectTaskID with the other-costs sum row
+(`GENO | OTHER | <N/A>`) and differs only on InventoryID. That is fine, and it is fine for
+a reason worth stating: they are two distinct lines under one task. But if those two keys
+ever collapsed into one, the matcher would see two mapping rows pointing at one line and
+**sum them** — posting the referral fee into the GENO other-costs total, silently, with a
+total that looks entirely reasonable. There is a test named for that.
+
+The change also broke three existing tests in an instructive way. They simulated "the
+referral line is absent" by filtering the scaffold on `ProjectTaskID !== "REFERRAL"`, which
+after the key change removes nothing; and one test removed all GENO lines to check
+skip-zero, which now removes two lines instead of one and would have tested something
+else entirely while still appearing to pass a different assertion. Both are fixed to filter
+on the full key, and the helper is named `withoutReferralLine()` so the next person does
+not have to rediscover why.
+
+**Three branches.** Present → update by guid, business as usual, and that holds even with
+the gate open. Absent with a zero amount → inactive, which is every job that has no
+referral fee. Absent with a real amount → create, then re-read and verify, after which a
+re-push is an ordinary update. That last clause is tested rather than assumed: the test
+creates the line, pushes again at a different amount, and asserts an update-by-guid, zero
+creates, and still exactly one referral line on the project.
+
+**Create-then-verify, and the asymmetry that justifies it.** An update that half-fails
+leaves a wrong amount, which the next push corrects. A create that half-fails leaves either
+nothing — money silently unposted — or two lines, and a duplicate breaks the
+exactly-one-match invariant so that *every future push on that project aborts*. Neither
+is self-healing, so neither may be reported as success on the strength of a 200. The
+verifier re-reads and checks four things: exactly one line with the key, a guid, the
+amount we sent, and AccountGroup/Type as expected.
+
+**Those last two checks caught a flaw in my own verifier on the first test run.** Acumatica
+may derive AccountGroup and Type from the inventory item's posting class rather than taking
+what we send, and both are parts of the natural key — so a derived value produces a real
+line under a key we did not ask for. My first version reported that as "no line came back",
+which is exactly backwards: the line exists, it is just keyed differently, and the message
+would have sent someone hunting for something sitting right in front of them. The verifier
+now looks for a near-match on task + inventory before concluding nothing exists, and names
+the key part that changed.
+
+An unverified create aborts the whole push before any other line is written. Creates run
+first for that reason: the one case where the project's state is unknown should not also
+have twenty updated lines to reason about.
+
+**On the gate, since the brief left the mechanism to me: a repo constant, not an
+environment variable.** `CREATE_GATE = { enabled: false }`, with a test asserting the
+committed value is `false`. An env var can be flipped in the AWS console with no commit and
+no review, and this repo has already been burned once by a load-bearing untracked dashboard
+setting; enabling the only write that can add rows to Harmon's books should be a diff
+someone signed off on. It is a mutable object rather than a `const false` so the tests can
+exercise the enabled path — a gate whose open state is untested until the day it opens is
+not much of a gate. While closed, the behaviour is *exactly* pre-D20: a loud abort before
+any PUT, carrying a message that tells the user to add the line by hand. That is pinned by
+its own test, because "disabled" has to mean unchanged rather than quietly different.
+
+Creation is guarded on three redundant conditions — the row opts in, its key is exactly the
+referral key, and the gate is open — and the create function re-checks its own
+preconditions rather than trusting that a future edit upstream kept them. A row that opts
+in without being the referral line falls through to the ordinary missing-line abort;
+tested.
+
+**The sandbox hand-proof runbook** (`docs/integrations/acumatica-referral-line-create-runbook.md`)
+is five REST calls against BizRun R269999: mint a token, create, re-read for the guid and
+the two derived fields, update by guid, re-read to prove no duplicate. It exists because
+the unit tests prove the code handles five ways Acumatica might behave, and cannot say
+which one is real. Two of its possible outcomes stop the project rather than continue it —
+"Inventory item REFERRAL not found" means Harmon creates the item first, and a 405 on
+PUT-without-id means D20 is not implementable as designed. Both are written up as complete,
+useful answers rather than failures.
+
+Tests: 56, up from 38. All three branches, gate open and closed, and four ways a create can
+go wrong: rejected, 200-with-nothing-created, 200-with-a-duplicate, and wrong AccountGroup.
+
 ## 2026-08-22 — D21: neither rep commission line is burdened
 
 Harmon's ruling on the burden basis, one day after Stage 2 shipped it the other way:

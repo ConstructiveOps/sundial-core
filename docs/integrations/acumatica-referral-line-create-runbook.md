@@ -1,16 +1,24 @@
 # Sandbox hand-proof — creating the REFERRAL budget line (D20)
 
+> ## ✅ DONE — 2026-08-22, sandbox, project `R261065`. All five gates passed.
+> `CREATE_GATE.enabled` is now `true`. **[Results are recorded below](#results--2026-08-22).**
+> This document is kept as the procedure for the next write-proof, not just a record of
+> this one — see the [tenant-identity preamble](#step-2--prove-which-tenant-you-are-on),
+> which was added as a result of running it.
+
 **Purpose:** prove, by hand, that Acumatica will let us CREATE a ProjectBudget line, and
-that the line comes back shaped the way the mapping expects. Until this is done and the
-results are pasted in, `CREATE_GATE.enabled` stays `false` in
-`lambdas/sundial-acumatica-budget-push/index.js` and the push refuses to create anything.
+that the line comes back shaped the way the mapping expects.
 
-**Target:** BizRun sandbox project **`R269999`** (customer `C001311112`) — the canonical
-scaffold project, 38 lines, already used for the 2026-08-07 harvest.
+**Nothing here touches Salesforce or the Lambda.** It is a handful of REST calls you make
+yourself, so that the first time a write mechanic runs it is not also the first time
+anyone has seen it work.
 
-**Nothing here touches production, Salesforce, or the Lambda.** It is five REST calls you
-make yourself, so that the first time this write mechanic runs it is not also the first
-time anyone has seen it work.
+---
+
+**Target for the original run:** sandbox project **`R261065`**. (The runbook was drafted
+against `R269999`, the 2026-08-07 harvest project; the actual run used `R261065`. Either
+works — any scaffolded project with no existing REFERRAL line will do. Substitute the
+project you are using into `$Project` below.)
 
 ---
 
@@ -48,12 +56,15 @@ Harmon's authoritative spec, which is also `REFERRAL_CREATE_SPEC` in the code:
 
 Natural key: **`GENO | OTHER | REFERRAL | Expense`**. Note this shares `ProjectTaskID`
 with the GENO other-costs sum line (`GENO | OTHER | <N/A> | Expense`) but differs on
-`InventoryID`, so they are two distinct lines under one task — no collision. Step 5 below
+`InventoryID`, so they are two distinct lines under one task — no collision. Step 6 below
 verifies exactly that.
 
-> **Prerequisite:** the inventory item `REFERRAL` must exist in the sandbox. If step 2
+> **Prerequisite:** the inventory item `REFERRAL` must exist in the tenant. If step 3
 > comes back with *"Inventory item REFERRAL not found"*, that is the real answer and it
 > stops here — Harmon has to create the item before anything else is worth trying.
+>
+> **Answered 2026-08-22:** it exists, and its posting class derives exactly the
+> `OTHER`/`Expense` this table expects. See [Results](#results--2026-08-22).
 
 ---
 
@@ -69,13 +80,14 @@ $secret = aws secretsmanager get-secret-value `
 
 $BaseUrl = $secret.base_url.TrimEnd('/')
 $ApiRoot = "$BaseUrl/entity/Default/25.200.001"
-$Project = 'R269999'
+$Project = 'R261065'   # any scaffolded project with no existing REFERRAL line
 
 "base: $BaseUrl"
 ```
 
-> ⚠️ **Confirm `$BaseUrl` is the SANDBOX (BizRun) tenant before continuing.** If the
-> secret points at production, stop — this runbook creates a real budget line.
+> ⚠️ **`$BaseUrl` DOES NOT TELL YOU WHICH TENANT THIS IS.** Sandbox and production share
+> it; the secret's contents are what decide, and they change without the URL changing.
+> **Step 2 is the check** — do not skip it and do not infer the tenant from this value.
 
 ---
 
@@ -106,7 +118,40 @@ problem, not a create problem.
 
 ---
 
-## Step 2 — CREATE the line
+## Step 2 — prove which tenant you are on
+
+**Do this before the first write, every time, and paste the output with the results.**
+
+Sandbox and production share a base URL, and the sandbox is a refreshed copy of live, so
+**project IDs exist in both**. A transcript showing `R261065` and a `200` therefore does
+not say which system it hit — and "which system did that write land in" is not a question
+you want to be answering afterwards from memory. The secret's contents decide it, and the
+secret changes without the URL changing.
+
+Record something that distinguishes the two:
+
+```powershell
+# 1. The tenant the credentials actually authenticate into. client_id is scoped to a
+#    tenant (e.g. "...@BizRun Tenant" vs "...@Company"), so this is the primary tell.
+"client_id : $($secret.client_id)"
+"username  : $($secret.username)"
+"base_url  : $BaseUrl"
+
+# 2. A server-side fact, so this does not rest on the secret's labelling alone.
+Invoke-RestMethod -Method Get -Uri "$ApiRoot/Company" -Headers $H |
+  Select-Object @{n='companyId';e={$_.CompanyID.value}}, @{n='name';e={$_.CompanyName.value}}
+```
+
+**Both must agree, and both must say sandbox.** If `client_id` names one tenant and the
+company record names another, stop — you do not know where the next write goes.
+
+> If `/Company` is not exposed to the integration user, substitute any read whose value
+> differs between the tenants and say which you used. A row count on a table that only
+> exists post-refresh works; a project ID does not, because the refresh copies those.
+
+---
+
+## Step 3 — CREATE the line
 
 Payload goes via a **no-BOM file**, per this repo's convention: PowerShell 5.1 writes a
 UTF-8 BOM by default and JSON parsers reject it.
@@ -144,13 +189,13 @@ informative failures:
 | Response | Means |
 |---|---|
 | `Inventory item REFERRAL not found` | The item does not exist in the sandbox. Stop; Harmon creates it first. |
-| `Project task GENO not found` | Wrong task code, or R269999 lacks it. |
-| Anything about a key or a duplicate | A line may already exist — jump to step 3 and look. |
+| `Project task GENO not found` | Wrong task code, or the project you chose lacks it. |
+| Anything about a key or a duplicate | A line may already exist — jump to step 4 and look. |
 | 405 / "not supported" | PUT-without-id is not an insert on this entity. **D20 is not implementable as designed**; report back before anything else. |
 
 ---
 
-## Step 3 — RE-READ, and capture the guid
+## Step 4 — RE-READ, and capture the guid
 
 The point of the whole exercise: what the *project* looks like now, which is a different
 question from what the write claimed.
@@ -194,7 +239,7 @@ Also worth noting: `uom` (did `EA` stick?) and `amount` (is it `500`?).
 
 ---
 
-## Step 4 — UPDATE the amount by guid
+## Step 5 — UPDATE the amount by guid
 
 Proves the created line behaves like every other line afterwards — which is what makes
 branch 1 (re-push = ordinary update) true rather than hoped for.
@@ -218,7 +263,7 @@ $update.StatusCode
 
 ---
 
-## Step 5 — RE-READ, and prove there is no duplicate
+## Step 6 — RE-READ, and prove there is no duplicate
 
 The failure this catches is the expensive one: if the update inserted a second line
 instead of updating the first, the key stops matching uniquely and **every future push on
@@ -240,24 +285,24 @@ $lines2 | Where-Object { $_.ProjectTaskID.value -eq 'GENO' } |
                 @{n='type';e={$_.Type.value}},
                 @{n='amount';e={$_.OriginalBudgetedAmount.value}} | Format-Table
 
-# Total line count: was 38 before this runbook.
+# Total line count: note what it was BEFORE, and expect exactly one more.
 "total lines: $(@($lines2).Count)"
 ```
 
 **Expect:**
 
-- referral count **1**, amount **750**, guid **same as step 3**
+- referral count **1**, amount **750**, guid **same as step 4**
 - **two** GENO rows: `OTHER | <N/A>` and `OTHER | REFERRAL` — separate lines, which is the
   no-collision proof
-- total lines **39** (38 + the one we created)
+- total lines = **the scaffold's count + 1** (38 + 1 on a standard RS project)
 
 ---
 
-## Step 6 — clean up (optional but preferred)
+## Step 7 — clean up (optional but preferred)
 
-R269999 is the harvest reference project, and the committed fixtures
-(`harvest/R261077-rs.json`, `harvest/R261066-rsdc.json`) come from other projects, so a
-stray line here breaks nothing automated. It will still confuse the next person reading a
+The committed fixtures (`harvest/R261077-rs.json`, `harvest/R261066-rsdc.json`) are
+static files captured in 2026-08-20, so a stray line on a live sandbox project breaks
+nothing automated. It will still confuse the next person reading a
 reconcile. Either delete the line in the Acumatica UI, or zero it:
 
 ```powershell
@@ -273,30 +318,64 @@ Invoke-WebRequest -Method Put -Uri "$ApiRoot/ProjectBudget" -Headers $H `
 ## What to paste back
 
 ```
-Step 2 create        status: ____   (error text if not 200)
-Step 3 count:        ____
-Step 3 AccountGroup: ____      <- must be OTHER
-Step 3 Type:         ____      <- must be Expense
-Step 3 UOM:          ____
-Step 3 amount:       ____
-Step 4 update        status: ____
-Step 5 referral count: ____    amount: ____   guid unchanged: ____
-Step 5 GENO rows:    ____      <- expect 2, listed
-Step 5 total lines:  ____      <- expect 39
+Step 2 tenant        client_id: ____   company: ____   <- must both say SANDBOX
+Step 3 create        status: ____   (error text if not 200)
+Step 4 count:        ____
+Step 4 AccountGroup: ____      <- must be OTHER
+Step 4 Type:         ____      <- must be Expense
+Step 4 UOM:          ____
+Step 4 amount:       ____
+Step 5 update        status: ____
+Step 6 referral count: ____    amount: ____   guid unchanged: ____
+Step 6 GENO rows:    ____      <- expect 2, listed
+Step 6 total lines:  ____      <- expect scaffold + 1
 ```
 
 ---
 
-## Then, and only then
+## Results — 2026-08-22
 
-Flip `CREATE_GATE.enabled` to `true` in
-`lambdas/sundial-acumatica-budget-push/index.js`, **in the same PR that records these
-results**, and update the `D20: the create gate ships CLOSED` test to match. Two things to
-carry into that PR:
+**Run by Tim against the SANDBOX, project `R261065`. All five gates passed.**
 
-- If `AccountGroup` or `Type` came back different, the mapping row's key changes too —
-  `REFERRAL_LINE_KEY`, `REFERRAL_CREATE_SPEC`, and the `Referral Fees` row in
-  `MAPPING_ROWS` all have to agree with whatever Acumatica actually produces.
-- The first production job that exercises this should be watched. `summary.created` is
-  `1` on that push and `0` on every push afterwards; if it is ever `1` twice for the same
-  project, something is wrong with the verification and the gate goes back to `false`.
+| Gate | Result |
+|---|---|
+| PUT with no `id` inserts | **YES** — the mechanic works |
+| `AccountGroup` on re-read | **`OTHER`** — derived from the REFERRAL item's posting class, and agrees with what we send |
+| `Type` on re-read | **`Expense`** — likewise derived |
+| Update-by-guid | **updates in place**, no new line |
+| Duplicates | **none** — count `1` throughout |
+
+**What this settled.** The two open questions were whether Acumatica derives `AccountGroup`
+and `Type` from the inventory item rather than taking the body, and if so what it derives.
+It does derive them, and it derives exactly what the mapping expects — so
+`REFERRAL_LINE_KEY` (`GENO | OTHER | REFERRAL | Expense`) is correct and **no mapping
+change was needed**. Had either come back differently, the line would have existed under a
+key the mapping could never match, and the fix would have been to re-key the mapping row.
+
+**On the sandbox standing in for live:** the sandbox is a refreshed copy of live, so item
+posting classes are live's own configuration. Deriving `OTHER`/`Expense` there is evidence
+about live's config, not merely about a sandbox's. That is Tim's assessment and it is
+sound for configuration-derived behaviour.
+
+> **One limit of this transcript, recorded because it is the reason step 2 now exists.**
+> The run predates the tenant-identity check, and the shared base URL plus a
+> refresh-copied project ID mean the transcript cannot self-certify which tenant it hit.
+> The sandbox attribution is **Tim's attestation**, not something the output proves. That
+> is accepted here — he ran it and knows which credentials were loaded. Step 2 removes the
+> need to take anyone's word for it next time.
+
+**Gate opened** in the same commit as this record. Test
+`D20: the create gate ships OPEN, on the strength of the sandbox hand-proof` now asserts
+`true`, so a change in either direction stays a visible diff.
+
+---
+
+## For the next write-proof
+
+- **Step 2 is not optional.** Any future proof of a write mechanic runs the tenant-identity
+  check before the first write and pastes the output. The base URL is not an identifier.
+- **The first production job that exercises this should be watched.** `summary.created` is
+  `1` on the push that first posts a referral fee for a project and `0` on every push
+  after. If it is ever `1` twice for the same project, verification is not doing its job:
+  set `CREATE_GATE.enabled` back to `false` and look at the project. Closing the gate is a
+  complete rollback to the pre-D20 abort, and there is a test that keeps it that way.

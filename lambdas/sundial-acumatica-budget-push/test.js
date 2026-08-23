@@ -100,22 +100,28 @@ const {
 } = mod;
 
 /**
- * Run `fn` with the D20 create gate open, then close it again no matter what.
+ * Run `fn` with the D20 create gate forced to `state`, then RESTORE WHAT IT WAS.
  *
- * The gate is a mutable export precisely so the enabled path can be exercised here —
- * a `const false` would leave the create branch untested until the day someone flipped
- * it in production, which is the opposite of what a gate is for. The try/finally is
- * load-bearing: a leaked-open gate would make the "ships CLOSED" test pass or fail
- * depending on file order.
+ * The gate is a mutable export precisely so both states can be exercised here — a plain
+ * `const` would leave one branch untested until the day someone flipped it in production,
+ * which is the opposite of what a gate is for.
+ *
+ * Note these save and restore rather than resetting to a literal. An earlier version
+ * hard-coded `false` in the finally, which was correct only while `false` was the
+ * committed value; when the gate opened after the sandbox proof, that would have leaked a
+ * CLOSED gate into every later test and made the whole suite order-dependent.
  */
-async function withCreateEnabled(fn) {
-  CREATE_GATE.enabled = true;
+async function withGate(state, fn) {
+  const prior = CREATE_GATE.enabled;
+  CREATE_GATE.enabled = state;
   try {
     return await fn();
   } finally {
-    CREATE_GATE.enabled = false;
+    CREATE_GATE.enabled = prior;
   }
 }
+const withCreateEnabled = (fn) => withGate(true, fn);
+const withCreateDisabled = (fn) => withGate(false, fn);
 
 /**
  * A scaffold line in the RAW Acumatica shape, which is what the stubbed
@@ -315,11 +321,16 @@ test("D20: the referral key is GENO | OTHER | REFERRAL, and does NOT collide wit
   assert.equal(MAPPING_ROWS.filter((r) => naturalKey(r) === REFERRAL_LINE_KEY).length, 1);
 });
 
-test("D20: the create gate ships CLOSED", () => {
-  // This test exists to make enabling line creation a visible, deliberate diff. If it
-  // fails, someone committed the gate open — that may be correct, but it is never
-  // incidental, and the sandbox hand-proof runbook has to be done first.
-  assert.equal(CREATE_GATE.enabled, false, "CREATE_GATE must ship false — see the runbook");
+test("D20: the create gate ships OPEN, on the strength of the sandbox hand-proof", () => {
+  // This test exists to make a change to line creation a visible, deliberate diff in
+  // EITHER direction. It shipped asserting `false`; it now asserts `true` because the
+  // hand-proof passed against sandbox R261065 (runbook §Results) — PUT-without-id
+  // inserts, AccountGroup/Type come back OTHER/Expense, update-by-guid is in place, no
+  // duplicate.
+  //
+  // If a future change closes the gate, this test is the thing that says so out loud
+  // rather than letting referral fees start silently aborting again.
+  assert.equal(CREATE_GATE.enabled, true, "CREATE_GATE — see the runbook results before changing this");
 });
 
 test("D20: only the referral row carries createIfMissing", () => {
@@ -549,11 +560,18 @@ test("zero scaffold lines aborts — never create lines from scratch", async () 
 
 test("a missing scaffold line aborts before any PUT", async () => {
   reset();
-  ctx.lines = withoutReferralLine();
+  // GENM (total material), not the referral line: with the gate open, a missing referral
+  // line is CREATED rather than an abort, so using it here would test the opposite of
+  // what this test is named for. Every other line in the mapping is still update-only,
+  // and a template missing one of them is a broken scaffold — refuse, write nothing.
+  ctx.lines = rawScaffold().filter(
+    (l) => !(l.ProjectTaskID.value === "GENM" && l.AccountGroup.value === "MATERIAL")
+  );
   const res = await writeBudgetLines("R000001", VALUES);
   assert.equal(res.ok, false);
   assert.equal(res.aborted, "match_problems");
   assert.equal(ctx.puts.length, 0);
+  assert.equal(ctx.createCount, 0, "no line other than the referral line may be created");
 });
 
 test("a real run PUTs by GUID only — no inserts, no key upserts", async () => {
@@ -584,14 +602,19 @@ test("a zero expense row with NO scaffold line is inactive, not a failure", asyn
   assert.ok(res.inactive.some((i) => i.rows.includes("Referral Fees")));
 });
 
-test("a NON-zero expense row with no scaffold line aborts with its own message", async () => {
+test("a NON-zero optional row with no scaffold line aborts with its own message", async () => {
   reset();
-  ctx.lines = withoutReferralLine();
-  const res = await writeBudgetLines("R000001", { ...VALUES, Adder_Referral_Fee_Qty__c: 1 }, { dryRun: true });
+  // The DC rebate, since D20 gave the referral row a create path instead of this one.
+  // The mechanic being pinned is generic and still matters: a scaffoldOptional row that
+  // is absent while carrying a real amount must abort with the row's OWN message naming
+  // the actual fix, rather than being skipped as "optional" and losing the money.
+  ctx.lines = rawScaffold().filter((l) => l.ProjectTaskID.value !== "DCREBATE");
+  const res = await writeBudgetLines("R000001", { ...VALUES, DC_Rebate_Amount__c: 3960 }, { dryRun: true });
   assert.equal(res.ok, false);
   assert.equal(res.aborted, "match_problems");
-  assert.match(res.problems[0].reason, /GENO \| OTHER \| REFERRAL line/);
-  assert.equal(res.problems[0].amount, 500);
+  assert.match(res.problems[0].reason, /RSDC template/);
+  assert.equal(res.problems[0].amount, 3960);
+  assert.equal(ctx.createCount, 0, "an optional row that is not the referral line never creates");
 });
 
 test("skip-before-match applies to ANY zero expense row, not just the optional ones", async () => {
@@ -805,36 +828,36 @@ test("D20: dry run reports would_create and issues no PUT at all", async () => {
   });
 });
 
-test("D20: with the gate CLOSED the create path does not exist", async () => {
-  // Not a softer failure — the SAME failure as before D20 was written. Pinned because
-  // "disabled" has to mean the shipped behaviour is unchanged, not merely quieter.
-  reset();
-  ctx.lines = withoutReferralLine();
-  const res = await writeBudgetLines("R000001", VALUES);
-  assert.equal(res.ok, false);
-  assert.equal(res.aborted, "match_problems");
-  assert.equal(ctx.puts.length, 0, "the abort must come before any write");
-  assert.equal(ctx.createCount, 0);
-  assert.match(res.problems[0].reason, /DISABLED pending the sandbox hand-proof/);
+test("D20: closing the gate restores the pre-D20 behaviour exactly", async () => {
+  // The gate is open now, but closing it has to remain a safe, complete rollback rather
+  // than a half-state: a loud abort before any write, not a silently skipped line. This
+  // is the test that makes "set CREATE_GATE back to false" a real answer if the create
+  // path ever misbehaves in production.
+  await withCreateDisabled(async () => {
+    reset();
+    ctx.lines = withoutReferralLine();
+    const res = await writeBudgetLines("R000001", VALUES);
+    assert.equal(res.ok, false);
+    assert.equal(res.aborted, "match_problems");
+    assert.equal(ctx.puts.length, 0, "the abort must come before any write");
+    assert.equal(ctx.createCount, 0);
+    assert.match(res.problems[0].reason, /CREATE_GATE has been closed/);
+  });
 });
 
 test("D20: reconcile never creates — it has no amounts and no write path", () => {
   // matchMappingToLines with no budgetValues cannot know an amount is non-zero, so
-  // toCreate must be empty even with the gate open. Reconcile is read-only and stays so.
-  CREATE_GATE.enabled = true;
-  try {
-    const lines = fullScaffold().filter((l) => l.inventoryId !== "REFERRAL");
-    const { toCreate, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines);
-    assert.deepEqual(toCreate, []);
-    // It surfaces as INACTIVE, not a problem: reconcile allows a scaffoldOptional row to
-    // be absent (that is the whole point of the flag), and with no amounts it cannot
-    // know whether this project would need the line. Reported rather than swallowed, so
-    // "why is Referral Fees not in the output" still has an answer.
-    assert.ok(inactive.some((i) => i.key === REFERRAL_LINE_KEY));
-    assert.ok(!problems.some((p) => p.key === REFERRAL_LINE_KEY));
-  } finally {
-    CREATE_GATE.enabled = false;
-  }
+  // toCreate must be empty even with the gate open. Reconcile is read-only and stays so —
+  // which matters more now that the gate is open by default.
+  const lines = fullScaffold().filter((l) => l.inventoryId !== "REFERRAL");
+  const { toCreate, problems, inactive } = matchMappingToLines(MAPPING_ROWS, lines);
+  assert.deepEqual(toCreate, []);
+  // It surfaces as INACTIVE, not a problem: reconcile allows a scaffoldOptional row to
+  // be absent (that is the whole point of the flag), and with no amounts it cannot
+  // know whether this project would need the line. Reported rather than swallowed, so
+  // "why is Referral Fees not in the output" still has an answer.
+  assert.ok(inactive.some((i) => i.key === REFERRAL_LINE_KEY));
+  assert.ok(!problems.some((p) => p.key === REFERRAL_LINE_KEY));
 });
 
 test("D20: no row other than the referral line can reach the create path", async () => {
@@ -925,6 +948,25 @@ test("LIVE RS scaffold + a domestic-content rebate = wrong template, loud abort"
   assert.equal(problems.length, 1);
   assert.match(problems[0].reason, /RSDC template/);
   assert.equal(problems[0].amount, 3960);
+});
+
+test("LIVE RS scaffold + a referral fee = create, against the real 38-line harvest", () => {
+  // The D20 branch tests run against a synthetic scaffold built from MAPPING_ROWS, which
+  // by construction agrees with the mapping. This one runs against the actual harvested
+  // template, so it also proves the harvest genuinely has no GENO/REFERRAL line and no
+  // OTHER line collides with the new key — the thing a self-consistent fixture cannot say.
+  const lines = harvest("R261077-rs.json");
+  assert.equal(lines.filter((l) => l.key === REFERRAL_LINE_KEY).length, 0);
+  // ...and the GENO sum line IS there, unaffected, which is the no-collision proof.
+  assert.equal(lines.filter((l) => l.key === "GENO | OTHER | <N/A> | Expense").length, 1);
+
+  const { toCreate, problems } = matchMappingToLines(MAPPING_ROWS, lines, {
+    ...VALUES, DC_Rebate_Amount__c: 0, Adder_Referral_Fee_Qty__c: 1,
+  });
+  assert.equal(problems.length, 0, JSON.stringify(problems));
+  assert.equal(toCreate.length, 1);
+  assert.equal(toCreate[0].key, REFERRAL_LINE_KEY);
+  assert.equal(toCreate[0].amount, 500);
 });
 
 test("the RSDC scaffold is the RS scaffold plus exactly one line", () => {

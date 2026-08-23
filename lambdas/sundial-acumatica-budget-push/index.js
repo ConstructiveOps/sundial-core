@@ -130,7 +130,7 @@ export const MAPPING_ROWS = [
   { line: "Engineer Stamps", taskId: "ENGR", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Engineer_Stamps_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J17 / E55, from the Structural-Electrical Engineer Stamp adder. HARVEST-CONFIRMED 2026-08-20 (R261077 + R261066): ENGR | SUBCON | <N/A> | Expense is present in both live scaffolds, so the section 5 'ENGR?' guess was right and it is ENGR, not the neighbouring SUBCON line." },
   { line: "Subcontractor", taskId: "SUBCON", accountGroup: "SUBCON", type: "Expense", inventoryId: "<N/A>", amountField: "Subcontractor_Cost__c", hoursField: null, keyStatus: "harvested", note: "Sheet J18 / E56, from the Bird Blocking adder (per-watt cost x watts). HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds." },
   { line: "Audit Software", taskId: "SOFTWARE", accountGroup: "OTHER", type: "Expense", inventoryId: "<N/A>", amountField: "Adder_Software_Fee_Price__c*Adder_Software_Fee_Qty__c", hoursField: null, keyStatus: "harvested", note: "Sheet J19 / E60. HARVEST-CONFIRMED 2026-08-20: present in both live scaffolds. There is NO dedicated SF output field (left extras-only per gap doc section D), so the amount is the PRODUCT of the two adder fields - identical to what the calc computes, where a pass-through row's cost IS price x qty." },
-  { line: "Referral Fees", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "REFERRAL", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "harvested_absent", scaffoldOptional: true, createIfMissing: true, missingLineMessage: "This job carries a referral fee and the project has no GENO | OTHER | REFERRAL line. Creating it is implemented (D20) but DISABLED pending the sandbox hand-proof - see CREATE_GATE. Until then, add the line by hand in Acumatica and re-push.", note: "Sheet J20 / E63. KEY CHANGED 2026-08-22 (D20): was REFERRAL | OTHER | <N/A>, now GENO | OTHER | REFERRAL per Harmon's authoritative line spec. Distinct InventoryID means NO collision with the GENO | OTHER | <N/A> sum row - they are different keys under the same task. Harmon will NOT add the line to the RS/RSDC templates, so the push creates it when a job actually carries a referral fee: see REFERRAL_CREATE_SPEC and the three-branch behaviour there. This is the ONLY line the integration may ever create." },
+  { line: "Referral Fees", taskId: "GENO", accountGroup: "OTHER", type: "Expense", inventoryId: "REFERRAL", amountField: "Adder_Referral_Fee_Price__c*Adder_Referral_Fee_Qty__c", hoursField: null, keyStatus: "harvested_absent", scaffoldOptional: true, createIfMissing: true, missingLineMessage: "This job carries a referral fee and the project has no GENO | OTHER | REFERRAL line. The push normally CREATES it (D20), so seeing this message means CREATE_GATE has been closed - check why before working around it. Add the line by hand in Acumatica and re-push if you need to unblock the job.", note: "Sheet J20 / E63. KEY CHANGED 2026-08-22 (D20): was REFERRAL | OTHER | <N/A>, now GENO | OTHER | REFERRAL per Harmon's authoritative line spec. Distinct InventoryID means NO collision with the GENO | OTHER | <N/A> sum row - they are different keys under the same task. Harmon will NOT add the line to the RS/RSDC templates, so the push creates it when a job actually carries a referral fee: see REFERRAL_CREATE_SPEC and the three-branch behaviour there. This is the ONLY line the integration may ever create." },
 ];
 
 /**
@@ -170,23 +170,30 @@ export const REFERRAL_CREATE_SPEC = {
 };
 
 /**
- * THE GATE. Line creation is an unproven write mechanic against a system where a bad
- * write is not a bad row in a table — it is a wrong number in Harmon's books.
+ * THE GATE — **OPEN as of 2026-08-22, on the strength of the sandbox hand-proof.**
  *
- * SHIPS `false`. A test asserts that the committed value is `false`, so flipping it is a
- * visible diff in review and cannot be done by accident. Deliberately NOT an environment
- * variable: an env var can be flipped in the AWS console with no commit and no review,
- * and this repo has already been burned once by a load-bearing untracked dashboard
- * setting. Enabling this must be a code change someone signed off on.
+ * Line creation was an unproven write mechanic against a system where a bad write is not
+ * a bad row in a table, it is a wrong number in Harmon's books. It is now proven by hand:
+ * `docs/integrations/acumatica-referral-line-create-runbook.md` §Results, run against
+ * sandbox project **R261065**. All five gates passed —
  *
- * TO ENABLE: run `docs/integrations/acumatica-referral-line-create-runbook.md` against
- * sandbox project R269999 by hand, paste the results in, and flip this in the same PR.
+ *   - PUT-without-id DOES insert (the mechanic works at all)
+ *   - `AccountGroup` came back **OTHER** and `Type` **Expense**, DERIVED from the
+ *     REFERRAL item's posting class and agreeing with what we send, so
+ *     `REFERRAL_LINE_KEY` is correct and no mapping change was needed
+ *   - update-by-guid updates in place, no duplicate, count 1 throughout
  *
- * While `false`, an absent line with a real referral fee behaves EXACTLY as it does
- * today: a loud abort carrying `missingLineMessage`, before any PUT. That is not a
- * degraded fallback, it is the current shipped behaviour, and a test pins it.
+ * Deliberately NOT an environment variable: an env var can be flipped in the AWS console
+ * with no commit and no review, and this repo has already been burned once by a
+ * load-bearing untracked dashboard setting. A test asserts the committed value, so a
+ * change in EITHER direction is a visible diff someone signed off on.
+ *
+ * TO CLOSE IT AGAIN (and the trigger to watch for): `summary.created` should be `1` on
+ * the push that first posts a referral fee for a project and `0` on every push after. If
+ * it is ever `1` twice for the same project, verification is not doing its job — set this
+ * back to `false` and look at the project before anything else.
  */
-export const CREATE_GATE = { enabled: false };
+export const CREATE_GATE = { enabled: true };
 
 /**
  * Rows whose Acumatica key is not yet known.

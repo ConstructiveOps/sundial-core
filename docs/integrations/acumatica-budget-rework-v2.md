@@ -27,7 +27,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D14 | Small System 10-12 / 13-15 remain the ONLY revenue-only adders (price affects commission side; no cost line). | REVISED sheet |
 | D18 | **Live harvest results (2026-08-20, projects R261077 RS / R261066 RSDC).** (a) `SLPC OUT` has ONE space — the sheet's two-space H7 label is a typo. (b) `ENGR`, `SUBCON` and `SOFTWARE` all exist in the live template exactly as §5 guessed. (c) **`REFERRAL` does NOT exist** (D13 predicted it) — ~~Harmon must add it before any job can push a referral fee~~ **and never will: D20 has the push create it instead.** (d) DC rebate key is `DCREBATE · BILLING · <N/A> · Income`, and it is **the only difference between the RS and RSDC templates** (38 vs 39 lines). (e) Q12b settled by live math: **BALANCE excludes the rebate**, so the BALANCE row is unchanged. Both scaffolds are committed at `lambdas/sundial-acumatica-budget-push/harvest/` and the mapping is regression-tested against them. | Live reconcile |
 | D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`, **deployed 2026-08-21**) plus the Stage 2 calc rewrite (**built 2026-08-21**, §4i). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history, and a test pins that repopulating one changes nothing. Blank sales company **throws** (`SALES_COMPANY_MISSING`, HTTP 422) rather than defaulting to external — see the 83%-blank rollout note in §4i. | Tim, 2026-08-21 |
-| D20 | **THE REFERRAL LINE IS CREATED BY THE PUSH, NOT ADDED TO THE TEMPLATE — supersedes D13's template-ask.** Harmon will not add a REFERRAL line to the RS/RSDC templates. Authoritative line spec: ProjectTaskID **`GENO`** · AccountGroup **`OTHER`** · InventoryID **`REFERRAL`** · Description **"Referral Fee"** · UOM **`EA`** · Currency USD · no default qty or rate. **The mapping key therefore CHANGES from `REFERRAL · OTHER · <N/A>` to `GENO · OTHER · REFERRAL · Expense`** — a distinct InventoryID, so no collision with the `GENO · OTHER · <N/A>` other-costs sum row; they are two lines under one task. Three branches: present → update by guid; absent + 0 → inactive (the overwhelmingly common case); absent + non-zero → **create, then re-read and VERIFY before reporting success**, after which a re-push is an ordinary update. **This is the ONLY line the integration may ever create**, guarded on the exact key. Ships with `CREATE_GATE.enabled = false` — a repo constant, not an env var — until the sandbox hand-proof in `acumatica-referral-line-create-runbook.md` comes back clean. | Harmon / Tim, 2026-08-22 |
+| D20 | **THE REFERRAL LINE IS CREATED BY THE PUSH, NOT ADDED TO THE TEMPLATE — supersedes D13's template-ask.** Harmon will not add a REFERRAL line to the RS/RSDC templates. Authoritative line spec: ProjectTaskID **`GENO`** · AccountGroup **`OTHER`** · InventoryID **`REFERRAL`** · Description **"Referral Fee"** · UOM **`EA`** · Currency USD · no default qty or rate. **The mapping key therefore CHANGES from `REFERRAL · OTHER · <N/A>` to `GENO · OTHER · REFERRAL · Expense`** — a distinct InventoryID, so no collision with the `GENO · OTHER · <N/A>` other-costs sum row; they are two lines under one task. Three branches: present → update by guid; absent + 0 → inactive (the overwhelmingly common case); absent + non-zero → **create, then re-read and VERIFY before reporting success**, after which a re-push is an ordinary update. **This is the ONLY line the integration may ever create**, guarded on the exact key. **Gate OPENED 2026-08-22** after the sandbox hand-proof passed all five checks against project `R261065` (`acumatica-referral-line-create-runbook.md` §Results): PUT-without-id inserts, and `AccountGroup`/`Type` come back `OTHER`/`Expense` **derived from the REFERRAL item's posting class** and agreeing with the mapping — so no key change was needed. `CREATE_GATE.enabled` is a repo constant, not an env var, and a test asserts its committed value so a change in either direction is a visible diff. | Harmon / Tim, 2026-08-22 |
 | D21 | **COMMISSION BURDEN = 75% × (management + setter) ONLY.** **Neither rep line is burdened** — not the external one (never was) and **not the internal redline commission** either. This **amends D9 and the D19 Stage 2 implementation**, both of which burdened the internal rep amount, and it **supersedes the REVISED sheet's J12**, whose burden array includes K8 (the internal rep cell). The sheet is not to be "restored" here: under the redline model the internal rep amount is an order of magnitude larger than when that array was written, and Harmon has ruled. Effect on the fixture job: internal-deal burden 10,939.50 → **415.50**, identical to the same job sold externally. Nothing else moves — the external worked example was already 75% × (mgmt + setter). | Harmon / Tim, 2026-08-22 |
 
 ## 1. What survives from v1 (do not rebuild)
@@ -371,19 +371,28 @@ An unverified create **aborts the whole push before any other line is written**,
 one case where the project's state is unknown is not buried under twenty successful
 updates.
 
-**The gate.** `CREATE_GATE = { enabled: false }` — a repo constant, deliberately **not** an
-environment variable, because an env var can be flipped in the AWS console with no commit
-and no review and this repo has already been burned by a load-bearing untracked dashboard
-setting. A test asserts the committed value is `false`, so enabling it is a visible diff.
-While closed, an absent line with a real referral fee produces **exactly the pre-D20
-behaviour** — a loud abort before any PUT — which is itself pinned by a test, because
-"disabled" has to mean unchanged rather than quietly different.
+**The gate — OPEN since 2026-08-22.** `CREATE_GATE = { enabled: true }`, a repo constant
+and deliberately **not** an environment variable, because an env var can be flipped in the
+AWS console with no commit and no review and this repo has already been burned by a
+load-bearing untracked dashboard setting. A test asserts the committed value, so a change
+in **either** direction is a visible diff.
 
-To open it: run
+It opened on the strength of the hand-proof in
 [`acumatica-referral-line-create-runbook.md`](acumatica-referral-line-create-runbook.md)
-by hand against sandbox **R269999**, paste the results, and flip the constant in the same
-PR. If `AccountGroup` or `Type` come back different, the mapping key changes too — that is
-a mapping fix, not a verifier fix.
+§Results — sandbox project `R261065`, all five checks. The two real unknowns are settled:
+Acumatica **does** derive `AccountGroup` and `Type` from the inventory item's posting
+class, and it derives exactly `OTHER`/`Expense`, so `REFERRAL_LINE_KEY` is correct and no
+mapping change was needed. (Had it derived anything else, the fix would have been to
+re-key the mapping row, not to relax the verifier.) The sandbox is a refreshed copy of
+live, so its item posting classes are live's own configuration — which is what makes a
+sandbox result evidence about live here.
+
+**Closing the gate is a complete rollback**, not a half-state: an absent line with a real
+referral fee reverts to the pre-D20 loud abort before any PUT. Pinned by its own test, so
+"set `CREATE_GATE.enabled` back to `false`" stays a real answer if the create path ever
+misbehaves. **The trigger to watch for:** `summary.created` should be `1` on the push that
+first posts a referral fee for a project and `0` on every push after. Ever `1` twice for
+the same project means verification is not doing its job.
 
 **Guarded to one key.** Three redundant conditions must all hold before anything is
 created: the row opts in (`createIfMissing`), its key is exactly `REFERRAL_LINE_KEY`, and

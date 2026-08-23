@@ -1,5 +1,65 @@
 # Sundial — Progress Log
 
+## 2026-08-22 — D20 hand-proof passed; create gate opened
+
+Tim ran the runbook against the sandbox (project `R261065`) and all five gates passed:
+PUT-without-id inserts, `AccountGroup` and `Type` come back `OTHER`/`Expense`,
+update-by-guid updates in place, no duplicate, count 1 throughout. `CREATE_GATE.enabled`
+is now `true`.
+
+**The result that mattered was the derivation one.** Acumatica *does* derive `AccountGroup`
+and `Type` from the inventory item's posting class rather than taking them from the body —
+and it derives exactly what the mapping expects. Both are parts of the natural key, so the
+alternative outcome was a real line sitting under a key the mapping could never match,
+with the fix being a re-key of the mapping row rather than anything about the verifier.
+`REFERRAL_LINE_KEY` stands as written and no mapping change was needed. Since the sandbox
+is a refreshed copy of live, those posting classes are live's own configuration, which is
+what makes a sandbox answer evidence about live here.
+
+**The gate assertion inverted rather than disappeared.** The test that read "ships CLOSED"
+now reads "ships OPEN, on the strength of the sandbox hand-proof" and asserts `true`. The
+point of that test was never that the gate is off — it was that a change to it is a visible
+diff someone signed off on, and that property is symmetric. Closing it again is still a
+complete rollback to the pre-D20 loud abort, with its own test, so "set it back to `false`"
+stays a real answer if the create path misbehaves in production.
+
+**Opening the gate broke three tests, and two of them were right to break.** The suite's
+`withCreateEnabled` helper reset the gate to a hard-coded `false` in its `finally`, which
+was correct only while `false` was the committed value — with the gate open it would have
+leaked a CLOSED gate into every later test and made the suite order-dependent. It now saves
+and restores. The other two were tests that faked "a missing scaffold line" using the
+referral line, which with the gate open is now a *create* rather than an abort: the
+missing-line test moved to GENM (still update-only, and a template missing it is a broken
+scaffold), and the optional-row-with-its-own-message test moved to the DC rebate, which is
+now the only row where that mechanic applies.
+
+Added one test worth its keep: a create resolved against the **real 38-line RS harvest**
+rather than the synthetic scaffold. The D20 branch tests build their scaffold from
+MAPPING_ROWS, so they agree with the mapping by construction and cannot say anything about
+the actual template. This one asserts the harvest genuinely has no `GENO/REFERRAL` line,
+still has its `GENO/<N/A>` sum line, and that a referral fee against it produces exactly one
+create. 57 tests.
+
+**The runbook gained a tenant-identity check, and it is the durable part of this.** Tim's
+observation: sandbox and production share a base URL, and because the sandbox is a
+refreshed copy of live, project IDs exist in both. A transcript showing `R261065` and a
+`200` therefore does not say which system the write landed in — the secret's contents
+decide, and the secret changes without the URL changing. New Step 2, before the first
+write of any future proof, records `client_id` and `username` alongside a server-side
+`/Company` read, and both must agree. The old "confirm `$BaseUrl` is the sandbox" note was
+worse than useless and is replaced with a warning that the base URL is not an identifier.
+
+That check applies retroactively to this very proof, which predates it, so §Results says so
+plainly: the sandbox attribution is Tim's attestation — he ran it and knows which
+credentials were loaded — rather than something the transcript establishes. Recording the
+distinction costs a sentence and means the next person reading the evidence knows exactly
+what kind of evidence it is.
+
+The runbook is now written as a reusable procedure rather than a record of one run: the
+project ID is a variable with `R261065` as the worked example, the step numbering shifted
+to fit the new Step 2, and it closes with a "for the next write-proof" section carrying the
+tenant rule and the `summary.created` watch item.
+
 ## 2026-08-22 — D20: the referral line the push creates, shipped disabled
 
 The REFERRAL question resolved the other way from D13's plan. Harmon will not add the line
@@ -80,6 +140,8 @@ useful answers rather than failures.
 
 Tests: 56, up from 38. All three branches, gate open and closed, and four ways a create can
 go wrong: rejected, 200-with-nothing-created, 200-with-a-duplicate, and wrong AccountGroup.
+
+> **Gate opened later the same day** — the hand-proof passed. See the entry above.
 
 ## 2026-08-22 — D21: neither rep commission line is burdened
 

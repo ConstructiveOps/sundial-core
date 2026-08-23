@@ -11,7 +11,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D1 | **REVISED workbook** replaces HOLLAND (and BRADS) as the pinned regression fixture AND the S3 snapshot template. Fixture expectations from its cached example: contract 36,502 · watts 8,800 · commissions 3,169.50 (3rd-party 2,200 + mgmt 484 + geo 70 + burden 415.50) · Total Material 16,140.73 · GENO Other 2,550 · Engineer Stamps 250 · Subcontractor 528 · Software 30 · Referral 500 · Total Labor 2,605 · Labor Burden 1,953.75 · Job Cost (no comm) 24,557.48 · with comm 27,726.98 · Hours 63 (GENA 4 / S1 26.67 / S2 13.33 / S3 19) · Balance of Revenue 33,332.50 · GP$ 8,775.02 · GP% 24.04/26.33. | REVISED teardown |
 | D2 | DC rebate = **$0.45/W** (LightReach), NOT 30%. YES/NO toggle → revenue line `DC REBATE` on the RSDC template. | Tim, confirmed |
 | D3 | RSDC template exists in live Acumatica, built by Harmon. Code `RSDC`. Selected when Domestic Content = true at creation. | Tim, confirmed |
-| D4 | Dealer→Vendor resolution: **config map** built from the delivered Vendor export, matched to Dealer picklist values by Tim. Lives in code beside the tax-zone map pattern; flagged for config externalization. NOTE from the export: dealers AND individual salespeople exist as vendors (many individuals Inactive); map only what the picklist actually offers, prefer Active vendors, fail loudly on unmapped or Inactive. | Tim + vendor export |
+| D4 | **RESOLVED 2026-08-22 — map delivered.** `docs/integrations/dealer-vendor-map.csv` (53 rows) is the source of truth; `scripts/generate-dealer-vendors.mjs` emits `lib/acumatica-dealer-vendors.js` and `--check` fails a stale build. Lookup **trims then matches EXACTLY** — deliberately stricter than the tax-zone map, because these are picklist values rather than typed free text, so a near-miss is a signal not a spelling. Four distinct refusals, never a guess: `internal` (Harmon Solar — belt-and-braces behind the deal-type gate, D16), `inactive` (Derek Anderson → vendor 01863, fails loudly per the original rule), `unmapped`, `blank`. Ten dealers carry two picklist spellings each, intentionally mapped to one VendorID. **⚠ Coverage: 35 of 56 active picklist values resolve; 19 are unmapped and 128 existing Solar records carry one** — `scripts/verify-dealer-vendor-coverage.mjs` lists them. | Tim + vendor export |
 | D5 | Attributes are BOTH lifecycle dates and commission milestone amounts — confirmed by live pull (§7). Attribute sync ties into the budget/PO update path. | Live pull, confirmed |
 | D6 | Existing adder Price/Qty fields on Customer + Solar are PRICE (commission-side). New COST fields (Solar only) feed the budget. Quantities shared. | Tim, confirmed |
 | D7 | After a Solar record exists, SOLAR is the source of truth for adders + commissions; Customer page shows read-only Solar values, editable Customer fields hidden. | Tim, confirmed |
@@ -29,6 +29,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D19 | **REDLINE COMMISSION MODEL — supersedes the PPW-input model entirely.** `Total Commission ($) = Contract_Amount__c − (Redline × system watts) − Total Adder Price`. Redline by deal type × finance source: External+Lightreach **1.75**, External+other **1.85**, Internal+Lightreach **2.10**, Internal+other **2.20**. **Deal type** = INTERNAL when the sales-company field is "Harmon Solar", EXTERNAL otherwise (Customer `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) — this also **replaces D16's which-PPW-is-populated discriminator**. **Finance** = Lightreach via Customer `Financing_Partner__c` / Solar `Sales_Type_Partner__c` (note the casing differs per object: `Lightreach` vs `LightReach`; formula `=` is case-insensitive so both resolve). **Total Adder Price** = every priced adder: flat at Price×Qty, per-watt at Price×Watts×Qty, NS blocks 1-5 at the marked-up total `Material×(1+Markup/100) + Hours×33×1.75`; Referral included. Implemented as four FORMULA fields per object (`salesforce/v3-redline-commission-fields/`, **deployed 2026-08-21**) plus the Stage 2 calc rewrite (**built 2026-08-21**, §4i). **`Sales_Rep_Commission_PPW__c` and `Internal_Rep_Commission_PPW__c` are RETIRED as calc inputs** — fields stay on the objects for history, and a test pins that repopulating one changes nothing. Blank sales company **throws** (`SALES_COMPANY_MISSING`, HTTP 422) rather than defaulting to external — see the 83%-blank rollout note in §4i. | Tim, 2026-08-21 |
 | D20 | **THE REFERRAL LINE IS CREATED BY THE PUSH, NOT ADDED TO THE TEMPLATE — supersedes D13's template-ask.** Harmon will not add a REFERRAL line to the RS/RSDC templates. Authoritative line spec: ProjectTaskID **`GENO`** · AccountGroup **`OTHER`** · InventoryID **`REFERRAL`** · Description **"Referral Fee"** · UOM **`EA`** · Currency USD · no default qty or rate. **The mapping key therefore CHANGES from `REFERRAL · OTHER · <N/A>` to `GENO · OTHER · REFERRAL · Expense`** — a distinct InventoryID, so no collision with the `GENO · OTHER · <N/A>` other-costs sum row; they are two lines under one task. Three branches: present → update by guid; absent + 0 → inactive (the overwhelmingly common case); absent + non-zero → **create, then re-read and VERIFY before reporting success**, after which a re-push is an ordinary update. **This is the ONLY line the integration may ever create**, guarded on the exact key. **Gate OPENED 2026-08-22** after the sandbox hand-proof passed all five checks against project `R261065` (`acumatica-referral-line-create-runbook.md` §Results): PUT-without-id inserts, and `AccountGroup`/`Type` come back `OTHER`/`Expense` **derived from the REFERRAL item's posting class** and agreeing with the mapping — so no key change was needed. `CREATE_GATE.enabled` is a repo constant, not an env var, and a test asserts its committed value so a change in either direction is a visible diff. | Harmon / Tim, 2026-08-22 |
 | D21 | **COMMISSION BURDEN = 75% × (management + setter) ONLY.** **Neither rep line is burdened** — not the external one (never was) and **not the internal redline commission** either. This **amends D9 and the D19 Stage 2 implementation**, both of which burdened the internal rep amount, and it **supersedes the REVISED sheet's J12**, whose burden array includes K8 (the internal rep cell). The sheet is not to be "restored" here: under the redline model the internal rep amount is an order of magnitude larger than when that array was written, and Harmon has ruled. Effect on the fixture job: internal-deal burden 10,939.50 → **415.50**, identical to the same job sold externally. Nothing else moves — the external worked example was already 75% × (mgmt + setter). | Harmon / Tim, 2026-08-22 |
+| D22 | **COMMISSION PO SHAPE — from the live specimen** (PO 016102 · project R261078 · vendor 02118, 2026-08-22). One PO **per milestone payment**: Type `Normal`, VendorID from the D4 map, and a **single Non-Stock detail line** — InventoryID `M1&M2COM`, OrderQty 1, UOM `EA`, `UnitCost = ExtendedCost =` the payment amount, line-level `Project` + `ProjectTask` `SLPC OUT`, LineDescription `Outside Sales commissions`. **Account 5450 / Subaccount 02 / TaxCategory LABSERV / Warehouse MAIN / Location MAIN / Terms 30D / Branch HARMON are DERIVED** from the item and vendor, so the create body is built MINIMAL and the derived values are VERIFIED against the specimen on re-read — sending them would put a second, silently-drifting copy of Harmon's item configuration in the repo. **M1/M2 identity is the Description** (`Sales Commission M1 — <ProjectID>`), which is a LABEL: idempotency is the OrderNbr stored in Salesforce, **never a description scan**. **Freeze rule reads header Status** — `Open`/`On Hold` updatable by PUT with header guid + line id; `Completed`/`Closed`/`Cancelled` frozen, delta lands in M2 (§6). | Harmon / Tim, 2026-08-22 |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -237,7 +238,28 @@ Test suite: **188 checks** (88 cells / 55 fields / 16 extras / 29 behaviours), u
 All old 2,200-based commission expectations removed — grep for `2200`, `2754`, `3169.5`,
 `33332.5`, `8775.02` returns nothing.
 
-### 4f. PO tracking fields — SOLAR only (draft, pending Q2/Q5b).
+### 4f. PO tracking fields — SOLAR only — **GAP LIST FOR REVIEW, NOT BUILT**
+
+**Verified absent by live describe, 2026-08-22: no `Commission_PO_*` field exists on
+`Sundial_Solar__c`.** Eight proposed fields are written up in
+[`commission-po-field-gap.md`](commission-po-field-gap.md) — two OrderNbr, two amount, two
+created-at, plus status and error. Deliberately **not** packaged: naming Salesforce fields
+on Harmon's behalf is how an org ends up with two fields meaning the same thing. Approve
+or amend the list and the additive package follows.
+
+Two things from that document worth surfacing here:
+
+- **The OrderNbr fields are the idempotency key and there is no substitute.** Acumatica
+  order numbers are zero-padded strings (`016102`), so they must be **Text, not Number** —
+  a Number silently drops the leading zero. The rejected alternative was searching
+  Acumatica for a PO whose description looks right; a description scan matches a
+  hand-typed PO and misses a renamed one, and both failure modes are Harmon paying a
+  dealer twice.
+- **`Bill_Out_in_Acumatica_Requested__c` / `_2__c` already exist** and are labelled "M1 /
+  M2 Bill Out in Acumatica Requested". They are Harmon's manual **AR** request markers,
+  not the **AP** purchase order this engine raises — but they sit in the same conceptual
+  space, so confirm that reading before adding more M1/M2 fields beside them.
+
 
 ### 4g. Create Project mapping deltas
 ADD: §4a ×14 Customer pairs, §4b ×8 Customer NS fields, `Internal_Rep_Commission_PPW__c`.
@@ -440,8 +462,53 @@ confirm against the org rather than the saved dumps; Q12c (the `DLR` line); Harm
 sign-off on APPT COM; and Harmon adding a REFERRAL line if referral fees are to be pushed
 at all.
 
-## 6. PO engine spec (pending Q2/Q5b)
-Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complete, M2 = balance at Glass on Roof; internal 75/25 (⚠ Q2 PO-vs-payroll); vendor via D4 config map; freeze rule on released POs; SF write-back per §4f; sandbox hand-proof first. Live attribute pull CORROBORATES: R251282 shows SLSCOM1 = exactly 2500 (cap hit), SLSCOM2 = 4814 balance.
+## 6. PO engine spec — **BUILT 2026-08-22, GATED OFF** (`lambdas/sundial-acumatica-commission-po/`)
+
+One PO per milestone payment to the dealer who sold the job. **Internal deals raise no PO
+at all** — internal commission is payroll (D16).
+
+| Milestone | Amount | Fires at |
+|---|---|---|
+| **M1** | `min(50% of commission, $2,500)` | Site Audit Complete (**Q13 — field not identified**) |
+| **M2** | the balance | Glass on Roof (**Q13**) |
+
+The cap is corroborated by the live attribute pull on R251282: SLSCOM1 = **2500.00
+exactly** and SLSCOM2 = **4814.00**, i.e. a 7,314 commission split by the cap biting. A
+round 2,500 appearing in live data is the strongest evidence available that the rule is
+stated correctly, so it is the pinned regression case.
+
+**M1 is rounded and M2 is the remainder**, never rounded independently — rounding both
+lets them miss the total by a cent, and a cent that appears in a report but not a payment
+is somebody's afternoon.
+
+**Shape: D22**, from live specimen PO 016102. Body built minimal, derived values verified
+against the specimen on re-read — the same create-then-verify discipline as D20, for a
+sharper reason: a budget line is a number in a plan, a purchase order instructs a payment.
+A wrong derived `Account` posts real cost to the wrong GL account, which nothing
+downstream flags.
+
+**Vendor** via the D4 map, which refuses four distinct ways rather than guessing. The
+internal exclusion there is belt-and-braces; the deal-type gate in `planCommissionPos` is
+the primary defence and does not consult the sales company at all.
+
+**Freeze rule** (D22): `Open`/`On Hold` updatable by PUT with header guid + line id;
+`Completed`/`Closed`/`Cancelled` frozen, and the refusal **reports the delta** so it can
+land in M2 rather than vanishing.
+
+**Idempotency**: the OrderNbr stored on the Salesforce record. Never a description scan.
+
+### THREE blockers, all outside the code
+
+1. **§4f fields do not exist** — no idempotency without them (gap list above).
+2. **Q13 — the milestone triggers are not identified.** Read the formula on
+   `Days_to_Glass_on_Roof__c`; whatever it subtracts from is the M2 trigger.
+3. **Hand-proof** — [`acumatica-commission-po-runbook.md`](acumatica-commission-po-runbook.md),
+   which also records what a PO does to the SLPC OUT line's **committed** columns. The
+   budget push writes `OriginalBudgetedAmount`, so there is no write conflict by
+   construction, but step 6 checks that rather than assuming it.
+
+`PO_GATE.enabled` ships `false`, a repo constant rather than an env var, pinned by a test —
+same mechanism and same reasoning as D20's `CREATE_GATE`. **39 tests.**
 
 ## 7. Attribute map (live enumeration, project R251282 — now concrete)
 | AttributeID | Description | Fed by | When |
@@ -453,11 +520,46 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
 | COMDATE | Commissioning Date | **Commission_of_System__c** | portal-save |
 | JOBTYPE | Job Type (RS / RSDC value observed "RS") | template code at creation | Layer-1 push |
 | KW | Kilowatts | System_Size__c | Layer-1 / budget push |
-| SALESPERSO | Sales Person (name) | rep/dealer name field (Tim to name) | Layer-1 / budget push |
+| SALESPERSO | Sales Person (name) | **`Sales_Company_Harmon_Solar_or_Third__c`** (Q10 resolved 2026-08-22) | Layer-1 / budget push |
 | SLSCOM1 / SLSCOM2 | Salesperson commission M1/M2 | PO engine amounts | budget/PO push |
 | MGRCOM1 / MGRCOM2 | Manager comm M1/M2 (75/25 of .04×W — verified 382.80/127.60 @12.76kW) | calc (mgr component) | budget/PO push |
 | MGMTOR1 / MGMTOR2 | Mgmt override M1/M2 (75/25 of .015×W — verified 143.55/47.85) | calc (overhead component) | budget/PO push |
-⚠ Q10: Tim supplies the five date-field API names + SALESPERSO source. Mechanism: PUT Project with Attributes array (id/AttributeID + Value); hand-prove once in sandbox.
+**Q10 fully resolved 2026-08-22. Built as `lib/acumatica-attributes.js` (15 tests); the
+PUT is hand-proof-gated.**
+
+**SALESPERSO carries the selling COMPANY, not a person.** The AttributeID says "Sales
+Person", but R251282's value is "Familia Sicairos" — a `Sales_Company_Harmon_Solar_or_Third__c`
+picklist value. For an internal deal it reads the literal "Harmon Solar" rather than the
+Harmon rep. That matches the live data and Harmon's reporting; it is not a placeholder.
+
+**The rep milestone pair follows a DIFFERENT rule from the other two, and this is the
+easiest thing here to get wrong:**
+
+| Pair | Split |
+|---|---|
+| `SLSCOM1/2` | third-party: `min(50%, $2,500)` then the balance (§6) · **internal: 75/25** (D16) |
+| `MGRCOM1/2` | 75/25 of the `.04` component, whichever way the deal was sold |
+| `MGMTOR1/2` | 75/25 of the `.015` component, whichever way the deal was sold |
+
+An internal deal raises **no PO** but still gets SLSCOM1/2 — the money goes through
+payroll and the attributes still have to show it. Filling them from the third-party
+milestone rule would understate the first payment on every internal job over $5,000,
+which under D19's redline model is most of them. It also reads the **internal** amount
+field, not the third-party one.
+
+MGRCOM and MGMTOR stay **separate** attributes. D10 keeps the two components stored
+precisely so this split is possible; the budget's SLMC line sums them, and summing them
+here too would collapse the distinction the attributes exist to make.
+
+**Blank values are OMITTED, never sent as `""`.** A milestone that has not happened is not
+a milestone someone cleared, and writing `""` to every unreached date would make the sync
+capable of erasing a value entered in Acumatica by hand.
+
+⚠ **That protection depends on an unproven assumption**: that a partial `Attributes` array
+MERGES rather than REPLACES. If PUT replaces the set, omitting an attribute deletes it and
+the sync needs a read-modify-write cycle before it can be wired at all. **Step 5 of
+[`acumatica-attribute-sync-runbook.md`](acumatica-attribute-sync-runbook.md) is that
+test**, and it is the reason that runbook exists.
 
 ## 8. Template selection (RS / RSDC) — unchanged from prior draft; JOBTYPE attribute should carry the same code.
 
@@ -468,16 +570,18 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
 | Q2 | **RESOLVED (D16)** | Internal = payroll, no PO; same attributes (75/25), SLPC·SALESCOMM cost line. |
 | Q3 | **RESOLVED (D11)** | SUBCON lines contribute to totals + push. |
 | Q4 | **RESOLVED (D11)** | Software = SOFTWARE cost line, contributes. |
-| Q5 | **(a) RESOLVED (D12)**; (b) OPEN | LR Warranty → GENO cost. (b) Example live commission PO to clone shape. |
+| Q5 | **(a) RESOLVED (D12); (b) RESOLVED 2026-08-22** | LR Warranty → GENO cost. (b) Live specimen supplied: **PO 016102, project R261078, vendor 02118**. Shape recorded as D22 and in §6. |
 | Q6 | OPEN | Expansion Pack +4h / Powerwall +16h — auto or manual? (Sheet: manual.) |
 | Q7 | **OBSOLETED by D19** | The per-adder commission question disappears: commission is now Contract − Redline×W − Total Adder Price, so adders reduce commission in aggregate rather than each earning a per-adder rate. §4e per-adder commission formula fields are **not needed and will not be built**. |
 | Q8 | **RESOLVED** | Setter line = APPT COM (sheet label "APPT COMM"). |
 | Q9 | **RESOLVED (D17)** | Setter__c populated → apply Geo_Commission_Amount__c ($70 dflt). |
-| Q10 | **RESOLVED (dates)** / SALESPERSO source still open | Five date fields mapped (§7); confirm SALESPERSO source (dealer/rep name field). |
+| Q10 | **FULLY RESOLVED 2026-08-22** | Five date fields mapped (§7), all verified present by live describe. **SALESPERSO = `Sales_Company_Harmon_Solar_or_Third__c`** — consistent with R251282, whose SALESPERSO reads "Familia Sicairos", a value of that picklist. Note the attribute therefore carries the selling COMPANY, not an individual. |
 | Q11 | **RESOLVED (D10, Tim-confirmed)** | Two stored fields (.04/.015), summed for the SLMC line, split for attributes. |
-| Q12a | **RESOLVED (D18)** | SOFTWARE + ENGR + SUBCON exist in the live template. **REFERRAL does NOT** — the mapping treats it as `scaffoldOptional`, so a job with no referral fee is unaffected, but one that HAS a referral fee aborts loudly. **Harmon action: add a REFERRAL line to the RS/RSDC templates.** |
+| Q12a | **RESOLVED (D18), then SUPERSEDED (D20)** | SOFTWARE + ENGR + SUBCON exist in the live template. **REFERRAL does NOT, and will not** — D20 re-keys it to `GENO · OTHER · REFERRAL` and has the push create the line on demand. No Harmon template action. |
 | Q12b | **RESOLVED (D18)** | BALANCE income **excludes** the DC rebate — confirmed by the live math. The rebate posts to its own `DCREBATE` income line. No change to the BALANCE row. |
 | Q12c | OPEN (Harmon) | Is the `DLR` dealer-fee expense line correct, given the calc already nets the dealer fee out of Balance of Revenue? Carried over from v1 rather than dropped, because the line exists in the live scaffold. |
+| Q13 | **OPEN (Tim) — blocks the PO engine** | §6 fires M1 "at Site Audit Complete" and M2 "at Glass on Roof". **Neither exists as a field.** Candidates: `Audit_Date_and_DateTime__c` / `Audit_Photos_Received__c` for M1; `Stanchion_Installation__c` / `Install_Complete__c` for M2. **Fastest answer: read the formula on `Days_to_Glass_on_Roof__c`** — whatever date it subtracts from IS the M2 trigger. Not guessed, because it decides when a dealer gets paid. |
+| Q14 | **OPEN (Harmon) — blocks 128 records** | 19 active Sales Company picklist values have no Acumatica vendor in the D4 map, and 128 existing Solar records carry one. Each is a commission PO that will refuse (correctly) until Harmon supplies the VendorID. Run `scripts/verify-dealer-vendor-coverage.mjs` for the current list. |
 
 ## 10. Execution plan
 **A — SF metadata:** deploy built package now + addendum (Internal_Rep_Commission_PPW__c ×2) + follow-up existing-field package (defaults/relabels). Then FLS.
@@ -499,8 +603,8 @@ Unchanged from prior draft: 3rd-party M1 = min(50%, $2500) at Site Audit Complet
   - **23 tests added** (the Lambda had none); suite 316 green.
   - **GATE: the harvest has run and both scaffolds reconcile clean offline.** Remaining before a live push: Tim re-runs the live reconcile after merge/deploy (to confirm against the org, not the saved dumps), Q12c on the `DLR` line, Harmon sign-off on APPT COM, and Harmon adding a REFERRAL line if referral fees are ever to be pushed.
 **C (remaining):** RSDC template selection; MAPPING_ROWS freeze after the harvest.
-**D — PO engine:** after Q2/Q5b + vendor map + sandbox hand-proof.
-**E — attribute sync:** after Q10; sandbox hand-proof.
+**D — PO engine: 🔶 BUILT 2026-08-22, GATED OFF** (`lambdas/sundial-acumatica-commission-po/`, 39 tests). Milestone amounts, the D22 body shape, create-then-verify, freeze rule, and idempotency-by-stored-OrderNbr are all built and tested. Vendor resolution is `lib/acumatica-dealer-vendors.js`, generated from the CSV (14 tests). **Three blockers remain, none of them code:** the §4f fields do not exist (gap list, for review); Q13 — the milestone triggers are not identified; and the sandbox hand-proof. `PO_GATE.enabled = false` until all three clear.
+**E — attribute sync: 🔶 BUILT 2026-08-22** (`lib/acumatica-attributes.js`, 15 tests). Q10 fully resolved. The builder reproduces R251282's live commission attributes exactly (2500/4814 · 382.80/127.60 · 143.55/47.85) and omits blanks rather than blanking them. **One unproven assumption gates the wiring:** whether a partial `Attributes` PUT merges or replaces — step 5 of the attribute runbook.
 **F — frontend:** commissions v3 inputs, COST adders, D7 read-only tabs, mapping deltas, PO/attribute status display.
   - **⚠️ PREREQUISITE — four existing output fields CHANGED MEANING in v2** (`budget-v2-output-gap.md` §A/§E). A Budget UI still on v1 semantics shows **zero commission on every internal deal**, **double-counts CO fee + permit** (`Constructive_Ops_Total__c` is now a *subset* of `Total_Other_Budget__c`), **double-counts QA** (`Audit_Labor_Cost__c` is now audit+QA), and understates labor (`Total_Labor_Budget__c` excludes burden; use `Total_Labor_And_Burden__c`). None of these throws — they all render a plausible wrong number on a margin screen. Read §A before touching the Budget UI.
 **Gates:** REVISED fixture green → deploy calc; reconcile 0-problems live RS + RSDC → enable push; sandbox PO proof → enable PO stage; supervised live end-to-end (one 3rd-party + one RSDC job).

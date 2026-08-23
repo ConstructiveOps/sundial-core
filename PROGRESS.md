@@ -1,5 +1,109 @@
 # Sundial — Progress Log
 
+## 2026-08-22 — the three PO/attribute TODOs close: dealer map, commission PO engine, attribute sync
+
+D4's vendor map, Q5b's live PO specimen and Q10's SALESPERSO source all landed together,
+which unblocks execution-plan stages D and E. Both are built; both are gated off pending
+hand-proofs, and the PO engine has two further blockers that are not code.
+
+**The dealer map is generated, not hand-written.** The CSV is the source of truth and the
+thing worth reviewing in a PR; `scripts/generate-dealer-vendors.mjs` emits the module, and
+`--check` is wired into a test so an un-regenerated CSV is a red suite rather than a
+lookup quietly returning last week's answer.
+
+Matching is **trim, then exact** — deliberately stricter than the tax-zone map next door,
+which case-folds and strips punctuation. That map takes free-text city names a human
+typed; this one takes picklist values, where the exact string is known and a near-miss is
+a signal that something is wrong rather than a spelling to forgive. Ten dealers carry two
+picklist spellings each and are mapped as separate keys to one VendorID, including
+`Residental Solar Brokers` alongside `Residential Solar Brokers` — deleting the
+misspelling would break every deal carrying it, the same trap as Acumatica's `RESIDENTAL`
+inventory id.
+
+Four refusals rather than one, because each needs a different fix: `internal`, `inactive`,
+`unmapped`, `blank`. The Harmon Solar exclusion is **belt-and-braces** as specified — the
+deal-type gate in the PO engine is the primary defence and does not consult the sales
+company at all — and both are tested, including the case where the gate is bypassed.
+
+**The coverage check is the finding worth acting on.** Cross-referencing the map against
+the live picklist: 35 of 56 active values resolve, and **19 do not — carried by 128
+existing Solar records.** Every one of those is a commission PO that will refuse, which is
+correct behaviour and useless as a surprise, so `scripts/verify-dealer-vendor-coverage.mjs`
+turns it into a list with record counts. Logged as Q14 for Harmon.
+
+**The PO engine is built around one asymmetry.** The budget push updates scaffold lines,
+where a wrong number is corrected by the next push. A purchase order authorises a
+*payment*: a duplicate is Harmon paying a dealer twice, a wrong vendor pays the wrong
+company. So every write is create-then-verify-by-re-read, and the create body is
+deliberately **minimal**. Account 5450, Subaccount 02, TaxCategory LABSERV, Warehouse and
+Location MAIN, Terms 30D, Branch HARMON, LineType Non-Stock are all derived from the item
+and the vendor — sending them would put a second, silently-drifting copy of Harmon's
+configuration in this repo, so they are verified against the specimen instead of asserted.
+
+The M1 cap reproduces R251282's live split exactly (2,500 / 4,814 on a 7,314 commission),
+and that a round 2,500 shows up in real attribute data is the best evidence available that
+§6's rule is stated correctly — so it is the pinned regression case. M1 is rounded and M2
+is the remainder, never rounded independently, so they always sum to the cent.
+
+**A design error caught by its own test:** I first listed `Status: "Open"` among the
+specimen's derived defaults, which made verification reject every On Hold purchase
+order — and reject it with a message about the specimen, pointing at entirely the wrong
+thing. Status is mutable lifecycle state, not configuration Acumatica derived once. It is
+now checked only where it means something: the freeze rule, and a separate check that a
+*brand new* PO has not arrived already frozen, which would leave it permanently
+uncorrectable.
+
+Idempotency is the stored OrderNbr and nothing else. The rejected alternative — searching
+Acumatica for a PO whose description looks right — matches a hand-typed order and misses a
+renamed one, and both failure modes are a duplicate payment. The description is a label.
+
+**Two blockers on the PO engine are Salesforce-side and I have not worked around either.**
+A describe confirms no `Commission_PO_*` field exists, so there is nowhere to store the
+OrderNbr and therefore no idempotency at all. Eight fields are proposed in a gap list
+**for review rather than built**, because naming fields on Harmon's behalf is how an org
+ends up with two fields meaning the same thing. Text not Number for the order numbers —
+`016102` loses its leading zero as a Number, the same trap as the vendor ids. Worth
+flagging that `Bill_Out_in_Acumatica_Requested__c` / `_2__c` already exist and are labelled
+M1/M2: they are AR request markers, not this AP purchase order, but they sit close enough
+that the reading should be confirmed before more M1/M2 fields go in beside them.
+
+The second is Q13: §6 fires M1 "at Site Audit Complete" and M2 "at Glass on Roof", and
+neither exists as a field. There are candidates, but picking one is guessing about when a
+dealer gets paid. There is, however, a `Days_to_Glass_on_Roof__c` **formula** on the
+object — whatever date it subtracts from is the M2 trigger, and reading it in Setup is a
+thirty-second answer that the integration user cannot get for itself (no Metadata API).
+
+**Attribute sync closes Q10 and has one rule that is easy to get backwards.** SALESPERSO
+is the sales-company field, which means the attribute named "Sales Person" carries the
+selling *company* — "Harmon Solar" on an internal deal. That matches the live data, so it
+is documented rather than worked around.
+
+The trap is that the rep milestone pair follows a **different split from the other two**.
+Manager and overhead are 75/25 whichever way the deal was sold; the rep pair is the capped
+milestone rule for third-party but **75/25 for internal** (D16). An internal deal raises no
+PO yet still gets SLSCOM1/2, because the money goes through payroll and the attributes
+still have to show it — and using the capped rule there would understate the first payment
+on every internal job over $5,000, which under D19's redline model is most of them. It also
+has to read the internal amount field rather than the third-party one. All three splits are
+pinned against R251282's live values.
+
+Blanks are omitted rather than sent as empty strings, so an unreached milestone can never
+erase a date somebody typed into Acumatica by hand. **That protection rests on an unproven
+assumption** — that a partial `Attributes` PUT merges rather than replaces — and step 5 of
+the attribute runbook is the test for it. If it replaces, the sync needs a
+read-modify-write cycle before it can be wired at all, which is a design change rather
+than a fix.
+
+Both runbooks carry the tenant-identity check from the referral-line proof. The PO runbook
+also records what a purchase order does to the SLPC OUT line's committed columns: the
+budget push writes `OriginalBudgetedAmount`, so there is no conflict by construction, but
+step 6 checks that rather than assuming it — and its step 8 probes whether Acumatica
+enforces the freeze rule itself or whether ours is the only thing preventing a silent edit
+to a released document. Either answer is useful; the second one is worth knowing.
+
+Repo-wide: **419 tests green** (53 new — 14 dealer map, 39 PO engine, 15 attributes, less
+overlap in the count).
+
 ## 2026-08-22 — D20 hand-proof passed; create gate opened
 
 Tim ran the runbook against the sandbox (project `R261065`) and all five gates passed:

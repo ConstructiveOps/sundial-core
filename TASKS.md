@@ -58,6 +58,34 @@ Branch `feat/redline-commissions`. Three stages with a boundary at each; **Stage
 ### Consequences already recorded
 - [x] **Q7 OBSOLETED and §4e CANCELLED.** Per-adder commission formula fields are not needed and will not be built — adders now reduce the commission pool in aggregate, so there is no per-adder rate to define.
 
+## PO engine + attribute sync — the three TODOs closed (2026-08-22)
+
+Branch `feat/redline-commissions`. **Build only — nothing deployed, both write paths gated off.**
+
+### Stage A — dealer→vendor map (D4) — DONE
+- [x] `docs/integrations/dealer-vendor-map.csv` committed (53 rows) as the **source of truth**; `scripts/generate-dealer-vendors.mjs` emits `lib/acumatica-dealer-vendors.js`, and `--check` fails a stale build (a test runs it, so an un-regenerated CSV is a red suite rather than a stale lookup).
+- [x] **Trim, then EXACT match** — deliberately stricter than the tax-zone map. Those are free-text city names a human typed; these are picklist values, so a near-miss is a signal rather than a spelling to forgive.
+- [x] **Four distinct refusals, never a guess:** `internal` (Harmon Solar), `inactive` (Derek Anderson → 01863, fails loudly per D4), `unmapped`, `blank`. Each names a different fix, which is why they are not one error.
+- [x] The internal exclusion is **belt-and-braces** — the deal-type gate in `planCommissionPos` is the primary defence and doesn't consult the sales company at all. Both are tested, including the "gate bypassed" case.
+- [x] Ten dealers carry two picklist spellings each, mapped to one VendorID — including `Residental` / `Residential Solar Brokers`, where deleting the misspelling would break every deal carrying it.
+- [!] **⚠ Q14 (Harmon): 19 of 56 active picklist values have NO vendor, and 128 existing Solar records carry one.** Each is a commission PO that will refuse until Harmon supplies the VendorID. `scripts/verify-dealer-vendor-coverage.mjs` lists them with record counts.
+
+### Stage B — commission PO engine (D22) — BUILT, GATED OFF
+- [x] `lambdas/sundial-acumatica-commission-po/` — 39 tests. M1 = `min(50%, $2500)`, M2 = balance; **the R251282 live split (2500 / 4814) is the pinned case**. M1 rounded, M2 the remainder, so they always sum to the cent.
+- [x] **Create body MINIMAL** per the specimen — Account/Subaccount/TaxCategory/Warehouse/Terms/Branch/LineType are all DERIVED and none is sent. Sending them would put a second, silently-drifting copy of Harmon's item configuration in the repo. They are **verified** against the specimen on re-read instead.
+- [x] Create-then-verify, freeze rule (`Open`/`On Hold` updatable; frozen statuses report the delta for M2), and **idempotency by stored OrderNbr — never a description scan**, which would match a hand-typed PO and miss a renamed one.
+- [x] **Caught in build:** an early version listed `Status: "Open"` among the derived defaults, so verification rejected every On Hold order — and blamed the specimen. Status is lifecycle state; it is now checked only where it means something (the freeze rule, and "a new PO must not arrive already frozen").
+- [!] **BLOCKER 1 — §4f fields do not exist.** Verified by describe. Gap list in `docs/integrations/commission-po-field-gap.md`, **for review, not built** — no idempotency without a stored OrderNbr, and Text not Number because `016102` loses its leading zero.
+- [!] **BLOCKER 2 — Q13: the milestone triggers are not identified.** No `Site_Audit_Complete__c`, no glass-on-roof field. **Fastest answer: read the formula on `Days_to_Glass_on_Roof__c`** — whatever it subtracts from is the M2 trigger. Not guessed; it decides when a dealer gets paid.
+- [ ] **BLOCKER 3 — TIM: run `docs/integrations/acumatica-commission-po-runbook.md`.** Includes the committed-amount check you asked for (step 6) and a freeze-rule probe (step 8) that is useful either way it answers.
+
+### Stage E — attribute sync (Q10 closed) — BUILT
+- [x] **SALESPERSO = `Sales_Company_Harmon_Solar_or_Third__c`.** Documented that it therefore carries the selling COMPANY, not a person — "Harmon Solar" on internal deals.
+- [x] `lib/acumatica-attributes.js`, 15 tests. Reproduces R251282's live values exactly: SLSCOM 2500/4814, MGRCOM 382.80/127.60, MGMTOR 143.55/47.85.
+- [x] **The rep pair follows a different rule from the other two** — third-party is the capped milestone split, **internal is 75/25** (D16), and it reads the internal amount field. Using the capped rule would understate the first payment on every internal job over $5,000, which under D19 is most of them.
+- [x] Blanks are **omitted, never sent as `""`** — an unreached milestone is not a cleared one, and blanking would let the sync erase hand-entered values.
+- [ ] **TIM: run `docs/integrations/acumatica-attribute-sync-runbook.md`.** **Step 5 is the one that matters:** does a partial `Attributes` PUT merge or replace? If it replaces, the omit-blanks protection is worthless and the sync needs read-modify-write — a design change, not a tweak.
+
 ## MAPPING_ROWS v3 + re-harvest prep (2026-08-20, Workstream C)
 
 Branch `feat/mapping-v3`. **Build + report only — no deploy, no live push.** Gate discipline: nothing pushes until the re-harvest verifies.

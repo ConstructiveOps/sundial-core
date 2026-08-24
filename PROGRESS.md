@@ -46,6 +46,37 @@ none. `Unverified` is kept separate from `Failed` (a write that may have partly 
 needs a different response from one that did not), and `Attribute_Synced_At__c` means
 last-known-good and does not move on failure, so a stale record cannot look fresh.
 
+**Route wiring failed, then shipped (same day).** `wire-attributes-sync-route.ps1` died at
+`put-method` having already created the resource, printing nothing usable. The cause was a
+trap this repo had already found and documented once:
+**`--api-key-required $false` renders as the bare word `False`**, the CLI has no
+value-taking form of that option, and it errored with
+`Unknown options: --api-key-required, False` — so `put-method` never ran. Then **`2>$null`
+swallowed the message**: under `$ErrorActionPreference='Stop'`, a native command's stderr
+becomes a terminating `NativeCommandError`, which kills the script and discards the one
+thing that would have explained it. Both traps are written up in
+`wire-design-request-route.ps1`; the new script simply had not adopted that pattern, which
+is the actual lesson — a documented trap only helps if the next script copies the fix
+rather than the shape.
+
+Repaired against the live gateway and deployed. Verified live: POST with a bad bearer
+returns a **JSON 401** `AUTH_INVALID_TOKEN`, no auth header returns 401 `AUTH_NO_TOKEN`
+(not 403 Missing Authentication Token), the OPTIONS preflight returns 200 with
+`OPTIONS,POST`, and the ACAO header echoes the production origin.
+
+Two things the repair itself taught. The Windows AWS CLI **cannot read a Git-Bash `/tmp`
+path** — passing `file:///tmp/...` failed mid-repair and left the OPTIONS method without an
+integration, briefly creating exactly the state that blocks every deploy on the API. And a
+403 immediately after `create-deployment` was propagation, not a fault; the same call
+seconds later returned the correct 401. Both are now noted in the script.
+
+The rewritten script checks `$LASTEXITCODE` after every call, surfaces the real stderr with
+PowerShell's ErrorRecord decoration stripped, tolerates named "already exists" outcomes so
+a partial run is repaired by re-running, passes the MOCK template and CORS params as no-BOM
+JSON files, and **refuses to deploy if any method anywhere on the API lacks an
+integration** — because that blocks every deploy, not just its own route, and the symptom
+points nowhere useful. A full idempotent re-run tolerated every step.
+
 **Deploy fix (same day).** The v5 package failed its first Workbench deploy:
 `Value too long for field: Description maximum length is:1000` —
 `Attribute_Sync_Status__c`'s description was 1,137 characters. Trimmed to 929, keeping the

@@ -125,9 +125,11 @@ function redlineFormula(o) {
  * The four per-watt adders share one `* watts` factor rather than repeating the watts
  * expression four times; that is purely a compiled-size measure and changes no result.
  *
- * NS blocks use the MARKED-UP total: Material x (1 + Markup/100) + Hours x 33 x 1.75.
- * Markup is a Percent field, which a formula reads as a whole number (25 = 25%), hence
- * the /100 — the same conversion budgetCalc does.
+ * NS blocks use the MARKED-UP total: Material x (1 + Markup) + Hours x 33 x 1.75.
+ *
+ * ⚠️ NO /100 on the markup — see the long note inside the function. A FORMULA reads a
+ * Percent field already in the decimal domain (a true 25% reads as 0.25), unlike the REST
+ * API which reads it as 25. budgetCalc keeps its /100 because it reads through SOQL.
  */
 function totalAdderPriceFormula(o) {
   const flat = FLAT_ADDERS.map(
@@ -137,9 +139,27 @@ function totalAdderPriceFormula(o) {
     "(" +
     PPW_ADDERS.map((b) => `${B(`Adder_${b}_Price__c`)}*${B(`Adder_${b}_Qty__c`)}`).join("+") +
     `)*${wattsExpr(o)}`;
+  // ⚠️ NO `/100` ON THE MARKUP, and that is the fix rather than an omission.
+  //
+  // A Salesforce FORMULA sees a Percent field ALREADY in the decimal domain: a field
+  // storing a true 25% (API/SOQL value 25) reads as 0.25 inside a formula. Measured on a
+  // live record by scripts/probe-percent-field-domain.mjs — writing 25 through REST and
+  // reading Total_Adder_Price__c back showed the formula multiplying by 1.0025, i.e. it
+  // saw 0.0025 after the old `/100`.
+  //
+  // So `(1 + Markup/100)` divided twice and produced a ~0% markup. The correct formula
+  // term is `(1 + Markup)`.
+  //
+  // budgetCalc.js keeps ITS `/100` — it reads through SOQL, where the domain is DISPLAY
+  // (25 means 25%). The two layers are not inconsistent; they read different domains.
+  //
+  // ⚠️ THIS MUST SHIP WITH THE DATA FIX. Until now two bugs cancelled: records carried
+  // 2500 (from the decimal-domain default), the formula saw 25, and `25/100` gave the
+  // right 1.25 by accident. Correcting the DATA alone would leave this formula computing
+  // 1.0025; correcting THIS alone would leave it computing 26. Deploy them together.
   const ns = NS_BLOCKS.map(
     (n) =>
-      `${B(`NS_Adder_${n}_Material_Cost__c`)}*(1+${B(`NS_Adder_${n}_Markup_Percent__c`)}/100)` +
+      `${B(`NS_Adder_${n}_Material_Cost__c`)}*(1+${B(`NS_Adder_${n}_Markup_Percent__c`)})` +
       `+${B(`NS_Adder_${n}_Labor_Hours__c`)}*33*1.75`
   ).join("+");
   // Batteries and Tesla expansion packs are sold OUTSIDE the redline x watts model, so
@@ -206,16 +226,17 @@ function fields(o) {
       type: "Currency", precision: 18, scale: 2,
       formula: totalAdderPriceFormula(o),
       description:
-        "D19. Every priced adder at PRICE (the commission side), never cost: 16 flat adders at Price x Qty, " +
-        "4 per-watt at Price x Watts x Qty, NS blocks 1-5 at their MARKED-UP total " +
-        "Material x (1 + Markup/100) + Hours x 33 x 1.75. Referral Fee IS included. " +
-        "THE 33 IS HARDCODED, like the redlines: it is the Powerwall labor rate the model is defined against, " +
-        "not a per-job parameter - reading Battery_Labor_Rate__c here would let a per-job override silently " +
-        "change everybody's commission. 1.75 is labor + 75% burden; re-rating either number changes this " +
-        "formula and the redline table together. " +
-        "STORAGE TOO: batteries (Battery_Unit_Price__c x Battery_Qty__c) and Tesla expansion packs " +
+        "D19. Every priced adder at PRICE (the commission side), never cost: 16 flat at Price x Qty, " +
+        "4 per-watt at Price x Watts x Qty, NS blocks 1-5 at Material x (1 + Markup) + Hours x 33 x 1.75, " +
+        "and storage. Referral Fee IS included. " +
+        "MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via " +
+        "the API), so dividing would divide twice. " +
+        "THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the model is defined against, not " +
+        "a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's " +
+        "commission. 1.75 is labor + 75% burden. " +
+        "STORAGE: batteries (Battery_Unit_Price__c x Battery_Qty__c) and Tesla expansion packs " +
         `(Tesla_Expansion_Pack_Unit_Price__c x ${s.expansionQty}) sell OUTSIDE the redline x watts model, ` +
-        "so their price is deducted here as an adder. " + s.expansionQtyShort,
+        "so their price is deducted here too. " + s.expansionQtyShort,
       help: "Sum of every priced adder on this job, used as a deduction in the commission calculation.",
     },
     {

@@ -4,6 +4,56 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## D-063 NS markup percent-domain fix (2026-08-24)
+
+Branch `fix/ns-markup-percent-domain` (based on `feature/battery-expansion-adder-commission`,
+which is not merged yet). `<defaultValue>25</defaultValue>` on a Percent field means
+**2500%**, because Salesforce evaluates a Percent default in the decimal domain.
+
+- [x] **PROBE FIRST, on one test record.** `scripts/probe-percent-field-domain.mjs` wrote
+      through `sfUpdateRecord` and read both the raw field and the dependent formula back.
+      **Three domains, and they disagree:** metadata default = decimal (`0.25`),
+      REST/SOQL = display (`25`), formula = decimal (`0.25`). The API echoes `25`
+      unchanged; the `.25` Tim saw was the FORMULA domain.
+      - Probed on **Customer** on purpose — `Sundial_Budget_Recalc_Trigger` watches these
+        fields on Solar and would fire a platform event per write.
+      - The restore itself hit the bug: the record's original `2500` cannot be written
+        back through Customer's `Percent(6,3)`. The probe now says so and writes the
+        corrected value instead.
+- [x] **Metadata fix** — all five blocks, both objects, `25` → **`0.25`**, carried by the
+      MODIFY package `v2-field-alignments` (10 fields). `v2-budget-adder-fields`'s
+      generator corrected too, so a fresh org never inherits it — but that package does
+      **not** need redeploying here.
+- [x] **Customer widened `Percent(6,3)` → `Percent(18,4)`** to match Solar.
+- [x] **Formula fix** — `Total_Adder_Price__c` NS term is now `Material × (1 + Markup)`.
+      The `/100` divided twice. `budgetCalc` KEEPS its `/100` (it reads the display
+      domain); both land on `1.25`.
+- [x] **Found and fixed, not in the brief: the MODIFY generator was not idempotent.**
+      Regenerating produced `225 Upgrade-Overhead-Overhead` on four labels. Would have
+      shipped in this deploy.
+- [x] **`scripts/zip-package.mjs`** — forward-slash entries, metadata only, prints mtimes
+      so a stale zip is visible. Replaces the manual Explorer step and the
+      never-use-`Compress-Archive` rule.
+- [x] **Data fix applied — 7 records** (all Customer, 0 Solar so no recalc fan-out).
+      **Zero financial impact**: every affected record has zero NS material.
+- [x] **`NS_MARKUP_IMPLAUSIBLE`** above 100% in budgetCalc, same shape as
+      `PPW_PRICE_IMPLAUSIBLE`.
+- [x] **`verify.mjs` 30 → 35 checks**, pinned to the probe's real returned numbers.
+- [ ] **TIM: deploy, in this order.** The data fix has already run.
+      1. `salesforce/v3-redline-commission-fields.zip` — the formula fix (Check Only
+         first, expect `Components: 8/8`).
+      2. `salesforce/v2-field-alignments.zip` — the defaults + widening (expect
+         `Components: 10/10`).
+      Both zips are freshly built. Order between them does not matter; order against the
+      data fix did, and that one is done.
+- [ ] **TIM: decide about the zeros.** 4,474 Solar records hold markup `0` on blocks 1-3.
+      That is a legitimate "no markup" and was left alone, but the intended default is now
+      25% — whether those should become 25 is a business call, not a bug fix.
+- [ ] **TIM: one human-set value to eyeball** — Solar `a1Q7y00000JDFpVEAX` (SOL-10014, the
+      test clone) has `NS_Adder_2_Markup_Percent__c = 15.3927` on 2,355 of material. Left
+      untouched. Once the formula fix lands it becomes a real 15.39% markup (+358.88 on the
+      adder total) instead of the ~0% it computes today.
+
 ## D27/D28 storage priced as adders + per-watt sanity guard (2026-08-24)
 
 Branch `feature/battery-expansion-adder-commission`. Batteries and Tesla expansion packs sell

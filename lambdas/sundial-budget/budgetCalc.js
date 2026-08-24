@@ -182,6 +182,27 @@ const PPW_PRICE_FIELDS = [
   'Adder_Bird_Blocking_Price__c',
 ];
 
+/**
+ * NS MATERIALS MARKUP CEILING, in the REST/SOQL domain where 25 means 25%.
+ *
+ * ⚠️ PERCENT DOMAIN. This calc reads Salesforce through SOQL, and a Percent field reads
+ * there as the DISPLAY number: a true 25% arrives as `25`, which is why the NS loop below
+ * divides by 100. A Salesforce FORMULA sees the same field as `0.25` and must NOT divide —
+ * that asymmetry is real, was measured on a live record by
+ * `scripts/probe-percent-field-domain.mjs`, and is why `Total_Adder_Price__c` has no /100
+ * while this file does. Neither is a mistake; do not "align" them.
+ *
+ * A markup above 100% is a data error in this business, and the incident is the argument:
+ * the five markup fields shipped with `<defaultValue>25</defaultValue>`, which Salesforce
+ * evaluates in the DECIMAL domain, so every record created since carried **2500** — a
+ * 2500% markup. Through this calc that is a 26x multiplier on materials.
+ *
+ * 100 rather than something tighter because Harmon does use markups above the 25% default
+ * and a ceiling that argues with legitimate pricing gets switched off. 100% is not a
+ * pricing judgement, it is "this number is not a percentage".
+ */
+const NS_MARKUP_CEILING = 100;
+
 const SUBCON_ADDERS = [
   { base: 'Structural',    row: 55, priceKind: 'flat', costKind: 'unit', line: 'engineerStamps' },
   { base: 'Bird_Blocking', row: 56, priceKind: 'ppw',  costKind: 'watt', line: 'subcontractor' },
@@ -492,6 +513,24 @@ function calculateBudget(rec) {
     }
   }
 
+  // ---- NS materials markup sanity (the percent-domain incident) -----------
+  // Also before any maths, and for the same reason as the per-watt guard: a 2500 here is
+  // a 26x multiplier on materials, and it reaches the commission through the adder total.
+  for (const b of NS_BLOCKS) {
+    const field = `NS_Adder_${b.n}_Markup_Percent__c`;
+    const raw = g(field);
+    if (raw > NS_MARKUP_CEILING) {
+      throw new BudgetInputError(
+        `${field} is ${raw}, i.e. a ${raw}% markup on materials, above the ` +
+          `${NS_MARKUP_CEILING}% sanity ceiling. Through SOQL a Percent field reads as the ` +
+          'display number, so 25 means 25% — a value this size is almost always the ' +
+          'decimal-domain default bug, where <defaultValue>25</defaultValue> stored 2500. ' +
+          'Fix the value on the record (a true 25% is stored as 25), then recalculate.',
+        'NS_MARKUP_IMPLAUSIBLE'
+      );
+    }
+  }
+
   // ---- Flat adders --------------------------------------------------------
   for (const a of FLAT_ADDERS) {
     const price = g(`Adder_${a.base}_Price__c`);
@@ -567,6 +606,10 @@ function calculateBudget(rec) {
   let nsMat = 0, nsLabor = 0, nsBurden = 0, nsHours = 0, nsTotalWithMarkup = 0;
   const nsRows = [];
   for (const b of NS_BLOCKS) {
+    // /100 IS CORRECT HERE and must stay. SOQL hands us the display number (a true 25%
+    // arrives as 25). The Salesforce Total_Adder_Price__c formula gets 0.25 for the same
+    // field and therefore has NO /100 — see NS_MARKUP_CEILING above. Both layers land on
+    // the same 1.25 multiplier; the probe pins that.
     const markup = g(`NS_Adder_${b.n}_Markup_Percent__c`) / 100;
     const mat = g(`NS_Adder_${b.n}_Material_Cost__c`);
     const hours = g(`NS_Adder_${b.n}_Labor_Hours__c`);

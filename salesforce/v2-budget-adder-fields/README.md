@@ -1,5 +1,26 @@
 # v2 Budget Adder + Commission Fields — Sundial_Customer__c + Sundial_Solar__c
 
+> ## ⚠️ Corrected 2026-08-24 — the NS markup default was wrong
+>
+> This package created `NS_Adder_4/5_Markup_Percent__c` with
+> `<defaultValue>25</defaultValue>`. A Percent field's `defaultValue` is a formula
+> expression evaluated in the **decimal** domain, so `25` meant **2500%**, and every
+> record created since carried a stored API value of `2500`. Setup renders the expression
+> back as `"25"`, so it read as correct everywhere.
+>
+> The generator now emits **`0.25`**, and Customer's `nsMarkup` type was widened from
+> `Percent(6,3)` to `Percent(18,4)` to match Solar — the narrow type is why writing `2500`
+> errored on Customer and succeeded on Solar.
+>
+> **This package does NOT need redeploying to fix the live org.**
+> `salesforce/v2-field-alignments/` carries the correction for all five blocks on both
+> objects as a MODIFY package, which is a far smaller deploy than re-running this one.
+> The change here is so a **fresh org** never inherits the bug.
+>
+> Full explanation, including the three disagreeing domains and the empirical probe that
+> measured them: `salesforce/v2-field-alignments/README.md` → *The percent-domain trap*.
+
+
 Workbench metadata package for the v2 budget rework field inventory.
 Reference: [`docs/integrations/acumatica-budget-rework-v2.md`](../../docs/integrations/acumatica-budget-rework-v2.md) §4a / §4b / §4c / §4d.
 

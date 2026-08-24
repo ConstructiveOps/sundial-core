@@ -1,5 +1,70 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — the NS markup percent-domain bug: three domains, two cancelling errors
+
+`<defaultValue>25</defaultValue>` on a Percent field never meant 25%. Salesforce evaluates
+a Percent default as a formula expression in the **decimal** domain, so it meant **2500%**,
+and Setup renders the expression back as `"25"` so nothing looked wrong. D-063. Suite
+green: 204 budget checks, 35 formula checks, 496 node tests.
+
+**The probe came first, and it was right to.** Tim had observed a save of `25` reading back
+as `.25`, which does not fit "the default stored 2500" — so rather than reason about it,
+`scripts/probe-percent-field-domain.mjs` wrote values through `sfUpdateRecord` on one
+Customer test record and read both the raw field and the dependent formula field back.
+Three domains, and they do not agree:
+
+| Layer | Domain | A true 25% is |
+|---|---|---|
+| metadata `<defaultValue>` | decimal | `0.25` |
+| REST API / SOQL | **display** | `25` |
+| formula field reference | decimal | `0.25` |
+
+The API echoes `25` unchanged. The `.25` Tim saw was the **formula** domain showing
+through — which turned out to be the more expensive half of the bug.
+
+**Two errors were cancelling, which is why nobody caught it.** Records held `2500`, the
+`Total_Adder_Price__c` formula saw `25`, and its `Markup/100` produced the correct `1.25`
+by accident. Fixing either side alone breaks it:
+
+| | data `2500` | data `25` |
+|---|---|---|
+| formula `/100` (old) | `1.25` ✔ by accident | `1.0025` ✗ |
+| formula no `/100` (new) | `26` ✗ | `1.25` ✔ |
+
+So the formula's `/100` is gone (a formula already gets the decimal) and `budgetCalc`
+**keeps** its `/100` (it reads SOQL, the display domain). Both now land on `1.25`, and
+`verify.mjs` pins that to the probe's actual returned numbers rather than to assumed ones.
+
+**The exposure was nil, and that is worth stating plainly.** Only 7 records carried `2500`,
+all Customer, and *all of them had zero NS material cost* — the markup multiplied nothing.
+Org-wide only 5 records have any NS material at all, and their markups are null or 0 except
+one test clone. So this was a loaded gun rather than a wound: the first person to type a
+material cost on one of those records would have posted a 26x markup through budgetCalc.
+
+**Fixed data before formula, deliberately.** Data-first leaves a window where markup reads
+as ~0% (understates the deduction, slightly overpays); formula-first would leave a 26x
+window. 7 records written, 0 on Solar — which also meant zero recalc-trigger fan-out, since
+`Sundial_Budget_Recalc_Trigger` watches those fields on Solar and would have published a
+platform event per record.
+
+**Two things found along the way, neither in the brief:**
+
+- **The MODIFY generator was not idempotent.** Regenerating `v2-field-alignments` against
+  an org where it had already deployed produced `225 Upgrade-Overhead-Overhead` on four
+  labels — a blind `.replace()` re-applying. It would have shipped in this very deploy.
+  The relabel is now applied at most once, and those fields correctly fall into the
+  generator's own "already at target value" skip list.
+- **Zipping is now a script.** `scripts/zip-package.mjs` writes the archive directly with
+  forward-slash entries, so the "never use `Compress-Archive`" rule is enforced rather than
+  remembered, and it prints each entry's mtime so a **stale zip** — which we shipped once —
+  is visible before the upload. It also stops sweeping `generate.mjs` and `README.md` into
+  the package, which Explorer had been doing.
+
+`NS_MARKUP_IMPLAUSIBLE` now throws above 100% in `budgetCalc`, the same shape as
+`PPW_PRICE_IMPLAUSIBLE`. Customer's markup fields are widened `Percent(6,3)` →
+`Percent(18,4)` so the two objects stop disagreeing about what fits.
+
+
 ## 2026-08-24 — batteries and expansion packs priced as adders; commissions on battery deals were overpaid
 
 Storage is sold **outside** the `Redline × watts` model, so nothing in `Redline × watts`

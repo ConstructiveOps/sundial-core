@@ -15,7 +15,11 @@ const CONV = {
   Sundial_Customer__c: {
     // Labels: "Adder: Sub Panel — Price"  (colon + em dash)
     adderLabel: (name, suffix) => `Adder: ${name} — ${suffix}`,
-    nsMarkup: { precision: 6, scale: 3 },   // NS_Adder_1_Markup_Percent__c
+    // Widened to match Solar (was 6,3 = max 999.999, cloned from the org's blocks 1-3).
+    // The two objects disagreeing about what fits in the same logical field is what made
+    // the 2500 bug behave differently per object. v2-field-alignments carries the
+    // widening for the LIVE org; this keeps a fresh org consistent from the start.
+    nsMarkup: { precision: 18, scale: 4 },  // NS_Adder_1_Markup_Percent__c
     nsHours: { precision: 6, scale: 1 },    // NS_Adder_1_Labor_Hours__c
     ppw: { precision: 7, scale: 3 },        // Sales_Rep_Commission_PPW__c (Number, NOT Currency)
   },
@@ -142,10 +146,17 @@ function buildObject(objName) {
       api: `NS_Adder_${n}_Markup_Percent__c`,
       label: `NS Adder ${n} Markup %`,
       type: "Percent", precision: c.nsMarkup.precision, scale: c.nsMarkup.scale,
-      defaultValue: 25,
-      description: `v2 budget rework §4b. Markup applied to NS adder ${n} material cost. Default 25%. NOTE: NS blocks 1-3 on this object currently default to ${objName === "Sundial_Solar__c" ? "0" : "no default"} — aligning them to 25 is a separate change (see TASKS.md).`,
+      // ⚠️ 0.25, NOT 25. A Percent field's <defaultValue> is a formula expression
+      // evaluated in the DECIMAL domain, so `25` there means 2500%, and that is exactly
+      // what shipped: records created after this package carry a stored API value of
+      // 2500. Setup renders the expression back as "25" so it reads as correct.
+      // The REST/SOQL domain is DISPLAY (a true 25% reads as 25) and the FORMULA domain
+      // is decimal again — see PERCENT_DOMAIN in v2-field-alignments/generate.mjs and
+      // scripts/probe-percent-field-domain.mjs, which measured all three on a live record.
+      defaultValue: 0.25,
+      description: `v2 budget rework §4b. Markup applied to NS adder ${n} material cost. Default 25% (written as the decimal 0.25 — a Percent defaultValue is evaluated in the decimal domain, so 25 there would mean 2500%). Reads back as 25 through the API.`,
       help: "Markup on the material cost for this non-standard adder. Defaults to 25%.",
-    }, { api: `NS_Adder_${n}_Markup_Percent__c`, type: `Percent(${c.nsMarkup.precision - c.nsMarkup.scale},${c.nsMarkup.scale})`, default: "25", section: "4b" });
+    }, { api: `NS_Adder_${n}_Markup_Percent__c`, type: `Percent(${c.nsMarkup.precision - c.nsMarkup.scale},${c.nsMarkup.scale})`, default: "0.25 (= 25%)", section: "4b" });
 
     add({
       api: `NS_Adder_${n}_Material_Cost__c`,

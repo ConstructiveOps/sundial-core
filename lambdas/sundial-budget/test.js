@@ -762,6 +762,85 @@ it('PPW guard: legitimate cent-scale prices pass, and $10/W exactly is allowed',
   );
 });
 
+// ---------------------------------------------------------------------------
+// NS markup — the percent-domain incident
+// ---------------------------------------------------------------------------
+
+it('NS markup: 25 through SOQL means 25%, giving a 1.25 multiplier', () => {
+  // THE DOMAIN ASSERTION. This calc reads Salesforce through SOQL, where a Percent field
+  // arrives as the DISPLAY number — a true 25% is 25. Measured on a live record by
+  // scripts/probe-percent-field-domain.mjs, not assumed.
+  //
+  // The Salesforce Total_Adder_Price__c formula sees 0.25 for the same field and so has
+  // NO /100, while this file does. Both must land on 1.25, and that agreement is the
+  // whole point: the formula decides the commission, this decides the snapshot.
+  const r = calculateBudget({
+    ...REVISED,
+    NS_Adder_1_Material_Cost__c: 1000,
+    NS_Adder_1_Labor_Hours__c: 0,
+    NS_Adder_1_Markup_Percent__c: 25,
+  });
+  // 1000 x 1.25 = 1250, and NS block 1 is the only NS block populated in the fixture.
+  assert.ok(
+    Math.abs(r.extras.nsAdderTotalWithMarkup - 1250) < TOL,
+    `NS total is ${r.extras.nsAdderTotalWithMarkup}, expected 1250 (a 25% markup on 1000)`
+  );
+});
+
+it('NS markup: 100 means 100%, giving a 2.00 multiplier', () => {
+  const r = calculateBudget({
+    ...REVISED,
+    NS_Adder_1_Material_Cost__c: 1000,
+    NS_Adder_1_Labor_Hours__c: 0,
+    NS_Adder_1_Markup_Percent__c: 100,
+  });
+  assert.ok(Math.abs(r.extras.nsAdderTotalWithMarkup - 2000) < TOL);
+});
+
+it('NS markup guard: the legacy 2500 value throws NS_MARKUP_IMPLAUSIBLE', () => {
+  // 2500 is what <defaultValue>25</defaultValue> actually stored, because Salesforce
+  // evaluates a Percent default in the DECIMAL domain. Through this calc it would be a
+  // 26x multiplier on materials, so it refuses.
+  assert.throws(
+    () => calculateBudget({ ...REVISED, NS_Adder_1_Markup_Percent__c: 2500 }),
+    (e) =>
+      e instanceof BudgetInputError &&
+      e.code === 'NS_MARKUP_IMPLAUSIBLE' &&
+      e.message.includes('NS_Adder_1_Markup_Percent__c') &&
+      e.message.includes('2500'),
+    'the 2500 default-bug value was not guarded'
+  );
+});
+
+it('NS markup guard: covers all five blocks, and 100 exactly is allowed', () => {
+  for (const n of [1, 2, 3, 4, 5]) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, [`NS_Adder_${n}_Markup_Percent__c`]: 2500 }),
+      (e) => e instanceof BudgetInputError && e.code === 'NS_MARKUP_IMPLAUSIBLE',
+      `block ${n} was not guarded`
+    );
+  }
+  // Exclusive ceiling, same convention as the per-watt guard.
+  assert.doesNotThrow(() => calculateBudget({ ...REVISED, NS_Adder_3_Markup_Percent__c: 100 }));
+  assert.throws(
+    () => calculateBudget({ ...REVISED, NS_Adder_3_Markup_Percent__c: 100.01 }),
+    (e) => e instanceof BudgetInputError && e.code === 'NS_MARKUP_IMPLAUSIBLE'
+  );
+});
+
+it('NS markup guard: fires on the markup alone, with no material on the block', () => {
+  // Same reasoning as the per-watt guard: bad data is bad data, and a block with no
+  // material today is one edit away from having some.
+  assert.throws(
+    () => calculateBudget({
+      ...REVISED,
+      NS_Adder_4_Markup_Percent__c: 2500,
+      NS_Adder_4_Material_Cost__c: 0,
+    }),
+    (e) => e instanceof BudgetInputError && e.code === 'NS_MARKUP_IMPLAUSIBLE'
+  );
+});
+
 it('PPW guard: FLAT adder prices are untouched by it', () => {
   // Sub Panel is a flat adder at 500 - a per-watt ceiling must not reach it.
   assert.doesNotThrow(() => calculateBudget({ ...REVISED, Adder_Sub_Panel_Price__c: 5000 }));

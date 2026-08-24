@@ -47,8 +47,27 @@ env vars are needed here** — the shared helper (and the execution role's
 
 ## Notes
 
-- Percent fields (`Labor_Burden_Rate__c`, `Commission_Burden_Rate__c`, NS markup) are stored
-  as whole numbers in Salesforce (75 = 75%); `budgetCalc.js` divides by 100 — don't do it twice.
+- **Percent fields have THREE domains in Salesforce and they disagree** (D-063, measured by
+  `scripts/probe-percent-field-domain.mjs`):
+
+  | Layer | Domain | A true 25% is |
+  |---|---|---|
+  | metadata `<defaultValue>` | decimal | `0.25` |
+  | REST API / SOQL | **display** | `25` |
+  | formula field reference | decimal | `0.25` |
+
+  This Lambda reads through SOQL, so `Labor_Burden_Rate__c`, `Commission_Burden_Rate__c` and
+  the NS markups all arrive as whole numbers (75 = 75%) and `budgetCalc.js` divides by 100.
+  **That is correct — do not remove it**, and do not divide twice.
+
+  The Salesforce `Total_Adder_Price__c` formula does the same job with **no** `/100`,
+  because a formula already receives the decimal. The two look inconsistent and are not;
+  both land on the same multiplier. `<defaultValue>25</defaultValue>` on the NS markup
+  fields is what caused the 2500 incident — it meant 2500%.
+- **`NS_MARKUP_IMPLAUSIBLE`** throws when any NS block's markup exceeds **100%**, before any
+  adder maths and regardless of whether the block has material. A 2500 is the decimal-domain
+  default bug and would be a 26x multiplier on materials. Sweep with
+  `node scripts/fix-ns-markup-percent-domain.mjs` (read-only by default).
 - The snapshot is **values-only** on purpose: it's the frozen record copy of what was
   calculated. The template (with live formulas) stays the working calculator.
 - File metadata registration in Supabase (per `docs/file-storage.md`) is marked TODO in

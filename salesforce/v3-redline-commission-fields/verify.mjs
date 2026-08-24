@@ -12,6 +12,21 @@
 // It does NOT validate Salesforce's compiled-size limit or its parser — only Check Only
 // can do that, which is why it is step 1 of the deploy checklist.
 //
+// ⚠️ PERCENT_DOMAIN — WHICH NUMBERS TO PUT IN THIS FILE.
+//
+// This harness evaluates FORMULA TEXT, so every Percent value below must be in the
+// FORMULA domain, where a true 25% is **0.25**. Salesforce hands a formula a Percent
+// field already divided by 100.
+//
+// The REST API does not. Through SOQL the same field reads **25**, which is why
+// `lambdas/sundial-budget/test.js` writes 25 for the same 25% and budgetCalc keeps a
+// `/100` this file's formulas must not have. The two files disagreeing on the literal is
+// correct; they are reading different domains.
+//
+// All three domains were measured on a live record by
+// `scripts/probe-percent-field-domain.mjs`, and the "percent domain" checks below are
+// pinned to the numbers that probe actually returned.
+//
 // Run: node salesforce/v3-redline-commission-fields/verify.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -291,14 +306,67 @@ console.log("\n=== per-watt and NS handling ===");
   check("per-watt adder = price x watts x qty", v.Total_Adder_Price__c, 0.1 * 8800 * 2);
 }
 {
+  // ⚠️ MARKUP VALUES HERE ARE IN THE FORMULA DOMAIN: 0.25 means 25%. See PERCENT_DOMAIN
+  // at the top of this file. The Lambda fixture (lambdas/sundial-budget/test.js) uses 25
+  // for the same 25%, because it feeds the calc through the REST domain. Both are right.
   const v = evaluate("Sundial_Solar__c", {
     System_Size__c: 8.8, Contract_Amount__c: 36502,
     Sales_Company_Harmon_Solar_or_Third__c: "Harmon Solar", Sales_Type_Partner__c: "Cash",
-    NS_Adder_1_Material_Cost__c: 1000, NS_Adder_1_Markup_Percent__c: 25, NS_Adder_1_Labor_Hours__c: 10,
-    NS_Adder_5_Material_Cost__c: 500, NS_Adder_5_Markup_Percent__c: 25, NS_Adder_5_Labor_Hours__c: 4,
+    NS_Adder_1_Material_Cost__c: 1000, NS_Adder_1_Markup_Percent__c: 0.25, NS_Adder_1_Labor_Hours__c: 10,
+    NS_Adder_5_Material_Cost__c: 500, NS_Adder_5_Markup_Percent__c: 0.25, NS_Adder_5_Labor_Hours__c: 4,
   });
   // 1000*1.25 + 10*33*1.75  +  500*1.25 + 4*33*1.75
   check("NS blocks marked up + labour", v.Total_Adder_Price__c, 1250 + 577.5 + 625 + 231);
+}
+
+console.log("\n=== percent domain — pinned to scripts/probe-percent-field-domain.mjs ===");
+{
+  // These four numbers are NOT derived from a model of Salesforce. They are what the
+  // live org returned when the probe wrote a value through REST and read
+  // Total_Adder_Price__c back on Sundial_Customer__c a1P7y00000AmMTVEA3, holding
+  // NS_Adder_1_Material_Cost__c = 1000 and NS_Adder_1_Labor_Hours__c = 0:
+  //
+  //     REST value written   formula saw   Total_Adder_Price__c
+  //         25                 0.25              1002.50   <- under the OLD /100 formula
+  //          0.25              0.0025            1000.03
+  //          1                 0.01              1000.10
+  //        100                 1.00              1010.00
+  //
+  // The middle column is the formula domain, and it is the REST value / 100. The fixed
+  // formula drops its own /100, so feeding the FORMULA-domain value here must reproduce
+  // the intended markup rather than the observed-under-the-bug one.
+  const base = {
+    System_Size__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company_Harmon_Solar_or_Third__c: "Harmon Solar", Sales_Type_Partner__c: "Cash",
+    NS_Adder_1_Material_Cost__c: 1000, NS_Adder_1_Labor_Hours__c: 0,
+  };
+
+  // A TRUE 25%: REST stores 25, the formula sees 0.25, the multiplier must be 1.25.
+  const t25 = evaluate("Sundial_Solar__c", { ...base, NS_Adder_1_Markup_Percent__c: 0.25 });
+  check("true 25% -> multiplier 1.25", t25.Total_Adder_Price__c, 1250);
+
+  // A TRUE 100%: REST stores 100, the formula sees 1.00, the multiplier must be 2.00.
+  const t100 = evaluate("Sundial_Solar__c", { ...base, NS_Adder_1_Markup_Percent__c: 1 });
+  check("true 100% -> multiplier 2.00", t100.Total_Adder_Price__c, 2000);
+
+  // Zero markup is still just the material.
+  const t0 = evaluate("Sundial_Solar__c", { ...base, NS_Adder_1_Markup_Percent__c: 0 });
+  check("0% -> multiplier 1.00", t0.Total_Adder_Price__c, 1000);
+
+  // THE REGRESSION THIS PACKAGE FIXES. The old formula had `/100`, so a true 25% became
+  // 1 + 0.25/100 = 1.0025 and the markup all but vanished. 1002.50 is the number the live
+  // org actually returned, and it must NOT come back.
+  check(
+    "the OLD /100 result (1002.50) is gone",
+    t25.Total_Adder_Price__c === 1002.5 ? 1002.5 : 1250,
+    1250
+  );
+
+  // THE OTHER HALF: the broken DATA. A record carrying the decimal-domain default reads
+  // 2500 through REST, which a formula sees as 25 — and under the fixed formula that is a
+  // 2500% markup, i.e. 26x. Two bugs used to cancel; now the data fix is load-bearing.
+  const broken = evaluate("Sundial_Solar__c", { ...base, NS_Adder_1_Markup_Percent__c: 25 });
+  check("legacy 2500 data (formula sees 25) -> 26x, so the DATA fix must ship too", broken.Total_Adder_Price__c, 26000);
 }
 
 // Print the COUNT rather than trusting a number written in a doc — an earlier draft of

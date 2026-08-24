@@ -2300,3 +2300,87 @@ The guard covers all four fields even though they span two lists in the calc
 (`Bird_Blocking` is a SUBCON adder with `priceKind: 'ppw'`). Deriving the list from
 `PPW_ADDERS` alone would have left `Bird_Blocking` unguarded — the one shape of this bug the
 guard must not miss.
+
+
+---
+
+## D-063: Salesforce Percent fields have THREE domains — metadata defaults are decimal, the API is display, formulas are decimal
+
+**Date:** 2026-08-24 · **Decided by:** Tim (root-caused), measured empirically
+**Recorded here because this WILL recur on the next Percent field anyone creates.**
+
+### The finding
+
+Salesforce does not use one representation for a Percent field. It uses three, and they do
+not agree. These rows were **measured on a live record** by
+`scripts/probe-percent-field-domain.mjs` — written through `sfUpdateRecord`, read back raw,
+and cross-checked against a dependent formula field — not taken from documentation:
+
+| Layer | Domain | A true **25%** is |
+|---|---|---|
+| metadata `<defaultValue>` | **decimal** | `0.25` |
+| REST API / SOQL, read *and* write | **display** | `25` |
+| formula field referencing it | **decimal** | `0.25` |
+
+### What went wrong
+
+`<defaultValue>25</defaultValue>` is a formula expression evaluated in the decimal domain,
+so it never meant 25%. It meant **2500%**, and every record created since carried a stored
+API value of `2500`. **Setup renders the default expression back as `"25"`**, so the bug is
+invisible in the UI — which is the part that makes it worth an ADR rather than a code
+comment.
+
+The formula domain is the same trap wearing different clothes: `Markup/100` inside a
+formula divides a value that has *already* been divided. `Total_Adder_Price__c` had exactly
+that.
+
+### Why it survived: two errors cancelled
+
+| | data `2500` | data `25` (correct) |
+|---|---|---|
+| **formula `/100`** (old) | `1.25` ✔ *by accident* | `1.0025` ✗ |
+| **formula no `/100`** (new) | `26` ✗ | `1.25` ✔ |
+
+The only correct cell is the bottom-right, and reaching it requires changing both. Fixing
+either alone is worse than fixing neither — which is why the data fix and the formula
+package are a pair, and why the data fix runs **first** (its window understates a deduction;
+the other direction is a 26x multiplier).
+
+### The rules that follow
+
+1. **A Percent field's `<defaultValue>` is written as a decimal.** 25% is `0.25`.
+2. **REST/SOQL is the display domain.** Code reading Salesforce through the API divides by
+   100 itself — `budgetCalc.js` does, and that is correct.
+3. **A Salesforce formula must NOT divide by 100.** It already received the decimal.
+4. **Points 2 and 3 look inconsistent and are not.** Do not "align" them. Both land on the
+   same multiplier because they start from different domains.
+5. **Assert the domain in tests, in the units of the layer being tested.** `verify.mjs`
+   evaluates formula text so it uses `0.25`; `lambdas/sundial-budget/test.js` feeds the calc
+   through the REST domain so it uses `25`. The literals differ on purpose.
+6. **Measure, do not reason.** Tim's report of "`25` saved, `.25` read back" did not fit the
+   2500 theory and would have been easy to dismiss. It was real — it was the formula domain
+   — and probing settled in one run what argument would not have.
+
+### Blast radius, for the record
+
+Nil, and worth stating so the severity is not overstated later. Only **7 records** carried
+`2500`, all `Sundial_Customer__c`, and **all had zero NS material cost** — the markup
+multiplied nothing. Org-wide only 5 records have any NS material at all. This was a loaded
+gun, not a wound: the first person to enter a material cost on one of those records would
+have posted a 26x markup through budgetCalc.
+
+Guarded going forward by `NS_MARKUP_IMPLAUSIBLE` (>100%), the same shape as
+`PPW_PRICE_IMPLAUSIBLE` in D-062.
+
+### Two incidental fixes this uncovered
+
+- **The MODIFY generator was not idempotent.** `v2-field-alignments` re-reads live labels
+  and applies a delta, but its `225 Upgrade` relabel used a blind `.replace()`. Regenerating
+  against an org where it had already deployed produced `225 Upgrade-Overhead-Overhead`, and
+  it would have shipped in this deploy. **Any transformation in a read-live-and-re-emit
+  generator has to be safe to run twice.**
+- **Zipping is now `scripts/zip-package.mjs`.** The standing rule was "Explorer only, never
+  `Compress-Archive`" (PS 5.1 writes backslash entry paths the ZIP spec forbids). A rule
+  people must remember is worse than a script that cannot get it wrong — and the script also
+  prints each entry's mtime, because we shipped a **stale zip** once, and excludes
+  `generate.mjs` / `README.md`, which Explorer had been uploading to Harmon's org.

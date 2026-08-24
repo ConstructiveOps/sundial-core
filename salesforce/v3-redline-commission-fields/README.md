@@ -75,12 +75,48 @@ Every **priced** adder, at price (never cost):
 - **4 per-watt adders** at `Price × Watts × Qty` — Conduit in Attic, Flat Roof, Roof
   Tile, Bird Blocking.
 - **NS blocks 1-5** at their **marked-up** total:
-  `Material × (1 + Markup/100) + Hours × 33 × 1.75`.
+  `Material × (1 + Markup) + Hours × 33 × 1.75`. **No `/100`** — see below.
 - **Storage** at `Unit Price × Qty` — batteries and Tesla expansion packs. Added
   2026-08-24; see below.
 
-`Markup` is a Percent field, which a formula reads as a whole number (25 = 25%), hence
-the `/100` — the same conversion budgetCalc does.
+### ⚠️ The markup has NO `/100`, and that is the fix
+
+A Salesforce **formula** receives a Percent field **already in the decimal domain**: a
+field storing a true 25% (API value `25`) reads as **`0.25`** inside a formula. So the
+original `(1 + Markup/100)` divided twice and produced a ~0% markup.
+
+This is not a guess. `scripts/probe-percent-field-domain.mjs` wrote values through REST on
+a live record and read `Total_Adder_Price__c` back:
+
+| Written via REST | Formula saw | `Total_Adder_Price__c` on 1000 material |
+|---|---|---|
+| `25` | `0.25` | **1002.50** ← the old `/100` formula |
+| `0.25` | `0.0025` | 1000.03 |
+| `1` | `0.01` | 1000.10 |
+| `100` | `1.00` | 1010.00 |
+
+`verify.mjs` pins those numbers directly, so the regression cannot come back quietly.
+
+**`budgetCalc.js` keeps its `/100`.** It reads through SOQL, where the domain is *display*
+(`25` means 25%). The two layers are not inconsistent — they read different domains, and
+both land on a `1.25` multiplier for a true 25%.
+
+> ⚠️ **This ships WITH the data fix, not before or after it.** Two bugs used to cancel:
+> records carried `2500` (from `<defaultValue>25</defaultValue>`, which Salesforce
+> evaluates in the decimal domain), the formula saw `25`, and `25/100` gave the right
+> `1.25` by accident.
+>
+> | | data `2500` | data `25` (fixed) |
+> |---|---|---|
+> | **formula `/100`** (old) | `1.25` ✔ by accident | `1.0025` ✗ markup vanishes |
+> | **formula no `/100`** (new) | `26` ✗ catastrophic | `1.25` ✔ correct |
+>
+> Run `scripts/fix-ns-markup-percent-domain.mjs` first (done, 7 records), then deploy this.
+> Data-first is the harmless window.
+
+> ⚠️ **Percent values in `verify.mjs` are in the FORMULA domain** — `0.25` means 25%.
+> `lambdas/sundial-budget/test.js` writes `25` for the same 25%, because it feeds the calc
+> through the REST domain. The two files disagreeing on the literal is correct.
 
 ### Storage: batteries and Tesla expansion packs
 
@@ -247,7 +283,7 @@ references, and inline the terms rather than chaining another formula field.
 
 ## Offline validation
 
-`node salesforce/v3-redline-commission-fields/verify.mjs` — **30 checks, all passing.**
+`node salesforce/v3-redline-commission-fields/verify.mjs` — **35 checks, all passing.**
 
 It reads the **actual `<formula>` text out of the generated `.object` files**, transpiles
 the small subset of the formula language they use into JavaScript, and evaluates it. That
@@ -264,6 +300,11 @@ Covered: the D19 worked example on both objects, all four redlines, the Lightrea
 difference, blank company, zero watts, blank finance, no adders, per-watt × qty, and NS
 markup + labour.
 
+Plus the **percent domain** block (2026-08-24), pinned to the live numbers
+`scripts/probe-percent-field-domain.mjs` returned: a true 25% giving `1.25`, a true 100%
+giving `2.00`, the old `/100` result of `1002.50` being gone, and the legacy `2500` data
+producing `26x` — which is what makes the data fix load-bearing rather than cosmetic.
+
 Plus the storage block (added 2026-08-24): the 27,800 worked example on both objects
 (2 batteries at 9,950 + 1 expansion pack at 7,900 — adder total **up** 27,800, commission
 **down** 27,800), zero-qty-with-default-price changing nothing, a blank price contributing
@@ -275,26 +316,36 @@ can, which is why that is step 1 below.
 
 ---
 
-## ⚠️ Zipping — Explorer only, never `Compress-Archive`
+## Zipping — use the builder
 
-**Zip with Windows Explorer: select the files → right-click → *Send to* → *Compressed
-(zipped) folder*.**
+```
+node scripts/zip-package.mjs salesforce/v3-redline-commission-fields
+```
 
-**Do NOT use PowerShell 5.1's `Compress-Archive`** — it writes **backslash** path
-separators and Workbench cannot read the entries, failing with a misleading "no
-components" error.
+Writes `salesforce/v3-redline-commission-fields.zip` with `package.xml` at the root,
+forward-slash entry names, and only `package.xml` + `objects/`. It prints every entry with
+its last-modified time so a **stale zip** is visible before the upload — we shipped one
+already, and nothing about a zip's filename says how old it is.
+
+It also replaces the old "Explorer only, never `Compress-Archive`" rule: PowerShell 5.1's
+cmdlet writes **backslash** entry paths, which the ZIP spec forbids and Workbench cannot
+read. The builder always writes forward slashes.
 
 ---
 
 ## Deploy
 
-1. Zip the **contents** so `package.xml` is at the zip root:
+0. **Run the data fix first if it has not run** —
+   `node scripts/fix-ns-markup-percent-domain.mjs --apply`. Already done (7 records,
+   2026-08-24). See the two-bugs-cancelled table above for why the order matters.
+1. **Regenerate and rebuild the zip:**
    ```
-   package.xml
-   objects/Sundial_Customer__c.object
-   objects/Sundial_Solar__c.object
+   node salesforce/v3-redline-commission-fields/generate.mjs
+   node salesforce/v3-redline-commission-fields/verify.mjs
+   node scripts/zip-package.mjs salesforce/v3-redline-commission-fields
    ```
-2. Workbench → **Migration → Deploy** → **Single Package**.
+2. Workbench → **Migration → Deploy** → choose
+   `salesforce/v3-redline-commission-fields.zip` → **Single Package**.
 3. **"Check Only" FIRST.** This is not the usual formality — it is the only thing that
    compiles the formulas and proves they fit. Expect `Components: 8/8`. A
    `FIELD_INTEGRITY_EXCEPTION` mentioning "formula is too big" means the compiled limit
@@ -303,6 +354,10 @@ components" error.
 5. **FLS: Read for everyone who should see commission; the integration user needs Read**
    (Stage 2's calc reads `Commission_Total__c`). Formula fields are read-only by
    definition, so there is no Edit to grant.
+6. **Then deploy `salesforce/v2-field-alignments.zip`** — the matching metadata fix that
+   changes the five NS markup defaults from `25` to `0.25` and widens Customer's fields to
+   `Percent(18,4)`. Order between these two does not matter (one is defaults for NEW
+   records, the other is the formula); order against the DATA fix does.
 
 ## Post-deploy verification — 30 seconds, and worth it
 
@@ -316,6 +371,17 @@ On a real Solar record:
 4. **Blank the Sales Company.** Redline, Commission Total and Commission $/W must all go
    **blank** — not 0, not a number. This is the `BlankAsBlank` assumption; if any of them
    shows a value instead, stop and tell me before Stage 2.
+5. **The markup check (2026-08-24).** On a scratch record set `NS Adder 1 Material Cost`
+   = **1000**, `NS Adder 1 Labor Hours` = **0**, and `NS Adder 1 Markup %` = **25%**.
+   `Total Adder Price` must rise by **1,250** — a 25% markup on 1,000.
+
+   | What you see | What it means |
+   |---|---|
+   | **+1,250** | ✅ correct |
+   | +1,002.50 | the `/100` is still in the formula — this package did not land |
+   | +26,000 | the record holds `2500`, so the data fix did not run on it |
+
+   Then clear the fields you set.
 
 ## Then
 

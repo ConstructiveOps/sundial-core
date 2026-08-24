@@ -29,6 +29,39 @@ const esc = (s) =>
   String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /**
+ * ⚠️ PERCENT_DOMAIN — READ BEFORE SETTING A DEFAULT ON ANY Percent FIELD.
+ *
+ * Salesforce uses THREE domains for a Percent field and they do not agree. Measured
+ * empirically by `scripts/probe-percent-field-domain.mjs` on a live record, not inferred:
+ *
+ *   | layer                        | domain  | a TRUE 25% is |
+ *   |------------------------------|---------|---------------|
+ *   | metadata <defaultValue>      | DECIMAL | 0.25          |
+ *   | REST API / SOQL read + write | DISPLAY | 25            |
+ *   | FORMULA field reference      | DECIMAL | 0.25          |
+ *
+ * So `<defaultValue>25</defaultValue>` does NOT mean 25%. It means 25.0 as a decimal
+ * fraction — **2500%** — and every record created since carries a stored API value of
+ * 2500. Setup renders the default expression back as "25", so nothing looks wrong.
+ *
+ * That is the bug this package now fixes. The default must be written **0.25**.
+ *
+ * The formula-domain row is the other half of the same trap: a formula referencing a
+ * Percent field sees it ALREADY divided by 100, so `Markup/100` in a formula divides
+ * twice. budgetCalc reads through REST and its `/100` is correct; the Salesforce formula
+ * must NOT have one.
+ */
+
+/**
+ * "225 Upgrade" -> "225 Upgrade-Overhead", applied at most once.
+ *
+ * This generator re-reads the LIVE label and re-emits it with the delta applied, so any
+ * transformation it performs has to be safe to run against an org where it already ran.
+ */
+const relabel225 = (label) =>
+  label.includes("225 Upgrade-Overhead") ? label : label.replace("225 Upgrade", "225 Upgrade-Overhead");
+
+/**
  * The intended deltas. `change` receives the CURRENT values and returns ONLY the keys
  * to override — anything it does not return is carried through untouched.
  *
@@ -42,22 +75,37 @@ const CHANGES = {
       why: "§3: Hours/Battery is 16 in the REVISED sheet (was 20 in BRADS). The org has 0, so a fresh record gets ZERO battery labor until someone types it.",
       change: () => ({ defaultValue: "16" }),
     },
-    ...[1, 2, 3].map((n) => ({
+    // ⚠️ PERCENT DEFAULTS ARE EVALUATED IN THE DECIMAL DOMAIN. `0.25`, not `25`.
+    // See PERCENT_DOMAIN above and scripts/probe-percent-field-domain.mjs. All FIVE
+    // blocks are listed here, not just 1-3: blocks 4-5 were created by
+    // v2-budget-adder-fields with the same wrong `25`, and fixing them through this
+    // MODIFY package avoids redeploying that whole create-package for two fields.
+    ...[1, 2, 3, 4, 5].map((n) => ({
       api: `NS_Adder_${n}_Markup_Percent__c`,
-      why: "§3: NS markup defaults to 25%. Blocks 4-5 shipped at 25; 1-3 are at 0, so the five blocks do not behave alike.",
-      change: () => ({ defaultValue: "25" }),
+      why: "§3 + the percent-domain fix: NS markup defaults to a TRUE 25%, which as a decimal-domain default expression is 0.25. The previous `25` meant 2500%.",
+      change: () => ({ defaultValue: "0.25" }),
     })),
 
     // ---- Relabels --------------------------------------------------------
     {
       api: "Adder_Upgrade_225_Price__c",
       why: '§4a: disambiguated from the new Underground variant.',
-      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+      // IDEMPOTENT ON PURPOSE. A blind .replace() re-applies every time this generator
+      // runs against an org where the relabel already landed, producing
+      // "225 Upgrade-Overhead-Overhead". Caught when regenerating for the percent-domain
+      // fix — the relabel had deployed, and the diff showed the doubled label. Returning
+      // the label unchanged makes the "already at target value" check skip the field.
+      change: (cur) => ({ label: relabel225(cur.label) }),
     },
     {
       api: "Adder_Upgrade_225_Qty__c",
       why: "§4a: same.",
-      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+      // IDEMPOTENT ON PURPOSE. A blind .replace() re-applies every time this generator
+      // runs against an org where the relabel already landed, producing
+      // "225 Upgrade-Overhead-Overhead". Caught when regenerating for the percent-domain
+      // fix — the relabel had deployed, and the diff showed the doubled label. Returning
+      // the label unchanged makes the "already at target value" check skip the field.
+      change: (cur) => ({ label: relabel225(cur.label) }),
     },
     {
       api: "Gateway_Unit_Cost__c",
@@ -82,20 +130,36 @@ const CHANGES = {
       why: "Same as Solar AND load-bearing: this field is COPIED to Solar by Create Project (customer-to-solar-map.ts line 83). Leaving Customer blank would overwrite Solar's new 16 default on every new project.",
       change: () => ({ defaultValue: "16" }),
     },
-    ...[1, 2, 3].map((n) => ({
+    // Same decimal-domain default as Solar, PLUS a widening. Customer's markup fields are
+    // Percent(6,3) — max 999.999 — while Solar's are Percent(18,4). That divergence is
+    // why re-entering the broken 2500 errors on Customer and succeeds on Solar, and it
+    // means the two objects disagree about what fits in the same logical field. Widened
+    // to match Solar. Widening precision/scale is a non-destructive metadata change; no
+    // existing value is at risk because nothing on Customer exceeds 999.999 today.
+    ...[1, 2, 3, 4, 5].map((n) => ({
       api: `NS_Adder_${n}_Markup_Percent__c`,
-      why: "Same as Solar; NS_Adder_1_Markup_Percent__c is likewise in the create-map.",
-      change: () => ({ defaultValue: "25" }),
+      why: "Same as Solar (NS_Adder_1_Markup_Percent__c is likewise in the create-map), plus widening Percent(6,3) -> Percent(18,4) so the two objects stop disagreeing about what fits.",
+      change: () => ({ defaultValue: "0.25", precision: 18, scale: 4 }),
     })),
     {
       api: "Adder_Upgrade_225_Price__c",
       why: "§4a.",
-      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+      // IDEMPOTENT ON PURPOSE. A blind .replace() re-applies every time this generator
+      // runs against an org where the relabel already landed, producing
+      // "225 Upgrade-Overhead-Overhead". Caught when regenerating for the percent-domain
+      // fix — the relabel had deployed, and the diff showed the doubled label. Returning
+      // the label unchanged makes the "already at target value" check skip the field.
+      change: (cur) => ({ label: relabel225(cur.label) }),
     },
     {
       api: "Adder_Upgrade_225_Qty__c",
       why: "§4a.",
-      change: (cur) => ({ label: cur.label.replace("225 Upgrade", "225 Upgrade-Overhead") }),
+      // IDEMPOTENT ON PURPOSE. A blind .replace() re-applies every time this generator
+      // runs against an org where the relabel already landed, producing
+      // "225 Upgrade-Overhead-Overhead". Caught when regenerating for the percent-domain
+      // fix — the relabel had deployed, and the diff showed the doubled label. Returning
+      // the label unchanged makes the "already at target value" check skip the field.
+      change: (cur) => ({ label: relabel225(cur.label) }),
     },
     { api: "Gateway_Unit_Cost__c", why: "§3.", change: () => ({ label: "Tesla Expansion Pack Unit Cost" }) },
     { api: "Gateway_Qty__c", why: "§3.", change: () => ({ label: "Tesla Expansion Pack Qty" }) },

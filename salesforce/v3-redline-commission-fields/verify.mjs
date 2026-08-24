@@ -198,6 +198,89 @@ console.log("\n=== blank / degenerate inputs ===");
   check("commission with no adders", v.Commission_Total__c, 36502 - 2.2 * 8800);
 }
 
+console.log("\n=== battery + Tesla expansion pack (sold OUTSIDE the redline model) ===");
+{
+  // The regression this package fixes: batteries and expansion packs are priced outside
+  // redline x watts, so their PRICE has to appear in Total_Adder_Price and come back out
+  // of Commission_Total. Before the fix, commission on this deal was overpaid by 27,800.
+  //
+  //   2 batteries x 9,950            = 19,900
+  //   1 Tesla expansion pack x 7,900 =  7,900
+  //                                    -------
+  //                                     27,800
+  const base = {
+    System_Size__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company_Harmon_Solar_or_Third__c: "Blue Sky Solar", // external
+    Sales_Type_Partner__c: "GoodLeap",                        // not Lightreach
+    ...ADDERS_3110,
+  };
+  const without = evaluate("Sundial_Solar__c", base);
+  const withStorage = evaluate("Sundial_Solar__c", {
+    ...base,
+    Battery_Unit_Price__c: 9950, Battery_Qty__c: 2,
+    // SOLAR USES Gateway_Qty__c FOR THE EXPANSION PACK. See the README's "mismatched
+    // Tesla x Gateway pair" - Gateway_* is the maintained field, and this check is what
+    // fails if someone "tidies" the formula onto Tesla_Expansion_Pack_Quantity__c.
+    Tesla_Expansion_Pack_Unit_Price__c: 7900, Gateway_Qty__c: 1,
+  });
+  check("Solar baseline unmoved", without.Total_Adder_Price__c, 3110);
+  check("Solar adder price up by 27,800", withStorage.Total_Adder_Price__c, 3110 + 27800);
+  // The result is NEGATIVE (-10,688) because this reuses the 36,502 contract from the
+  // D19 example without adding the battery revenue to it. That is fine and deliberate:
+  // the thing under test is the 27,800 DELTA, not a realistic deal. A real battery job
+  // carries the storage revenue in Contract_Amount__c too.
+  check("Solar commission DOWN by 27,800", withStorage.Commission_Total__c, 17112 - 27800);
+  check("Solar $/W follows", withStorage.Commission_Total_PPW__c, (17112 - 27800) / 8800);
+}
+{
+  // The trap, asserted directly: Solar's Tesla_Expansion_Pack_Quantity__c is NOT read.
+  // If it ever starts being read, this check flips - and the mismatch has been "fixed"
+  // into a silent zero for every real expansion pack.
+  const v = evaluate("Sundial_Solar__c", {
+    System_Size__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company_Harmon_Solar_or_Third__c: "Harmon Solar", Sales_Type_Partner__c: "Cash",
+    Tesla_Expansion_Pack_Unit_Price__c: 7900, Tesla_Expansion_Pack_Quantity__c: 3,
+  });
+  check("Solar ignores Tesla_Expansion_Pack_Quantity__c", v.Total_Adder_Price__c, 0);
+}
+{
+  // CUSTOMER uses its own Tesla_Expansion_Pack_Qty__c, not Gateway_Qty__c.
+  const v = evaluate("Sundial_Customer__c", {
+    Final_System_Size_kW__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company__c: "Third-Party Dealer", Financing_Partner__c: "GoodLeap",
+    ...ADDERS_3110,
+    Battery_Unit_Price__c: 9950, Battery_Qty__c: 2,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900, Tesla_Expansion_Pack_Qty__c: 1,
+  });
+  check("Customer adder price up by 27,800", v.Total_Adder_Price__c, 3110 + 27800);
+  check("Customer commission DOWN by 27,800", v.Commission_Total__c, 17112 - 27800);
+}
+{
+  // Zero qty must not move anything. This is the common case, not an edge: the new price
+  // fields carry static defaults of 9,950 / 7,900 on EVERY new record, battery or not.
+  const v = evaluate("Sundial_Solar__c", {
+    System_Size__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company_Harmon_Solar_or_Third__c: "Blue Sky Solar", Sales_Type_Partner__c: "GoodLeap",
+    ...ADDERS_3110,
+    Battery_Unit_Price__c: 9950, Battery_Qty__c: 0,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900, Gateway_Qty__c: 0,
+  });
+  check("default price with zero qty adds nothing", v.Total_Adder_Price__c, 3110);
+  check("default price with zero qty leaves commission", v.Commission_Total__c, 17112);
+}
+{
+  // Blank price with a real qty contributes 0 rather than blanking the whole adder
+  // total - BLANKVALUE(...,0) again. That is precisely why legacy battery records need
+  // the Task 3 backfill: the formula alone cannot fix them.
+  const v = evaluate("Sundial_Solar__c", {
+    System_Size__c: 8.8, Contract_Amount__c: 36502,
+    Sales_Company_Harmon_Solar_or_Third__c: "Blue Sky Solar", Sales_Type_Partner__c: "GoodLeap",
+    ...ADDERS_3110,
+    Battery_Unit_Price__c: null, Battery_Qty__c: 2,
+  });
+  check("blank battery price contributes 0 (backfill is what fixes it)", v.Total_Adder_Price__c, 3110);
+}
+
 console.log("\n=== per-watt and NS handling ===");
 {
   const v = evaluate("Sundial_Solar__c", {

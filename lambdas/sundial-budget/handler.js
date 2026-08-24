@@ -98,6 +98,17 @@ const INPUT_FIELDS = [
   // Gateway_* is REUSED for the Tesla Expansion Pack (§3) — relabel pending.
   "Gateway_Unit_Cost__c", "Gateway_Qty__c",
   "Microinverter_Unit_Cost__c", "Microinverter_Qty__c", "Battery_Unit_Cost__c", "Battery_Qty__c",
+  // Storage PRICE fields (D19 amendment). Batteries and Tesla expansion packs sell
+  // outside the redline x watts model, so their price is part of the adder total the
+  // commission deducts. The COST side above is unaffected. Note the pairing the calc
+  // uses: Tesla_Expansion_Pack_Unit_Price__c x Gateway_Qty__c, because Gateway_* is the
+  // expansion-pack quantity on this object (§3 reuse, same as the Salesforce formula).
+  //
+  // FLS: both need Read for the integration user. Unlike Commission_Total__c there is no
+  // loud failure if a grant is missing - SOQL omits the field, the price reads 0, and the
+  // adder total quietly understates. The describe gate in
+  // scripts/probe-battery-adder-fields.mjs is what catches that.
+  "Battery_Unit_Price__c", "Tesla_Expansion_Pack_Unit_Price__c",
   "BOS_Solar_Cost_Per_Watt__c", "BOS_Electrical_Cost_Per_Watt__c",
   "Roof_Material_Cost_Per_Pen__c", "Penetrations_Per_Module__c",
   "Blended_Labor_Rate__c", "Labor_Burden_Rate__c", "Audit_Hours__c", "QA_Commissioning_Hours__c",

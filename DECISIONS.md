@@ -2233,3 +2233,70 @@ Two details that are decisions rather than defaults: `Unverified` is a separate 
 that did not happen — collapsing them would hide the case the verification exists to
 surface. And `Attribute_Synced_At__c` means *last known good* and does not move on a failed
 run, so a stale record cannot look fresh because we tried and could not.
+
+
+---
+
+## D-062: Storage is priced as an adder outside the redline, and per-watt prices above $10/W are a hard error
+
+**Date:** 2026-08-24 · **Decided by:** Tim
+**Amends:** D19 (the redline commission model) as recorded in
+`docs/integrations/acumatica-budget-rework-v2.md` — see **D27** and **D28** in that doc's
+decision table, and §4h / §4j for the implementation. Recorded here because it changes what
+a rep is paid.
+
+### Storage is an adder (D27)
+
+Batteries and Tesla expansion packs are sold **outside** the `Redline × watts` model.
+Nothing in `Redline × watts` accounts for them, so unless their price is deducted from the
+commission base the rep is paid commission on the full battery revenue as though it were
+margin. It was not being deducted anywhere: **every battery deal's commission was overpaid
+by the full battery + expansion price.**
+
+Two terms are added to the `Total_Adder_Price__c` formula on both objects:
+
+| Object | Battery | Expansion pack |
+|---|---|---|
+| `Sundial_Customer__c` | `Battery_Unit_Price__c × Battery_Qty__c` | `Tesla_Expansion_Pack_Unit_Price__c × Tesla_Expansion_Pack_Qty__c` |
+| `Sundial_Solar__c` | `Battery_Unit_Price__c × Battery_Qty__c` | `Tesla_Expansion_Pack_Unit_Price__c × **Gateway_Qty__c**` |
+
+**The mismatched Solar pair is the decision, not an accident.** `Gateway_*` IS the Tesla
+expansion pack on Solar — the group was reused for it, its label reads "Tesla Expansion Pack
+Qty", `budgetCalc` reads `Gateway_Qty__c`, and the Create Project map writes it. Solar's
+`Tesla_Expansion_Pack_Quantity__c` (note `_Quantity__c`, not `_Qty__c`) is an orphan that
+nothing maintains. Renaming the pair into agreement would repoint the formula at a
+permanently blank field and price every expansion pack at **zero**, so the mismatch is
+documented and asserted rather than tidied.
+
+**Three places have to agree** — the Salesforce formula, `budgetCalc.js`, and the fixture —
+because the documented joint of the budget fixture is that the workbook and the formula land
+on the same adder total. The Lambda change is **price-side only**; the cost side was already
+complete and adding cost there would double-count.
+
+**Existing records needed a backfill, and that is not a detail.** A Salesforce field default
+only applies to records created after the field existed, so every pre-existing
+battery/expansion record had a null price — and a null price contributes 0. The formula
+change alone fixes nothing for history. 29 records were backfilled (null-only, never
+overwriting a human-entered price), **before** the formula deploy, so the commission shift
+lands atomically rather than record by record.
+
+### Per-watt prices above $10/W are an ERROR (D28)
+
+The four per-watt adder prices multiply by **watts**. A flat dollar total typed into one is
+not a rounding error, it is a factor-of-thousands error — and it is the root cause of the
+$2.5M incident on `a1P7y00000AlufJEAR`, where a flat amount sat in
+`Adder_Roof_Tile_Price__c`. **The formula was right; the data was wrong.**
+
+`budgetCalc` now throws `BudgetInputError` / `PPW_PRICE_IMPLAUSIBLE` naming the field and
+the value, before any adder maths runs, gated on the price alone rather than on quantity.
+
+**Deliberately an error rather than a warning**, which is where this differs from the Aurora
+escalation-fraction case it is otherwise modelled on. There the ambiguity is genuine and the
+value is merely suspicious, so a warning is honest. Here a recalc that carried on would post
+a commission nobody can defend — refusing is the correct answer, and the fix is always on the
+record rather than in the code.
+
+The guard covers all four fields even though they span two lists in the calc
+(`Bird_Blocking` is a SUBCON adder with `priceKind: 'ppw'`). Deriving the list from
+`PPW_ADDERS` alone would have left `Bird_Blocking` unguarded — the one shape of this bug the
+guard must not miss.

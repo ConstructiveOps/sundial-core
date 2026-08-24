@@ -1,5 +1,69 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — batteries and expansion packs priced as adders; commissions on battery deals were overpaid
+
+Storage is sold **outside** the `Redline × watts` model, so nothing in `Redline × watts`
+accounts for it — and its price was not being deducted anywhere. Every battery deal's
+commission was therefore overpaid by the full battery + expansion price. D27 / D28.
+Suite green: 199 budget checks + 496 node tests, 30 offline formula checks.
+
+**The gate came first.** Tim created `Battery_Unit_Price__c` and
+`Tesla_Expansion_Pack_Unit_Price__c` on both objects through the Setup UI; nothing was
+written until a live describe confirmed both existed, were Currency(16,2) with the right
+defaults, and were **readable by the integration user**. `describe()` only returns
+FLS-visible fields, so an absent field and a missing grant look identical from the outside
+— `scripts/probe-battery-adder-fields.mjs` is the durable version of that check.
+
+**The formula change is two terms, and one of them looks like a bug.** On
+`Sundial_Solar__c` the expansion pack is `Tesla_Expansion_Pack_Unit_Price__c ×
+**Gateway_Qty__c**`. The names do not match on purpose: `Gateway_*` **is** the expansion
+pack on Solar (§3 reuse — its label is literally "Tesla Expansion Pack Qty", `budgetCalc`
+reads it, the Create Project map writes it), while Solar's `Tesla_Expansion_Pack_Quantity__c`
+is an orphan nothing maintains. The tempting tidy-up would repoint the formula at a field
+that is always blank and price every expansion pack at **zero**, so both `verify.mjs` and
+the Lambda suite now assert the `Gateway_Qty__c` path works *and* that the `_Quantity__c`
+path is ignored. Customer keeps its own `Tesla_Expansion_Pack_Qty__c`.
+
+**The build-time guard earned its place within minutes.** `generate.mjs` predated
+`assertFieldLimits()`; wiring it in immediately failed the build with
+`Total_Adder_Price__c: description is 1082 chars, limit 1000`. That is precisely the
+failure the v5 package hit through Workbench, caught here before a zip existed. Descriptions
+now sit at 936 / 970 and print as `(tight)` — there is no room for another sentence, and the
+build will say so rather than the deploy. Compiled sizes moved 3,086 → **3,229 bytes** of
+5,000.
+
+**A field default does not reach existing records**, which is the part that would have been
+easy to miss: the formula change alone fixes nothing for history, because a null price
+contributes 0. `scripts/backfill-storage-adder-prices.mjs` backfilled **29 records** (25
+Customer, 4 Solar) — null-only, never overwriting a human-entered price, and refusing to
+apply across more than one tenant since 9,950 / 7,900 are Harmon's numbers. Backfill ran
+**before** the formula deploy deliberately, so the commission shift lands at once rather
+than record by record; a post-run read confirmed prices set and commissions still unmoved.
+
+**Acumatica reconciliation is a shorter list than it first looked.** A Customer's
+`Acumatica_Project_ID__c` only says a project exists over there, not that a commission was
+pushed — reading it as evidence produced 20 false positives. The real evidence lives on the
+linked Solar record (`Commission_PO_M1/M2_Number__c`, `Budget_Pushed_At__c`), so the script
+looks through the relationship instead. **Exactly one touched record has a real push, and
+it is `SOL-10014 "ZZ TEST HOLLAND CLONE"`** (budget pushed 2026-08-07, blank commission).
+No real customer commission that reached Acumatica is affected.
+
+**The $2.5M class is now an error, and the sweep found more than expected.** Per-watt adder
+prices multiply by watts, so a flat dollar total in one is a factor-of-thousands error —
+`budgetCalc` throws `PPW_PRICE_IMPLAUSIBLE` above $10/W, before any adder maths runs, gated
+on price alone rather than on qty. Brian Peters (`a1P7y00000AlufJEAR`) **is** fixed
+(`Adder_Roof_Tile_Price__c` = 0.02). But he was not the only one:
+
+| Record | Field | Value | `Commission_Total__c` |
+|---|---|---|---|
+| Customer `a1P7y00000AUk65EAD` — Nicholas Suwyn | `Adder_Roof_Tile_Price__c` | 246.40 | **−3,021,904** |
+| Customer `a1P7y00000AbJXNEA3` — Hugo Quintana | `Adder_Flat_Roof_Price__c` | 220.00 | **−2,113,556** |
+| Solar `a1Q7y00000JD2u7EAD` — SOL-9428 (TEST) | `Adder_Conduit_Attic_Price__c` | 450.00 | blank — latent |
+
+Two live records carrying the original defect. The guard refuses them; the values still
+need correcting on the records.
+
+
 ## 2026-08-24 — attribute-only sync for legacy projects, and the deferred field package built
 
 `POST /projects/{recordId}/budget/attributes-sync` — a new mode on the budget-push Lambda

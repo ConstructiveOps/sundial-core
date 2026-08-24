@@ -38,6 +38,8 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D25 | **BOTH WRITE GATES OPEN, STAGES B AND E WIRED INTO THE PUSH WORKER — and the PO freeze rule is the ONLY freeze that exists.** 2026-08-24, reviewed commit (ADR **D-060**). `PO_GATE.enabled = true`, `ATTR_GATE.enabled = true`; `runDownstreamStages` runs commission POs then attributes after a **successful** budget write — a PO raised against a budget that failed to push is a payment authorised for numbers that are not in the plan. **The step 8 re-run put a PUT into a CANCELED purchase order and got `200` with the change PERSISTED**, so `UPDATABLE_STATUSES` is not us mirroring an ERP rule, it is the entire rule: the check is **deny-by-default** (unrecognised/empty/null/missing status ⇒ frozen), tests assert it is unbypassable, and **only `Canceled` was tested** — every status off the allow-list is never-touch regardless. Spelling corrected while pinning it: Acumatica sends **`Canceled`** (one L) and `FROZEN_STATUSES` had said `Cancelled`, matching nothing — harmless only because that list is documentation and never the guard. **Step 7's duplicate probe is buggy** (28 on both runs = the vendor's whole PO history); ruled a runbook defect, not a gate blocker, because idempotency is the stored OrderNbr and never a scan — **an accepted residual risk, so the first-live-job watch is the compensating control: exactly one PO per milestone per project, ever.** A downstream failure leaves `Budget_Push_Status__c = 'Pushed'` (the budget DID push) with the problem in `Budget_Push_Error__c`; internal deals and zero commissions are not problems; neither stage may throw past the wrapper. **Known gap shipped knowingly:** the attribute stage has no status/error fields of its own, so its failures live in that shared note and CloudWatch. | Harmon / Tim, 2026-08-24 |
 
 | D26 | **ATTRIBUTE-ONLY SYNC PATH FOR LEGACY / NON-BUDGETED PROJECTS — one gate, a restricted attribute set, and the deferred observability fields built.** New mode on the budget-push Lambda (ADR **D-061**): `POST /projects/{recordId}/budget/attributes-sync` (JWT + tenant, `scripts/wire-attributes-sync-route.ps1`) plus a direct-invoke equivalent (`{ attributesSync: true, recordId }`). **The ONLY gate is a linked `Acumatica_Project_ID__c`** — no `Budget_Calc_Status__c` check, no `Commission_Deal_Type__c` guard, no deal-type logic, because those exist to stop a wrong BUDGET being posted and this path posts none; a legacy record legitimately has neither, and refusing it for that would refuse exactly the records this serves. **Writes `NON_COMMISSION_ATTRIBUTES` only** — the five lifecycle dates + `KW` + `SALESPERSO`, populated-only. **Never** `SLSCOM*`/`MGRCOM*`/`MGMTOR*`, and never `JOBTYPE`. **Three independent things protect a legacy project's hand-entered figures:** (1) SCOPE — the commission attributes are never in the body, and the filter lives inside `buildProjectAttributes` so a caller cannot forget it; (2) MERGE — a partial PUT leaves what it did not send alone (D24); (3) OMIT-BLANKS — an empty record sends nothing rather than `""`. Any one would do; together the path is incapable of disturbing a figure Harmon typed in. **Verify-by-re-read is mandatory here too** — the silent-200 hazard does not care which path is writing. **SYNCHRONOUS**, unlike the push: five round trips, nowhere near the ~29s cap, and async would cost the caller an immediate answer for nothing. **Closes the D-060 observability gap:** `Attribute_Sync_Status__c` / `Attribute_Sync_Error__c` / `Attribute_Synced_At__c` (`salesforce/v5-attribute-sync-fields/`), written by **both** this path and the push worker's Stage E from **one** mapping function, so they cannot describe the same outcome differently. `Unverified` is deliberately distinct from `Failed`; `Attribute_Synced_At__c` means last-known-good and does not move on failure. **No gate on this path** — it writes only attributes, the proven-safe mechanic. | Harmon / Tim, 2026-08-24 |
+| D27 | **BATTERIES AND TESLA EXPANSION PACKS ARE PRICED AS ADDERS, OUTSIDE THE REDLINE — amends D19.** Storage is sold outside the `Redline × watts` model, so nothing in `Redline × watts` accounts for it. Until now its price was not deducted anywhere, and **every battery deal's commission was overpaid by the full battery + expansion price**. Two terms are added to `Total_Adder_Price__c` on BOTH objects: `Battery_Unit_Price__c × Battery_Qty__c`, and `Tesla_Expansion_Pack_Unit_Price__c ×` the **object-appropriate** qty — Customer `Tesla_Expansion_Pack_Qty__c`, **Solar `Gateway_Qty__c`**. ⚠️ **The Solar `Tesla_* price × Gateway_* qty` pairing is deliberate**: `Gateway_*` IS the expansion pack on Solar (§3 reuse — its label is "Tesla Expansion Pack Qty", `budgetCalc` reads it, the Create Project map writes it), while Solar's `Tesla_Expansion_Pack_Quantity__c` is an orphan nothing maintains; repointing the formula at the matching name would price every expansion pack at **zero**. `Commission_Total__c` and `Commission_Total_PPW__c` need no source edit (they inline `Total_Adder_Price`); worst compiled size 3,086 → **3,229 bytes** of 5,000. Price fields are Currency(16,2), defaults **9,950** / **7,900**, created via Setup UI on both objects 2026-08-24. The **cost** side was already complete and is unchanged. Field defaults only apply to NEW records, so existing records were **backfilled** (`scripts/backfill-storage-adder-prices.mjs`, 29 records, 2026-08-24). | Tim, 2026-08-24 |
+| D28 | **PER-WATT ADDER PRICES ABOVE $10/W ARE A HARD ERROR IN THE CALC.** The four per-watt adder prices (`Conduit_Attic`, `Flat_Roof`, `Roof_Tile`, `Bird_Blocking`) multiply by **watts**, so a flat dollar total typed into one is a factor-of-thousands error, not a rounding one — the root cause of the $2.5M incident on `a1P7y00000AlufJEAR` (Brian Peters) was exactly that, a flat amount in `Adder_Roof_Tile_Price__c`. **Data, not formula.** `budgetCalc` now throws `BudgetInputError` / `PPW_PRICE_IMPLAUSIBLE` naming the field and value. Deliberately an **ERROR, not a warning** (unlike the Aurora escalation-fraction case, where the ambiguity is genuine): a recalc that carried on would post an indefensible commission. Real values are cents — $0.10/W is typical. The guard covers all four despite them spanning two lists in the calc (`Bird_Blocking` is a SUBCON adder with `priceKind: 'ppw'`); deriving the list from `PPW_ADDERS` alone would leave the one shape it must not miss unguarded. | Tim, 2026-08-24 |
 
 ## 1. What survives from v1 (do not rebuild)
 
@@ -161,15 +163,27 @@ for, answered by real data.
 | Field | Type | Meaning |
 |---|---|---|
 | `Commission_Redline_PPW__c` | Currency(14,4) | the $/W redline for this deal |
-| `Total_Adder_Price__c` | Currency(16,2) | every priced adder, at price |
+| `Total_Adder_Price__c` | Currency(16,2) | every priced adder, at price — **incl. storage since D27** |
 | `Commission_Total__c` | Currency(16,2) | **the rep commission in dollars** — what the calc reads |
 | `Commission_Total_PPW__c` | Currency(14,4) | the derived per-watt rate |
+
+**Storage price fields (D27) — created via Setup UI 2026-08-24, both objects, verified
+present + readable by the integration user with a live describe before any code changed:**
+
+| Field | Type | Default | Multiplied by |
+|---|---|---|---|
+| `Battery_Unit_Price__c` | Currency(16,2) | 9,950 | `Battery_Qty__c` (both objects) |
+| `Tesla_Expansion_Pack_Unit_Price__c` | Currency(16,2) | 7,900 | Customer `Tesla_Expansion_Pack_Qty__c` · **Solar `Gateway_Qty__c`** |
+
+⚠️ Solar's `Tesla_Expansion_Pack_Quantity__c` is **not** used — orphan field, nothing
+maintains it. See D27 and the package README.
 
 All four are FORMULAS, so nothing writes them and they cannot drift. Object-appropriate
 sources per D19. **Blank sales company ⇒ NULL, never the external rate.** `33` (Powerwall
 labor rate) and `1.75` (labor + burden) are hardcoded in the NS term like the redlines
 themselves — they are constants of the commission MODEL, and reading a per-job override
-there would let one job's budget change what a rep is paid.
+there would let one job's budget change what a rep is paid. **D27 adds the two storage
+terms** to `Total_Adder_Price__c` on both objects.
 
 ⚠️ **Do not confuse `Commission_Total_PPW__c` with the pre-existing `Commission_PPW__c`**
 on both objects: that one is a calc OUTPUT covering all commissions (rep + management +
@@ -177,9 +191,16 @@ setter + burden) ÷ watts.
 
 Compiled size was the real constraint — Salesforce inlines referenced formulas, and the
 first draft of `Commission_Total_PPW__c` compiled to ~6,000 bytes (limit 5,000) because it
-named `Commission_Total__c` twice. Restructured to one reference; worst case is now 3,086
-bytes (62%). Figures printed by `generate.mjs`; formulas validated offline by
-`verify.mjs` (20 checks), which caught a watts precedence bug on its first run.
+named `Commission_Total__c` twice. Restructured to one reference; worst case is now
+**3,229 bytes (65%)** after D27's storage terms (3,086 / 62% before them). Figures printed
+by `generate.mjs`; formulas validated offline by `verify.mjs` (**30 checks**), which caught
+a watts precedence bug on its first run.
+
+`generate.mjs` also calls `assertFieldLimits()` (`salesforce/field-limits.mjs`) as of
+2026-08-24 — v3 predated that guard, and D27's storage sentence immediately pushed
+`Total_Adder_Price__c`'s description to 1,082 characters against a 1,000 limit. Caught at
+build time rather than by a failed Workbench deploy, which is what the guard exists for.
+The descriptions now sit at 936 / 970 and the generator flags them `(tight)`.
 
 ### 4i. D19 in budgetCalc — **BUILT 2026-08-21 (Stage 2)**
 
@@ -220,6 +241,69 @@ written to `Budget_Calc_Error__c` by `markError`.
 
 **What did NOT change:** management (.04 + .015 summed into one SLMC line, D10) and
 setter (gated on `Sundial_Customer__r.Setter__c`, D17).
+
+---
+
+### 4j. Storage on the price side + the per-watt sanity guard — **BUILT 2026-08-24**
+
+Two changes to `budgetCalc.js`, implementing D27 and D28.
+
+**D27 — storage in `stdPriceTotal` (the K39 rollup), PRICE SIDE ONLY.**
+
+```
+batteryPriceTotal   = Battery_Unit_Price__c            × Battery_Qty__c
+expansionPriceTotal = Tesla_Expansion_Pack_Unit_Price__c × Gateway_Qty__c
+stdPriceTotal      += batteryPriceTotal + expansionPriceTotal
+```
+
+`handler.js` `INPUT_FIELDS` gains the two price fields. The joint this preserves is the
+one the fixture documents: **the workbook and the Salesforce `Total_Adder_Price__c`
+formula must agree on the adder total**, or the snapshot and the commission actually paid
+tell two different stories. A test asserts `cells.K39 === extras.stdAdderPriceTotal` and
+that both land on the formula's figure.
+
+> ⚠️ **The cost side is complete and was NOT touched.** `Battery_Unit_Cost__c × Qty` and
+> `Gateway_Unit_Cost__c × Qty` already flow to material (F16 / F14), and battery labor and
+> burden already flow through F32/F33. Adding cost here would double-count. A test pins
+> that setting a storage PRICE alone moves neither `Total_Job_Cost__c` nor
+> `Total_Material_Budget__c`.
+
+**Where the snapshot and the sheet intentionally differ.** The REVISED workbook has
+battery/gateway **cost** parameters (B11/C11, B13/C13) but **no adder price row** for
+storage — the storage price is a commission-model concept the spreadsheet never had. So
+the two terms go straight into the **K39** rollup with no matching `B`/`C`/`D` row. K39 in
+a Sundial snapshot can therefore exceed the sum of the adder rows above it, by exactly
+`battery + expansion price`. `extras.batteryPriceTotal` / `expansionPriceTotal` /
+`storagePriceTotal` break the figure out so it never has to be reverse-engineered.
+
+**FLS note.** Unlike `Commission_Total__c`, a missing Read grant on the two price fields
+fails **quietly** — SOQL omits the field, the price reads 0, and the adder total merely
+understates. `scripts/probe-battery-adder-fields.mjs` is the describe gate that catches it.
+
+**D28 — `PPW_PRICE_IMPLAUSIBLE`.**
+
+| | |
+|---|---|
+| Ceiling | `$10/W`, exclusive (exactly 10 passes, 10.01 throws) |
+| Fields | `Adder_{Conduit_Attic,Flat_Roof,Roof_Tile,Bird_Blocking}_Price__c` |
+| Runs | **before any adder maths**, so an implausible rate never reaches a commission, a budget line or a snapshot |
+| Gated on qty? | **No.** Price alone fires it — bad data is bad data, and a qty of 0 is one edit away from a qty of 1 |
+
+The message names the field and the value, and points at the `a1P7y00000AlufJEAR`
+precedent, because the fix is always on the record rather than in the code.
+
+**Production sweep, 2026-08-24.** `scripts/backfill-storage-adder-prices.mjs` also sweeps
+both objects for existing violations. Brian Peters (`a1P7y00000AlufJEAR`) is **fixed** —
+`Adder_Roof_Tile_Price__c` now 0.02. Three others were **not** known:
+
+| Record | Field | Value | `Commission_Total__c` |
+|---|---|---|---|
+| Customer `a1P7y00000AUk65EAD` — Nicholas Suwyn | `Adder_Roof_Tile_Price__c` | 246.40 | **−3,021,904** |
+| Customer `a1P7y00000AbJXNEA3` — Hugo Quintana | `Adder_Flat_Roof_Price__c` | 220.00 | **−2,113,556** |
+| Solar `a1Q7y00000JD2u7EAD` — SOL-9428 "Ralph Romano - TEST" | `Adder_Conduit_Attic_Price__c` | 450.00 | blank (qty 0, no system size) — **latent** |
+
+The first two are live records carrying the same defect that caused the original incident.
+Until the values are corrected, recalc on them now refuses rather than posting the number.
 
 **Burden DID change, one day later — see D21.** Stage 2 as originally built kept the old
 rule and burdened the internal rep amount, which under the redline model produced

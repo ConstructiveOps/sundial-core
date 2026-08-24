@@ -4,6 +4,57 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## D27/D28 storage priced as adders + per-watt sanity guard (2026-08-24)
+
+Branch `feature/battery-expansion-adder-commission`. Batteries and Tesla expansion packs sell
+OUTSIDE the redline × watts model, so their price belongs in `Total_Adder_Price__c`. Until
+now it was deducted nowhere and **every battery deal was overpaid by the full storage price**.
+
+- [x] **Describe gate first.** `scripts/probe-battery-adder-fields.mjs` — both price fields
+      confirmed present on BOTH objects, Currency(16,2), defaults 9,950 / 7,900, and
+      **readable by the integration user**. `describe()` only returns FLS-visible fields, so
+      "absent" and "no FLS" are the same symptom; the probe distinguishes them.
+- [x] **Formula, through the generator (never the Setup UI).** Two terms appended to
+      `Total_Adder_Price__c` on both objects. `Commission_Total__c` /
+      `Commission_Total_PPW__c` needed no source edit — they inline it.
+- [x] **The mismatched pair is documented, not fixed.** Solar uses
+      `Tesla_Expansion_Pack_Unit_Price__c × Gateway_Qty__c`. `Gateway_*` IS the expansion
+      pack on Solar; `Tesla_Expansion_Pack_Quantity__c` is an orphan. README, D27, and
+      assertions in both `verify.mjs` and the Lambda suite guard the tidy-up.
+- [x] **Compiled sizes re-checked** — worst 3,086 → **3,229 of 5,000 (65%)**.
+- [x] **`assertFieldLimits()` wired into v3's generator** (it predated the guard) — and it
+      failed the build immediately on a 1,082-char description. Descriptions now 936 / 970,
+      printed as `(tight)`.
+- [x] **`verify.mjs` extended — 20 → 30 checks.** Includes the 27,800 worked example on both
+      objects, zero-qty-with-default-price, blank-price-contributes-0, and the
+      `Gateway_Qty__c` vs `Tesla_Expansion_Pack_Quantity__c` assertion.
+- [ ] **TIM: zip and deploy `salesforce/v3-redline-commission-fields/`** (Check Only first).
+      Explorer zip only — never `Compress-Archive`. **Commissions shift the moment this
+      lands** — the backfill is already done, so the shift is atomic.
+- [x] **Lambda price side.** `stdPriceTotal` gains both terms (K39 rollup); `handler.js`
+      `INPUT_FIELDS` gains both price fields. **Cost side untouched** — already complete via
+      `Battery_Unit_Cost__c` / `Gateway_Unit_Cost__c`, and a test pins that price alone moves
+      neither job cost nor material.
+- [x] **Snapshot/sheet divergence documented** — the workbook has no storage adder price row,
+      so K39 can exceed the sum of the rows above it by exactly the storage price.
+      `extras.storagePriceTotal` breaks it out.
+- [x] **Backfill run against production (29 records).** Field defaults only reach NEW records,
+      so the formula alone fixed nothing for history. Null-only; multi-tenant refused.
+      Run **before** the formula deploy so the shift is atomic.
+- [x] **Acumatica reconciliation list produced.** Exactly one touched record has real push
+      evidence: `SOL-10014 "ZZ TEST HOLLAND CLONE"` (budget pushed 2026-08-07, blank
+      commission). No real pushed commission is affected. Customer `Acumatica_Project_ID__c`
+      is NOT evidence of a commission push — the script looks through to the Solar children.
+- [x] **`PPW_PRICE_IMPLAUSIBLE` guard** — the four per-watt adder prices, > $10/W, an ERROR
+      not a warning, before any adder maths, gated on price alone.
+- [x] **Production sweep done.** Brian Peters (`a1P7y00000AlufJEAR`) **is already fixed**.
+- [ ] **TIM: fix two LIVE records the sweep found** — they carry the same defect as the
+      original incident and recalc now refuses them:
+      - Customer `a1P7y00000AUk65EAD` (Nicholas Suwyn) — `Adder_Roof_Tile_Price__c` = **246.40**, commission **−3,021,904**
+      - Customer `a1P7y00000AbJXNEA3` (Hugo Quintana) — `Adder_Flat_Roof_Price__c` = **220.00**, commission **−2,113,556**
+- [ ] Optional: Solar `a1Q7y00000JD2u7EAD` (SOL-9428, a TEST record) —
+      `Adder_Conduit_Attic_Price__c` = 450.00, currently latent (qty 0, no system size).
+
 ## D19 REDLINE commission model (2026-08-21) — supersedes the PPW-input model
 
 Branch `feat/redline-commissions`. Three stages with a boundary at each; **Stage 1 is package-only and STOPPED for Tim's deploy (done).**

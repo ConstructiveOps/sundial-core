@@ -76,9 +76,72 @@ Every **priced** adder, at price (never cost):
   Tile, Bird Blocking.
 - **NS blocks 1-5** at their **marked-up** total:
   `Material × (1 + Markup/100) + Hours × 33 × 1.75`.
+- **Storage** at `Unit Price × Qty` — batteries and Tesla expansion packs. Added
+  2026-08-24; see below.
 
 `Markup` is a Percent field, which a formula reads as a whole number (25 = 25%), hence
 the `/100` — the same conversion budgetCalc does.
+
+### Storage: batteries and Tesla expansion packs
+
+Batteries and expansion packs are sold **outside** the redline × watts model. Nothing in
+`Redline × watts` accounts for them, so unless their price is deducted here the rep is
+paid commission on the full battery revenue as though it were margin. Before this was
+added, **every battery deal was overpaid by the full battery + expansion price.**
+
+| Object | Battery term | Expansion-pack term |
+|---|---|---|
+| `Sundial_Customer__c` | `Battery_Unit_Price__c × Battery_Qty__c` | `Tesla_Expansion_Pack_Unit_Price__c × Tesla_Expansion_Pack_Qty__c` |
+| `Sundial_Solar__c` | `Battery_Unit_Price__c × Battery_Qty__c` | `Tesla_Expansion_Pack_Unit_Price__c × **Gateway_Qty__c**` |
+
+Both price fields are Currency(16,2) with static defaults of **9,950** and **7,900**,
+created via the Setup UI on both objects.
+
+#### ⚠️ The mismatched `Tesla_*` × `Gateway_*` pair on Solar — leave it alone
+
+On `Sundial_Solar__c` the formula multiplies `Tesla_Expansion_Pack_Unit_Price__c` by
+`Gateway_Qty__c`. The names do not match, and that is **deliberate**, not an oversight:
+
+- **`Gateway_*` IS the Tesla expansion pack on Solar.** The `Gateway_*` group was reused
+  for it (§3). Its label is literally *"Tesla Expansion Pack Qty"*, `Gateway_Cost__c` is
+  labelled *"Tesla Expansion Pack Cost"*, `budgetCalc.js` reads `Gateway_Qty__c` as the
+  expansion-pack quantity, and the Create Project map writes it.
+- **Solar's `Tesla_Expansion_Pack_Quantity__c` is an orphan.** Nothing maintains it.
+  Note it is also spelled `_Quantity__c`, not `_Qty__c` — a different field from
+  Customer's `Tesla_Expansion_Pack_Qty__c`, which *is* maintained.
+
+So the tempting tidy-up — "the price says Tesla, the qty should say Tesla too" — would
+repoint the formula at a field that is always blank, and **every expansion pack would
+silently price at zero**. `verify.mjs` asserts both halves of this (the `Gateway_Qty__c`
+path works, the `Tesla_Expansion_Pack_Quantity__c` path is ignored), and `test.js` in the
+budget Lambda does the same, so the tidy-up fails loudly instead of quietly.
+
+Customer keeps its own `Tesla_Expansion_Pack_Qty__c`. Customer *also* carries a
+`Gateway_Qty__c` with the same label, but its intake maintains the `Tesla_*` one.
+
+#### Where the snapshot workbook and the sheet intentionally differ
+
+The REVISED workbook has battery/gateway **cost** parameters (B11/C11, B13/C13) but **no
+adder price row** for storage — the storage price is a commission-model concept that the
+spreadsheet never had. So in `budgetCalc.js` the two terms are added straight into the
+**K39** adder-price rollup without a matching `B`/`C`/`D` row of their own.
+
+That is the one place the snapshot and the sheet layout diverge. K39 in a Sundial snapshot
+can therefore exceed the sum of the adder rows above it, by exactly
+`battery + expansion price`. `extras.storagePriceTotal` (plus `batteryPriceTotal` /
+`expansionPriceTotal`) breaks the figure out so it never has to be reverse-engineered.
+
+The **cost** side is untouched: `Battery_Unit_Cost__c × Qty` and
+`Gateway_Unit_Cost__c × Qty` already flow to material (F16 / F14) and battery labor and
+burden already flow through F32/F33. Adding cost here would double-count.
+
+#### Existing records needed a backfill
+
+A Salesforce field default only applies to records created **after** the field existed, so
+every pre-existing battery/expansion record had a **null** price — and a null price
+contributes 0, which means the formula change alone fixes nothing for history.
+`scripts/backfill-storage-adder-prices.mjs` covers that (null-only, never overwriting a
+human-entered price). It ran against production on **2026-08-24**, touching 29 records.
 
 ### Why 33 is hardcoded
 
@@ -134,15 +197,29 @@ a copy of all three. `Total_Adder_Price` alone is ~40 field references. Limits a
 | Object | Field | Source | Inlined | Headroom |
 |---|---|---|---|---|
 | Customer | `Commission_Redline_PPW__c` | 190 | 190 | 4,810 |
-| Customer | `Total_Adder_Price__c` | 2,387 | 2,387 | 2,613 |
-| Customer | `Commission_Total__c` | 233 | 2,936 | 2,064 |
-| Customer | `Commission_Total_PPW__c` | 120 | 3,039 | 1,961 |
+| Customer | `Total_Adder_Price__c` | 2,543 | 2,543 | 2,457 |
+| Customer | `Commission_Total__c` | 233 | 3,092 | 1,908 |
+| Customer | `Commission_Total_PPW__c` | 120 | 3,195 | 1,805 |
 | Solar | `Commission_Redline_PPW__c` | 236 | 236 | 4,764 |
-| Solar | `Total_Adder_Price__c` | 2,378 | 2,378 | 2,622 |
-| Solar | `Commission_Total__c` | 215 | 3,001 | 1,999 |
-| Solar | `Commission_Total_PPW__c` | 102 | 3,086 | 1,914 |
+| Solar | `Total_Adder_Price__c` | 2,521 | 2,521 | 2,479 |
+| Solar | `Commission_Total__c` | 215 | 3,144 | 1,856 |
+| Solar | `Commission_Total_PPW__c` | 102 | 3,229 | 1,771 |
 
-**Worst case 3,086 bytes — 62% of the limit.**
+**Worst case 3,229 bytes — 65% of the limit.** (Was 3,086 / 62% before the two storage
+terms; they cost ~143 bytes at the worst point because the inlining carries them three
+times over.)
+
+### Metadata length is now guarded at build time too
+
+`generate.mjs` calls `assertFieldLimits()` from `salesforce/field-limits.mjs` — the guard
+added after the v5 package failed a Workbench deploy on a 1,137-character description.
+v3 predated it, and the storage sentence promptly pushed `Total_Adder_Price__c`'s
+description to 1,082 characters, over the 1,000 limit. The build failed locally instead of
+after a zip-and-upload round trip, which is the entire point.
+
+The descriptions now sit at **936** (Customer) and **970** (Solar) of 1,000 and the
+generator prints them as `(tight)`. That is deliberate — there is not room for another
+sentence, and the build will say so rather than the deploy.
 
 ### It did not fit on the first attempt
 
@@ -170,7 +247,7 @@ references, and inline the terms rather than chaining another formula field.
 
 ## Offline validation
 
-`node salesforce/v3-redline-commission-fields/verify.mjs` — **20 checks, all passing.**
+`node salesforce/v3-redline-commission-fields/verify.mjs` — **30 checks, all passing.**
 
 It reads the **actual `<formula>` text out of the generated `.object` files**, transpiles
 the small subset of the formula language they use into JavaScript, and evaluates it. That
@@ -186,6 +263,12 @@ parenthesised everywhere.
 Covered: the D19 worked example on both objects, all four redlines, the Lightreach casing
 difference, blank company, zero watts, blank finance, no adders, per-watt × qty, and NS
 markup + labour.
+
+Plus the storage block (added 2026-08-24): the 27,800 worked example on both objects
+(2 batteries at 9,950 + 1 expansion pack at 7,900 — adder total **up** 27,800, commission
+**down** 27,800), zero-qty-with-default-price changing nothing, a blank price contributing
+0 rather than blanking the total, and — the important one — that Solar reads
+`Gateway_Qty__c` and **ignores** `Tesla_Expansion_Pack_Quantity__c`.
 
 **It does not validate Salesforce's compiled-size limit or its parser.** Only Check Only
 can, which is why that is step 1 below.

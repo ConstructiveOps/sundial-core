@@ -130,6 +130,35 @@ const INTERNAL_DEAL = {
 };
 
 /**
+ * The same job with STORAGE on it - 2 batteries and 1 Tesla expansion pack.
+ *
+ * Read this exactly like INTERNAL_DEAL: the last field is NOT an independent input. It
+ * is what the deployed Total_Adder_Price__c / Commission_Total__c formulas return once
+ * the storage prices are set, so they move together or not at all.
+ *
+ *   batteries        2 x 9,950 = 19,900
+ *   expansion pack   1 x 7,900 =  7,900
+ *                               -------
+ *   adder total up             = 27,800   (3,110 -> 30,910)
+ *   commission down            = 27,800   (17,112 -> -10,688)
+ *
+ * The commission goes NEGATIVE, and that is expected rather than a failing case: the
+ * fixture reuses the 36,502 contract without adding the storage revenue to it. The thing
+ * under test is the 27,800 delta and the workbook/formula AGREEMENT on it. A real
+ * battery job carries storage revenue in Contract_Amount__c too.
+ *
+ * Gateway_Qty__c is the EXPANSION-PACK quantity (section 3 reuse). Solar's
+ * Tesla_Expansion_Pack_Quantity__c is unmaintained and deliberately not read - see
+ * salesforce/v3-redline-commission-fields/README.md.
+ */
+const STORAGE_DEAL = {
+  Battery_Unit_Price__c: 9950, Battery_Qty__c: 2,
+  Tesla_Expansion_Pack_Unit_Price__c: 7900, Gateway_Qty__c: 1,
+  Commission_Total__c: 17112 - 27800,
+};
+const STORAGE_PRICE_TOTAL = 27800;
+
+/**
  * COMMISSION_REPIN — why the commission numbers here are NOT the workbook's.
  *
  * Every non-commission expectation below is still the REVISED workbook's own cached
@@ -585,6 +614,157 @@ it('NS blocks 4 and 5 are live and use the POWERWALL rate', () => {
   assert.ok(Math.abs(r.extras.nsAdder4Total - (1000 + 250 + 330 + 247.5)) < TOL);
   // The MARKUP must not reach the material budget (sheet J15 pulls G68, no markup).
   assert.ok(Math.abs(r.fields.Total_Material_Budget__c - (16140.73 + 1500)) < TOL);
+});
+
+// ---------------------------------------------------------------------------
+// D19 amendment — storage priced as an adder (batteries + Tesla expansion packs)
+// ---------------------------------------------------------------------------
+
+it('storage: battery price x qty lands in the adder price total', () => {
+  const r = calculateBudget({ ...REVISED, ...STORAGE_DEAL });
+  assert.ok(
+    Math.abs(r.extras.stdAdderPriceTotal - (3110 + STORAGE_PRICE_TOTAL)) < TOL,
+    `adder price total is ${r.extras.stdAdderPriceTotal}, expected ${3110 + STORAGE_PRICE_TOTAL}`
+  );
+  assert.ok(Math.abs(r.extras.batteryPriceTotal - 19900) < TOL);
+  assert.ok(Math.abs(r.extras.expansionPriceTotal - 7900) < TOL);
+  assert.ok(Math.abs(r.extras.storagePriceTotal - STORAGE_PRICE_TOTAL) < TOL);
+});
+
+it('storage: THE JOINT — the workbook K39 cell agrees with the formula total', () => {
+  // This is the whole point of the change. The Salesforce Total_Adder_Price__c formula
+  // and this calc must land on the SAME adder total, or the snapshot workbook and the
+  // commission that was actually paid tell two different stories.
+  const r = calculateBudget({ ...REVISED, ...STORAGE_DEAL });
+  assert.ok(Math.abs(r.cells.K39 - (3110 + STORAGE_PRICE_TOTAL)) < TOL);
+  assert.ok(Math.abs(r.cells.K39 - r.extras.stdAdderPriceTotal) < TOL);
+});
+
+it('storage: the commission falls by exactly price x qty', () => {
+  const plain = calculateBudget(REVISED);
+  const withStorage = calculateBudget({ ...REVISED, ...STORAGE_DEAL });
+  // Commission_Total__c is the FORMULA field, read not computed, so the drop arrives as
+  // an input here. What this pins is that the calc carries it through undisturbed and
+  // routes the same amount - i.e. the Lambda agrees with the formula rather than
+  // re-deriving a second answer.
+  const delta = plain.extras.redlineCommissionAmt - withStorage.extras.redlineCommissionAmt;
+  assert.ok(
+    Math.abs(delta - STORAGE_PRICE_TOTAL) < TOL,
+    `commission moved by ${delta}, expected ${STORAGE_PRICE_TOTAL}`
+  );
+  // External deal, so it routes to the third-party line and NOT the internal one.
+  assert.ok(Math.abs(withStorage.extras.thirdPartyCommissionAmt - (17112 - 27800)) < TOL);
+  assert.strictEqual(withStorage.extras.internalCommissionAmt, 0);
+});
+
+it('storage: PRICE SIDE ONLY — job cost and material are untouched', () => {
+  // The cost side was already complete (Battery_Unit_Cost__c x Qty into F16,
+  // Gateway_Unit_Cost__c x Qty into F14). If a storage PRICE ever reaches a cost line,
+  // it is double-counted, and this is what catches it.
+  const priceOnly = calculateBudget({
+    ...REVISED,
+    Battery_Unit_Price__c: 9950,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900,
+    // qty deliberately left at the fixture's own values
+  });
+  assert.ok(Math.abs(priceOnly.fields.Total_Job_Cost__c - 24557.48) < TOL);
+  assert.ok(Math.abs(priceOnly.fields.Total_Material_Budget__c - 16140.73) < TOL);
+});
+
+it('storage: ZERO QTY changes nothing, even with the default prices set', () => {
+  // Not an edge case - the new fields default to 9,950 / 7,900 on EVERY new record, so
+  // the overwhelming majority of jobs are priced-but-no-storage and must be unmoved.
+  const r = calculateBudget({
+    ...REVISED,
+    Battery_Unit_Price__c: 9950, Battery_Qty__c: 0,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900, Gateway_Qty__c: 0,
+  });
+  assert.ok(Math.abs(r.extras.stdAdderPriceTotal - 3110) < TOL);
+  assert.ok(Math.abs(r.extras.storagePriceTotal - 0) < TOL);
+  assert.ok(Math.abs(r.cells.K39 - 3110) < TOL);
+  // Job cost DOES move here, and that is the cost side doing its existing job: the
+  // fixture ships Battery_Qty__c 1, so zeroing it drops Battery_Unit_Cost__c x 1 =
+  // 7,383.33 of material (F16). Asserting the exact drop proves it came from cost and
+  // that no part of the 9,950 PRICE leaked in alongside it.
+  assert.ok(
+    Math.abs(r.fields.Total_Job_Cost__c - (24557.48 - 7383.33)) < TOL,
+    `job cost is ${r.fields.Total_Job_Cost__c}, expected ${24557.48 - 7383.33}`
+  );
+});
+
+it('storage: a BLANK price with real qty contributes 0, not NaN', () => {
+  // Why the Task 3 backfill exists: legacy records have qty but no price, and the calc
+  // must stay arithmetically sane until they are populated.
+  const r = calculateBudget({ ...REVISED, Battery_Qty__c: 2, Battery_Unit_Price__c: null });
+  assert.ok(Math.abs(r.extras.stdAdderPriceTotal - 3110) < TOL);
+  assert.ok(Number.isFinite(r.cells.K39));
+});
+
+it('storage: the expansion pack reads Gateway_Qty__c, NOT Tesla_Expansion_Pack_Quantity__c', () => {
+  // The deliberate mismatched pair. If someone "tidies" the calc onto the matching name,
+  // this flips and every real expansion pack silently prices at zero.
+  const wrong = calculateBudget({
+    ...REVISED,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900,
+    Tesla_Expansion_Pack_Quantity__c: 3,   // unmaintained field - must be ignored
+  });
+  assert.ok(Math.abs(wrong.extras.expansionPriceTotal - 0) < TOL);
+
+  const right = calculateBudget({
+    ...REVISED,
+    Tesla_Expansion_Pack_Unit_Price__c: 7900,
+    Gateway_Qty__c: 3,
+  });
+  assert.ok(Math.abs(right.extras.expansionPriceTotal - 23700) < TOL);
+});
+
+// ---------------------------------------------------------------------------
+// Per-watt price sanity guard (the $2.5M class)
+// ---------------------------------------------------------------------------
+
+it('PPW guard: each of the four per-watt prices throws above $10/W', () => {
+  for (const field of [
+    'Adder_Conduit_Attic_Price__c',
+    'Adder_Flat_Roof_Price__c',
+    'Adder_Roof_Tile_Price__c',
+    'Adder_Bird_Blocking_Price__c',
+  ]) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, [field]: 2500 }),
+      (e) =>
+        e instanceof BudgetInputError &&
+        e.code === 'PPW_PRICE_IMPLAUSIBLE' &&
+        // The message has to name the field AND the value or it is useless at 2am.
+        e.message.includes(field) &&
+        e.message.includes('2500'),
+      `${field} was not guarded`
+    );
+  }
+});
+
+it('PPW guard: fires on price alone, even when the adder is NOT selected', () => {
+  // Bad data is bad data. A qty of 0 today is one edit away from being a qty of 1, and
+  // the a1P7y00000AlufJEAR record is exactly the shape this catches.
+  assert.throws(
+    () => calculateBudget({ ...REVISED, Adder_Roof_Tile_Price__c: 3000, Adder_Roof_Tile_Qty__c: 0 }),
+    (e) => e instanceof BudgetInputError && e.code === 'PPW_PRICE_IMPLAUSIBLE'
+  );
+});
+
+it('PPW guard: legitimate cent-scale prices pass, and $10/W exactly is allowed', () => {
+  // 0.10/W is the fixture's own Bird Blocking price; the ceiling is exclusive so a value
+  // sitting exactly on it is not treated as an error.
+  assert.doesNotThrow(() => calculateBudget({ ...REVISED, Adder_Roof_Tile_Price__c: 0.12 }));
+  assert.doesNotThrow(() => calculateBudget({ ...REVISED, Adder_Flat_Roof_Price__c: 10 }));
+  assert.throws(
+    () => calculateBudget({ ...REVISED, Adder_Flat_Roof_Price__c: 10.01 }),
+    (e) => e instanceof BudgetInputError && e.code === 'PPW_PRICE_IMPLAUSIBLE'
+  );
+});
+
+it('PPW guard: FLAT adder prices are untouched by it', () => {
+  // Sub Panel is a flat adder at 500 - a per-watt ceiling must not reach it.
+  assert.doesNotThrow(() => calculateBudget({ ...REVISED, Adder_Sub_Panel_Price__c: 5000 }));
 });
 
 it('D14: small systems are revenue-only — they touch price, never cost', () => {

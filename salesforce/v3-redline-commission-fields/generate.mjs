@@ -19,6 +19,10 @@
 // that can confirm the compiled figure, and it is step 1 of the deploy checklist.
 import fs from "node:fs";
 import path from "node:path";
+// Description <= 1,000 chars / help <= 255. v3 predated this guard, and the battery +
+// expansion terms push Total_Adder_Price__c description length up, so it is wired in
+// here too rather than trusting a Workbench round trip to find an overflow.
+import { assertFieldLimits, reportFieldLimitHeadroom } from "../field-limits.mjs";
 
 const OUT = path.resolve("salesforce/v3-redline-commission-fields");
 fs.mkdirSync(path.join(OUT, "objects"), { recursive: true });
@@ -54,6 +58,14 @@ const SRC = {
     finance: "Financing_Partner__c",
     lightreachValue: "Lightreach",
     kw: "Final_System_Size_kW__c",
+    // Expansion-pack qty. Customer keeps its own Tesla_Expansion_Pack_Qty__c — the
+    // object also carries a Gateway_Qty__c labelled "Tesla Expansion Pack Qty", but the
+    // Customer-side intake writes the Tesla_* one, so that is the one priced here.
+    expansionQty: "Tesla_Expansion_Pack_Qty__c",
+    expansionQtyShort:
+      "Customer also carries a Gateway_Qty__c with the same label; the Tesla_* field is the one its intake maintains.",
+    expansionQtyNote:
+      "Tesla_Expansion_Pack_Qty__c is the expansion-pack quantity on Customer (this object ALSO has a Gateway_Qty__c with the same label; the Customer intake maintains the Tesla_* field, so that is the one used).",
     companyNote:
       'Sales_Company__c is a two-value picklist ("Harmon Solar" / "Third-Party Dealer").',
     financeNote:
@@ -65,6 +77,17 @@ const SRC = {
     finance: "Sales_Type_Partner__c",
     lightreachValue: "LightReach",
     kw: "System_Size__c",
+    // ⚠️ MISMATCHED PAIR ON PURPOSE: Tesla_Expansion_Pack_Unit_Price__c x Gateway_Qty__c.
+    // Gateway_* IS the expansion pack on Solar (§3 reuse) — its label is literally
+    // "Tesla Expansion Pack Qty", the budget engine reads Gateway_Qty__c, and the Create
+    // Project map writes it. Solar's Tesla_Expansion_Pack_Quantity__c is an orphan that
+    // nothing maintains; "tidying" this to the matching name would price every expansion
+    // pack at zero. See README "The mismatched Tesla x Gateway pair".
+    expansionQty: "Gateway_Qty__c",
+    expansionQtyShort:
+      "Tesla_* price x Gateway_* qty is DELIBERATE - Gateway_* IS the expansion pack here; Tesla_Expansion_Pack_Quantity__c is unmaintained. See the package README.",
+    expansionQtyNote:
+      "Gateway_Qty__c is the expansion-pack quantity on Solar (the Gateway_* group is REUSED for the Tesla Expansion Pack, §3 — its label is \"Tesla Expansion Pack Qty\" and budgetCalc reads it). Solar's identically-themed Tesla_Expansion_Pack_Quantity__c is NOT maintained by anything and is deliberately not used here.",
     companyNote:
       'Sales_Company_Harmon_Solar_or_Third__c holds "Harmon Solar" or one of ~55 dealer names, so INTERNAL is an equality test and EXTERNAL is everything else.',
     financeNote:
@@ -119,7 +142,14 @@ function totalAdderPriceFormula(o) {
       `${B(`NS_Adder_${n}_Material_Cost__c`)}*(1+${B(`NS_Adder_${n}_Markup_Percent__c`)}/100)` +
       `+${B(`NS_Adder_${n}_Labor_Hours__c`)}*33*1.75`
   ).join("+");
-  return `${flat}+${ppw}+${ns}`;
+  // Batteries and Tesla expansion packs are sold OUTSIDE the redline x watts model, so
+  // their PRICE has to be deducted here like any other adder. Without these two terms a
+  // battery deal's commission is overpaid by the full battery + expansion price.
+  // Note the qty field differs per object — see SRC[o].expansionQty and its note.
+  const storage =
+    `${B("Battery_Unit_Price__c")}*${B("Battery_Qty__c")}` +
+    `+${B("Tesla_Expansion_Pack_Unit_Price__c")}*${B(SRC[o].expansionQty)}`;
+  return `${flat}+${ppw}+${ns}+${storage}`;
 }
 
 /** COMMISSION TOTAL. Null redline or zero watts -> NULL, never a number. */
@@ -177,12 +207,15 @@ function fields(o) {
       formula: totalAdderPriceFormula(o),
       description:
         "D19. Every priced adder at PRICE (the commission side), never cost: 16 flat adders at Price x Qty, " +
-        "4 per-watt adders at Price x Watts x Qty, and NS blocks 1-5 at their MARKED-UP total " +
+        "4 per-watt at Price x Watts x Qty, NS blocks 1-5 at their MARKED-UP total " +
         "Material x (1 + Markup/100) + Hours x 33 x 1.75. Referral Fee IS included. " +
-        "THE 33 IS HARDCODED, like the redlines themselves: it is the Powerwall labor rate the commission " +
-        "model is defined against, not a per-job parameter, so reading Battery_Labor_Rate__c here would let a " +
-        "per-job override silently change everybody's commission. 1.75 is labor + 75% burden. " +
-        "If Harmon re-rates either number, this formula and the redline table change together.",
+        "THE 33 IS HARDCODED, like the redlines: it is the Powerwall labor rate the model is defined against, " +
+        "not a per-job parameter - reading Battery_Labor_Rate__c here would let a per-job override silently " +
+        "change everybody's commission. 1.75 is labor + 75% burden; re-rating either number changes this " +
+        "formula and the redline table together. " +
+        "STORAGE TOO: batteries (Battery_Unit_Price__c x Battery_Qty__c) and Tesla expansion packs " +
+        `(Tesla_Expansion_Pack_Unit_Price__c x ${s.expansionQty}) sell OUTSIDE the redline x watts model, ` +
+        "so their price is deducted here as an adder. " + s.expansionQtyShort,
       help: "Sum of every priced adder on this job, used as a deduction in the commission calculation.",
     },
     {
@@ -256,6 +289,7 @@ const report = [];
 
 for (const objName of Object.keys(SRC)) {
   const list = fields(objName);
+  assertFieldLimits(list, `v3-redline-commission-fields (${objName})`);
   const byApi = Object.fromEntries(list.map((f) => [f.api, f]));
 
   const header = `<?xml version="1.0" encoding="UTF-8"?>
@@ -338,6 +372,11 @@ for (const r of report) {
     `  ${r.object.padEnd(8)} ${r.api.padEnd(28)} ${r.type.padEnd(15)} ${String(r.source).padStart(5)}  ${String(r.inlined).padStart(7)}  ${String(COMPILED_LIMIT - r.inlined).padStart(7)}${flag}`
   );
 }
+for (const objName of Object.keys(SRC)) {
+  console.log(`\n  ${objName} metadata-length headroom:`);
+  reportFieldLimitHeadroom(fields(objName));
+}
+
 console.log(`\n  source limit ${SOURCE_LIMIT} / compiled limit ${COMPILED_LIMIT}`);
 console.log(`  worst inlined expansion: ${worst} bytes (${Math.round((worst / COMPILED_LIMIT) * 100)}% of the limit)`);
 if (worst > COMPILED_LIMIT) {

@@ -150,6 +150,38 @@ const PPW_ADDERS = [
  *   Structural     → SUBCON Engineering  (J17)
  *   Bird_Blocking  → SUBCON Subcontractor (J18)
  */
+/**
+ * PER-WATT ADDER PRICE SANITY CEILING, dollars per watt (the $2.5M class of error).
+ *
+ * The four per-watt adder prices multiply by WATTS, so a flat dollar amount typed into
+ * one of them is not a rounding error - it is a factor-of-thousands error. That is
+ * exactly what happened on customer a1P7y00000AlufJEAR: a flat dollar amount sat in
+ * Adder_Roof_Tile_Price__c, and because the field is per-watt it multiplied out into a
+ * $2.5M commission swing. The FORMULA was right; the DATA was wrong.
+ *
+ * Real per-watt adder prices are cents, not dollars - $0.10/W is typical and the
+ * highest legitimate one on the books is well under $1/W. $10/W is therefore not a
+ * judgement call about pricing, it is "somebody typed a total into a rate field".
+ *
+ * This is an ERROR, not a warning (unlike the Aurora escalation-fraction case, where
+ * the ambiguity is genuine and the value is merely suspicious). Here a recalc that
+ * carried on would post a commission nobody can defend, so it refuses.
+ */
+const PPW_PRICE_CEILING = 10;
+
+/**
+ * The four per-watt adder PRICE fields, spanning two lists on purpose: three live in
+ * PPW_ADDERS and Bird_Blocking is a SUBCON adder with priceKind 'ppw'. Deriving this
+ * from PPW_ADDERS alone would leave Bird_Blocking unguarded, which is the one shape of
+ * this bug the guard must not miss.
+ */
+const PPW_PRICE_FIELDS = [
+  'Adder_Conduit_Attic_Price__c',
+  'Adder_Flat_Roof_Price__c',
+  'Adder_Roof_Tile_Price__c',
+  'Adder_Bird_Blocking_Price__c',
+];
+
 const SUBCON_ADDERS = [
   { base: 'Structural',    row: 55, priceKind: 'flat', costKind: 'unit', line: 'engineerStamps' },
   { base: 'Bird_Blocking', row: 56, priceKind: 'ppw',  costKind: 'watt', line: 'subcontractor' },
@@ -441,6 +473,25 @@ function calculateBudget(rec) {
     return num(raw);
   };
 
+  // ---- Per-watt price sanity (the $2.5M class) ----------------------------
+  // Runs BEFORE any adder maths, so an implausible rate never reaches a commission,
+  // a budget line or a snapshot. Reports the first offender by NAME and VALUE - the
+  // point of the message is to send someone straight to the field on the record.
+  for (const field of PPW_PRICE_FIELDS) {
+    const price = g(field);
+    if (price > PPW_PRICE_CEILING) {
+      throw new BudgetInputError(
+        `${field} is ${price}, which is $${price}/W - above the $${PPW_PRICE_CEILING}/W ` +
+          'sanity ceiling. This field is a PER-WATT rate, so it is multiplied by system ' +
+          'watts; real values are cents (0.10/W is typical). A number this size is almost ' +
+          'always a flat dollar TOTAL typed into a rate field, which is what produced the ' +
+          '$2.5M commission error on a1P7y00000AlufJEAR. Fix the value on the record, then ' +
+          'recalculate.',
+        'PPW_PRICE_IMPLAUSIBLE'
+      );
+    }
+  }
+
   // ---- Flat adders --------------------------------------------------------
   for (const a of FLAT_ADDERS) {
     const price = g(`Adder_${a.base}_Price__c`);
@@ -532,6 +583,32 @@ function calculateBudget(rec) {
     nsTotalWithMarkup += total;
     nsRows.push({ ...b, markup, mat, hours, labor, bur, markupAmt, total });
   }
+
+  // ---- Storage: batteries + Tesla expansion packs, PRICE SIDE ONLY --------
+  // D19 amendment. Batteries and expansion packs are sold OUTSIDE the redline x watts
+  // model, so their PRICE belongs in the adder total that Commission_Total__c deducts.
+  // This mirrors the two terms added to the Salesforce Total_Adder_Price__c formula, and
+  // that agreement is the joint the fixture pins - workbook and formula must land on the
+  // same adder total or the two halves of the fixture cannot be combined.
+  //
+  // ⚠️ THE COST SIDE IS ALREADY COMPLETE AND IS NOT TOUCHED HERE. Battery_Unit_Cost__c x
+  // Battery_Qty__c and Gateway_Unit_Cost__c x Gateway_Qty__c already flow into material
+  // (F16 / F14), and battery labor + burden already flow through F32/F33. Adding cost
+  // here would double-count them.
+  //
+  // ⚠️ Gateway_Qty__c IS the Tesla expansion-pack quantity (§3 reuse) - its label is
+  // literally "Tesla Expansion Pack Qty" and the Solar formula multiplies the same pair.
+  // Solar's Tesla_Expansion_Pack_Quantity__c is unmaintained and deliberately unread.
+  const batteryPriceTotal = g('Battery_Unit_Price__c') * g('Battery_Qty__c');
+  const expansionPriceTotal =
+    g('Tesla_Expansion_Pack_Unit_Price__c') * g('Gateway_Qty__c');
+  const storagePriceTotal = batteryPriceTotal + expansionPriceTotal;
+
+  // NO SHEET ROW EXISTS for either. The REVISED workbook has battery/gateway COST
+  // parameters (B11/C11, B13/C13) but no adder PRICE row for storage, so these land in
+  // the K39 rollup without a matching B/C/D row of their own. The snapshot and the sheet
+  // intentionally differ here - documented in the package README.
+  stdPriceTotal += storagePriceTotal;
 
   const adderLaborTotal = stdLabor + nsLabor;
   const adderBurdenTotal = stdBurden + nsBurden;
@@ -709,6 +786,11 @@ function calculateBudget(rec) {
     nsAdder5Total: r2(nsRows[4].total),
     nsAdderTotalWithMarkup: r2(nsTotalWithMarkup),
     stdAdderPriceTotal: r2(stdPriceTotal),
+    // Broken out so the storage share of the adder total is visible without re-deriving
+    // it - there is no sheet row for it (see the K39 note above).
+    batteryPriceTotal: r2(batteryPriceTotal),
+    expansionPriceTotal: r2(expansionPriceTotal),
+    storagePriceTotal: r2(storagePriceTotal),
   };
 
   // =========================================================================

@@ -53,3 +53,23 @@ env vars are needed here** — the shared helper (and the execution role's
   calculated. The template (with live formulas) stays the working calculator.
 - File metadata registration in Supabase (per `docs/file-storage.md`) is marked TODO in
   `handler.js` — wire it to the existing file-metadata helper when integrating.
+- **Storage price terms (D27) have no sheet row.** `Battery_Unit_Price__c × Battery_Qty__c`
+  and `Tesla_Expansion_Pack_Unit_Price__c × Gateway_Qty__c` go straight into the **K39**
+  adder-price rollup, because the REVISED workbook has battery/gateway *cost* parameters
+  (B11/C11, B13/C13) but no adder *price* row for storage. **This is the one place the
+  snapshot and the sheet layout intentionally differ** — K39 can exceed the sum of the adder
+  rows above it, by exactly the storage price. `extras.batteryPriceTotal` /
+  `expansionPriceTotal` / `storagePriceTotal` break it out.
+- **`Gateway_Qty__c` is the Tesla expansion-pack quantity**, not a separate gateway (§3
+  reuse — its label is literally "Tesla Expansion Pack Qty"). Solar's
+  `Tesla_Expansion_Pack_Quantity__c` is an orphan nothing maintains; repointing the calc at
+  the matching name would price every expansion pack at zero. The same pairing is used by
+  the `Total_Adder_Price__c` formula, and tests pin both halves.
+- **Storage is PRICE-side only.** The cost side was already complete
+  (`Battery_Unit_Cost__c × Qty` → F16, `Gateway_Unit_Cost__c × Qty` → F14, battery labor and
+  burden via F32/F33). Adding cost alongside the price would double-count it.
+- **`PPW_PRICE_IMPLAUSIBLE` (D28)** throws when any of the four per-watt adder prices exceeds
+  **$10/W**, before any adder maths runs and regardless of qty. These multiply by watts, so a
+  flat dollar total typed into one is a factor-of-thousands error — the cause of the $2.5M
+  incident on `a1P7y00000AlufJEAR`. Real values are cents. Sweep existing data with
+  `node scripts/backfill-storage-adder-prices.mjs` (read-only by default).

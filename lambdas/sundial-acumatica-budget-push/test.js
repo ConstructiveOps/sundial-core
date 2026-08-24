@@ -19,6 +19,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
+import {
+  NON_COMMISSION_ATTRIBUTES,
+  buildAttributeSyncWriteback,
+} from "../../lib/acumatica-attributes.js";
 
 const ctx = {
   lines: [],
@@ -98,6 +102,7 @@ const {
   MAPPING_ROWS, PENDING_HARVEST_ROWS, budgetFieldNames, matchMappingToLines, naturalKey,
   writeBudgetLines, CREATE_GATE, REFERRAL_LINE_KEY, REFERRAL_CREATE_SPEC,
   downstreamFieldNames, workerFieldNames, runDownstreamStages,
+  isAttributesSyncRoute, runAttributeOnlySync,
 } = mod;
 
 /**
@@ -1077,4 +1082,131 @@ test("both problems are reported together, not just the first", async () => {
   });
   assert.match(r.note, /inactive/);
   assert.match(r.note, /KW discarded/);
+});
+
+// ===========================================================================
+// Attribute-only sync — route dispatch and the single gate
+// ===========================================================================
+
+test("the route is matched on the PATH, not on the record id", () => {
+  // Both routes carry {recordId}, so they are indistinguishable by parameters. A push
+  // request landing in the attribute handler would silently do a fraction of what the
+  // user asked for and report success.
+  for (const e of [
+    { resource: "/projects/{recordId}/budget/attributes-sync" },
+    { routeKey: "POST /projects/{recordId}/budget/attributes-sync" },
+    { requestContext: { resourcePath: "/projects/{recordId}/budget/attributes-sync" } },
+    { requestContext: { http: { path: "/projects/a0X/budget/attributes-sync" } } },
+    { rawPath: "/projects/a0X/budget/attributes-sync" },
+    { path: "/projects/a0X/budget/attributes-sync/" },
+  ]) {
+    assert.equal(isAttributesSyncRoute(e), true, JSON.stringify(e));
+  }
+  // The push route must NOT match, including the shape that merely contains the word.
+  for (const e of [
+    { resource: "/projects/{recordId}/budget/push" },
+    { rawPath: "/projects/a0X/budget/push" },
+    { rawPath: "/projects/a0X/budget/attributes-sync/extra" },
+    {},
+  ]) {
+    assert.equal(isAttributesSyncRoute(e), false, JSON.stringify(e));
+  }
+});
+
+test("ONE GATE: a linked Acumatica project, and nothing else", async () => {
+  // The point of this path. A legacy record has no calc status and no deal type - the
+  // two things the push route (correctly) refuses on - and must still sync.
+  const calls = [];
+  const r = await runAttributeOnlySync("a0X000000000001AAA", "harmon", {
+    sfQuery: async () => [{
+      Acumatica_Project_ID__c: "R261065",
+      Audit_Date_and_DateTime__c: "2026-06-19",
+      System_Size__c: 8.36,
+      // Deliberately absent: Budget_Calc_Status__c, Commission_Deal_Type__c.
+    }],
+    syncProjectAttributes: async (proj, values, opts) => {
+      calls.push({ proj, values, opts });
+      return { ok: true, action: "synced", written: 2, omitted: [] };
+    },
+    sfUpdateRecord: async () => ({ ok: true }),
+    now: () => "T",
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.acumaticaProjectId, "R261065");
+  // The scope restriction is passed, every time.
+  assert.deepEqual([...calls[0].opts.only], [...NON_COMMISSION_ATTRIBUTES]);
+});
+
+test("NO Acumatica project is the only refusal, and it writes NOTHING", async () => {
+  // A record never linked to Acumatica has not had a failed sync; it has had no sync.
+  // Stamping Failed on it would be inventing a problem.
+  let wrote = false;
+  const r = await runAttributeOnlySync("a0X000000000001AAA", "harmon", {
+    sfQuery: async () => [{ Acumatica_Project_ID__c: "   " }],
+    syncProjectAttributes: async () => { throw new Error("must not sync"); },
+    sfUpdateRecord: async () => { wrote = true; },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "NO_ACUMATICA_PROJECT");
+  assert.equal(wrote, false, "no sync fields may be written when there is nothing to sync to");
+});
+
+test("the SELECT is tenant-scoped and reads only the in-scope fields", async () => {
+  let soql = "";
+  await runAttributeOnlySync("a0X000000000001AAA", "harmon", {
+    sfQuery: async (q) => { soql = q; return []; },
+  });
+  assert.match(soql, /Client__c = 'harmon'/);
+  assert.match(soql, /Acumatica_Project_ID__c/);
+  assert.match(soql, /Audit_Date_and_DateTime__c/);
+  assert.match(soql, /System_Size__c/);
+  // Commission inputs are not read at all - a SELECT that reads them invites a future
+  // edit that sends them.
+  assert.ok(!/Sales_Rep_Commission_Amt__c|Commission_Deal_Type__c/.test(soql));
+  // Nor the budget mapping's fields: this is not a budget path.
+  assert.ok(!/Contract_Amount__c|Total_Material_Budget__c/.test(soql));
+});
+
+test("a record that is missing or not owned is one indistinguishable outcome", async () => {
+  const r = await runAttributeOnlySync("a0X000000000001AAA", "harmon", { sfQuery: async () => [] });
+  assert.equal(r.code, "RECORD_NOT_FOUND");
+});
+
+test("the sync fields are written from the SHARED mapping, not a local copy", async () => {
+  const writes = [];
+  await runAttributeOnlySync("a0X000000000001AAA", null, {
+    sfQuery: async () => [{ Acumatica_Project_ID__c: "R261065", System_Size__c: 8.36 }],
+    syncProjectAttributes: async () => ({ ok: false, action: "unverified", message: "GREENTAG discarded" }),
+    sfUpdateRecord: async (_o, _id, fields) => writes.push(fields),
+    now: () => "T",
+  });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0], buildAttributeSyncWriteback({ ok: false, action: "unverified", message: "GREENTAG discarded" }, "T"));
+  assert.equal(writes[0].Attribute_Sync_Status__c, "Unverified");
+});
+
+test("a write-back failure does not turn a successful Acumatica write into a failure", async () => {
+  // The attributes really did land. Failing to record that is a reporting problem, and
+  // reporting it as the sync failing would send someone to look for a write that worked.
+  const r = await runAttributeOnlySync("a0X000000000001AAA", null, {
+    sfQuery: async () => [{ Acumatica_Project_ID__c: "R261065", System_Size__c: 8.36 }],
+    syncProjectAttributes: async () => ({ ok: true, action: "synced", written: 1 }),
+    sfUpdateRecord: async () => { throw new Error("SF is down"); },
+    now: () => "T",
+  });
+  assert.equal(r.ok, true, "the Acumatica write succeeded and must still read as success");
+  assert.match(r.writebackFailed, /SF is down/);
+});
+
+test("the push worker writes the SAME three fields from the SAME mapping", async () => {
+  // Two paths now write these. A record that said Synced after one and Failed after the
+  // other for the same outcome would be worse than having no field at all.
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => ({ ok: true, status: "Both Raised" }),
+    syncProjectAttributes: async () => ({ ok: true, action: "synced" }),
+  });
+  const fromWorker = buildAttributeSyncWriteback(r.attributes, "T");
+  const fromRoute = buildAttributeSyncWriteback({ ok: true, action: "synced" }, "T");
+  assert.deepEqual(fromWorker, fromRoute);
+  assert.equal(fromWorker.Attribute_Sync_Status__c, "Synced");
 });

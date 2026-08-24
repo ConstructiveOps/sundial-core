@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Attribute-sync observability fields for Sundial_Solar__c.
+  Reference: D-060 (the gap, shipped knowingly) and D-061 (the attribute-only path).
+
+  3 NEW fields, ADDITIVE ONLY — no existing field is touched.
+
+  WRITTEN BY TWO PATHS, ONE MAPPING. Both the budget push worker's Stage E and the
+  attribute-only route write these, via buildAttributeSyncWriteback() in
+  lib/acumatica-attributes.js. That is deliberate: a record reading 'Synced' after one
+  path and 'Failed' after the other for the same outcome would be worse than no field.
+
+  The integration user needs READ + EDIT on all 3.
+
+  NOT the same as Budget_Push_Status__c / Budget_Push_Error__c, which describe the BUDGET
+  LINES. A project can have a perfectly pushed budget and a failed attribute sync, and
+  before these fields existed that combination was only visible in CloudWatch.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Attribute_Sync_Status__c</fullName>
+        <description>WRITTEN by the Acumatica attribute sync (lib/acumatica-attributes.js), from BOTH the budget push worker's Stage E and the attribute-only route (POST /projects/{recordId}/budget/attributes-sync) — do not edit manually. Where this job's Acumatica project ATTRIBUTES stand — the lifecycle dates, system size, sales company and (on the budget push path only) the commission milestone amounts that Harmon's accounting reporting reads. BLANK means the sync has never run on this record, which is different from every value below and is why there is no 'None'. Synced = every attribute sent was confirmed present by a re-read. Nothing to Sync = the sync ran and the record had no populated values to send (blanks are omitted, never written as empty). UNVERIFIED IS NOT A FAILURE and is deliberately separate from it: Acumatica returns 200 and SILENTLY DISCARDS an AttributeID the project's template does not define, so the write may have partly happened and was not confirmed. Failed = the write did not happen. The two need different responses, which is why they are different values. RESTRICTED: the sync only ever writes these four literals.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Where the Acumatica attribute sync stands. Blank = never run. 'Unverified' means Acumatica accepted the write but did not confirm it.</inlineHelpText>
+        <label>Attribute Sync Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Synced</fullName>
+                    <default>false</default>
+                    <label>Synced</label>
+                </value>
+                <value>
+                    <fullName>Nothing to Sync</fullName>
+                    <default>false</default>
+                    <label>Nothing to Sync</label>
+                </value>
+                <value>
+                    <fullName>Unverified</fullName>
+                    <default>false</default>
+                    <label>Unverified</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Attribute_Sync_Error__c</fullName>
+        <description>WRITTEN by the Acumatica attribute sync (lib/acumatica-attributes.js), from BOTH the budget push worker's Stage E and the attribute-only route (POST /projects/{recordId}/budget/attributes-sync) — do not edit manually. Why the last attribute sync failed or could not be verified, and CLEARED on a clean run. This is where an attribute that Acumatica accepted with a 200 and then discarded gets named — without it, that outcome is invisible, because nothing about the response distinguishes 'written' from 'thrown away'.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Why the last attribute sync failed or could not be verified. Blank when it succeeded.</inlineHelpText>
+        <label>Attribute Sync Error</label>
+        <length>4000</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Attribute_Synced_At__c</fullName>
+        <description>WRITTEN by the Acumatica attribute sync (lib/acumatica-attributes.js), from BOTH the budget push worker's Stage E and the attribute-only route (POST /projects/{recordId}/budget/attributes-sync) — do not edit manually. When the attributes were last known GOOD. Stamped on a successful sync and on 'Nothing to Sync' (the sync ran and had nothing to say), but deliberately NOT moved on a failure or an unverified run — a stale record must not look fresh because we tried and could not. Read it together with Attribute_Sync_Status__c: a recent timestamp beside 'Failed' means the failure came after a good run.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>When this project's Acumatica attributes were last confirmed good. Does not move on a failed sync.</inlineHelpText>
+        <label>Attribute Synced At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+</CustomObject>

@@ -375,6 +375,63 @@ curl -i -X POST \
 
 ### Budget
 
+#### `POST /projects/{recordId}/budget/attributes-sync`
+
+**Lambda:** `sundial-acumatica-budget-push` (same function as the budget push; it dispatches on the resource path)
+**Wiring:** `scripts/wire-attributes-sync-route.ps1`
+**Purpose:** Push a project's Acumatica **attributes** — the five lifecycle dates, `KW` and `SALESPERSO` — without touching its budget. Built for **legacy and non-budgeted jobs**: projects that predate the integration, were budgeted by hand, or were calculated by the v1 engine, whose attributes still need to be current because that is what Harmon's accounting reporting reads.
+
+**Synchronous** (200/409/502, not 202). One SOQL, one Acumatica read, one PUT, one verifying re-read, one Salesforce update — five round trips, comfortably inside API Gateway's ~29s cap. The budget push next door self-invokes because it writes ~20 budget lines with retries; this does not, and making it async would cost the caller an immediate answer for nothing.
+
+**Auth:** Supabase JWT in `Authorization`, verified inside the Lambda (`resolveIdentity`). The tenant comes only from the verified token and scopes the record read.
+
+##### One gate, and only one
+
+The record must carry an `Acumatica_Project_ID__c`. **There is deliberately no `Budget_Calc_Status__c` check and no `Commission_Deal_Type__c` guard.** Those exist to stop a *wrong budget* being posted, and this route posts no budget. A legacy record legitimately has neither, so gating on them would refuse exactly the records this exists to serve.
+
+##### What it writes — and what it structurally cannot
+
+Only `NON_COMMISSION_ATTRIBUTES`: `AUDITDATE`, `INDESIGN`, `INCOMDATE`, `GREENTAG`, `COMDATE`, `KW`, `SALESPERSO`. Populated values only.
+
+**It never writes `SLSCOM1/2`, `MGRCOM1/2`, `MGMTOR1/2` or `JOBTYPE`.** That matters because legacy projects carry commission attributes **Harmon entered by hand** — `R261065` held `SLSCOM1 = 1538.00` / `SLSCOM2 = 2138.00`, matching neither the third-party rule nor the 75/25 one. Three independent mechanics keep those safe:
+
+1. **Scope** — the commission attributes are never in the request body, and the filter lives inside `buildProjectAttributes`, so a caller cannot forget it.
+2. **Merge** — a partial `Attributes` PUT leaves what it did not send alone (D24, proved by hand).
+3. **Omit-blanks** — a field with no value is left out entirely rather than sent as `""`, so even an empty legacy record cannot blank anything.
+
+Any one would be sufficient. Together, this path is incapable of disturbing a figure a person typed in.
+
+`JOBTYPE` is excluded for a different reason: RS vs RSDC is authoritative at Layer-1 project creation, and nothing here can do better than infer it. Saying nothing lets the merge preserve what created the project.
+
+##### Verification is mandatory
+
+Acumatica returns **200 and silently discards** an `AttributeID` the project's template does not define (D-060). The write is therefore always followed by a fresh re-read, comparing dates by date part (`2026-07-14` comes back as `2026-07-14 00:00:00.000`). An attribute that was accepted and dropped is reported as `missing`.
+
+##### Responses
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{ ok: true, action: "synced" \| "nothing_to_write", written, omitted }` | Confirmed by re-read. `nothing_to_write` means the record had no populated values. |
+| `400` | `INVALID_RECORD_ID` | Path parameter is not a Salesforce id. |
+| `401` / `403` | `AUTH_*`, `NO_TENANT`, `NO_SUNDIAL_USER` | Standard identity mapping. |
+| `404` | `RECORD_NOT_FOUND` | Missing or not owned by the tenant — deliberately indistinguishable. |
+| `409` | `NO_ACUMATICA_PROJECT` | The one gate. Nothing is written, including the sync fields: a record never linked to Acumatica has not had a *failed* sync. |
+| `502` | `{ ok: false, action: "unverified" \| "write_failed" \| ..., missing, mismatched }` | The write failed or could not be confirmed. |
+
+##### Direct invoke
+
+```json
+{ "attributesSync": true, "recordId": "a0X...", "tenantId": "harmon" }
+```
+
+`tenantId` is optional and scopes the read when present. No token is involved, so this is an operator/back-office entry point at the same trust level as the `reconcile` and `dryRunWrite` payloads on the same function.
+
+##### Salesforce write-back
+
+`Attribute_Sync_Status__c`, `Attribute_Sync_Error__c` and `Attribute_Synced_At__c` (`salesforce/v5-attribute-sync-fields/`). **The budget push worker's Stage E writes the same three fields from the same mapping function**, so the two paths cannot describe the same outcome differently.
+
+---
+
 #### `POST /projects/{recordId}/budget/recalc`
 
 **Lambda:** `sundial-budget`
@@ -725,6 +782,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-download-file` | GET /files/by-id/{fileId}/download |
 | `sundial-delete-file` | DELETE /files/by-id/{fileId} |
 | `sundial-budget` | POST /projects/{recordId}/budget/recalc |
+| `sundial-acumatica-budget-push` | POST /projects/{recordId}/budget/push, POST /projects/{recordId}/budget/attributes-sync |
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |

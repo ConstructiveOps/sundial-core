@@ -1,5 +1,57 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — attribute-only sync for legacy projects, and the deferred field package built
+
+`POST /projects/{recordId}/budget/attributes-sync` — a new mode on the budget-push Lambda
+for jobs that will never go through the budget push: projects predating the integration,
+budgeted by hand, or calculated by v1. Their Acumatica attributes still need to be current,
+because that is what Harmon's accounting reporting reads. D26 / **D-061**. 484 tests green.
+
+**The interesting design question was which gates to keep, and the answer was almost none.**
+`Budget_Calc_Status__c = 'Calculated'` and the `Commission_Deal_Type__c` v2-rollout guard
+both exist to stop a *wrong budget* being posted. This path posts no budget, so neither
+protects anything — and both would fire on exactly the records the path exists to serve,
+since a legacy record legitimately has a blank calc status and a blank deal type. Reusing
+them out of consistency would have shipped a feature that refuses its own use case. The one
+gate that survives is about capability rather than correctness: without an
+`Acumatica_Project_ID__c` there is nothing to write to.
+
+**Three independent things stop it touching Harmon's hand-entered commission figures**, and
+specifying all three is not theatre — they fail in different ways. Scope (the commission
+attributes never enter the body, and the filter lives inside `buildProjectAttributes` so a
+caller cannot forget it) fails if someone adds an id to a list. Merge (D24) fails if
+Acumatica changes semantics. Omit-blanks fails if someone helpfully normalises blanks to
+empty strings. Depending on any one would make an unrelated future edit capable of
+overwriting data a person typed in — and we know they did type it: `R261065` holds
+`SLSCOM1 = 1538.00` / `SLSCOM2 = 2138.00`, matching neither commission rule.
+
+**Synchronous, deliberately unlike the route next door.** The budget push self-invokes
+because it writes ~20 lines with retries and can approach the ~29s cap. This does five round
+trips. Async would buy nothing and cost the caller an immediate answer, forcing a UI to poll
+a status field to learn what a single PUT did. Worth naming, because "match the neighbouring
+route" is otherwise a reasonable instinct.
+
+**No fourth gate constant.** `CREATE_GATE`, `PO_GATE` and `ATTR_GATE` each guarded a write
+mechanic that had never been proved. This uses one that is hand-proved and in production, on
+a strictly smaller attribute set. `ATTR_GATE` already covers this path anyway, since it runs
+through the same `syncProjectAttributes`. Verification is a different matter and stays
+mandatory: the silent-200 is a property of the API, not of the caller.
+
+**The D-060 observability gap is closed as part of this**, because a second writer made it
+untenable — the attribute-only path has no budget push to borrow an error field from.
+`salesforce/v5-attribute-sync-fields/`: status, error, synced-at. Both paths write them from
+**one** mapping function, since two callers building their own field maps would eventually
+disagree about the same outcome, and a status field two systems disagree about is worse than
+none. `Unverified` is kept separate from `Failed` (a write that may have partly happened
+needs a different response from one that did not), and `Attribute_Synced_At__c` means
+last-known-good and does not move on failure, so a stale record cannot look fresh.
+
+**One incidental fix.** `generate-dealer-vendors.mjs --check` compared raw bytes, so it
+reported the generated module STALE after any `git checkout` on Windows — CRLF working copy
+against LF generator output. The guard was firing on a checkout artifact rather than the
+drift it exists to catch, and regenerating only "fixed" it until the next checkout. It now
+compares normalised content. Found because it broke the suite on a fresh branch.
+
 ## 2026-08-24 — both Acumatica write gates open; Stages B and E ship in the release window
 
 `PO_GATE` and `ATTR_GATE` are both `true`, and both stages are wired into the budget push

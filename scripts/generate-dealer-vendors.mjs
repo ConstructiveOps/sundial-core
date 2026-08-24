@@ -226,9 +226,23 @@ export function lookupDealerVendor(salesCompany) {
 `;
 
 const mode = process.argv[2];
+
+/**
+ * Compare CONTENT, not line endings.
+ *
+ * The working copy is checked out with CRLF on Windows (git's autocrlf) while this script
+ * emits LF, so a raw string comparison reports STALE after any `git checkout` — the guard
+ * fires on a checkout artifact rather than on the drift it exists to catch. Regenerating
+ * "fixes" it only until the next checkout, so the loop is the bug, not the file.
+ *
+ * Normalising here keeps the guard doing its real job: catching a CSV edited without the
+ * generated module being rebuilt.
+ */
+const sameContent = (a, b) => a.replace(/\r\n/g, "\n") === b.replace(/\r\n/g, "\n");
+
 if (mode === "--check") {
   const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";
-  if (current !== out) {
+  if (!sameContent(current, out)) {
     console.error("lib/acumatica-dealer-vendors.js is STALE — run: node scripts/generate-dealer-vendors.mjs");
     process.exit(1);
   }

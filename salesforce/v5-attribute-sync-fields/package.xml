@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: attribute-sync observability fields.
+  3 new custom fields on Sundial_Solar__c, additive only.
+
+  Zip this folder's CONTENTS (package.xml at the zip root) and deploy via
+  Workbench -> Migration -> Deploy -> Single Package. RUN CHECK ONLY FIRST.
+
+  ⚠️ ZIP WITH WINDOWS EXPLORER "Send to > Compressed (zipped) folder".
+  NEVER PowerShell 5.1 Compress-Archive — it writes BACKSLASH path separators into
+  the zip and Workbench cannot read the entries. See README.md.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Solar__c.Attribute_Sync_Status__c</members>
+        <members>Sundial_Solar__c.Attribute_Sync_Error__c</members>
+        <members>Sundial_Solar__c.Attribute_Synced_At__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

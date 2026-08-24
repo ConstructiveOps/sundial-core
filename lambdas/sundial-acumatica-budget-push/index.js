@@ -51,6 +51,9 @@ import {
 import {
   syncProjectAttributes,
   attributeFieldNames,
+  nonCommissionFieldNames,
+  buildAttributeSyncWriteback,
+  NON_COMMISSION_ATTRIBUTES,
 } from "../../lib/acumatica-attributes.js";
 
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
@@ -928,10 +931,11 @@ async function projectIdForRecord(recordId) {
 
 // --- handler: dispatch by invocation shape ---------------------------------
 // Ways this Lambda is entered:
-//   1. Async worker self-invoke  -> event.__worker === true    (handleWorker)
-//   2. Dry-run write (direct)    -> event.dryRunWrite === true (handleDryRunWrite)
-//   3. API Gateway HTTP request  -> event.requestContext etc.  (handleHttp)
-//   4. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
+//   1. Async worker self-invoke  -> event.__worker === true       (handleWorker)
+//   2. Dry-run write (direct)    -> event.dryRunWrite === true    (handleDryRunWrite)
+//   3. Attribute-only (direct)   -> event.attributesSync === true (runAttributeOnlySync)
+//   4. API Gateway HTTP request  -> event.requestContext etc.     (handleHttp*)
+//   5. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
 // The reconcile path is UNCHANGED from before; HTTP + worker are the write path.
 function isHttpEvent(event) {
   return !!(
@@ -940,10 +944,38 @@ function isHttpEvent(event) {
   );
 }
 
+/**
+ * Which HTTP route this event is for.
+ *
+ * Matched on the PATH rather than on a pathParameter, because both routes carry the same
+ * `{recordId}` and would otherwise be indistinguishable — a push request landing in the
+ * attribute handler would silently do a fraction of what the user asked for. The resource
+ * path is checked across every shape API Gateway REST and HTTP APIs use for it.
+ */
+export function isAttributesSyncRoute(event) {
+  const path =
+    event?.resource ||
+    event?.routeKey ||
+    event?.requestContext?.resourcePath ||
+    event?.requestContext?.http?.path ||
+    event?.rawPath ||
+    event?.path ||
+    "";
+  return /\/budget\/attributes-sync\/?$/.test(String(path));
+}
+
 export const handler = async (event) => {
   if (event && event.__worker === true) return handleWorker(event);
   if (event && event.dryRunWrite === true) return handleDryRunWrite(event);
-  if (isHttpEvent(event)) return handleHttp(event);
+  // Direct-invoke equivalent of the HTTP route. No token, so no tenant scoping is
+  // possible — this is an operator/back-office entry point, same trust level as the
+  // reconcile and dry-run payloads next to it.
+  if (event && event.attributesSync === true) {
+    return runAttributeOnlySync(event.recordId, event.tenantId ?? null);
+  }
+  if (isHttpEvent(event)) {
+    return isAttributesSyncRoute(event) ? handleAttributesSyncHttp(event) : handleHttp(event);
+  }
   return handleReconcile(event);
 };
 
@@ -1155,6 +1187,10 @@ async function handleWorker(event) {
         // push, and something after it did not. See runDownstreamStages.
         Budget_Push_Error__c: downstream.note,
         Budget_Finalized__c: true, // first success finalizes; re-push leaves it true
+        // Stage E's own status, folded into this PATCH rather than sent as a second SF
+        // call. Same three fields the attribute-only route writes, from the same mapping
+        // function, so the two paths cannot describe the same outcome differently.
+        ...(buildAttributeSyncWriteback(downstream.attributes) ?? {}),
       });
     } else {
       const failedKeys = (result.results || [])
@@ -1250,6 +1286,164 @@ export async function runDownstreamStages(recordId, acumaticaProjectId, values, 
     // has always been.
     note: problems.length === 0 ? null : `Budget lines pushed OK. ${problems.join(" | ")}`.slice(0, 32000),
   };
+}
+
+// ===========================================================================
+// ATTRIBUTE-ONLY SYNC — for legacy and non-budgeted projects
+// ===========================================================================
+//
+// Harmon has projects that will never go through the budget push: jobs that predate the
+// integration, jobs budgeted by hand, jobs from before the v2 calc. Their Acumatica
+// attributes still need the lifecycle dates and system size kept current, because that is
+// what Harmon's accounting reporting reads.
+//
+// ---------------------------------------------------------------------------
+// ONE GATE, AND ONLY ONE: the record must be linked to an Acumatica project
+// ---------------------------------------------------------------------------
+// No Budget_Calc_Status__c check, no Commission_Deal_Type__c guard, no deal-type logic.
+// Those exist to stop a WRONG BUDGET being posted, and this path posts no budget. A legacy
+// record legitimately has a blank calc status and a blank deal type; refusing it for that
+// would be refusing exactly the records this exists to serve.
+//
+// ---------------------------------------------------------------------------
+// WHAT PROTECTS A LEGACY PROJECT'S HAND-ENTERED COMMISSION FIGURES
+// ---------------------------------------------------------------------------
+// Three independent things, and it is worth being able to name all three:
+//
+//   1. SCOPE — only NON_COMMISSION_ATTRIBUTES are built. SLSCOM/MGRCOM/MGMTOR are never
+//      in the body. The filter lives inside buildProjectAttributes, so a caller cannot
+//      forget it.
+//   2. MERGE — a partial Attributes PUT leaves what it did not send alone (D24, proved by
+//      hand). An attribute we do not send is not touched, not blanked.
+//   3. OMIT-BLANKS — a field with no value is left out entirely rather than sent as "",
+//      so an empty legacy record cannot blank anything at all.
+//
+// Any one of the three would do it. Together they mean this path is incapable of
+// disturbing a figure Harmon typed in, which is the whole reason it is safe to point at
+// records the integration knows nothing about.
+//
+// Verification is still mandatory — an unknown AttributeID gets a 200 and is silently
+// discarded (D-060), and that is exactly as true here as on the push path.
+
+/**
+ * Read the record, sync its non-commission attributes, record the outcome.
+ *
+ * @param {string} recordId - Sundial_Solar__c id
+ * @param {string|null} tenantId - when present, scopes the read (defense in depth)
+ */
+export async function runAttributeOnlySync(recordId, tenantId = null, deps = {}) {
+  const runAttrs = deps.syncProjectAttributes ?? syncProjectAttributes;
+  const update = deps.sfUpdateRecord ?? sfUpdateRecord;
+  const query = deps.sfQuery ?? sfQuery;
+  const now = deps.now ?? (() => new Date().toISOString());
+
+  const fields = ["Acumatica_Project_ID__c", ...nonCommissionFieldNames()];
+  const soql =
+    `SELECT ${fields.join(", ")} FROM ${SOLAR_SF_OBJECT} ` +
+    `WHERE Id = '${soqlEscapeString(recordId)}'` +
+    (tenantId ? ` AND Client__c = '${soqlEscapeString(tenantId)}'` : "") +
+    ` LIMIT 1`;
+  const rows = await query(soql);
+  if (!rows || rows.length === 0) {
+    return { ok: false, error: "record_not_found", code: "RECORD_NOT_FOUND" };
+  }
+
+  const acumaticaProjectId = String(rows[0].Acumatica_Project_ID__c || "").trim();
+  if (!acumaticaProjectId) {
+    // The one gate. Reported without touching the sync fields: a record that was never
+    // linked to Acumatica has not had a failed sync, it has had no sync.
+    return {
+      ok: false,
+      error: "no_acumatica_project",
+      code: "NO_ACUMATICA_PROJECT",
+      message: "Acumatica_Project_ID__c is blank; there is no project to sync attributes to.",
+    };
+  }
+
+  const result = await runAttrs(acumaticaProjectId, rows[0], { only: NON_COMMISSION_ATTRIBUTES });
+
+  const writeback = buildAttributeSyncWriteback(result, now());
+  if (writeback) {
+    try {
+      await update(SOLAR_SF_OBJECT, recordId, writeback);
+    } catch (err) {
+      // The Acumatica write already happened; failing to record it is a reporting
+      // problem, not a data problem, and must not be reported as the sync failing.
+      console.error("attribute-only sync: write-back failed:", err?.message || String(err));
+      return { ...result, acumaticaProjectId, writebackFailed: err?.message || String(err) };
+    }
+  }
+  return { ...result, acumaticaProjectId };
+}
+
+// --- HTTP: POST /projects/{recordId}/budget/attributes-sync ----------------
+//
+// SYNCHRONOUS, unlike the budget push next door, and that is a considered difference
+// rather than an inconsistency. The push self-invokes because it writes ~20 budget lines
+// with retries and can genuinely approach API Gateway's ~29s cap. This does one SOQL, one
+// Acumatica read, one PUT, one verifying re-read and one SF update — five round trips,
+// nowhere near the limit. Making it async would buy nothing and cost the caller an
+// immediate answer, forcing the UI to poll a status field to learn what a single PUT did.
+//
+// If the shape ever changes — batching many records, say — this is the first thing to
+// revisit, and the worker pattern above is the template.
+async function handleAttributesSyncHttp(event) {
+  const method = httpMethod(event);
+  const headers = normalizeHeaders(event?.headers);
+  const cors = corsHeaders(headers["origin"]);
+
+  if (method === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+  if (method !== "POST") {
+    return jsonResponse(405, cors, { error: "method_not_allowed", code: "METHOD_NOT_ALLOWED" });
+  }
+
+  const pp = event?.pathParameters || {};
+  const recordId = pp.recordId ? decodeURIComponent(pp.recordId) : null;
+  if (!recordId || /^[a-zA-Z0-9]{15,18}$/.test(recordId) === false) {
+    return jsonResponse(400, cors, {
+      error: "invalid_record_id",
+      code: "INVALID_RECORD_ID",
+      message: "Path must carry a Sundial_Solar__c record id.",
+    });
+  }
+
+  // Auth — tenant derived ONLY from the verified token, same as every other route.
+  let identity;
+  try {
+    identity = await resolveIdentity(headers["authorization"]);
+  } catch (err) {
+    const m = mapIdentityError(err?.code);
+    if (m) return jsonResponse(m.status, cors, m.body);
+    throw err;
+  }
+  const tenantId = identity.tenantId;
+  if (!tenantId) return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+
+  try {
+    const result = await runAttributeOnlySync(recordId, tenantId);
+    if (result.error === "record_not_found") {
+      // Not owned and not existing are deliberately indistinguishable.
+      return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+    }
+    if (result.error === "no_acumatica_project") {
+      return jsonResponse(409, cors, { error: result.error, code: result.code, message: result.message });
+    }
+    return jsonResponse(result.ok ? 200 : 502, cors, {
+      mode: "attributes_sync",
+      ok: result.ok,
+      action: result.action,
+      acumaticaProjectId: result.acumaticaProjectId,
+      written: result.written ?? 0,
+      omitted: result.omitted ?? [],
+      missing: result.missing ?? [],
+      mismatched: result.mismatched ?? [],
+      message: result.message,
+      writebackFailed: result.writebackFailed,
+    });
+  } catch (err) {
+    console.error("attributes-sync error:", err?.message || String(err));
+    return jsonResponse(500, cors, { error: "server_error", code: "SERVER_ERROR" });
+  }
 }
 
 // Record a failed push. Budget_Finalized__c is deliberately NOT touched here.

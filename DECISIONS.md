@@ -2133,3 +2133,103 @@ deployed — so a failed attribute verification lives in the shared note and in 
 That is thinner than the PO side and is the next field package. It is recorded here rather
 than left implicit because it is the same weakness the §4f document argued against, and
 shipping it knowingly is a different thing from shipping it by accident.
+
+## D-061: An attribute-only sync path, gated on nothing but a linked Acumatica project
+
+**Date:** 2026-08-24
+**Status:** Accepted
+**Cross-reference:** D26 in `docs/integrations/acumatica-budget-rework-v2.md`.
+
+### Context
+
+Harmon has projects that will never go through the budget push: jobs predating the
+integration, jobs budgeted by hand, jobs calculated by the v1 engine. Their Acumatica
+attributes — the lifecycle dates and system size — still need to be current, because that
+is what the accounting reporting reads. The budget push cannot serve them: every one of its
+gates would refuse, correctly.
+
+### Decision
+
+1. **A new mode on the budget-push Lambda**, not a new function:
+   `POST /projects/{recordId}/budget/attributes-sync` plus a direct-invoke equivalent.
+2. **The only gate is a linked `Acumatica_Project_ID__c`.**
+3. **It writes `NON_COMMISSION_ATTRIBUTES` only** — five dates, `KW`, `SALESPERSO`.
+4. **Synchronous**, not the async self-invoke the budget push uses.
+5. **Verify-by-re-read is mandatory**, exactly as on the push path.
+6. **No gate constant.** It writes only attributes, the proven-safe mechanic.
+
+### Why the push's gates are the wrong gates here
+
+`Budget_Calc_Status__c = 'Calculated'` and the `Commission_Deal_Type__c` v2-rollout guard
+both exist to stop a **wrong budget** being posted. This path posts no budget, so neither
+protects anything — and both would fire on exactly the records the path exists to serve,
+because a legacy record legitimately has a blank calc status and a blank deal type. Reusing
+them out of consistency would have produced a feature that refuses its own use case.
+
+The one gate that survives is the one that is about capability rather than correctness:
+without a project id there is nothing to write to.
+
+### Why the commission attributes are excluded, and why that needed three mechanisms
+
+Legacy projects carry commission attributes **Harmon typed in**. `R261065` held
+`SLSCOM1 = 1538.00` / `SLSCOM2 = 2138.00` — a total matching neither the third-party rule
+(1,838) nor the internal 75/25 one (2,757), while the manager and overhead pairs checked out
+to the cent. That is what hand-entry looks like, and it is the strongest argument against
+letting a path that knows nothing about a job write numbers onto it.
+
+Three independent things prevent it:
+
+1. **Scope** — the commission attributes never enter the request body. The filter lives
+   inside `buildProjectAttributes` via `opts.only`, so the restriction travels with the
+   build rather than depending on each caller remembering it.
+2. **Merge** — a partial `Attributes` PUT leaves what it did not send alone (D24).
+3. **Omit-blanks** — a field with no value is omitted, not sent as `""`.
+
+Any one would be sufficient. Specifying all three is not belt-and-braces theatre: they fail
+in different ways. Scope fails if someone adds an id to a list; merge fails if Acumatica
+changes semantics; omit-blanks fails if someone "helpfully" normalises blanks to empty
+strings. Depending on one would make an unrelated future edit capable of overwriting
+Harmon's data.
+
+`JOBTYPE` is excluded for a different reason — RS vs RSDC is authoritative at Layer-1
+creation and nothing here can do better than infer it. Inference is not authority.
+
+### Why synchronous, when the budget push is not
+
+The budget push self-invokes because it writes ~20 budget lines with retries and can
+genuinely approach API Gateway's ~29s cap. This does one SOQL, one Acumatica read, one PUT,
+one verifying re-read and one Salesforce update. Async would buy nothing and cost the caller
+an immediate answer, forcing a UI to poll a status field to learn what a single PUT did.
+
+The inconsistency is deliberate and worth naming, because "match the neighbouring route" is
+otherwise a reasonable instinct. If this ever grows — batching many records, say — the
+worker pattern next door is the template.
+
+### Why no gate constant
+
+`CREATE_GATE`, `PO_GATE` and `ATTR_GATE` each guarded a write mechanic that had never been
+proved: creating a budget line, raising a purchase order, writing attributes at all. This
+path uses a mechanic that is now hand-proved and running in production, on a strictly
+smaller attribute set, with a strictly smaller blast radius. A fourth gate would be
+ceremony — and `ATTR_GATE` already stops this path too, since it runs through the same
+`syncProjectAttributes`.
+
+Verification, by contrast, is **not** ceremony and stays mandatory: the silent-200 hazard is
+a property of the API, not of the caller, and it is exactly as true here.
+
+### Closing the D-060 gap, deliberately, as part of this
+
+D-060 shipped the attribute stage knowing it had nowhere of its own to report. A second
+writer made that untenable — the attribute-only path has no budget push to borrow an error
+field from — so the deferred package is built here:
+`Attribute_Sync_Status__c` / `Attribute_Sync_Error__c` / `Attribute_Synced_At__c`.
+
+**Both paths write them from one function** (`buildAttributeSyncWriteback`). Two callers
+each building their own field map would eventually disagree about the same outcome, and a
+status field two systems disagree about is worse than no status field.
+
+Two details that are decisions rather than defaults: `Unverified` is a separate value from
+`Failed`, because a write that may have partly happened needs a different response from one
+that did not happen — collapsing them would hide the case the verification exists to
+surface. And `Attribute_Synced_At__c` means *last known good* and does not move on a failed
+run, so a stale record cannot look fresh because we tried and could not.

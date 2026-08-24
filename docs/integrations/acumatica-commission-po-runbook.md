@@ -358,17 +358,17 @@ Step 9  cleaned up?  ____
 
 ## Then
 
-Opening `PO_GATE` needs **all three** blockers cleared. As of 2026-08-24 two are:
+**✅ DONE 2026-08-24 — all three cleared and the gate is OPEN:**
 
-1. ✅ §4f fields — approved and packaged (`salesforce/v4-commission-po-fields/`).
-   **Deploy them, with Read + Edit FLS for the integration user.**
+1. ✅ §4f fields deployed, with Read + Edit FLS for the integration user.
 2. ✅ Q13 — answered (D23). Both POs are raised on the first budget push; the two dates
    are what each PO carries, not triggers.
-3. ❌ **This runbook.** See §Results — steps 7 and 8 need re-running, and the Terms
-   question needs a business answer rather than a re-run.
+3. ✅ This runbook re-run. See §Results for what steps 7 and 8 actually settled — and for
+   the one thing that did **not** get proven.
 
-Then flip `PO_GATE.enabled` in a reviewed commit and update the
-`PO_GATE ships CLOSED` test, exactly as D20's gate was opened.
+`PO_GATE.enabled` was flipped in a reviewed commit and the gate test now pins `true`,
+exactly as D20's gate was opened. **Re-running this runbook is still the way to
+re-validate the write mechanic after any change to the create/update path.**
 
 **Watch on the first live job:** exactly one PO per milestone per project, ever. If a
 project ever grows a second M1, close the gate before anything else — that is a duplicate
@@ -378,7 +378,20 @@ payment, not a reporting glitch.
 
 **Run 2026-08-24 · project `R261065` · vendor `01736` (Blue Sky Solar) · PO `016442`.**
 
-### Verdict: the write mechanic is proven. Two steps did not land, and there is cleanup outstanding.
+> ## ✅ RE-RUN 2026-08-24 — `PO_GATE` IS OPEN
+>
+> Steps 7 and 8 were re-run and the gate was opened in a reviewed commit. **Step 8 answered
+> the freeze question the hard way: Acumatica ALLOWS a PUT to a Canceled PO** — see
+> [the step 8 result](#-step-8-re-run--acumatica-allows-it-our-refusal-is-the-only-freeze).
+> Step 7's probe remains buggy and was ruled a runbook defect rather than a gate blocker;
+> the residual risk is recorded there and in D-060. PO 016442 is confirmed Canceled.
+>
+> ⚠️ **The re-run transcript was not pasted into this document** — the verdicts below are
+> Tim's, recorded as attestation. The step 8 status string was independently confirmed by
+> reading PO 016442 back through the API (`Status: "Canceled"`); nothing else in the
+> re-run was verified from this side.
+
+### Verdict: the write mechanic is proven. Two steps did not land on the FIRST run, and are resolved below.
 
 | Step | | Outcome |
 |---|---|---|
@@ -389,9 +402,9 @@ payment, not a reporting glitch.
 | 5 — Terms | ⚠️→✅ | Came back **`DOR`**, not the specimen's `30D`. Correct — Terms is per-vendor (Q16). Caught a real bug in the verifier; see below. |
 | 6 — committed amounts | ✅ | `OriginalBudgetedAmount` did **not** move. No write conflict with the budget push. |
 | 7 — update by guid | ✅ | `200`, same guid, UnitCost and ExtendedCost both 2400. |
-| 7 — no duplicate | ❌ | **Uninterpretable as run.** Counted 28. See below. |
-| 8 — freeze rule | ❌ | **Never tested.** The PO was `On Hold`, not frozen. See below. |
-| 9 — clean up | ❌ | **Not done. PO 016442 is still open at $9,999.** See below. |
+| 7 — no duplicate | ❌ | **Probe is buggy — 28 on both runs.** Ruled a runbook defect, not a gate blocker. See below. |
+| 8 — freeze rule | ✅ | **Re-run: Acumatica ALLOWS editing a Canceled PO** (200, change persisted). Our refusal is the only freeze. |
+| 9 — clean up | ✅ | **016442 Canceled**, confirmed via the API 2026-08-24. |
 
 ---
 
@@ -440,8 +453,23 @@ The real evidence from step 7 is good: the guid was unchanged, the OrderNbr was 
 and the amount moved. That is consistent with an in-place update. It is just not the same
 claim as "no second PO was raised".
 
+> **RE-RUN 2026-08-24: the corrected probe returned 28 as well** — the vendor's whole PO
+> history again, so the description filter is not comparing what it claims to. **The probe
+> itself is buggy.** Ruled the same day as a runbook defect to fix separately, and
+> explicitly NOT a reason to hold the gate:
+>
+> - idempotency in the engine is the **stored OrderNbr** and never a scan, so what this
+>   probe measures is not what the engine relies on;
+> - the first run's **guid and OrderNbr were unchanged** across an update that moved the
+>   amount, which is direct evidence of an in-place update;
+> - the create/update/no-duplicate behaviour is covered by tests.
+>
+> **This remains an accepted residual risk rather than a proven negative**, which is why
+> the first-live-job watch below is not boilerplate. Fixing the probe is a follow-up.
+
 **The corrected check** scopes by our own description, which is exactly the M1/M2 label the
-engine writes:
+engine writes — **and note that as written below it still returns the whole vendor
+history, so treat this block as the thing to debug, not as a working check:**
 
 ```powershell
 $wantDesc = "Sales Commission M1 — $Project"
@@ -460,7 +488,38 @@ $mine | ForEach-Object { "  $($_.OrderNbr.value)  $($_.Status.value)  $($_.Order
 
 ---
 
-### ❌ Step 8 never tested the freeze rule
+### ⚠️ Step 8 (re-run) — Acumatica ALLOWS it. Our refusal is the only freeze.
+
+**Re-run 2026-08-24 with the PO properly Canceled first: the PUT returned `200` and the
+change PERSISTED.**
+
+That is the answer the step said was useful either way, and it is the less comfortable one:
+
+> **There is no API-side freeze.** `UPDATABLE_STATUSES` in
+> `lambdas/sundial-acumatica-commission-po/index.js` is not us agreeing with Acumatica
+> about a rule — it is the entire rule. Nothing else, anywhere, prevents a silent edit to
+> a released purchase order.
+
+Pinned as **D-060**, and hardened in code:
+
+- The status check is **deny-by-default** (`!UPDATABLE_STATUSES.includes(status)`), so an
+  unrecognised, empty, null or missing status is frozen. A future Acumatica release adding
+  a status we have never heard of fails safe.
+- Tests assert it is unbypassable, including the "no `Status` field at all" shape and
+  case variants (`OPEN` ≠ `Open`).
+- **Only `Canceled` was tested.** `Completed` and `Closed` were not, and we deliberately do
+  not care whether the API happens to refuse them: **every status off the allow-list is
+  never-touch.**
+
+**Spelling, found while pinning this:** Acumatica returns **`Canceled`** — one L — read
+back off PO 016442. `FROZEN_STATUSES` said `Cancelled` and had therefore never matched
+anything. Harmless *only* because it is documentation and the guard is the allow-list; had
+anything been written as `FROZEN_STATUSES.includes(status)`, a canceled PO would have gone
+straight through. Corrected, and a test now pins the spelling.
+
+---
+
+### ❌ Step 8 on the FIRST run never tested the freeze rule
 
 The step requires cancelling or completing the PO in the Acumatica UI first. That was not
 done — the transcript shows `status: On Hold` immediately before the frozen-PUT:
@@ -502,20 +561,23 @@ and **recorded** when it is a property of the vendor.
 
 ---
 
-### ❌ Cleanup is outstanding — PO 016442 is live at $9,999
+### ✅ Cleanup — PO 016442 is Canceled
 
-Verified still present 2026-08-24: **`016442`, On Hold, OrderTotal 9,999.00, one line on
-project `R261065`, vendor 01736.** Step 9 was not run. A stray purchase order is a
-commitment sitting against a real project — cancel or delete it in the Acumatica UI.
+Was: `016442`, On Hold, OrderTotal 9,999.00, one line on project `R261065`, vendor 01736.
+**Canceled 2026-08-24 and confirmed through the API** (`Status: "Canceled"` — the same read
+that settled the spelling above). Cancelling it is what made the step 8 re-run possible, so
+the cleanup and the proof were one action.
 
 ---
 
-### What this does to the gate
+### What this did to the gate
 
-`PO_GATE.enabled` stays **`false`**. Q15 and Q16 are both resolved, so **the only thing
-left is re-running steps 7 and 8** (plus the tenant line from the corrected step 2, which
-is now one command). Tim is doing those, along with the 016442 cleanup; the gate opens in a
-reviewed commit once they come back clean.
+**`PO_GATE.enabled = true`, opened 2026-08-24 in a reviewed commit** (D-060). All three
+blockers cleared: §4f fields deployed with Read + Edit FLS, Q13/D23 answered, this runbook
+re-run. Q15 and Q16 resolved alongside.
+
+The gate is a repo constant, so **closing it is also a reviewed diff** — and closing it is
+the first move if the watch below ever fires.
 
 ---
 

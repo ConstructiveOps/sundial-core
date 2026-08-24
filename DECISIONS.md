@@ -2043,3 +2043,93 @@ contain values no rule in this repo produces. And it makes the authority questio
 rather than theoretical: once the sync runs on a job, it wins. That is the right design, and
 it is the kind of change that generates a support call if the first person to notice is
 whoever typed the old number.
+
+## D-060: Both Acumatica write gates open; the PO freeze rule is the only freeze there is
+
+**Date:** 2026-08-24
+**Status:** Accepted
+**Supersedes in part:** the gated-off status of D22/D24.
+
+### Context
+
+Three things had to be true before the commission PO engine could raise a real purchase
+order: the §4f write-back fields deployed with FLS, the milestone dates named (D23), and
+the sandbox hand-proof clean. The first two landed earlier the same day. The hand-proof was
+re-run, and the attribute sync's own hand-proof had already come back MERGE (D24).
+
+### Decision
+
+1. **`PO_GATE.enabled = true`** — the commission PO engine raises real purchase orders.
+2. **`ATTR_GATE.enabled = true`** — the attribute sync writes real project attributes.
+3. **Both stages are wired into the budget push worker**, after a successful budget write,
+   in `runDownstreamStages`.
+4. **A downstream failure does not fail the budget push**, but is never silent.
+5. Both gates remain repo constants with tests pinning the committed value, so **closing
+   them is also a reviewed diff.**
+
+### The finding that matters most: Acumatica does not enforce the freeze
+
+Step 8 of the re-run put a PUT into a **Canceled** purchase order. It returned **200 and
+the change persisted.**
+
+`UPDATABLE_STATUSES` is therefore not the integration agreeing with a rule the ERP
+enforces. **It is the entire rule.** Nothing else, at any layer, prevents a silent edit to
+a released document that somebody downstream has already worked from. Three consequences,
+all now in code:
+
+- The check is **deny-by-default** — `!UPDATABLE_STATUSES.includes(status)` — so an
+  unrecognised, empty, null or absent status is frozen. A future Acumatica release adding
+  a status we have never heard of fails safe rather than open.
+- Tests assert it is unbypassable, including the "no `Status` field at all" response shape
+  and casing variants, because the allow-list is case-sensitive.
+- **Only `Canceled` was tested.** `Completed` and `Closed` were not, and the decision is
+  that this does not matter: every status off the allow-list is never-touch whether or not
+  the API happens to refuse it. We do not want the code's safety to depend on which
+  statuses somebody got round to probing.
+
+**A spelling bug surfaced while pinning this.** Acumatica returns `Canceled`, one L;
+`FROZEN_STATUSES` said `Cancelled` and had never matched anything. It was harmless *only*
+because that list is documentation and the guard is the allow-list. Had anyone ever written
+the guard the tidier-looking way — `FROZEN_STATUSES.includes(status)` — a canceled PO would
+have sailed through it. That is the argument for deny-by-default stated as a near miss
+rather than a principle.
+
+### What was NOT proven, and why the gate opened anyway
+
+**Step 7's duplicate probe is buggy.** Both runs returned 28 — the vendor's entire PO
+history on that project — so the description-scoped filter is not comparing what it claims.
+Ruled a runbook defect to fix separately rather than a gate blocker, on three grounds:
+idempotency in the engine is the **stored OrderNbr and never a scan**, so the probe does not
+measure what the engine relies on; the first run's guid and OrderNbr were unchanged across
+an update that moved the amount; and the behaviour is covered by tests.
+
+That reasoning is sound and it is still **an accepted residual risk rather than a proven
+negative.** Recording it as such is the point: the first-live-job watch — *exactly one PO
+per milestone per project, ever* — is not boilerplate, it is the compensating control for
+the one check that never ran. If a project grows a second M1, close `PO_GATE` before
+anything else.
+
+### Why a downstream failure leaves the budget push "Pushed"
+
+The budget lines are written. Reporting that as `Failed` would be untrue, would leave
+`Budget_Finalized__c` false, and would make the next re-push redo work that had succeeded.
+The PO stage also owns its own reporting — `Commission_PO_Status__c` /
+`Commission_PO_Error__c` exist precisely so a refusal is not a log line nobody reads.
+
+So the status stays `Pushed` and the problem still surfaces, through a note on
+`Budget_Push_Error__c`. **`Pushed` with a non-null error is a deliberate combination**
+meaning exactly what it says: the budget pushed, and something after it needs a human.
+
+Two supporting rules. An **internal deal or a zero commission is not a problem** — the PO
+engine has already recorded `None`, and surfacing that as a push failure would train people
+to ignore the field. And **neither stage may throw past `runDownstreamStages`**: an escaping
+exception would land in the worker's catch and mark a genuinely successful budget push as
+failed.
+
+### Known gap accepted at ship
+
+The attribute stage has **no status/error fields of its own** — only the §4f PO fields were
+deployed — so a failed attribute verification lives in the shared note and in CloudWatch.
+That is thinner than the PO side and is the next field package. It is recorded here rather
+than left implicit because it is the same weakness the §4f document argued against, and
+shipping it knowingly is a different thing from shipping it by accident.

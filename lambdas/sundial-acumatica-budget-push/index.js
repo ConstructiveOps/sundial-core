@@ -43,6 +43,15 @@ import {
   httpMethod,
 } from "../../lib/http.js";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+import {
+  syncCommissionPos,
+  PO_NUMBER_FIELDS,
+  MILESTONE_DATE_FIELDS,
+} from "../sundial-acumatica-commission-po/index.js";
+import {
+  syncProjectAttributes,
+  attributeFieldNames,
+} from "../../lib/acumatica-attributes.js";
 
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
 const SOLAR_SF_OBJECT = "Sundial_Solar__c";
@@ -474,6 +483,28 @@ export function budgetFieldNames() {
     if (r.hoursField) names.add(r.hoursField.trim());
   }
   return [...names];
+}
+
+/**
+ * Fields the DOWNSTREAM stages read — commission POs (Stage B) and attributes (Stage E).
+ *
+ * Derived from each module's own exported constants rather than retyped, so a field
+ * rename over there cannot leave this SELECT quietly short. A missing field would not
+ * throw: it would arrive as undefined, and the PO engine would read "no stored OrderNbr"
+ * and raise a SECOND purchase order. That is the failure this list prevents.
+ */
+export function downstreamFieldNames() {
+  return [
+    ...attributeFieldNames(),
+    "Acumatica_Project_ID__c",
+    ...Object.values(PO_NUMBER_FIELDS),
+    ...Object.values(MILESTONE_DATE_FIELDS),
+  ];
+}
+
+/** Everything the worker must SELECT: budget mapping + both downstream stages. */
+export function workerFieldNames() {
+  return [...new Set([...budgetFieldNames(), ...downstreamFieldNames()])];
 }
 
 // Sum a list of amount-field specs (each may be an A+B or A-B expression).
@@ -1094,8 +1125,9 @@ async function handleHttp(event) {
 async function handleWorker(event) {
   const { recordId, acumaticaProjectId, tenantId } = event;
   try {
-    // Pull exactly the fields the mapping references (tenant-scoped defense-in-depth).
-    const fields = budgetFieldNames();
+    // Pull the fields the mapping references PLUS what the downstream stages read
+    // (tenant-scoped defense-in-depth).
+    const fields = workerFieldNames();
     const soql =
       `SELECT ${fields.join(", ")} FROM ${SOLAR_SF_OBJECT} ` +
       `WHERE Id = '${soqlEscapeString(recordId)}'` +
@@ -1110,10 +1142,18 @@ async function handleWorker(event) {
     const result = await writeBudgetLines(acumaticaProjectId, rows[0]);
 
     if (result.ok) {
+      // Downstream stages run ONLY after the budget lines are safely written. A commission
+      // PO raised against a budget that failed to push is a payment authorised for numbers
+      // that are not in the plan.
+      const downstream = await runDownstreamStages(recordId, acumaticaProjectId, rows[0]);
+      result.downstream = downstream;
+
       await sfUpdateRecord(SOLAR_SF_OBJECT, recordId, {
         Budget_Push_Status__c: "Pushed",
         Budget_Pushed_At__c: new Date().toISOString(),
-        Budget_Push_Error__c: null,
+        // Non-null alongside 'Pushed' is a real and intended combination: the budget DID
+        // push, and something after it did not. See runDownstreamStages.
+        Budget_Push_Error__c: downstream.note,
         Budget_Finalized__c: true, // first success finalizes; re-push leaves it true
       });
     } else {
@@ -1134,6 +1174,82 @@ async function handleWorker(event) {
     } catch {}
     return { ok: false, error: "worker_exception", message: err?.message || String(err) };
   }
+}
+
+/**
+ * Stage B (commission POs) and Stage E (project attributes), after a clean budget write.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY A DOWNSTREAM FAILURE DOES NOT FAIL THE BUDGET PUSH
+ * ---------------------------------------------------------------------------
+ * The budget lines are written. Reporting that as `Failed` would be untrue, would leave
+ * `Budget_Finalized__c` false, and would make the next re-push redo work that succeeded.
+ * The two stages also own their own reporting: the PO engine writes
+ * Commission_PO_Status__c / Commission_PO_Error__c, which exist precisely so a refusal is
+ * not "a log line nobody reads".
+ *
+ * So the status stays `Pushed` and the PROBLEM still surfaces, via a note on
+ * Budget_Push_Error__c. `Pushed` with a non-null error is deliberate and means exactly
+ * what it says: the budget pushed, and something after it needs a human.
+ *
+ * ⚠️ KNOWN GAP — the attribute stage has nowhere of its own to report. There is no
+ * Attribute_Sync_Status__c / _Error__c pair (only the §4f PO fields were deployed), so a
+ * failed attribute verification lives in this note and in CloudWatch. That is thinner
+ * than the PO side and it is the next field package to build; it is not a reason to leave
+ * the failure silent, which is why it is in the note at all.
+ *
+ * ---------------------------------------------------------------------------
+ * NEITHER STAGE MAY THROW PAST THIS FUNCTION
+ * ---------------------------------------------------------------------------
+ * An exception here would land in the worker's catch and mark a SUCCESSFUL budget push as
+ * failed. Each stage is therefore wrapped, and an exception is reported as that stage's
+ * failure rather than the push's.
+ *
+ * JOBTYPE is deliberately NOT passed to the attribute sync. RS vs RSDC is authoritative at
+ * Layer-1 creation and this worker only infers it from which lines the scaffold has —
+ * inference is not authority. Omitting it means the merge leaves whatever Layer-1 wrote
+ * intact, which is the correct outcome.
+ */
+export async function runDownstreamStages(recordId, acumaticaProjectId, values, deps = {}) {
+  const runPos = deps.syncCommissionPos ?? syncCommissionPos;
+  const runAttrs = deps.syncProjectAttributes ?? syncProjectAttributes;
+  const problems = [];
+
+  let pos = null;
+  try {
+    pos = await runPos(recordId, values);
+    // `ok:false` with a benign reason (internal deal, no commission) is the system working
+    // correctly and must not read as a problem — syncCommissionPos has already recorded
+    // `None` on the record for those.
+    if (pos && pos.ok === false && !["gate_closed", "internal_deal", "no_commission"].includes(pos.reason)) {
+      problems.push(`commission POs: ${pos.message || pos.status || pos.reason || "failed"}`);
+    }
+  } catch (err) {
+    console.error("commission-po stage threw:", err?.message || String(err));
+    pos = { ok: false, reason: "exception", message: err?.message || String(err) };
+    problems.push(`commission POs threw: ${pos.message}`);
+  }
+
+  let attrs = null;
+  try {
+    attrs = await runAttrs(acumaticaProjectId, values);
+    if (attrs && attrs.ok === false && attrs.action !== "blocked") {
+      problems.push(`attributes: ${attrs.message || attrs.reason || attrs.action}`);
+    }
+  } catch (err) {
+    console.error("attribute-sync stage threw:", err?.message || String(err));
+    attrs = { ok: false, action: "exception", message: err?.message || String(err) };
+    problems.push(`attributes threw: ${attrs.message}`);
+  }
+
+  return {
+    ok: problems.length === 0,
+    commissionPos: pos,
+    attributes: attrs,
+    // null clears the field on a clean run, which is what Budget_Push_Error__c's contract
+    // has always been.
+    note: problems.length === 0 ? null : `Budget lines pushed OK. ${problems.join(" | ")}`.slice(0, 32000),
+  };
 }
 
 // Record a failed push. Budget_Finalized__c is deliberately NOT touched here.

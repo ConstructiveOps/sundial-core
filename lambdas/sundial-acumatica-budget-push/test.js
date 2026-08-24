@@ -97,6 +97,7 @@ const mod = await import("./index.js");
 const {
   MAPPING_ROWS, PENDING_HARVEST_ROWS, budgetFieldNames, matchMappingToLines, naturalKey,
   writeBudgetLines, CREATE_GATE, REFERRAL_LINE_KEY, REFERRAL_CREATE_SPEC,
+  downstreamFieldNames, workerFieldNames, runDownstreamStages,
 } = mod;
 
 /**
@@ -974,4 +975,106 @@ test("the RSDC scaffold is the RS scaffold plus exactly one line", () => {
   const delta = harvest("R261066-rsdc.json").filter((l) => !rs.has(l.key));
   assert.equal(delta.length, 1);
   assert.equal(delta[0].key, "DCREBATE | BILLING | <N/A> | Income");
+});
+
+// ===========================================================================
+// Downstream stages — commission POs (B) and project attributes (E)
+// ===========================================================================
+
+test("the worker SELECTs everything both downstream stages read", () => {
+  // A field missing from this SELECT does not throw. It arrives as `undefined`, the PO
+  // engine reads "no stored OrderNbr", and raises a SECOND purchase order — so the list
+  // is derived from the modules' own exported constants rather than retyped here.
+  const names = workerFieldNames();
+  for (const f of [
+    "Acumatica_Project_ID__c",
+    "Commission_PO_M1_Number__c", "Commission_PO_M2_Number__c",
+    "Audit_Date_and_DateTime__c", "Scheduled_Install_Date__c",
+    "System_Size__c", "Sales_Company_Harmon_Solar_or_Third__c",
+    "Commission_Deal_Type__c", "Internal_Rep_Commission_Amt__c",
+    "Sales_Mgr_Commission_Amt__c", "Overhead_Commission_Amt__c",
+  ]) {
+    assert.ok(names.includes(f), `${f} missing from the worker SELECT`);
+  }
+  // The budget mapping's own fields are still all there.
+  for (const f of budgetFieldNames()) assert.ok(names.includes(f), `${f} dropped`);
+  assert.equal(new Set(names).size, names.length, "duplicate field would break the SOQL");
+  assert.ok(downstreamFieldNames().length > 0);
+});
+
+test("a clean run reports no problem and CLEARS the error field", async () => {
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => ({ ok: true, status: "Both Raised" }),
+    syncProjectAttributes: async () => ({ ok: true, action: "synced" }),
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.note, null, "null clears Budget_Push_Error__c, which is its contract");
+});
+
+test("an INTERNAL deal is not a problem — it is the system working", async () => {
+  // syncCommissionPos already recorded `None` on the record. Surfacing it as a push
+  // problem would train people to ignore the field.
+  for (const reason of ["internal_deal", "no_commission", "gate_closed"]) {
+    const r = await runDownstreamStages("a0X1", "R261065", {}, {
+      syncCommissionPos: async () => ({ ok: false, reason, message: "nope" }),
+      syncProjectAttributes: async () => ({ ok: true, action: "synced" }),
+    });
+    assert.equal(r.ok, true, `${reason} must not read as a failure`);
+    assert.equal(r.note, null);
+  }
+});
+
+test("a REAL PO failure surfaces on the record, not just in CloudWatch", async () => {
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => ({ ok: false, reason: "vendor_unmapped", message: "Solar Bill is not in dealer-vendor-map.csv" }),
+    syncProjectAttributes: async () => ({ ok: true, action: "synced" }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.note, /Budget lines pushed OK/);
+  assert.match(r.note, /dealer-vendor-map\.csv/);
+});
+
+test("an attribute verification failure surfaces too — it has no field of its own", async () => {
+  // KNOWN GAP: there is no Attribute_Sync_Status__c pair, so this note is the only place
+  // a discarded attribute becomes visible. Thin, and better than silent.
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => ({ ok: true, status: "Both Raised" }),
+    syncProjectAttributes: async () => ({ ok: false, action: "unverified", message: "GREENTAG was discarded" }),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.note, /GREENTAG was discarded/);
+});
+
+test("NEITHER STAGE MAY THROW PAST THIS — a successful budget push stays successful", async () => {
+  // An escaping exception would land in the worker's catch and mark a push that genuinely
+  // wrote every budget line as Failed, leaving Budget_Finalized__c false and inviting a
+  // pointless re-push.
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => { throw new Error("acumatica exploded"); },
+    syncProjectAttributes: async () => { throw new Error("and again"); },
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.note, /threw: acumatica exploded/);
+  assert.match(r.note, /threw: and again/);
+  assert.equal(r.commissionPos.reason, "exception");
+});
+
+test("the ATTRIBUTE stage still runs when the PO stage fails", async () => {
+  // They are independent facts about the job. A dealer with no vendor mapping should not
+  // also stop Harmon's reporting attributes from updating.
+  let ran = false;
+  await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => { throw new Error("boom"); },
+    syncProjectAttributes: async () => { ran = true; return { ok: true, action: "synced" }; },
+  });
+  assert.equal(ran, true);
+});
+
+test("both problems are reported together, not just the first", async () => {
+  const r = await runDownstreamStages("a0X1", "R261065", {}, {
+    syncCommissionPos: async () => ({ ok: false, reason: "vendor_inactive", message: "vendor 01863 is inactive" }),
+    syncProjectAttributes: async () => ({ ok: false, action: "unverified", message: "KW discarded" }),
+  });
+  assert.match(r.note, /inactive/);
+  assert.match(r.note, /KW discarded/);
 });

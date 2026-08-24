@@ -161,6 +161,9 @@ async function withGate(state, fn) {
   try { return await fn(); } finally { PO_GATE.enabled = prior; }
 }
 const withPoEnabled = (fn) => withGate(true, fn);
+// The gate is OPEN in the committed source now, so "what happens when it is shut" has to
+// be arranged explicitly rather than relying on the default.
+const withPoDisabled = (fn) => withGate(false, fn);
 
 function reset() {
   ctx.orders = [];
@@ -376,17 +379,23 @@ test("a create is verified by re-read and returns the OrderNbr to store", async 
 });
 
 test("the gate CLOSED means no PO is created at all", async () => {
-  reset();
-  const r = await createCommissionPo({ vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 });
-  assert.equal(r.ok, false);
-  assert.equal(r.action, "create_blocked");
-  assert.equal(ctx.puts.length, 0, "nothing may be written while the gate is closed");
+  // Still tested with the gate open in source: closing it is the emergency stop, so it
+  // has to keep working after it stops being the default.
+  await withPoDisabled(async () => {
+    reset();
+    const r = await createCommissionPo({ vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 });
+    assert.equal(r.ok, false);
+    assert.equal(r.action, "create_blocked");
+    assert.equal(ctx.puts.length, 0, "nothing may be written while the gate is closed");
+  });
 });
 
-test("PO_GATE ships CLOSED", () => {
-  // Two Salesforce gaps and an unproven write mechanic stand between this and live.
-  // Opening it is a reviewed diff, never a console setting.
-  assert.equal(PO_GATE.enabled, false, "PO_GATE must ship false — see the runbook and the field gap list");
+test("PO_GATE is OPEN, and its committed value is pinned", () => {
+  // Opened 2026-08-24 in a reviewed commit, after all three blockers cleared: §4f fields
+  // deployed with FLS, Q13/D23 answered, hand-proof re-run. It is a repo constant rather
+  // than an env var precisely so a change in EITHER direction is a diff someone reviewed
+  // — including closing it, which is the first move if a project ever grows a second M1.
+  assert.equal(PO_GATE.enabled, true, "PO_GATE is open — see the runbook §Results and D-060");
 });
 
 test("a rejected create says plainly that nothing needs cleaning up", async () => {
@@ -555,9 +564,76 @@ test("a stored OrderNbr pointing at nothing does NOT create a replacement", asyn
 // The freeze rule (§6)
 // ===========================================================================
 
-test("Open and On Hold are updatable; Completed / Closed / Cancelled are frozen", async () => {
+test("THE FREEZE RULE IS THE ONLY PROTECTION — Acumatica allows the edit we refuse", async () => {
+  // Established by the 2026-08-24 hand-proof re-run, step 8: a PUT to a CANCELED purchase
+  // order returns 200 and the change PERSISTS. There is no API-side freeze to fall back
+  // on. If updateCommissionPo's status check is ever weakened, bypassed for a "small"
+  // correction, or moved behind a flag, nothing else anywhere stops a silent edit to a
+  // released document.
+  //
+  // Only `Canceled` was tested live. Completed and Closed were not, and we deliberately
+  // do not care: everything off the allow-list is never-touch whether or not the API
+  // happens to agree.
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(rawPo({
+      orderNbr: "016442", vendorId: "01736", description: commissionPoDescription("M1", "R261078"),
+      project: "R261078", amount: 2400, status: "Canceled",
+    }));
+    const r = await updateCommissionPo({ orderNbr: "016442", amount: 9999, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+    assert.equal(r.ok, false);
+    assert.equal(r.action, "frozen");
+    assert.equal(ctx.puts.length, 0, "not one byte may reach Acumatica for a canceled PO");
+  });
+});
+
+test("DENY BY DEFAULT — an unrecognised status is frozen, not updatable", async () => {
+  // The guard is the ALLOW-list, never the deny-list. A status Acumatica invents in a
+  // future release, a typo, an empty string, a null — all must fail closed. This is what
+  // makes the FROZEN_STATUSES spelling non-load-bearing, which matters because it WAS
+  // wrong: it read "Cancelled" (two Ls) while Acumatica returns "Canceled" (one), so it
+  // had never matched anything. Harmless only because nothing ever used it as the guard.
+  for (const status of ["Canceled", "Cancelled", "Completed", "Closed", "Pending Approval", "Rejected", "", null, "OPEN", "open"]) {
+    await withPoEnabled(async () => {
+      reset();
+      ctx.orders.push(rawPo({
+        orderNbr: "016442", vendorId: "01736", description: commissionPoDescription("M1", "R261078"),
+        project: "R261078", amount: 2400, status,
+      }));
+      const r = await updateCommissionPo({ orderNbr: "016442", amount: 9999, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+      assert.equal(r.ok, false, `status ${JSON.stringify(status)} must not be updatable`);
+      assert.equal(r.action, "frozen", `status ${JSON.stringify(status)} must be frozen`);
+      assert.equal(ctx.puts.length, 0, `status ${JSON.stringify(status)}: nothing may be written`);
+    });
+  }
+  // Note "OPEN"/"open" above: the allow-list is case-SENSITIVE, so a casing change from
+  // Acumatica fails safe rather than silently unlocking the document.
+
+  // And the shape a truncated or changed response would produce: no Status field at all.
+  // A guard written as "is it frozen?" would read undefined and let this through.
+  await withPoEnabled(async () => {
+    reset();
+    const noStatus = rawPo({
+      orderNbr: "016442", vendorId: "01736", description: commissionPoDescription("M1", "R261078"),
+      project: "R261078", amount: 2400,
+    });
+    delete noStatus.Status;
+    ctx.orders.push(noStatus);
+    const r = await updateCommissionPo({ orderNbr: "016442", amount: 9999, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+    assert.equal(r.action, "frozen", "a PO with no Status at all must be frozen");
+    assert.equal(ctx.puts.length, 0);
+  });
+});
+
+test("the frozen-status list matches what Acumatica actually returns", () => {
+  // `Canceled`, one L — read off PO 016442 after it was canceled in the UI, 2026-08-24.
+  assert.ok(FROZEN_STATUSES.includes("Canceled"));
+  assert.ok(!FROZEN_STATUSES.includes("Cancelled"), "two Ls is not what Acumatica sends");
+});
+
+test("Open and On Hold are updatable; Completed / Closed / Canceled are frozen", async () => {
   assert.deepEqual([...UPDATABLE_STATUSES], ["Open", "On Hold"]);
-  assert.deepEqual([...FROZEN_STATUSES], ["Completed", "Closed", "Cancelled"]);
+  assert.deepEqual([...FROZEN_STATUSES], ["Completed", "Closed", "Canceled"]);
 
   for (const status of FROZEN_STATUSES) {
     await withPoEnabled(async () => {
@@ -961,10 +1037,12 @@ test("a frozen M1 reports Frozen and the delta, and still refreshes M2", async (
 test("the gate CLOSED means syncCommissionPos writes NOTHING, to either system", async () => {
   // Not belt-and-braces: without the top-level check, gate-closed refusals would flow
   // into the status reducer and stamp `Failed` on every solar record the push touched.
-  reset();
-  const r = await sync(DATED);
-  assert.equal(r.ok, false);
-  assert.equal(r.reason, "gate_closed");
-  assert.equal(ctx.puts.length, 0);
-  assert.equal(sfWrites.length, 0, "the gate being shut is not a fact about the job");
+  await withPoDisabled(async () => {
+    reset();
+    const r = await sync(DATED);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "gate_closed");
+    assert.equal(ctx.puts.length, 0);
+    assert.equal(sfWrites.length, 0, "the gate being shut is not a fact about the job");
+  });
 });

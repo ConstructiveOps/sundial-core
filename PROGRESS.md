@@ -1,5 +1,59 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — both Acumatica write gates open; Stages B and E ship in the release window
+
+`PO_GATE` and `ATTR_GATE` are both `true`, and both stages are wired into the budget push
+worker behind `runDownstreamStages`. 469 tests green. Recorded as D25 / **D-060**.
+
+**The step 8 re-run produced the finding of the day, and it is not the comfortable one.**
+A PUT into a properly **Canceled** purchase order returned `200` and the change persisted.
+So `UPDATABLE_STATUSES` is not the integration agreeing with a rule Acumatica enforces —
+**it is the entire rule.** Nothing at any other layer stops a silent edit to a released
+document somebody downstream has already worked from. The check is now deny-by-default
+(unrecognised, empty, null or absent status ⇒ frozen), and tests assert it is unbypassable
+including the "no `Status` field at all" response shape and casing variants. Only `Canceled`
+was actually probed; `Completed` and `Closed` were not, and we decided that must not matter
+— every status off the allow-list is never-touch whether or not the API happens to agree.
+
+Pinning that turned up a near miss worth keeping. Acumatica returns **`Canceled`**, one L;
+`FROZEN_STATUSES` said `Cancelled` and had therefore never matched anything. Harmless *only*
+because that list is documentation and the guard is the allow-list — had anyone ever written
+the guard the tidier-looking way, `FROZEN_STATUSES.includes(status)`, a canceled PO would
+have gone straight through it. That is the case for deny-by-default stated as an accident
+that didn't happen rather than as a principle.
+
+**What did not get proven, and shipped anyway.** Step 7's duplicate probe returned 28 on
+both runs — the vendor's whole PO history, so the description filter isn't comparing what it
+claims. Ruled a runbook defect rather than a gate blocker, on reasoning that holds:
+idempotency here is the stored OrderNbr and never a scan, the first run's guid and OrderNbr
+were unchanged across an update that moved the amount, and the behaviour is covered by
+tests. It is still **an accepted residual risk rather than a proven negative**, which is why
+the first-live-job watch — exactly one PO per milestone per project, ever — is the
+compensating control and not boilerplate.
+
+**Wiring, and the failure semantics that took the most thought.** Both stages run only after
+a successful budget write: a PO raised against a budget that failed to push is a payment
+authorised for numbers that are not in the plan. A downstream failure does **not** fail the
+budget push — the lines really were written, and reporting `Failed` would leave
+`Budget_Finalized__c` false and invite a re-push of work that succeeded — but it is never
+silent: `Budget_Push_Status__c = 'Pushed'` with a non-null `Budget_Push_Error__c` is a
+deliberate combination meaning "the budget pushed, and something after it needs a human".
+An internal deal or a zero commission is not a problem (the PO engine has already written
+`None`, and flagging that would train people to ignore the field), and neither stage may
+throw past the wrapper, because an escaping exception would land in the worker's catch and
+mark a genuinely successful push as failed.
+
+**One gap shipped knowingly.** The attribute stage has no status/error fields of its own —
+only the §4f PO fields were deployed — so a discarded attribute surfaces in that shared note
+and in CloudWatch. Thinner than the PO side gets, and the same "log line nobody reads"
+problem the §4f document argued against. Next field package; recorded rather than left
+implicit.
+
+Also closed: Q15 (BizRun is the sandbox — Tim's attestation), Q16 (Terms is per-vendor,
+nothing asserted), Q17 (numbers padded to Harmon's convention). §4f fields deployed with
+Read + Edit FLS. PO 016442 canceled. **Outstanding on Tim's side: the R261065 attribute
+restore (runbook step 9), whose status was left unfilled in the ruling message.**
+
 ## 2026-08-24 — the commission PO engine's two Salesforce blockers close, and the hand-proof finds a bug
 
 Q13 answered and §4f approved, so the two gaps that were "not code" are gone. The

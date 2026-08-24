@@ -70,7 +70,7 @@ Branch `feat/redline-commissions`. **Build only — nothing deployed, both write
 - [x] Ten dealers carry two picklist spellings each, mapped to one VendorID — including `Residental` / `Residential Solar Brokers`, where deleting the misspelling would break every deal carrying it.
 - [!] **⚠ Q14 (Harmon): 19 of 56 active picklist values have NO vendor, and 128 existing Solar records carry one.** Each is a commission PO that will refuse until Harmon supplies the VendorID. `scripts/verify-dealer-vendor-coverage.mjs` lists them with record counts.
 
-### Stage B — commission PO engine (D22/D23, D-057) — BUILT, GATED OFF
+### Stage B — commission PO engine (D22/D23, D25/D-057/D-060) — 🟢 LIVE, PO_GATE OPEN
 - [x] `lambdas/sundial-acumatica-commission-po/` — **62 tests**. M1 = `min(50%, $2500)`, M2 = balance; **the R251282 live split (2500 / 4814) is the pinned case**. M1 rounded, M2 the remainder, so they always sum to the cent.
 - [x] **Create body MINIMAL** per the specimen — Account/Subaccount/TaxCategory/Warehouse/Branch/LineType are all DERIVED and none is sent. Sending them would put a second, silently-drifting copy of Harmon's item configuration in the repo. They are **verified** against the specimen on re-read instead.
 - [x] Create-then-verify, freeze rule (`Open`/`On Hold` updatable; frozen statuses report the delta for M2), and **idempotency by stored OrderNbr — never a description scan**, which would match a hand-typed PO and miss a renamed one.
@@ -80,14 +80,18 @@ Branch `feat/redline-commissions`. **Build only — nothing deployed, both write
 - [x] ~~BLOCKER 2 — Q13.~~ **Resolved 2026-08-24 (D-057), and it dissolved rather than being answered:** both POs are raised on the first budget push, so there are no triggers. The dates are what each PO CARRIES — M1 `Audit_Date_and_DateTime__c`, M2 `Scheduled_Install_Date__c` → line `Requested`/`Promised`, blank sends nothing.
 - [x] **Write-back built** — `syncCommissionPos()`. M1's OrderNbr is stored **before M2 is attempted**, so an M2 failure cannot lose it and cause a duplicate M1 on the next push.
 - [ ] **TIM: deploy `salesforce/v4-commission-po-fields/`**, then grant the integration user **Read + Edit on all 8**. Without Edit on `Commission_PO_M1_Number__c` the engine raises a real PO, loses its number, and raises a second one next push.
-- [!] **BLOCKER 3 — the hand-proof is NOT clean.** `docs/integrations/acumatica-commission-po-runbook.md` ran 2026-08-24. Create, re-read, every derived value and update-by-guid all passed on R261065 / PO 016442. Outstanding:
-  - [ ] **Re-run step 7** — the duplicate count returned 28, counting the dealer's pre-existing POs on that project. It never isolated ours. Corrected command (scoped by description) is in the runbook.
-  - [ ] **Re-run step 8** — the freeze rule was never tested. The PO was still `On Hold`, which is an UPDATABLE status by design, so the 200 and the amount change were the correct behaviour and prove nothing about frozen statuses. Cancel it in the UI first.
-  - [ ] **Step 9 cleanup was skipped — PO `016442` is sitting at $9,999 against R261065.** Cancel or delete it.
+- [x] ~~TIM: deploy the §4f package + FLS.~~ **DEPLOYED 2026-08-24 with Read + Edit FLS.**
+- [x] **BLOCKER 3 — hand-proof re-run 2026-08-24.** Gate opened in a reviewed commit (D25/D-060).
+  - [x] **Step 8 re-run: Acumatica ALLOWS a PUT to a Canceled PO** (200, change persisted). **Our freeze rule is the SOLE protection.** Hardened: deny-by-default, unbypassable, tested against unknown/empty/null/missing statuses and casing variants. Only `Canceled` was tested — all frozen statuses treated as never-touch regardless.
+  - [x] **Spelling bug found while pinning it:** Acumatica sends `Canceled` (one L); `FROZEN_STATUSES` said `Cancelled` and had never matched. Harmless only because that list is documentation and the guard is the allow-list — the near miss that justifies deny-by-default.
+  - [x] **Step 9 cleanup: PO `016442` Canceled**, confirmed through the API.
+  - [!] **Step 7's probe is BUGGY — 28 on both runs** (the vendor's whole PO history; the description filter isn't comparing what it claims). Ruled a runbook defect, not a gate blocker: idempotency is the stored OrderNbr and never a scan, guid/OrderNbr were unchanged across the first run's update, behaviour is tested. **Accepted residual risk.**
+  - [ ] **FOLLOW-UP: fix the step 7 probe.** Until then the first-live-job watch is the compensating control, not boilerplate.
+  - [ ] **⚠ FIRST-LIVE-JOB WATCH: exactly one PO per milestone per project, ever.** A second M1 on any project ⇒ close `PO_GATE` before anything else. That is a duplicate payment, not a reporting glitch.
   - [x] ~~Q15: is `BizRun Tenant` the sandbox or production?~~ **RESOLVED — BizRun IS the sandbox** (original handoff fact); both runs' writes confirmed in both UIs. The contradiction was in the docs: **`sundial/acumatica/connected-app` is a POINTER whose contents change** (BizRun through the rework, repointed at live at the end of the release window), so "the live secret" / "the sandbox secret" is wrong in both directions. §1 of the rework doc now describes it as a pointer; both runbooks' step 2 reads the `client_id` suffix and says why it is not skippable.
   - [x] ~~Q16: should every commission PO be `30D`?~~ **RESOLVED — Terms is per-vendor**, derives from the vendor record. Code assumption stands; `Terms` is out of `SPECIMEN_DEFAULTS` and nothing asserts it. No Acumatica change.
 
-### Stage E — attribute sync (Q10 closed) — BUILT
+### Stage E — attribute sync (Q10 closed, D24/D-059/D-060) — 🟢 LIVE, ATTR_GATE OPEN
 - [x] **SALESPERSO = `Sales_Company_Harmon_Solar_or_Third__c`.** Documented that it therefore carries the selling COMPANY, not a person — "Harmon Solar" on internal deals.
 - [x] `lib/acumatica-attributes.js`, 15 tests. Reproduces R251282's live values exactly: SLSCOM 2500/4814, MGRCOM 382.80/127.60, MGMTOR 143.55/47.85.
 - [x] **The rep pair follows a different rule from the other two** — third-party is the capped milestone split, **internal is 75/25** (D16), and it reads the internal amount field. Using the capped rule would understate the first payment on every internal job over $5,000, which under D19 is most of them.
@@ -101,8 +105,9 @@ Branch `feat/redline-commissions`. **Build only — nothing deployed, both write
 - [x] ~~Q17 (Harmon): decimal formatting.~~ **RESOLVED — PAD, and done.** Money to 2 decimals (`2500.00`, `382.80`), KW to 3 (`8.360`), matching the hand-entered convention. `ATTRIBUTE_DECIMALS` + a `decimals` argument on `formatAttributeValue` — per-attribute, since Harmon's convention is not uniform; a non-numeric value passes through rather than becoming `NaN`. The pinned R251282 expectations are now **textually** identical to the live pull.
 - [x] **Verify-by-re-read APPROVED and BUILT** — `verifyAttributeWrite` returns `missing` (accepted with a 200, then discarded) and `mismatched`, comparing **dates by date part** because Acumatica echoes `2026-07-14` as `2026-07-14 00:00:00.000` and a string compare would flag all five dates every run. **24 tests, up from 15.**
 - [x] **STANDING HAZARD, documented as such:** an unknown `AttributeID` returns `200` and is silently discarded. It is how the API behaves and will not change; anything writing attributes must assume it.
-- [ ] **WIRE THE SYNC — now unblocked**, and it must call `verifyAttributeWrite` after every PUT.
-- [ ] **TIM: restore R261065's attributes.** The runbook had no cleanup step (it does now — step 9, pre-filled with the original values). The run overwrote ten and created four; step 3's output in §Results is the only record of what they were.
+- [x] **WIRED 2026-08-24** — `syncProjectAttributes` (PUT + verifying re-read behind `ATTR_GATE`) runs from the budget push worker after the budget lines are written. JOBTYPE is deliberately not sent: the worker can only infer RS/RSDC from which lines a scaffold has, and inference is not authority, so the merge preserves what Layer-1 wrote.
+- [ ] **⚠ NEXT FIELD PACKAGE: `Attribute_Sync_Status__c` / `Attribute_Sync_Error__c`.** The attribute stage has no fields of its own, so a discarded attribute surfaces only in the worker's `Budget_Push_Error__c` note and CloudWatch. Shipped knowingly (D-060), but it is the exact "log line nobody reads" problem the §4f doc argued against.
+- [ ] **TIM: restore R261065's attributes** — runbook step 9, pre-filled with the original values. **Status was left unfilled in the ruling message; still assumed outstanding.**
 - [ ] **HARMON: flag the behaviour change before this ships.** R261065's `SLSCOM1/2` (`1538.00`/`2138.00`) match neither commission rule — Harmon hand-enters these attributes today. On integration-managed jobs **the sync is authoritative and will overwrite them.** Intended, but they should hear it from us rather than notice it.
 
 ## MAPPING_ROWS v3 + re-harvest prep (2026-08-20, Workstream C)

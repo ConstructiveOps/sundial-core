@@ -1,7 +1,8 @@
 // sundial-acumatica-commission-po — third-party commission purchase orders (Stage D).
 //
-// STATUS: BUILT, GATED OFF. Both Salesforce gaps are now CLOSED; what is left is the
-// hand-proof. Read this header before wiring anything.
+// STATUS: LIVE as of 2026-08-24 — PO_GATE is OPEN. This engine now raises real purchase
+// orders against real vendors. Read this header, and read UPDATABLE_STATUSES, before
+// changing anything in it.
 //
 // TWO POs per third-party job, one per milestone payment to the dealer who sold it:
 //   M1 = min(50% of the commission, $2,500)
@@ -82,30 +83,29 @@ export const M1_CAP = 2500;
  * repo constant rather than an environment variable, so turning it on is a diff someone
  * reviewed, not a console click. A test asserts the committed value.
  *
- * Status 2026-08-24 — two of the original three blockers are cleared:
- *   1. ✅ the §4f write-back fields are approved and packaged (still to DEPLOY),
- *   2. ✅ the milestone dates are named (Q13 — see MILESTONE_DATE_FIELDS),
- *   3. ❌ docs/integrations/acumatica-commission-po-runbook.md is NOT clean.
+ * ⚠️ OPENED 2026-08-24. All three blockers cleared:
+ *   1. ✅ §4f write-back fields DEPLOYED, with Read + Edit FLS for the integration user.
+ *   2. ✅ milestone dates named (Q13/D23 — see MILESTONE_DATE_FIELDS).
+ *   3. ✅ hand-proof re-run — see below.
  *
- * The runbook's create, re-read, derived-value and update-by-guid steps all passed on
- * R261065 / PO 016442. Two did not:
+ * WHAT THE RE-RUN SETTLED, and what it did not:
  *
- *   - STEP 7's duplicate check is UNINTERPRETABLE as run. It counted every PO for the
- *     vendor+project pair and got 28 where it expected 1 — but the sandbox is a refreshed
- *     copy of live, so 27 of those are Blue Sky Solar's pre-existing orders on that
- *     project and the count never isolated ours. It neither proves nor disproves a
- *     duplicate. The guid and OrderNbr were unchanged across the update, which is
- *     evidence, but it is not the same evidence.
- *   - STEP 8 never tested the freeze rule. It requires cancelling the PO in the UI first;
- *     the PO was still `On Hold` when the frozen-PUT went in, and On Hold is an UPDATABLE
- *     status by design (UPDATABLE_STATUSES). The 200 and the amount changing to 9999 are
- *     the CORRECT behaviour for an On Hold order — they say nothing about Completed,
- *     Closed or Cancelled. So we still do not know whether Acumatica enforces the freeze
- *     or whether our refusal is the only thing enforcing it.
+ *   - STEP 8 answered the freeze question the hard way: **Acumatica ALLOWS a PUT to a
+ *     Canceled PO** (200, change persisted). So the freeze rule is not us agreeing with
+ *     the API — it is the ONLY protection there is. See UPDATABLE_STATUSES.
+ *   - STEP 7's duplicate probe is still not evidence: the corrected description scan
+ *     returned 28, i.e. the vendor's whole PO history again, so the runbook's probe is
+ *     itself buggy. Ruled 2026-08-24 as a runbook defect to fix separately, NOT a reason
+ *     to hold the gate — idempotency here is the stored OrderNbr and never a scan, the
+ *     first run's guid and OrderNbr were unchanged across an update, and the behaviour is
+ *     covered by tests. **That is an accepted residual risk, not a proven negative.**
+ *     Hence the watch below.
  *
- * Neither re-test is expensive; both are in the runbook's Results section.
+ * ⚠️ FIRST-LIVE-JOB WATCH: exactly one PO per milestone per project, ever. If a project
+ * ever grows a second M1, close this gate before doing anything else — that is a
+ * duplicate payment, not a reporting glitch.
  */
-export const PO_GATE = { enabled: false };
+export const PO_GATE = { enabled: true };
 
 /**
  * Q13, answered 2026-08-24 — which date each milestone PO CARRIES.
@@ -292,12 +292,36 @@ export const RECORDED_HEADER_FIELDS = Object.freeze(["terms"]);
 /**
  * PO header statuses in which the document may still be changed.
  *
- * Anything else is FROZEN and the delta belongs in M2 (§6). This is a business rule, not
- * an API limitation: a released PO has been acted on, and silently editing it would
- * change a commitment somebody downstream has already worked from.
+ * ⚠️ THIS ALLOW-LIST IS THE ONLY THING PROTECTING A RELEASED PURCHASE ORDER.
+ *
+ * The hand-proof re-run (2026-08-24, step 8) established that **Acumatica ALLOWS a PUT to
+ * a Canceled PO** — 200, and the change persists. It is not a business rule the API
+ * enforces and we mirror; it is a business rule the API does not have. Nothing outside
+ * this file will stop a silent edit to a document somebody downstream has already worked
+ * from, so the check below must never become conditional, never be skipped for a "small"
+ * correction, and never move behind a flag.
+ *
+ * **Only `Canceled` was tested.** `Completed` and `Closed` were not, so we do not know
+ * whether Acumatica happens to refuse those — and we treat that as irrelevant: every
+ * status that is not on the allow-list is never-touch, whether or not the API agrees.
+ *
+ * DENY BY DEFAULT, and that is load-bearing rather than stylistic. The guard is
+ * `!UPDATABLE_STATUSES.includes(status)`, so an unrecognised status is FROZEN. A future
+ * Acumatica version adding a status we have never heard of therefore fails safe.
  */
 export const UPDATABLE_STATUSES = Object.freeze(["Open", "On Hold"]);
-export const FROZEN_STATUSES = Object.freeze(["Completed", "Closed", "Cancelled"]);
+
+/**
+ * The frozen statuses we know of. **DOCUMENTATION ONLY — never the guard.**
+ *
+ * Note the spelling: Acumatica returns **`Canceled`**, one L, confirmed by reading PO
+ * 016442 after the step 8 re-run. This list previously said `Cancelled` and had therefore
+ * never matched anything. That was harmless *only* because the guard is the allow-list
+ * above; had anything ever been written as `FROZEN_STATUSES.includes(status)`, a canceled
+ * PO would have sailed straight through it. Which is the argument for deny-by-default
+ * rather than a tidier-looking deny-list.
+ */
+export const FROZEN_STATUSES = Object.freeze(["Completed", "Closed", "Canceled"]);
 
 /** Normalise a raw PurchaseOrder into the shape the rest of this file reasons about. */
 export function normalizePurchaseOrder(raw) {

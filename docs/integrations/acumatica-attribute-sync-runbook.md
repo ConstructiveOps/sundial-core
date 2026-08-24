@@ -1,12 +1,17 @@
 # Sandbox hand-proof — writing Project attributes (Stage E)
 
-> ## ✅ RUN 2026-08-24 — see [§Results](#results). The answer is MERGE.
+> ## ✅ RUN 2026-08-24 — see [§Results](#results). The answer is MERGE. `ATTR_GATE` IS OPEN.
 >
 > A partial `Attributes` PUT leaves what it did not send alone, so
-> `lib/acumatica-attributes.js` is correct as built and the sync's wiring is unblocked.
-> Two things came out of it: an unknown `AttributeID` is **silently ignored** (so the sync
-> must verify by re-read), and **step 9 did not exist**, so `R261065` is still carrying
-> this run's test data.
+> `lib/acumatica-attributes.js` was correct as built. The sync is now **wired into the
+> budget push worker** (Stage E) and `ATTR_GATE.enabled = true`.
+>
+> Two things came out of the run and both are in the shipped code: an unknown
+> `AttributeID` is **silently ignored**, so every write is verified by re-read
+> (`verifyAttributeWrite`); and numbers are padded to Harmon's convention (Q17).
+>
+> ⚠️ **Step 9 restore on `R261065` was still outstanding at the time of writing** — the
+> message reporting it left the status unfilled. The values are in §Results.
 
 **Purpose:** prove that a `PUT Project` with an `Attributes` array updates the values
 Harmon's reporting reads, that the date format round-trips, and — the one that actually
@@ -530,8 +535,16 @@ of this run:
 - **Step 7 — verification.** `verifyAttributeWrite` / `attributeValueMatches` /
   `attributeDatePart`.
 
-**24 tests, up from 15.** The sync can now be wired; that is the remaining Stage E work.
-See D24 in the rework doc.
+**And the sync is now wired.** `syncProjectAttributes` (PUT + verifying re-read, behind
+`ATTR_GATE`) runs from the budget push worker after the budget lines are safely written.
+**32 tests, up from 15.** See D24 in the rework doc and D-060 for the gate.
+
+**One known gap, carried deliberately:** there is no `Attribute_Sync_Status__c` /
+`_Error__c` pair — only the §4f *PO* fields were deployed. A failed attribute verification
+therefore surfaces in the worker's note on `Budget_Push_Error__c` and in CloudWatch, which
+is thinner than the PO side gets. That is the next field package, and it is exactly the
+"a log line nobody reads" problem the §4f document argued against — worth fixing rather
+than living with.
 
 ---
 

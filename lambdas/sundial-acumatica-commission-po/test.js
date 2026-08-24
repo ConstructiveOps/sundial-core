@@ -21,8 +21,16 @@ const ctx = {
   nextNbr: 20001,
 };
 
-/** Raw PO in Acumatica's shape, with the specimen's derived defaults applied. */
-function rawPo({ orderNbr, vendorId, description, project, amount, status = "Open", overrides = {}, lineOverrides = {} }) {
+/**
+ * Raw PO in Acumatica's shape, with the specimen's derived defaults applied.
+ *
+ * `when` mimics Acumatica's own behaviour: absent a requested date it defaults Requested
+ * and Promised to the order date, and it returns both as full timestamps rather than the
+ * bare date we sent. Both matter — the default is what makes a blank milestone date safe,
+ * and the timestamp format is what datePart() exists for.
+ */
+function rawPo({ orderNbr, vendorId, description, project, amount, status = "Open", when = null, terms = "30D", overrides = {}, lineOverrides = {} }) {
+  const stamp = `${when ?? "2026-08-24"}T00:00:00+00:00`;
   return {
     id: `po-guid-${orderNbr}`,
     OrderNbr: { value: orderNbr },
@@ -31,7 +39,7 @@ function rawPo({ orderNbr, vendorId, description, project, amount, status = "Ope
     Hold: { value: false },
     Branch: { value: "HARMON" },
     CurrencyID: { value: "USD" },
-    Terms: { value: "30D" },
+    Terms: { value: terms },
     Location: { value: "MAIN" },
     VendorID: { value: vendorId },
     Description: { value: description },
@@ -52,6 +60,8 @@ function rawPo({ orderNbr, vendorId, description, project, amount, status = "Ope
         Subaccount: { value: "02" },
         TaxCategory: { value: "LABSERV" },
         WarehouseID: { value: "MAIN" },
+        Requested: { value: stamp },
+        Promised: { value: stamp },
         ...lineOverrides,
       },
     ],
@@ -82,6 +92,10 @@ mock.module("../../lib/acumatica.js", {
             line.UnitCost = { value: d.UnitCost.value };
             line.ExtendedCost = { value: d.UnitCost.value };
           }
+          // Echoed back as a timestamp, the way Acumatica does.
+          for (const f of ["Requested", "Promised"]) {
+            if (d[f]) line[f] = { value: `${d[f].value}T00:00:00+00:00` };
+          }
         }
         return { ok: true, status: 200, data: po, text: "" };
       }
@@ -94,8 +108,11 @@ mock.module("../../lib/acumatica.js", {
         description: body.Description.value,
         project: body.Details[0].Project.value,
         amount: body.Details[0].UnitCost.value,
+        // No Requested sent -> Acumatica defaults it to the order date, as the specimen shows.
+        when: body.Details[0].Requested?.value ?? null,
         ...(ctx.createBehaviour === "wrong_account" ? { lineOverrides: { Account: { value: "6100" } } } : {}),
         ...(ctx.createBehaviour === "born_closed" ? { status: "Closed" } : {}),
+        ...(ctx.createBehaviour === "other_terms" ? { terms: "DOR" } : {}),
       });
 
       switch (ctx.createBehaviour) {
@@ -114,6 +131,18 @@ mock.module("../../lib/acumatica.js", {
   },
 });
 
+// The write-back goes through lib/salesforce.js, so the fake records every field map the
+// engine tries to persist — the ORDER of those calls is a tested property, not a detail.
+const sfWrites = [];
+mock.module("../../lib/salesforce.js", {
+  exports: {
+    sfUpdateRecord: async (obj, id, fields) => {
+      sfWrites.push({ obj, id, fields });
+      return { ok: true };
+    },
+  },
+});
+
 const mod = await import("./index.js");
 const {
   computeCommissionMilestones, commissionPoDescription, buildCommissionPoBody,
@@ -121,7 +150,9 @@ const {
   createCommissionPo, updateCommissionPo, planCommissionPos, planMilestone,
   storedOrderNbr, PO_GATE, M1_CAP, M1_RATE, SPECIMEN_DEFAULTS,
   UPDATABLE_STATUSES, FROZEN_STATUSES, COMMISSION_PROJECT_TASK, COMMISSION_INVENTORY_ID,
-  PO_NUMBER_FIELDS,
+  PO_NUMBER_FIELDS, MILESTONE_DATE_FIELDS, milestoneDate, datePart,
+  PO_WRITEBACK_FIELDS, PO_STATUSES, commissionPoStatus, syncCommissionPos,
+  RECORDED_HEADER_FIELDS,
 } = mod;
 
 async function withGate(state, fn) {
@@ -136,7 +167,11 @@ function reset() {
   ctx.puts = [];
   ctx.createBehaviour = "insert";
   ctx.nextNbr = 20001;
+  sfWrites.length = 0;
 }
+
+/** Every field the write-back has touched so far, flattened in order. */
+const writtenFields = () => Object.assign({}, ...sfWrites.map((w) => w.fields));
 
 /** A third-party job with a 7,314 commission — the live R251282 numbers. */
 const VALUES = {
@@ -146,6 +181,16 @@ const VALUES = {
   Sales_Company_Harmon_Solar_or_Third__c: "Blue Sky Solar",
   Commission_PO_M1_Number__c: null,
   Commission_PO_M2_Number__c: null,
+  // The two Q13 dates, unset — which is the ORDINARY state on a first budget push.
+  Audit_Date_and_DateTime__c: null,
+  Scheduled_Install_Date__c: null,
+};
+
+/** The same job, with both milestones dated. */
+const DATED = {
+  ...VALUES,
+  Audit_Date_and_DateTime__c: "2026-09-04",
+  Scheduled_Install_Date__c: "2026-10-15",
 };
 
 // ===========================================================================
@@ -439,10 +484,10 @@ test("idempotency reads the STORED OrderNbr, never a description scan", () => {
 });
 
 test("with no stored number the plan is CREATE; with one it is UPDATE", () => {
-  const plan = planCommissionPos(VALUES);
-  assert.deepEqual(planMilestone(VALUES, "M1", plan), { milestone: "M1", action: "create", amount: 2500 });
-  const after = { ...VALUES, Commission_PO_M1_Number__c: "020001" };
-  assert.deepEqual(planMilestone(after, "M1", plan), { milestone: "M1", action: "update", amount: 2500, orderNbr: "020001" });
+  const plan = planCommissionPos(DATED);
+  assert.deepEqual(planMilestone(DATED, "M1", plan), { milestone: "M1", action: "create", amount: 2500, milestoneDate: "2026-09-04" });
+  const after = { ...DATED, Commission_PO_M1_Number__c: "020001" };
+  assert.deepEqual(planMilestone(after, "M1", plan), { milestone: "M1", action: "update", amount: 2500, orderNbr: "020001", milestoneDate: "2026-09-04" });
 });
 
 test("a zero milestone is skipped, not created", () => {
@@ -545,6 +590,38 @@ test("an On Hold PO is still updatable — status is lifecycle state, not a deri
   });
 });
 
+test("TERMS IS RECORDED, NOT ASSERTED — a different vendor is not a failed create", async () => {
+  // The 2026-08-24 hand-proof caught this: the specimen (vendor 02118) has Terms 30D, the
+  // proof PO (vendor 01736) came back DOR, and both are correct because Terms derives
+  // from the vendor's payment terms. Asserting the specimen's value would have rejected a
+  // perfectly good Blue Sky Solar PO on the first live job — 35 mapped dealers, no shared
+  // terms. Regression-pinned so it cannot creep back into SPECIMEN_DEFAULTS.
+  assert.ok(!("Terms" in SPECIMEN_DEFAULTS.header), "Terms is vendor-derived, not a fixed specimen value");
+  assert.deepEqual([...RECORDED_HEADER_FIELDS], ["terms"]);
+
+  const args = { vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 };
+  const dor = normalizePurchaseOrder(rawPo({
+    orderNbr: "016442", vendorId: "01736", description: commissionPoDescription("M1", "R261078"),
+    project: "R261078", amount: 2500, terms: "DOR",
+  }));
+  assert.deepEqual(verifyCommissionPo(dor, args), [], "DOR terms must not fail verification");
+
+  // ...but the value still reaches the caller rather than vanishing.
+  await withPoEnabled(async () => {
+    reset();
+    ctx.createBehaviour = "other_terms";
+    const r = await createCommissionPo(args);
+    assert.equal(r.ok, true);
+    assert.equal(r.recorded.terms, "DOR");
+  });
+});
+
+test("the header values that ARE asserted are the ones that do not vary by vendor", () => {
+  // Branch, Currency and Location are properties of "a commission PO"; Terms is a
+  // property of whoever is being paid. That is the whole rule.
+  assert.deepEqual(Object.keys(SPECIMEN_DEFAULTS.header).sort(), ["Branch", "CurrencyID", "Location", "Type"]);
+});
+
 test("verification does not police Status or Hold", () => {
   const args = { vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 };
   for (const status of ["Open", "On Hold", "Completed", "Closed"]) {
@@ -574,4 +651,320 @@ test("an ambiguous OrderNbr throws rather than picking one", async () => {
   const b = { ...rawPo({ orderNbr: "016102", vendorId: "01736", description: "y", project: "R261078", amount: 200 }), id: "po-guid-dup" };
   ctx.orders.push(a, b);
   await assert.rejects(() => readPurchaseOrder("016102"), /matched 2 purchase orders/);
+});
+
+// ===========================================================================
+// The milestone dates (Q13) — cargo, NOT a creation gate
+// ===========================================================================
+
+test("Q13 names the two date fields, and they are the AUDITDATE / INCOMDATE sources", () => {
+  // Reusing the fields that already feed the Acumatica attributes is the point: the PO
+  // and the attribute sync cannot end up disagreeing about when a milestone happened.
+  assert.equal(MILESTONE_DATE_FIELDS.M1, "Audit_Date_and_DateTime__c");
+  assert.equal(MILESTONE_DATE_FIELDS.M2, "Scheduled_Install_Date__c");
+});
+
+test("datePart takes the date out of whatever Acumatica or Salesforce hands over", () => {
+  assert.equal(datePart("2026-09-04T00:00:00+00:00"), "2026-09-04");
+  assert.equal(datePart("2026-09-04"), "2026-09-04");
+  for (const junk of [null, undefined, "", "   ", "not a date", 0]) {
+    assert.equal(datePart(junk), null, `${JSON.stringify(junk)} is not a date`);
+  }
+});
+
+test("milestoneDate reads each milestone's own field, and blank means blank", () => {
+  assert.equal(milestoneDate(DATED, "M1"), "2026-09-04");
+  assert.equal(milestoneDate(DATED, "M2"), "2026-10-15");
+  assert.equal(milestoneDate(VALUES, "M1"), null);
+  assert.equal(milestoneDate(VALUES, "M2"), null);
+  assert.throws(() => milestoneDate(DATED, "M3"), /unknown milestone/);
+});
+
+test("A MISSING MILESTONE DATE DOES NOT BLOCK THE PO", () => {
+  // The load-bearing test for the 2026-08-24 workflow correction. §6 originally read as
+  // though M1 waited for Site Audit Complete; Harmon's actual workflow raises BOTH POs on
+  // the first budget push, when neither date is usually set yet. If this ever fails, a
+  // dealer stops getting paid until somebody notices.
+  const plan = planCommissionPos(VALUES);
+  assert.equal(planMilestone(VALUES, "M1", plan).action, "create");
+  assert.equal(planMilestone(VALUES, "M2", plan).action, "create");
+  assert.equal(planMilestone(VALUES, "M1", plan).milestoneDate, null);
+});
+
+test("with no milestone date the create body is EXACTLY the specimen's shape", () => {
+  // Sending no date is what makes the PO identical to every one Harmon has raised by
+  // hand: Acumatica defaults Requested/Promised to the order date, as PO 016102 shows.
+  const body = buildCommissionPoBody({ vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 });
+  assert.deepEqual(
+    Object.keys(body.Details[0]).sort(),
+    ["InventoryID", "LineDescription", "OrderQty", "Project", "ProjectTask", "UOM", "UnitCost"]
+  );
+});
+
+test("with a milestone date the line carries it in BOTH Requested and Promised", () => {
+  const body = buildCommissionPoBody({
+    vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500,
+    milestoneDate: "2026-09-04",
+  });
+  assert.equal(body.Details[0].Requested.value, "2026-09-04");
+  assert.equal(body.Details[0].Promised.value, "2026-09-04");
+  // A timestamp from Salesforce is normalised, not passed through raw.
+  const b2 = buildCommissionPoBody({
+    vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M2", amount: 4814,
+    milestoneDate: "2026-10-15T00:00:00.000+0000",
+  });
+  assert.equal(b2.Details[0].Promised.value, "2026-10-15");
+});
+
+test("a date we asked for is VERIFIED; a date we did not ask for is not policed", () => {
+  const args = { vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 };
+  const po = normalizePurchaseOrder(rawPo({
+    orderNbr: "1", vendorId: "01736", description: commissionPoDescription("M1", "R261078"),
+    project: "R261078", amount: 2500, when: "2026-08-24",
+  }));
+  // No milestoneDate requested -> the order-date default is none of our business.
+  assert.deepEqual(verifyCommissionPo(po, args), []);
+  // Requested and ignored -> a mismatch, found on the create rather than never.
+  const out = verifyCommissionPo(po, { ...args, milestoneDate: "2026-09-04" });
+  assert.ok(out.some((m) => /Requested/.test(m)), out.join("; "));
+  assert.ok(out.some((m) => /Promised/.test(m)), out.join("; "));
+});
+
+test("a create carries the milestone date through to the PO", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await createCommissionPo({
+      vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500,
+      milestoneDate: "2026-09-04",
+    });
+    assert.equal(r.ok, true);
+    assert.equal(r.milestoneDate, "2026-09-04");
+    assert.equal(ctx.puts[0].Details[0].Requested.value, "2026-09-04");
+  });
+});
+
+test("a rescheduled install updates the PO even though the amount has not moved", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const created = await createCommissionPo({
+      vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M2", amount: 4814,
+      milestoneDate: "2026-10-15",
+    });
+    ctx.puts = [];
+    const moved = await updateCommissionPo({
+      orderNbr: created.orderNbr, amount: 4814, vendorId: "01736",
+      acumaticaProjectId: "R261078", milestone: "M2", milestoneDate: "2026-11-02",
+    });
+    assert.equal(moved.ok, true);
+    assert.equal(moved.action, "updated");
+    assert.equal(moved.previousMilestoneDate, "2026-10-15");
+    assert.equal(moved.milestoneDate, "2026-11-02");
+    assert.equal(ctx.puts.length, 1);
+  });
+});
+
+test("an unchanged amount AND an unchanged date write nothing at all", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const created = await createCommissionPo({
+      vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500,
+      milestoneDate: "2026-09-04",
+    });
+    ctx.puts = [];
+    const again = await updateCommissionPo({
+      orderNbr: created.orderNbr, amount: 2500, vendorId: "01736",
+      acumaticaProjectId: "R261078", milestone: "M1", milestoneDate: "2026-09-04",
+    });
+    assert.equal(again.action, "unchanged");
+    assert.equal(ctx.puts.length, 0);
+  });
+});
+
+test("a BLANK milestone date never clears a date already on the PO", async () => {
+  // Harmon may have set it by hand. Un-setting a date nobody asked us to un-set is
+  // exactly the quiet edit to a live document this engine exists to avoid.
+  await withPoEnabled(async () => {
+    reset();
+    const created = await createCommissionPo({
+      vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500,
+      milestoneDate: "2026-09-04",
+    });
+    ctx.puts = [];
+    const r = await updateCommissionPo({
+      orderNbr: created.orderNbr, amount: 2500, vendorId: "01736",
+      acumaticaProjectId: "R261078", milestone: "M1", milestoneDate: null,
+    });
+    assert.equal(r.action, "unchanged");
+    assert.equal(ctx.puts.length, 0);
+    assert.equal(normalizePurchaseOrder(ctx.orders[0]).lines[0].promised, "2026-09-04");
+  });
+});
+
+// ===========================================================================
+// The §4f write-back (salesforce/v4-commission-po-fields/)
+// ===========================================================================
+
+test("the write-back field names match the deployed package exactly", () => {
+  // A typo here is an INVALID_FIELD at runtime on the one write that must not fail.
+  assert.deepEqual(PO_WRITEBACK_FIELDS.M1, {
+    number: "Commission_PO_M1_Number__c",
+    amount: "Commission_PO_M1_Amount__c",
+    created: "Commission_PO_M1_Created__c",
+  });
+  assert.deepEqual(PO_WRITEBACK_FIELDS.M2, {
+    number: "Commission_PO_M2_Number__c",
+    amount: "Commission_PO_M2_Amount__c",
+    created: "Commission_PO_M2_Created__c",
+  });
+  assert.equal(PO_WRITEBACK_FIELDS.status, "Commission_PO_Status__c");
+  assert.equal(PO_WRITEBACK_FIELDS.error, "Commission_PO_Error__c");
+  // And the number fields are the SAME ones idempotency reads, or a create would store
+  // its OrderNbr somewhere the next run does not look — a duplicate payment.
+  assert.equal(PO_WRITEBACK_FIELDS.M1.number, PO_NUMBER_FIELDS.M1);
+  assert.equal(PO_WRITEBACK_FIELDS.M2.number, PO_NUMBER_FIELDS.M2);
+});
+
+test("every status the engine writes is in the restricted picklist", () => {
+  assert.deepEqual([...PO_STATUSES], ["None", "M1 Raised", "Both Raised", "Failed", "Frozen"]);
+  const produced = [
+    commissionPoStatus([], {}),
+    commissionPoStatus([{ ok: true, action: "created" }], { M1: "020001" }),
+    commissionPoStatus([{ ok: true, action: "created" }], { M1: "020001", M2: "020002" }),
+    commissionPoStatus([{ ok: false, action: "create_failed" }], {}),
+    commissionPoStatus([{ ok: false, action: "frozen" }], { M1: "016102" }),
+  ];
+  assert.deepEqual(produced, ["None", "M1 Raised", "Both Raised", "Failed", "Frozen"]);
+  for (const s of produced) assert.ok(PO_STATUSES.includes(s), `${s} is not a valid picklist value`);
+});
+
+test("Failed outranks Frozen — a run with a real failure is a run somebody must look at", () => {
+  const both = commissionPoStatus(
+    [{ ok: false, action: "frozen" }, { ok: false, action: "create_failed" }],
+    { M1: "016102" }
+  );
+  assert.equal(both, "Failed");
+  // ...and Frozen outranks the raised-count, so a frozen PO is never hidden behind a
+  // reassuring "Both Raised".
+  assert.equal(commissionPoStatus([{ ok: false, action: "frozen" }], { M1: "a", M2: "b" }), "Frozen");
+});
+
+// ===========================================================================
+// syncCommissionPos — the whole job, end to end
+// ===========================================================================
+
+const NOW = () => "2026-08-24T12:00:00.000Z";
+const sync = (values) => syncCommissionPos("a0X000000000001AAA", values, { now: NOW });
+
+test("a clean run raises both POs and stores both numbers", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await sync(DATED);
+    assert.equal(r.ok, true);
+    assert.equal(r.status, "Both Raised");
+    assert.equal(ctx.orders.length, 2);
+
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_M1_Number__c, "020001");
+    assert.equal(f.Commission_PO_M2_Number__c, "020002");
+    assert.equal(f.Commission_PO_M1_Amount__c, 2500);
+    assert.equal(f.Commission_PO_M2_Amount__c, 4814);
+    assert.equal(f.Commission_PO_M1_Created__c, NOW());
+    assert.equal(f.Commission_PO_Status__c, "Both Raised");
+    assert.equal(f.Commission_PO_Error__c, null);
+
+    // Each PO carries its OWN milestone date.
+    const dates = ctx.orders.map((o) => normalizePurchaseOrder(o).lines[0].promised);
+    assert.deepEqual(dates, ["2026-09-04", "2026-10-15"]);
+  });
+});
+
+test("M1's ORDER NUMBER IS STORED BEFORE M2 IS ATTEMPTED", async () => {
+  // The property the whole write-back ordering exists for. If M2 fails, or the Lambda
+  // dies between the two, M1's number must already be on the record — otherwise the next
+  // push sees a blank field and raises a SECOND M1.
+  await withPoEnabled(async () => {
+    reset();
+    await sync(DATED);
+    const firstM1 = sfWrites.findIndex((w) => "Commission_PO_M1_Number__c" in w.fields);
+    const firstM2 = sfWrites.findIndex((w) => "Commission_PO_M2_Number__c" in w.fields);
+    assert.ok(firstM1 >= 0 && firstM2 > firstM1, `M1 stored at ${firstM1}, M2 at ${firstM2}`);
+    // And M1's number is written before M2's PO is even created.
+    assert.ok(sfWrites.length >= 3, "expected a write per milestone plus the final status");
+  });
+});
+
+test("a re-push updates both POs and never raises a third", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    await sync(DATED);
+    const after = { ...DATED, Commission_PO_M1_Number__c: "020001", Commission_PO_M2_Number__c: "020002" };
+    sfWrites.length = 0;
+
+    // The commission has grown: M1 is already at the cap so the whole delta lands in M2.
+    const r = await sync({ ...after, Sales_Rep_Commission_Amt__c: 8000 });
+    assert.equal(r.ok, true);
+    assert.equal(ctx.orders.length, 2, "a re-push must never create a third PO");
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_M1_Amount__c, 2500);
+    assert.equal(f.Commission_PO_M2_Amount__c, 5500);
+    // `Created` is a creation stamp and must not be re-stamped on an update.
+    assert.ok(!("Commission_PO_M1_Created__c" in f), "Created must not move on an update");
+  });
+});
+
+test("an internal deal writes None and NO error — it is the system working", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await sync({ ...DATED, Commission_Deal_Type__c: "Internal" });
+    assert.equal(r.reason, "internal_deal");
+    assert.equal(ctx.orders.length, 0);
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_Status__c, "None");
+    assert.equal(f.Commission_PO_Error__c, null, "an internal deal is not a failure");
+  });
+});
+
+test("an unmapped dealer writes Failed and the message that names the fix", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await sync({ ...DATED, Sales_Company_Harmon_Solar_or_Third__c: "Solar Bill" });
+    assert.equal(r.ok, false);
+    assert.equal(ctx.orders.length, 0, "nothing may be raised without a resolved vendor");
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_Status__c, "Failed");
+    assert.match(f.Commission_PO_Error__c, /dealer-vendor-map\.csv/);
+  });
+});
+
+test("a frozen M1 reports Frozen and the delta, and still refreshes M2", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    // M1 already raised and since Completed; M2 already raised and still Open.
+    ctx.orders.push(rawPo({ orderNbr: "016102", vendorId: "01736", description: commissionPoDescription("M1", "R261078"), project: "R261078", amount: 2500, status: "Completed", when: "2026-09-04" }));
+    ctx.orders.push(rawPo({ orderNbr: "016103", vendorId: "01736", description: commissionPoDescription("M2", "R261078"), project: "R261078", amount: 4814, status: "Open", when: "2026-10-15" }));
+    const r = await sync({
+      ...DATED,
+      Sales_Rep_Commission_Amt__c: 9000, // M1 stays capped at 2500, M2 becomes 6500
+      Commission_PO_M1_Number__c: "016102",
+      Commission_PO_M2_Number__c: "016103",
+    });
+    assert.equal(r.status, "Frozen");
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_Status__c, "Frozen");
+    assert.match(f.Commission_PO_Error__c, /belongs in M2/);
+    // The frozen M1 does not stop M2 from being brought up to date — which is precisely
+    // where §6 says the difference goes.
+    assert.equal(normalizePurchaseOrder(ctx.orders[1]).lines[0].unitCost, 6500);
+  });
+});
+
+test("the gate CLOSED means syncCommissionPos writes NOTHING, to either system", async () => {
+  // Not belt-and-braces: without the top-level check, gate-closed refusals would flow
+  // into the status reducer and stamp `Failed` on every solar record the push touched.
+  reset();
+  const r = await sync(DATED);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "gate_closed");
+  assert.equal(ctx.puts.length, 0);
+  assert.equal(sfWrites.length, 0, "the gate being shut is not a fact about the job");
 });

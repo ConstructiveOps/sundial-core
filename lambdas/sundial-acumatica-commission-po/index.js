@@ -1,39 +1,48 @@
 // sundial-acumatica-commission-po — third-party commission purchase orders (Stage D).
 //
-// STATUS: BUILT, GATED OFF, AND BLOCKED ON TWO SALESFORCE GAPS. Read this header before
-// wiring anything.
+// STATUS: BUILT, GATED OFF. Both Salesforce gaps are now CLOSED; what is left is the
+// hand-proof. Read this header before wiring anything.
 //
-// One PO per milestone payment to the dealer who sold the job:
-//   M1 = min(50% of the commission, $2,500)   at Site Audit Complete
-//   M2 = the balance                          at Glass on Roof
+// TWO POs per third-party job, one per milestone payment to the dealer who sold it:
+//   M1 = min(50% of the commission, $2,500)
+//   M2 = the balance
 // Internal deals raise NO PO at all — internal commission is payroll (D16).
 //
 // Shape is cloned from a LIVE specimen, PO 016102 on project R261078 (vendor 02118),
 // captured 2026-08-22. See SPECIMEN_DEFAULTS.
 //
 // ---------------------------------------------------------------------------
-// WHY THIS CANNOT BE TURNED ON YET — two gaps, both needing Tim, neither inventable
+// WHEN THE POs ARE RAISED — confirmed 2026-08-24, and NOT what §6 first described
 // ---------------------------------------------------------------------------
+// §6 read as though M1 fired at Site Audit Complete and M2 later at Glass on Roof, which
+// made "which field means Site Audit Complete" (Q13) a gating question. Harmon's actual
+// workflow is simpler and was confirmed as already-built behaviour:
 //
-// GAP 1 — THE WRITE-BACK FIELDS DO NOT EXIST. §4f of the rework doc was always a draft,
-//   and a live describe of Sundial_Solar__c on 2026-08-22 confirms there is no
-//   Commission_PO_* field of any kind. Without somewhere to store the OrderNbr there is
-//   no idempotency: every push would create another PO, because "have we already raised
-//   M1 for this job" is answered by a stored order number and nothing else. The field
-//   list is in docs/integrations/commission-po-field-gap.md, for review — deliberately
-//   NOT built as a package, because inventing Salesforce fields is how you end up with
-//   two fields meaning the same thing.
+//   BOTH POs are created on the FIRST budget push, and both are UPDATED by later pushes
+//   until Acumatica freezes them.
 //
-// GAP 2 — THE MILESTONE TRIGGERS ARE NOT IDENTIFIED. §6 says "at Site Audit Complete"
-//   and "at Glass on Roof". Neither exists as a field: there is no Site_Audit_Complete__c
-//   and no Glass_on_Roof__c. Candidates exist (Audit_Date_and_DateTime__c,
-//   Audit_Photos_Received__c; Stanchion_Installation__c, Install_Complete__c — and a
-//   Days_to_Glass_on_Roof__c FORMULA that must reference a real date somewhere), but
-//   picking one would be guessing about when Harmon gets paid. Recorded as Q13.
+// So the two milestone dates are NOT creation gates — nothing here waits on a date, and a
+// job with neither date set still gets both POs. What Q13 actually settled is which date
+// each PO CARRIES: see MILESTONE_DATE_FIELDS. planMilestone() has always worked this way;
+// the change in 2026-08-24 was deleting the trigger design, not adding one.
 //
-// Everything that does NOT depend on those two — the amounts, the body shape, the
-// create-then-verify, the freeze rule, the re-push behaviour — is built and tested here,
-// so that when the gaps close the remaining work is wiring rather than design.
+// ---------------------------------------------------------------------------
+// THE TWO GAPS, BOTH NOW CLOSED (2026-08-24)
+// ---------------------------------------------------------------------------
+// GAP 1 — the write-back fields. Approved as proposed and packaged in
+//   salesforce/v4-commission-po-fields/ (8 fields, collision-checked against the live
+//   describe). Without a stored OrderNbr there is no idempotency: "have we already raised
+//   M1 for this job" is answered by a stored order number and nothing else. THE PACKAGE
+//   STILL HAS TO BE DEPLOYED, with Read + Edit FLS for the integration user — see
+//   PO_WRITEBACK_FIELDS.
+//
+// GAP 2 — the milestone dates. Answered as Q13: M1 = Audit_Date_and_DateTime__c,
+//   M2 = Scheduled_Install_Date__c — the same two fields that already feed the AUDITDATE
+//   and INCOMDATE Acumatica attributes, so the PO and the attribute sync cannot disagree
+//   about when a milestone happened.
+//
+// WHAT STILL GATES THIS: the hand-proof. Two of its steps have not come back clean —
+// see PO_GATE.
 //
 // ---------------------------------------------------------------------------
 // THE ASYMMETRY THAT SHAPES THIS FILE
@@ -46,6 +55,7 @@
 
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { lookupDealerVendor } from "../../lib/acumatica-dealer-vendors.js";
+import { sfUpdateRecord } from "../../lib/salesforce.js";
 
 const PO_ENTITY = "PurchaseOrder";
 
@@ -72,12 +82,68 @@ export const M1_CAP = 2500;
  * repo constant rather than an environment variable, so turning it on is a diff someone
  * reviewed, not a console click. A test asserts the committed value.
  *
- * It stays `false` until ALL THREE of:
- *   1. the §4f write-back fields are deployed (gap 1),
- *   2. the milestone triggers are named (gap 2),
- *   3. docs/integrations/acumatica-commission-po-runbook.md comes back clean.
+ * Status 2026-08-24 — two of the original three blockers are cleared:
+ *   1. ✅ the §4f write-back fields are approved and packaged (still to DEPLOY),
+ *   2. ✅ the milestone dates are named (Q13 — see MILESTONE_DATE_FIELDS),
+ *   3. ❌ docs/integrations/acumatica-commission-po-runbook.md is NOT clean.
+ *
+ * The runbook's create, re-read, derived-value and update-by-guid steps all passed on
+ * R261065 / PO 016442. Two did not:
+ *
+ *   - STEP 7's duplicate check is UNINTERPRETABLE as run. It counted every PO for the
+ *     vendor+project pair and got 28 where it expected 1 — but the sandbox is a refreshed
+ *     copy of live, so 27 of those are Blue Sky Solar's pre-existing orders on that
+ *     project and the count never isolated ours. It neither proves nor disproves a
+ *     duplicate. The guid and OrderNbr were unchanged across the update, which is
+ *     evidence, but it is not the same evidence.
+ *   - STEP 8 never tested the freeze rule. It requires cancelling the PO in the UI first;
+ *     the PO was still `On Hold` when the frozen-PUT went in, and On Hold is an UPDATABLE
+ *     status by design (UPDATABLE_STATUSES). The 200 and the amount changing to 9999 are
+ *     the CORRECT behaviour for an On Hold order — they say nothing about Completed,
+ *     Closed or Cancelled. So we still do not know whether Acumatica enforces the freeze
+ *     or whether our refusal is the only thing enforcing it.
+ *
+ * Neither re-test is expensive; both are in the runbook's Results section.
  */
 export const PO_GATE = { enabled: false };
+
+/**
+ * Q13, answered 2026-08-24 — which date each milestone PO CARRIES.
+ *
+ * NOT creation triggers. Both POs are raised on the first budget push regardless of
+ * whether either date is set; these decide what goes in the PO's Requested/Promised
+ * dates once a date exists. See the header.
+ *
+ * Both are `date` fields on Sundial_Solar__c (confirmed by describe 2026-08-24 — note
+ * Audit_Date_and_DateTime__c is a Date despite its name), and both are already the source
+ * for an Acumatica attribute: AUDITDATE and INCOMDATE respectively (§7). Reusing them
+ * means the PO and the attribute sync cannot end up disagreeing about the same milestone.
+ */
+export const MILESTONE_DATE_FIELDS = Object.freeze({
+  M1: "Audit_Date_and_DateTime__c", // "Site Audit Complete"
+  M2: "Scheduled_Install_Date__c", // "Glass on Roof"
+});
+
+/** `2026-08-24T00:00:00+00:00` / `2026-08-24` -> `2026-08-24`; anything else -> null. */
+export function datePart(v) {
+  const s = String(v ?? "").trim();
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return m ? m[1] : null;
+}
+
+/**
+ * The milestone date for one PO, or null when Harmon has not set it yet.
+ *
+ * Null is the ORDINARY case on a first push — the audit is usually not done and the
+ * install usually not scheduled when the budget is first pushed — and it is handled by
+ * sending no date at all, so Acumatica applies its own default exactly as it does on
+ * every PO Harmon has ever raised by hand. A later push fills it in.
+ */
+export function milestoneDate(values, milestone) {
+  const f = MILESTONE_DATE_FIELDS[milestone];
+  if (!f) throw new Error(`unknown milestone ${milestone}`);
+  return datePart(values?.[f]);
+}
 
 function numOf(v) {
   const n = typeof v === "number" ? v : Number(v);
@@ -134,23 +200,39 @@ export function commissionPoDescription(milestone, acumaticaProjectId) {
  * back matching the specimen — which is the same trade the D20 referral-line create
  * makes, for the same reason.
  *
+ * THE MILESTONE DATE (Q13) IS THE ONE ADDITION TO THE SPECIMEN'S SHAPE. On PO 016102 the
+ * line's `Requested` and `Promised` both equal the order date (2026-07-14), because
+ * nobody typing a PO by hand changes them — so the specimen cannot tell us what Harmon
+ * WANTS there, only what the default is. Carrying the milestone date instead makes the
+ * document say when the payment is actually expected, which is what those fields are for.
+ * Two guards keep that from being a silent divergence:
+ *   - a BLANK milestone date sends nothing, so the PO is byte-identical to the specimen's
+ *     shape until a real date exists;
+ *   - the dates are VERIFIED as something we asked for, not accepted as derived, so if
+ *     Acumatica ignores or rewrites them we find out on the create rather than never.
+ * Both line dates are set together because the specimen keeps them equal.
+ *
  * No `id` — that is what makes this an insert.
  */
-export function buildCommissionPoBody({ vendorId, acumaticaProjectId, milestone, amount }) {
+export function buildCommissionPoBody({ vendorId, acumaticaProjectId, milestone, amount, milestoneDate = null }) {
+  const line = {
+    InventoryID: { value: COMMISSION_INVENTORY_ID },
+    OrderQty: { value: 1 },
+    UOM: { value: "EA" },
+    UnitCost: { value: round2(numOf(amount)) },
+    Project: { value: acumaticaProjectId },
+    ProjectTask: { value: COMMISSION_PROJECT_TASK },
+    LineDescription: { value: COMMISSION_LINE_DESCRIPTION },
+  };
+  const when = datePart(milestoneDate);
+  if (when) {
+    line.Requested = { value: when };
+    line.Promised = { value: when };
+  }
   return {
     VendorID: { value: vendorId },
     Description: { value: commissionPoDescription(milestone, acumaticaProjectId) },
-    Details: [
-      {
-        InventoryID: { value: COMMISSION_INVENTORY_ID },
-        OrderQty: { value: 1 },
-        UOM: { value: "EA" },
-        UnitCost: { value: round2(numOf(amount)) },
-        Project: { value: acumaticaProjectId },
-        ProjectTask: { value: COMMISSION_PROJECT_TASK },
-        LineDescription: { value: COMMISSION_LINE_DESCRIPTION },
-      },
-    ],
+    Details: [line],
   };
 }
 
@@ -171,12 +253,18 @@ export function buildCommissionPoBody({ vendorId, acumaticaProjectId, milestone,
 // would do it under a message about the specimen, which points at entirely the wrong
 // thing. Status is checked where it means something — the freeze rule below, and the
 // create's "landed in a state we can still correct" check.
+// ⚠️ `Terms` was in here and CAME OUT on 2026-08-24. The specimen (vendor 02118) shows
+// `30D`; the hand-proof PO on vendor 01736 came back `DOR`, and both are right — Terms
+// derives from the VENDOR's payment terms, so it is not a constant of "a commission PO",
+// it is a fact about whoever is being paid. Asserting the specimen's value would have
+// rejected a perfectly good Blue Sky Solar purchase order on the first live job, and the
+// D4 map has 35 resolvable dealers who will not share terms. It is REPORTED instead (see
+// RECORDED_HEADER_FIELDS) so a surprise is still visible without being fatal.
 export const SPECIMEN_DEFAULTS = Object.freeze({
   header: Object.freeze({
     Type: "Normal",
     Branch: "HARMON",
     CurrencyID: "USD",
-    Terms: "30D",
     Location: "MAIN",
   }),
   line: Object.freeze({
@@ -189,6 +277,17 @@ export const SPECIMEN_DEFAULTS = Object.freeze({
     OrderQty: 1,
   }),
 });
+
+/**
+ * Derived header values we RECORD but do not assert.
+ *
+ * The distinction is whether the value is a property of "a commission PO" or a property of
+ * the vendor. Branch, Currency and Location are the former and are checked. Terms is the
+ * latter — see the note above SPECIMEN_DEFAULTS — so it is logged and returned, which
+ * catches a genuinely odd value (a dealer set to something nobody intended) without
+ * failing a create over a difference we predicted and cannot control.
+ */
+export const RECORDED_HEADER_FIELDS = Object.freeze(["terms"]);
 
 /**
  * PO header statuses in which the document may still be changed.
@@ -226,6 +325,11 @@ export function normalizePurchaseOrder(raw) {
       extendedCost: av(d?.ExtendedCost),
       orderQty: av(d?.OrderQty),
       uom: av(d?.UOM),
+      // Acumatica returns these as full timestamps (`2026-08-24T00:00:00+00:00`); the
+      // date is the only part that means anything here, so normalise on the way in and
+      // nothing downstream has to remember to.
+      requested: datePart(d?.Requested?.value ?? d?.Requested),
+      promised: datePart(d?.Promised?.value ?? d?.Promised),
       account: av(d?.Account),
       subaccount: av(d?.Subaccount),
       taxCategory: av(d?.TaxCategory),
@@ -264,7 +368,7 @@ export async function readPurchaseOrder(orderNbr) {
  * the create so the runbook, the tests and the live path all judge "correct" by the same
  * rule, rather than the runbook checking by eye.
  */
-export function verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone, amount }) {
+export function verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone, amount, milestoneDate = null }) {
   const bad = [];
   if (!po) return ["no purchase order came back on the re-read"];
   if (!po.id) bad.push("the PO came back without a guid, so nothing can update it later");
@@ -288,10 +392,20 @@ export function verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone
   // we think it is, and the PO is for the wrong amount of money.
   if (round2(numOf(line.extendedCost)) !== round2(numOf(amount))) bad.push(`ExtendedCost is ${line.extendedCost}, expected ${amount} (qty should be 1)`);
 
+  // The milestone dates, when we sent them. Only checked when we asked for a date: with
+  // no milestone date we send none, Acumatica defaults them to the order date, and
+  // asserting anything about that would be asserting a derived value we deliberately do
+  // not own.
+  const wantWhen = datePart(milestoneDate);
+  if (wantWhen) {
+    if (line.requested !== wantWhen) bad.push(`line Requested is ${JSON.stringify(line.requested)}, expected ${wantWhen}`);
+    if (line.promised !== wantWhen) bad.push(`line Promised is ${JSON.stringify(line.promised)}, expected ${wantWhen}`);
+  }
+
   // What Acumatica DERIVED. A mismatch here is a configuration difference, not a bug in
   // this code — but it still means the PO is not the document the specimen describes.
   for (const [field, want] of Object.entries(SPECIMEN_DEFAULTS.header)) {
-    const key = { Type: "orderType", Branch: "branch", CurrencyID: "currencyId", Terms: "terms", Location: "location" }[field];
+    const key = { Type: "orderType", Branch: "branch", CurrencyID: "currencyId", Location: "location" }[field];
     const got = po[key];
     if (got !== want) bad.push(`derived header ${field} is ${JSON.stringify(got)}, specimen has ${JSON.stringify(want)}`);
   }
@@ -367,7 +481,7 @@ export function planCommissionPos(values) {
  * Neither is self-correcting on the next run, so neither may be reported as success on
  * the strength of a status code.
  */
-export async function createCommissionPo({ vendorId, acumaticaProjectId, milestone, amount }) {
+export async function createCommissionPo({ vendorId, acumaticaProjectId, milestone, amount, milestoneDate = null }) {
   if (!PO_GATE.enabled) {
     return { ok: false, action: "create_blocked", reason: "PO_GATE is closed — commission PO creation is not enabled" };
   }
@@ -375,8 +489,8 @@ export async function createCommissionPo({ vendorId, acumaticaProjectId, milesto
     return { ok: false, action: "create_refused", reason: `refusing to raise a purchase order for ${amount}` };
   }
 
-  const body = buildCommissionPoBody({ vendorId, acumaticaProjectId, milestone, amount });
-  console.log(`commission-po CREATE ${milestone} project=${acumaticaProjectId} vendor=${vendorId} amount=${amount}`);
+  const body = buildCommissionPoBody({ vendorId, acumaticaProjectId, milestone, amount, milestoneDate });
+  console.log(`commission-po CREATE ${milestone} project=${acumaticaProjectId} vendor=${vendorId} amount=${amount} date=${datePart(milestoneDate) ?? "(none)"}`);
   const put = await putAcumaticaEntity(PO_ENTITY, body);
   if (!put.ok) {
     return {
@@ -412,7 +526,7 @@ export async function createCommissionPo({ vendorId, acumaticaProjectId, milesto
     };
   }
 
-  const mismatches = verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone, amount });
+  const mismatches = verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone, amount, milestoneDate });
   // Status is not a derived default (see SPECIMEN_DEFAULTS), but a BRAND NEW PO that is
   // already Completed or Cancelled is a different document from the one we asked for,
   // and — worse — one the freeze rule means we could never correct. Checked here, where
@@ -429,7 +543,17 @@ export async function createCommissionPo({ vendorId, acumaticaProjectId, milesto
     };
   }
 
-  return { ok: true, action: "created", milestone, orderNbr: po.orderNbr, poId: po.id, lineId: po.lines[0].id, amount, vendorId, status: po.status };
+  // Recorded, not asserted — the vendor-derived values a human would want to see if they
+  // ever came out odd. Logged too, because the return value goes to a caller that stores
+  // three fields and drops the rest.
+  const recorded = Object.fromEntries(RECORDED_HEADER_FIELDS.map((k) => [k, po[k]]));
+  console.log(`commission-po CREATED ${milestone} nbr=${po.orderNbr} terms=${recorded.terms}`);
+
+  return {
+    ok: true, action: "created", milestone, orderNbr: po.orderNbr, poId: po.id,
+    lineId: po.lines[0].id, amount, vendorId, status: po.status,
+    milestoneDate: po.lines[0].promised, recorded,
+  };
 }
 
 /**
@@ -437,7 +561,7 @@ export async function createCommissionPo({ vendorId, acumaticaProjectId, milesto
  *
  * @param {string} orderNbr - the number stored on the Salesforce record (never a scan)
  */
-export async function updateCommissionPo({ orderNbr, amount, vendorId, acumaticaProjectId, milestone }) {
+export async function updateCommissionPo({ orderNbr, amount, vendorId, acumaticaProjectId, milestone, milestoneDate = null }) {
   if (!PO_GATE.enabled) {
     return { ok: false, action: "update_blocked", reason: "PO_GATE is closed" };
   }
@@ -472,26 +596,39 @@ export async function updateCommissionPo({ orderNbr, amount, vendorId, acumatica
 
   const current = round2(numOf(po.lines[0].unitCost));
   const wanted = round2(numOf(amount));
-  if (current === wanted) {
-    return { ok: true, action: "unchanged", orderNbr, milestone, amount: wanted, poId: po.id };
+  // The milestone date can move on its own — an install gets rescheduled without the
+  // commission changing a cent — so it is a second, independent reason to write. A blank
+  // milestone date is NOT a reason to clear a date already on the PO: Harmon may have set
+  // it by hand, and un-setting a date nobody asked us to un-set is the kind of quiet edit
+  // this file exists to avoid.
+  const whenWanted = datePart(milestoneDate);
+  const dateChanged = Boolean(whenWanted) && po.lines[0].promised !== whenWanted;
+  if (current === wanted && !dateChanged) {
+    return { ok: true, action: "unchanged", orderNbr, milestone, amount: wanted, poId: po.id, milestoneDate: po.lines[0].promised };
   }
 
   // Address BOTH the header and the line by guid, from the read we just did. Same
   // discipline as the budget push: guids come from this run, never from storage.
-  const put = await putAcumaticaEntity(PO_ENTITY, {
-    id: po.id,
-    Details: [{ id: po.lines[0].id, UnitCost: { value: wanted }, OrderQty: { value: 1 } }],
-  });
+  const detail = { id: po.lines[0].id, UnitCost: { value: wanted }, OrderQty: { value: 1 } };
+  if (whenWanted) {
+    detail.Requested = { value: whenWanted };
+    detail.Promised = { value: whenWanted };
+  }
+  const put = await putAcumaticaEntity(PO_ENTITY, { id: po.id, Details: [detail] });
   if (!put.ok) {
     return { ok: false, action: "update_failed", orderNbr, milestone, status: put.status, error: (put.text || "").slice(0, 300) };
   }
 
   const after = await readPurchaseOrder(orderNbr);
-  const mismatches = verifyCommissionPo(after, { vendorId, acumaticaProjectId, milestone, amount: wanted });
+  const mismatches = verifyCommissionPo(after, { vendorId, acumaticaProjectId, milestone, amount: wanted, milestoneDate: whenWanted });
   if (mismatches.length > 0) {
     return { ok: false, action: "update_unverified", orderNbr, milestone, mismatches, message: `PO ${orderNbr} was updated but no longer matches the expected shape: ${mismatches.join("; ")}.` };
   }
-  return { ok: true, action: "updated", orderNbr, milestone, amount: wanted, previousAmount: current, poId: after.id };
+  return {
+    ok: true, action: "updated", orderNbr, milestone, amount: wanted, previousAmount: current,
+    poId: after.id, milestoneDate: after.lines[0].promised,
+    previousMilestoneDate: po.lines[0].promised,
+  };
 }
 
 /**
@@ -526,7 +663,139 @@ export function storedOrderNbr(values, milestone) {
 export function planMilestone(values, milestone, plan) {
   const amount = plan.milestones[milestone === "M1" ? "m1" : "m2"];
   const existing = storedOrderNbr(values, milestone);
-  if (amount <= 0) return { milestone, action: "skip_zero", amount };
-  if (existing) return { milestone, action: "update", amount, orderNbr: existing };
-  return { milestone, action: "create", amount };
+  const when = milestoneDate(values, milestone);
+  // NOTE what is NOT here: any test of `when`. Both POs are raised on the first budget
+  // push whether or not the milestone has a date — the date is cargo, not a gate. See the
+  // header.
+  if (amount <= 0) return { milestone, action: "skip_zero", amount, milestoneDate: when };
+  if (existing) return { milestone, action: "update", amount, orderNbr: existing, milestoneDate: when };
+  return { milestone, action: "create", amount, milestoneDate: when };
+}
+
+// ===========================================================================
+// Write-back — the §4f fields (salesforce/v4-commission-po-fields/)
+// ===========================================================================
+
+/**
+ * The eight fields this engine writes. The integration user needs Read + Edit on all of
+ * them; without Edit the create still happens and the OrderNbr is lost, which is the one
+ * failure mode that costs money.
+ */
+export const PO_WRITEBACK_FIELDS = Object.freeze({
+  M1: Object.freeze({ number: "Commission_PO_M1_Number__c", amount: "Commission_PO_M1_Amount__c", created: "Commission_PO_M1_Created__c" }),
+  M2: Object.freeze({ number: "Commission_PO_M2_Number__c", amount: "Commission_PO_M2_Amount__c", created: "Commission_PO_M2_Created__c" }),
+  status: "Commission_PO_Status__c",
+  error: "Commission_PO_Error__c",
+});
+
+/** The five values Commission_PO_Status__c is restricted to. */
+export const PO_STATUSES = Object.freeze(["None", "M1 Raised", "Both Raised", "Failed", "Frozen"]);
+
+/**
+ * Reduce a run's per-milestone outcomes to the single picklist value.
+ *
+ * Precedence is FAILED > FROZEN > raised-count, and the order is the point. A run where
+ * M1 froze and M2 failed is a run somebody has to look at, so it reads `Failed`; a run
+ * where a PO froze and nothing failed is a normal, expected resting state and reads
+ * `Frozen` rather than being filed under failure — filing it under failure is how people
+ * learn to ignore failures.
+ *
+ * @param {Array<{ok:boolean, action:string}>} results
+ * @param {{M1?:string|null, M2?:string|null}} numbers - order numbers known AFTER the run
+ */
+export function commissionPoStatus(results, numbers) {
+  const list = results ?? [];
+  if (list.some((r) => !r.ok && r.action !== "frozen")) return "Failed";
+  if (list.some((r) => r.action === "frozen")) return "Frozen";
+  if (numbers?.M1 && numbers?.M2) return "Both Raised";
+  if (numbers?.M1) return "M1 Raised";
+  return "None";
+}
+
+/**
+ * Raise or refresh both commission POs for one job, storing each order number the moment
+ * it exists.
+ *
+ * THE WRITE-BACK ORDER IS THE WHOLE DESIGN. M1's number is persisted before M2 is even
+ * attempted, so an M2 failure — or a Lambda timeout between the two — cannot lose the
+ * fact that M1 was raised. Batching all eight fields into one tidy update at the end
+ * would be neater code and a duplicate payment the first time anything went wrong
+ * halfway.
+ *
+ * @param {string} recordId - the Sundial_Solar__c id
+ * @param {object} values - its field values, including the two Q13 dates
+ * @param {{now?: () => string, update?: Function}} [deps] - injected for tests
+ */
+export async function syncCommissionPos(recordId, values, deps = {}) {
+  const now = deps.now ?? (() => new Date().toISOString());
+  const update = deps.update ?? sfUpdateRecord;
+  const F = PO_WRITEBACK_FIELDS;
+
+  // Checked HERE as well as inside create/update, and not redundantly: without this the
+  // gate-closed refusals would flow into the status reducer and stamp `Failed` plus an
+  // error message on every solar record the budget push touched. The gate being shut is
+  // not a fact about the job.
+  if (!PO_GATE.enabled) {
+    return { ok: false, reason: "gate_closed", message: "PO_GATE is closed — no commission POs were attempted and nothing was written to Salesforce.", results: [] };
+  }
+
+  const plan = planCommissionPos(values);
+  if (!plan.ok) {
+    // Two different kinds of "no". An internal deal or a zero commission is the system
+    // working correctly and must not look like a failure on the record; the rest are
+    // things somebody has to fix.
+    const benign = plan.reason === "internal_deal" || plan.reason === "no_commission";
+    await update("Sundial_Solar__c", recordId, {
+      [F.status]: benign ? "None" : "Failed",
+      [F.error]: benign ? null : plan.message,
+    });
+    return { ok: false, reason: plan.reason, message: plan.message, results: [] };
+  }
+
+  const numbers = { M1: storedOrderNbr(values, "M1"), M2: storedOrderNbr(values, "M2") };
+  const results = [];
+
+  for (const milestone of ["M1", "M2"]) {
+    const step = planMilestone(values, milestone, plan);
+    if (step.action === "skip_zero") {
+      results.push({ ok: true, action: "skip_zero", milestone, amount: step.amount });
+      continue;
+    }
+
+    const args = {
+      vendorId: plan.vendorId,
+      acumaticaProjectId: plan.acumaticaProjectId,
+      milestone,
+      amount: step.amount,
+      milestoneDate: step.milestoneDate,
+    };
+    const r = step.action === "update"
+      ? await updateCommissionPo({ ...args, orderNbr: step.orderNbr })
+      : await createCommissionPo(args);
+    results.push(r);
+
+    if (r.ok) {
+      numbers[milestone] = r.orderNbr;
+      const f = F[milestone];
+      // `created` is stamped on the create only. On an update it would stop meaning
+      // "when this PO was raised" and start meaning "when we last touched it", which is
+      // a different fact and one nothing needs.
+      await update("Sundial_Solar__c", recordId, {
+        [f.number]: r.orderNbr,
+        [f.amount]: r.amount,
+        ...(r.action === "created" ? { [f.created]: now() } : {}),
+      });
+    }
+  }
+
+  const status = commissionPoStatus(results, numbers);
+  const problems = results
+    .filter((r) => !r.ok || r.action === "frozen")
+    .map((r) => r.message || r.reason || `${r.milestone}: ${r.action}`);
+  await update("Sundial_Solar__c", recordId, {
+    [F.status]: status,
+    [F.error]: problems.length > 0 ? problems.join("\n") : null,
+  });
+
+  return { ok: problems.length === 0, status, numbers, results };
 }

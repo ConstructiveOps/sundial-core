@@ -167,6 +167,13 @@ GENO 3→1 sums collapse into one scaffold line each).
   Reference project for reconcile + the first hand-proven write. Full harvest kept at
   `scratchpad/R269999-reconcile.json`.
 
+> **`BizRun Tenant` is the sandbox — but do not read that as "the secret points at the
+> sandbox" (D-058).** `sundial/acumatica/connected-app` is a **pointer whose contents
+> change**: BizRun through the rework, repointed at **live** at the end of the release
+> window. Read the tenant from the credential rather than from any document —
+> `client_id.Split('@')[-1]` — because Acumatica scopes the ROPC grant to the tenant named
+> in the `client_id` suffix, and that cannot disagree with reality.
+
 ---
 
 ## LIVE TEST RUNBOOK (Tim — run in order; each step says what to verify)

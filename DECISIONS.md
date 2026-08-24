@@ -1837,3 +1837,209 @@ instant.
 needing server-side config should use `private.app_config` rather than rediscovering
 this. That is the reason it is a shared table with a generic name and not
 `private.comment_notify_config`.
+
+## D-057: Both commission POs are raised on the first budget push; the milestone dates are cargo, not gates
+
+**Date:** 2026-08-24
+**Status:** Accepted
+**Cross-reference:** D22/D23 in `docs/integrations/acumatica-budget-rework-v2.md` (that
+document keeps its own D-number series for budget-rework decisions; this is the ADR).
+
+### Context
+
+§6 of the budget rework described the two dealer commission purchase orders as firing at
+milestones — M1 "at Site Audit Complete", M2 "at Glass on Roof". Read that way, the engine
+needed to know *which Salesforce field means each milestone* before it could run at all,
+and neither existed under those names. That became Q13, and it blocked the PO engine
+alongside the missing §4f write-back fields.
+
+Two describes and a live probe turned out to be answering the wrong question.
+
+### Decision
+
+1. **Both POs are created on the first budget push**, and updated by every later push
+   until Acumatica freezes them. Nothing waits on a date. A job with neither milestone
+   date set still gets both POs.
+2. **The two dates are what each PO carries, not when it is raised.**
+   `Audit_Date_and_DateTime__c` → M1, `Scheduled_Install_Date__c` → M2 — the same two
+   fields that already feed the `AUDITDATE` and `INCOMDATE` Acumatica attributes.
+3. They are written to the PO **line's `Requested` and `Promised`** (both, because the
+   specimen keeps them equal). **A blank date sends nothing**, and never clears a date
+   already on the PO.
+4. **`Terms` is recorded, not asserted.** It came out of `SPECIMEN_DEFAULTS`.
+
+### Why the workflow reading mattered more than the field names
+
+Had the trigger design been implemented, it would have been implemented correctly against
+a description of a process Harmon does not follow — and the failure mode is silent. A
+dealer's M1 would simply never be raised on any job where the audit date field was not the
+one we picked, and nothing anywhere would say so; the record would look normal, the budget
+would look normal, and the first symptom would be a dealer asking where their money was.
+Reading `Days_to_Glass_on_Roof__c`'s formula, which is what Q13 asked for, would have
+produced a confident wrong answer faster.
+
+The engine already did the right thing. `planMilestone()` has always keyed on "is there a
+stored OrderNbr" and never on a date. Closing Q13 was therefore mostly a **deletion** — of
+a trigger design that was never built — plus the date wiring above.
+
+### Why the dates go on Requested/Promised despite the specimen
+
+A live probe (`scripts/probe-po-date-fields.mjs`, 2026-08-24) found the header exposes
+`Date` / `PromisedOn` and the line `Requested` / `Promised`. On specimen PO 016102 all four
+equal the order date, and the same is true of the hand-proof PO — because nobody typing a
+PO by hand changes them. **So the specimen records the default, not a preference**, and it
+cannot tell us what Harmon wants there.
+
+Carrying the milestone date makes the document say when the payment is actually expected,
+which is what those fields are for. The two guards are what make it safe rather than a
+silent divergence: a blank date reproduces the specimen exactly, and a date we do send is
+**verified on re-read** as something we asked for rather than accepted as derived — so if
+Acumatica ignores or rewrites it, we find out on the create instead of never.
+
+### Why `Terms` stopped being a verified specimen value
+
+The specimen (vendor 02118) has `Terms: 30D`. The hand-proof PO on vendor 01736 came back
+`DOR`. **Both are right** — Terms derives from the vendor's payment terms, so it is a fact
+about whoever is being paid, not a constant of "a commission PO".
+
+Left as it was, `verifyCommissionPo` would have rejected a perfectly good Blue Sky Solar
+purchase order on the first live job, reported it as a specimen mismatch, and pointed
+whoever investigated at entirely the wrong thing. The D4 map has 35 resolvable dealers and
+they will not share payment terms.
+
+The distinction now drawn: a derived value is **asserted** when it is a property of the
+document (Branch, CurrencyID, Location, Type, and the whole line-level set including
+Account and Subaccount) and **recorded** when it is a property of the vendor (Terms). This
+is the same lesson as the earlier `Status` mistake — asserting mutable or
+externally-owned state under a message about the specimen — arrived at from live evidence
+rather than in review.
+
+### Consequence for the write-back
+
+Storing the OrderNbr is now possible (the §4f fields are approved and packaged), so
+`syncCommissionPos()` exists. **Its write ORDER is load-bearing:** M1's number is persisted
+before M2 is attempted, so an M2 failure — or a Lambda dying between the two — cannot lose
+the fact that M1 was raised. Batching all eight fields into one update at the end would be
+neater code and a duplicate payment the first time anything went wrong halfway.
+
+`PO_GATE.enabled` stays `false`. The remaining blocker is the hand-proof, whose duplicate
+check and freeze test did not land on 2026-08-24 — see the runbook's §Results.
+
+## D-058: The Acumatica secret is a pointer, not a tenant — and no doc may name the tenant it holds
+
+**Date:** 2026-08-24
+**Status:** Accepted
+
+### Context
+
+Two hand-proof runbooks each opened with a mandatory "prove which tenant you are on" step.
+Both called `GET /entity/Default/25.200.001/Company`, which does not exist — it returns
+`Entity Company not found` — so neither step had ever run, and neither run could certify
+where its writes had landed. One of those runbooks creates purchase orders.
+
+Chasing that turned up a second, worse problem. `acumatica-budget-push.md` described
+`sundial/acumatica/connected-app` as the **sandbox**; §1 of `acumatica-budget-rework-v2.md`
+described the same secret as **"(live-tenant)"**. Both were written in good faith and both
+were wrong in the same way.
+
+### Decision
+
+1. **`sundial/acumatica/connected-app` is a POINTER whose contents change** — it holds
+   BizRun (the sandbox) through the rework and is repointed at live at the end of the
+   release window. **No document may describe it as "the live secret" or "the sandbox
+   secret."**
+2. **The tenant is read from the credential**, because Acumatica suffixes the ROPC
+   `client_id` with the tenant the grant is scoped to: `client_id.Split('@')[-1]`.
+   `BizRun Tenant` is the sandbox.
+3. **Every runbook's step 2 uses that check, and says why it is not skippable** — the
+   answer changes over the life of the project, so "I saw it pass last time" is not
+   evidence.
+
+### Why the pointer is right and naming the tenant is wrong
+
+The repointing is the feature: at cutover, nothing in the repo, no Lambda environment
+variable and no runbook needs editing. That is exactly why a doc that names the tenant is
+dangerous rather than merely inaccurate — **it goes stale silently.** Nothing fails, no
+test goes red, and the sentence keeps reading as authoritative while quietly describing
+last quarter's configuration. The two contradictory descriptions were not a mistake anyone
+made; they were the predictable result of writing down a moving value.
+
+Reading the tenant from the credential has the opposite property: it cannot disagree with
+reality, because it *is* the thing that determines reality. A grant scoped to BizRun cannot
+write to live no matter what any document says.
+
+### Consequence
+
+Both 2026-08-24 hand-proof runs are retroactively certified — BizRun, confirmed in both
+UIs. The check itself moves from "a formality at the top of a runbook" to the one step that
+cannot be skipped, and it is now one line instead of a call to a nonexistent entity.
+
+## D-059: Attribute writes are verified by re-read, and match Harmon's number formatting
+
+**Date:** 2026-08-24
+**Status:** Accepted
+**Cross-reference:** D24 in `docs/integrations/acumatica-budget-rework-v2.md`;
+`acumatica-attribute-sync-runbook.md` §Results.
+
+### Context
+
+The attribute hand-proof answered its one dangerous question — a partial `Attributes` PUT
+**merges**, so the omit-blanks builder is safe as designed. It also turned up two things
+nobody had asked about.
+
+### Decision
+
+1. **The sync verifies every write by re-reading** (`verifyAttributeWrite`), separating
+   `missing` from `mismatched`, and **comparing dates by date part**.
+2. **Numbers match Harmon's existing convention** (`ATTRIBUTE_DECIMALS`): money to two
+   decimals, `KW` to three. Per-attribute, not one rule for all numbers.
+3. **The silent-200 is documented as a standing hazard**, not a finding.
+4. **On integration-managed jobs the sync is authoritative** and overwrites hand-entered
+   commission attributes. Intended; **flagged to Harmon as a behaviour change** rather than
+   left to be discovered.
+
+### Why verification is mandatory here rather than prudent
+
+An unknown `AttributeID` returns **200 and is silently discarded** — proved with
+`NOTAREALATTR`. Combined with the merge behaviour, the failure mode is invisible: if a
+template change ever drops an attribute, the sync keeps sending it, keeps getting 200, and
+that value simply stops updating. No error, no log line, no red test — just a reporting
+field that quietly stopped tracking reality, discovered whenever someone next reconciles a
+commission by hand. A status code cannot distinguish "written" from "thrown away"; only a
+re-read can.
+
+This is the same conclusion as the referral line and the commission PO, reached from the
+same premise, and it is worth noting that all three arrived independently: **an HTTP 200
+from Acumatica is an acknowledgement of receipt, not evidence of effect.**
+
+### Why the date comparison is load-bearing, not lenient
+
+We send `2026-07-14`; Acumatica echoes `2026-07-14 00:00:00.000`. A strict string
+comparison would report **all five** lifecycle dates as failed writes on **every single
+run**. The practical consequence is not noise, it is abandonment — a verification that
+always fires gets ignored, then switched off, and the check that was meant to catch the
+silent discard catches nothing because nobody reads it any more. Being right about dates is
+what makes the rest of the verification survivable.
+
+### Why formatting was Harmon's call and not a tidy-up
+
+Attributes are string-valued and Acumatica stores exactly what it is given, so `String(2500)`
+really does land in a reporting field as `2500` beside a hand-entered `1538.00`. That is a
+formatting difference, not a rounding one, and which one is *correct* depends on whether
+Harmon's reporting parses the string or displays it — a fact about their reports, not about
+our code. Harmon ruled: match what is already there. Note the convention is not uniform
+(money 2, KW 3), which is why the implementation is a per-attribute map rather than a single
+`toFixed(2)`.
+
+### The hand-entered values, and why they are recorded
+
+`R261065` carried `SLSCOM1 = 1538.00` / `SLSCOM2 = 2138.00` — a total matching neither the
+third-party rule nor the internal 75/25 one, while the manager and overhead pairs checked
+out to the cent. Harmon confirmed these are hand-entered today.
+
+Two things follow. It is direct evidence that the omit-blanks rule and the merge answer
+matter — those are precisely the fields a REPLACE would have wiped, and they demonstrably
+contain values no rule in this repo produces. And it makes the authority question real
+rather than theoretical: once the sync runs on a job, it wins. That is the right design, and
+it is the kind of change that generates a support call if the first person to notice is
+whoever typed the old number.

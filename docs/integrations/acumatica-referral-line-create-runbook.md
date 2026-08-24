@@ -73,6 +73,11 @@ verifies exactly that.
 Same secret the Lambda uses: **`sundial/acumatica/connected-app`** in Secrets Manager
 (`us-west-1`). Pull it once into the session rather than typing anything by hand.
 
+> **It is a pointer, not a tenant (D-058).** It holds BizRun (the sandbox) through the
+> rework and is repointed at **live** at the end of the release window, so check which one
+> you have before writing — `"tenant : $($secret.client_id.Split('@')[-1])"`. Acumatica
+> scopes the grant to the tenant in that suffix, so it cannot be wrong.
+
 ```powershell
 $secret = aws secretsmanager get-secret-value `
   --secret-id sundial/acumatica/connected-app --region us-west-1 `

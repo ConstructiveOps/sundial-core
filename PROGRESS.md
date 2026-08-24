@@ -1,5 +1,152 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — the commission PO engine's two Salesforce blockers close, and the hand-proof finds a bug
+
+Q13 answered and §4f approved, so the two gaps that were "not code" are gone. The
+remaining blocker is the hand-proof, which came back partly clean and — more usefully —
+caught a defect that would have fired on the first live job.
+
+**Q13 dissolved rather than resolving.** §6 read as though M1 fired at Site Audit Complete
+and M2 later at Glass on Roof, which made "which field means each milestone" a gating
+question. Harmon's actual workflow: **both POs are created on the first budget push and
+updated until Acumatica freezes them.** So there are no triggers to identify. The two dates
+are what each PO *carries* — `Audit_Date_and_DateTime__c` for M1,
+`Scheduled_Install_Date__c` for M2, the same fields already feeding the AUDITDATE and
+INCOMDATE attributes, so the PO and the attribute sync cannot disagree about a milestone.
+
+Worth noting what the wrong reading would have cost. `planMilestone()` had always keyed on
+"is there a stored OrderNbr", never on a date, so closing Q13 was mostly a **deletion** — a
+trigger design that was never built. Had it been built, the failure would have been silent:
+a dealer's M1 simply never raised on jobs where the audit field was not the one we guessed,
+with nothing anywhere saying so.
+
+**Where the dates go, and why the specimen could not answer it.** A live probe found the PO
+header exposes `Date` / `PromisedOn` and the line `Requested` / `Promised` — and that on
+both the specimen and the hand-proof PO, all four equal the order date, because nobody
+typing a PO by hand changes them. The specimen therefore records the *default*, not a
+preference. The dates now land on the line's `Requested` + `Promised`, with two guards: a
+blank date sends nothing (reproducing the specimen exactly, which is the ordinary case on a
+first push), and a date we do send is verified on re-read, so if Acumatica ignores it we
+find out on the create rather than never.
+
+**The §4f package is built as proposed** — `salesforce/v4-commission-po-fields/`, 8 fields,
+collision-checked against 490 live fields. `Text(20)` for the order numbers because
+`016442` loses its leading zero as a Number, the same trap as the vendor ids. With
+somewhere to store an OrderNbr, `syncCommissionPos()` now exists; **its write order is the
+design** — M1's number is persisted before M2 is even attempted, so an M2 failure or a
+Lambda dying between the two cannot lose it and cause a duplicate M1 next push.
+
+**The hand-proof caught a real bug.** `Terms` was in `SPECIMEN_DEFAULTS` as `30D`. The proof
+PO came back `DOR` — and both are right, because Terms derives from the *vendor's* payment
+terms. Left alone, `verifyCommissionPo` would have rejected a perfectly good Blue Sky Solar
+purchase order on the first live job, called it a specimen mismatch, and pointed whoever
+investigated at the wrong thing; the D4 map has 35 dealers who will not share terms. Terms
+is now **recorded, not asserted**. This is the same mistake as the earlier `Status` one —
+asserting externally-owned state under a message about the specimen — found this time by
+live evidence rather than in review, which is the argument for the runbook existing.
+
+**Two runbook steps did not land, and the runbook itself was wrong in three places.** Step 2
+called a `Company` entity that does not exist in the endpoint, so the tenant was never
+proved. Step 7's duplicate count returned 28 because it counted the dealer's pre-existing
+POs on that project and never isolated ours. Step 8 ran against an `On Hold` PO — an
+updatable status by design — so the 200 and the amount change were correct behaviour and
+said nothing about frozen statuses. All three commands are fixed; the re-run is small.
+
+**Two things need Tim, not code.** PO `016442` is still sitting at $9,999 against R261065
+(step 9 was skipped). And the repo contradicts itself about whether `BizRun Tenant` is the
+sandbox or production — `acumatica-budget-push.md` says sandbox, §1 of the rework doc calls
+the same secret "live-tenant". On a runbook that creates payment documents, that needs
+settling before the next run.
+
+`PO_GATE.enabled` stays `false`. 62 tests on the engine, 441 across the repo.
+
+## 2026-08-24 — the attribute sync's one dangerous unknown is answered: PUT merges
+
+The attribute hand-proof ran on R261065 and came back clean. **A partial `Attributes` PUT
+MERGES** — writing one attribute left the other ten untouched — so the omit-blanks rule in
+`lib/acumatica-attributes.js` does what it was designed to do, no read-modify-write
+redesign is needed, and the builder ships unchanged at 15 tests. Stage E's wiring is
+unblocked. Recorded as D24.
+
+**The run also produced its own justification.** R261065 was carrying
+`SLSCOM1 = 1538.00` / `SLSCOM2 = 2138.00` — a total of 3,676 that matches neither the
+third-party rule (which would give 1,838) nor the internal 75/25 one (2,757). The manager
+and overhead pairs check out to the cent, so it is not a systemic error; it looks like a
+hand-entered value. Which is the point: those are exactly the fields a REPLACE would have
+silently wiped, and we now know they contain things no rule in this repo produced.
+
+**Three smaller answers.** A PUT can *create* an attribute the project does not carry — 4
+of the 14 were absent rather than blank on R261065, and the run added all four — but only
+where the project's template defines it. Sending `''` clears a value, so "omit" and "send
+empty" are genuinely different. And `SALESPERSO` accepts free text, so it is not a
+controlled selector and needs no value-list mapping in the shape of the D4 map.
+
+**One answer has a cost.** An unknown `AttributeID` returns `200` and is silently
+discarded. The failure mode is specific and quiet: if a template change drops an attribute,
+the sync keeps sending it, keeps getting 200, and that value stops updating with nothing in
+the response saying so. **So the sync must verify by re-read** — the same discipline as the
+referral line and the commission PO, arrived at from the same premise that a 200 is not
+evidence. Comparing has to be by *date part*: we send `2026-07-14` and Acumatica echoes
+`2026-07-14 00:00:00.000`, so a string comparison would report every date as failed.
+
+**And one thing the runbook got wrong about itself: it had no cleanup step.** R261065 is
+still carrying the run's test data, and step 3's output is the only record of the ten
+original values. Step 9 now exists, pre-filled with them. Both runbooks also shared a
+broken step 2 — a `Company` entity that does not exist in the endpoint — so neither run
+proved its tenant; both now read it off the `client_id` suffix instead.
+
+Left open as Q17: the sync writes money attributes unpadded (`2500`, `382.8`) where every
+value already in Acumatica carries two decimals (`1538.00`, `250.80`). Attributes are
+string-valued and Acumatica stores exactly what it is given, so this is a formatting
+question for Harmon's reporting rather than a rounding bug — one line to change, but it
+moves every money value the sync writes, so it is not ours to decide.
+
+## 2026-08-24 — rulings on both hand-proofs: Q15/Q16/Q17 closed, verification built
+
+All three open questions came back the same day, and two of them changed code.
+
+**Q15 — `BizRun Tenant` is the sandbox**, the original handoff fact, and both runs' writes
+were confirmed in both UIs. The interesting part is *why* the repo contradicted itself:
+`acumatica-budget-push.md` called BizRun the sandbox while §1 of the rework doc called the
+same secret "live-tenant", and **both were describing a pointer as though it were a
+tenant.** `sundial/acumatica/connected-app` holds BizRun through the rework and gets
+repointed at live at the end of the release window. So neither "the live secret" nor "the
+sandbox secret" is a phrase that can stay true, and any doc using one goes stale silently
+without anything failing. §1 now says so, and both runbooks' step 2 explains that the check
+is not a formality you can skip once you have seen it pass — the answer changes.
+
+**Q16 — Terms is per-vendor**, so the code assumption stands and nothing asserts it. Worth
+recording that the hand-proof is what caught this: `Terms: 30D` sat in `SPECIMEN_DEFAULTS`
+purely because the one specimen we had happened to be vendor 02118, and it would have
+rejected a good Blue Sky Solar PO on the first live job while blaming the specimen. The
+rule now drawn is the useful part — **assert a derived value when it is a property of the
+document, record it when it is a property of the vendor.**
+
+**Q17 — pad, and it is done.** Money to two decimals, KW to three, matching what Harmon
+already has in the system. Implemented as `ATTRIBUTE_DECIMALS` plus a `decimals` argument
+on `formatAttributeValue`, per-attribute rather than one rule for all numbers, because
+Harmon's convention is not uniform. The pinned R251282 expectations now match the live pull
+**textually**, which is what "reproduces the live attributes exactly" always implied and
+did not previously mean.
+
+**Verify-by-re-read is approved and built.** `verifyAttributeWrite` separates `missing` (a
+200 followed by silent discard — the template does not define that attribute here) from
+`mismatched` (present, wrong value). Dates compare by date part, and that is load-bearing
+rather than lenient: Acumatica echoes `2026-07-14` as `2026-07-14 00:00:00.000`, so a
+string comparison would flag all five lifecycle dates on every run — and a check that
+always cries wolf gets switched off, which is worse than not having one. The silent-200 is
+now documented as a **standing hazard** rather than a finding, because it is how the API
+behaves and anything writing attributes has to assume it. 24 tests on the module, up from
+15; 450 across the repo.
+
+**One thing for Harmon rather than for us.** R261065's hand-entered `SLSCOM1/2` are
+confirmed as normal practice today. On integration-managed jobs the sync is authoritative
+and will overwrite them — intended, and a behaviour change they should hear about from us
+before it ships rather than notice afterwards.
+
+Both gates stay closed. The PO runbook's steps 7 and 8 re-runs and the 016442 / R261065
+cleanup are Tim's, in progress.
+
 ## 2026-08-22 — the three PO/attribute TODOs close: dealer map, commission PO engine, attribute sync
 
 D4's vendor map, Q5b's live PO specimen and Q10's SALESPERSO source all landed together,

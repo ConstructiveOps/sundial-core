@@ -31,9 +31,33 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D21 | **COMMISSION BURDEN = 75% × (management + setter) ONLY.** **Neither rep line is burdened** — not the external one (never was) and **not the internal redline commission** either. This **amends D9 and the D19 Stage 2 implementation**, both of which burdened the internal rep amount, and it **supersedes the REVISED sheet's J12**, whose burden array includes K8 (the internal rep cell). The sheet is not to be "restored" here: under the redline model the internal rep amount is an order of magnitude larger than when that array was written, and Harmon has ruled. Effect on the fixture job: internal-deal burden 10,939.50 → **415.50**, identical to the same job sold externally. Nothing else moves — the external worked example was already 75% × (mgmt + setter). | Harmon / Tim, 2026-08-22 |
 | D22 | **COMMISSION PO SHAPE — from the live specimen** (PO 016102 · project R261078 · vendor 02118, 2026-08-22). One PO **per milestone payment**: Type `Normal`, VendorID from the D4 map, and a **single Non-Stock detail line** — InventoryID `M1&M2COM`, OrderQty 1, UOM `EA`, `UnitCost = ExtendedCost =` the payment amount, line-level `Project` + `ProjectTask` `SLPC OUT`, LineDescription `Outside Sales commissions`. **Account 5450 / Subaccount 02 / TaxCategory LABSERV / Warehouse MAIN / Location MAIN / Terms 30D / Branch HARMON are DERIVED** from the item and vendor, so the create body is built MINIMAL and the derived values are VERIFIED against the specimen on re-read — sending them would put a second, silently-drifting copy of Harmon's item configuration in the repo. **M1/M2 identity is the Description** (`Sales Commission M1 — <ProjectID>`), which is a LABEL: idempotency is the OrderNbr stored in Salesforce, **never a description scan**. **Freeze rule reads header Status** — `Open`/`On Hold` updatable by PUT with header guid + line id; `Completed`/`Closed`/`Cancelled` frozen, delta lands in M2 (§6). | Harmon / Tim, 2026-08-22 |
 
+| D23 | **BOTH COMMISSION POs ARE RAISED ON THE FIRST BUDGET PUSH, AND THE TWO MILESTONE DATES ARE CARGO RATHER THAN GATES — resolves Q13 and corrects §6's reading.** §6 originally described M1 as firing "at Site Audit Complete" and M2 "at Glass on Roof", which made naming those fields a gating question. Harmon's actual workflow, confirmed as already-built behaviour: **both POs are created on the first budget push and updated by every later push until Acumatica freezes them.** Nothing waits on a date; a job with neither date set still gets both POs. What Q13 settles is which date each PO **carries**: **M1 → `Audit_Date_and_DateTime__c`, M2 → `Scheduled_Install_Date__c`** — the same two fields that already feed the `AUDITDATE` and `INCOMDATE` attributes (§7), so the PO and the attribute sync cannot disagree about when a milestone happened. Written to the PO's **line-level `Requested` + `Promised`** (both, because the specimen keeps them equal). **A blank date sends nothing**, leaving Acumatica to default them to the order date exactly as on every hand-typed PO — which is the ordinary case on a first push, since the audit is usually not done and the install not scheduled. A blank date also never CLEARS a date already on the PO. Dates we send are **verified on re-read** as something we asked for, not accepted as derived. Live probe 2026-08-24 (`scripts/probe-po-date-fields.mjs`): the header exposes `Date` / `PromisedOn` and the line `Requested` / `Promised`; on specimen 016102 all four equal the order date, so the specimen shows the default, not a Harmon preference. | Harmon / Tim, 2026-08-24 |
+
+| D24 | **A PARTIAL `Attributes` PUT MERGES — the omit-blanks builder stands, and the sync VERIFIES BY RE-READ.** Hand-proof 2026-08-24 on `R261065` (`acumatica-attribute-sync-runbook.md` §Results). Writing one attribute left the other ten untouched, so a sync that omits blanks can never erase a value it has no information about — **no read-modify-write cycle is needed** and `lib/acumatica-attributes.js` is correct as built (15 tests, unchanged). Three further facts: (a) a PUT can **CREATE** an attribute the project does not yet carry — 4 of the 14 were absent, not blank, and the run added all four — but only where the project's template defines it; (b) an **unknown `AttributeID` returns 200 and is silently discarded**, so a template change would quietly stop an attribute updating with nothing in the response saying so — **the sync must therefore re-read and compare what it sent, and compare dates by DATE PART** (`2026-07-14` is echoed as `2026-07-14 00:00:00.000`, so a string comparison would report every date as failed); (c) sending `''` **clears** a value, which is what makes "omit" and "send empty" meaningfully different. `SALESPERSO` accepts free text (`Familia Sicairos` was written over `Property Upgrades`), so it is **not** a controlled selector and needs no value-list mapping. ISO dates are accepted as sent — `formatAttributeValue` needs no change. **Q17 resolved the same day: PAD to Harmon's convention** — money 2dp, KW 3dp (`ATTRIBUTE_DECIMALS`). **The verify-by-re-read is approved and built** (`verifyAttributeWrite`, date-part comparison); the silent-200 is recorded as a **standing hazard**, not a one-off finding. **⚠️ Flag to Harmon before this ships:** R261065's `SLSCOM1/2` held `1538.00`/`2138.00`, matching neither commission rule — Harmon hand-enters these attributes today. On integration-managed jobs **the sync is authoritative and will overwrite them**, which is intended and is a behaviour change they should hear about from us rather than notice. | Live hand-proof, 2026-08-24 |
+
 ## 1. What survives from v1 (do not rebuild)
 
-- lib/acumatica.js (auth, GET/PUT helpers), secret `sundial/acumatica/connected-app` (live-tenant), API Gateway routes, CORS.
+- lib/acumatica.js (auth, GET/PUT helpers), secret `sundial/acumatica/connected-app` (**a POINTER — see below**), API Gateway routes, CORS.
+
+> ### ⚠️ `sundial/acumatica/connected-app` is a pointer, not a tenant (Q15, 2026-08-24)
+>
+> **Never describe it as "the live secret" or "the sandbox secret".** It is one secret name
+> whose *contents* change: it holds **BizRun (the sandbox)** through the rework, and is
+> repointed at **live** at the end of the release window. Nothing in the repo needs editing
+> when that happens, which is the point — and is also exactly why a doc that names a tenant
+> here goes stale silently. This line previously said "(live-tenant)" while
+> `acumatica-budget-push.md` called the same secret the sandbox; both were describing a
+> moving value as if it were fixed.
+>
+> **To find out which tenant you are on, read the credential**, which names its own tenant
+> because Acumatica suffixes the ROPC `client_id` with it:
+>
+> ```powershell
+> "tenant : $($secret.client_id.Split('@')[-1])"    # "BizRun Tenant" = sandbox
+> ```
+>
+> Every runbook's step 2 does this. **`BizRun Tenant` is the sandbox** — the original
+> handoff fact, and the 2026-08-24 hand-proof writes were confirmed in both UIs.
 - ProjectBudget write machinery: fresh filter-read → 4-part-key match → PUT-by-guid; sum-into-one-line; skip-zero on expense lines; income always written; fail-loud on 0 lines or ambiguous key; backoff; per-PUT logging; dryRun.
 - Async push pattern (202 → self-invoke worker → SF status write-back). Re-push idempotent.
 - Unified Create Project button (3-state), recalc button, Update Budget button, snapshot→S3→Files/XFiles/Dropbox chain, Supabase metadata registration.
@@ -238,14 +262,18 @@ Test suite: **188 checks** (88 cells / 55 fields / 16 extras / 29 behaviours), u
 All old 2,200-based commission expectations removed — grep for `2200`, `2754`, `3169.5`,
 `33332.5`, `8775.02` returns nothing.
 
-### 4f. PO tracking fields — SOLAR only — **GAP LIST FOR REVIEW, NOT BUILT**
+### 4f. PO tracking fields — SOLAR only — **APPROVED AS PROPOSED 2026-08-24, PACKAGED, NOT YET DEPLOYED**
 
-**Verified absent by live describe, 2026-08-22: no `Commission_PO_*` field exists on
-`Sundial_Solar__c`.** Eight proposed fields are written up in
-[`commission-po-field-gap.md`](commission-po-field-gap.md) — two OrderNbr, two amount, two
-created-at, plus status and error. Deliberately **not** packaged: naming Salesforce fields
-on Harmon's behalf is how an org ends up with two fields meaning the same thing. Approve
-or amend the list and the additive package follows.
+Eight fields, written up in [`commission-po-field-gap.md`](commission-po-field-gap.md) and
+approved unchanged — two OrderNbr, two amount, two created-at, plus status and error.
+Package: **`salesforce/v4-commission-po-fields/`** (generator + `.object` + `package.xml` +
+deploy README). Additive only; re-verified against the live describe 2026-08-24 (490 fields
+on `Sundial_Solar__c`, no collisions) by `scripts/probe-commission-po-fields.mjs`.
+
+**Still to do:** deploy the package, then grant the integration user **Read + Edit on all
+eight**. That FLS note is sharper than the usual one — without Edit on
+`Commission_PO_M1_Number__c` the engine still creates a real purchase order and then fails
+to store its number, and the next push raises a second one.
 
 Two things from that document worth surfacing here:
 
@@ -257,8 +285,8 @@ Two things from that document worth surfacing here:
   dealer twice.
 - **`Bill_Out_in_Acumatica_Requested__c` / `_2__c` already exist** and are labelled "M1 /
   M2 Bill Out in Acumatica Requested". They are Harmon's manual **AR** request markers,
-  not the **AP** purchase order this engine raises — but they sit in the same conceptual
-  space, so confirm that reading before adding more M1/M2 fields beside them.
+  not the **AP** purchase order this engine raises. **Confirmed unrelated 2026-08-24** —
+  the eight new fields sit beside them deliberately.
 
 
 ### 4g. Create Project mapping deltas
@@ -464,13 +492,21 @@ at all.
 
 ## 6. PO engine spec — **BUILT 2026-08-22, GATED OFF** (`lambdas/sundial-acumatica-commission-po/`)
 
-One PO per milestone payment to the dealer who sold the job. **Internal deals raise no PO
-at all** — internal commission is payroll (D16).
+Two POs per third-party job, one per milestone payment to the dealer who sold it.
+**Internal deals raise no PO at all** — internal commission is payroll (D16).
 
-| Milestone | Amount | Fires at |
-|---|---|---|
-| **M1** | `min(50% of commission, $2,500)` | Site Audit Complete (**Q13 — field not identified**) |
-| **M2** | the balance | Glass on Roof (**Q13**) |
+**WHEN (D23, corrected 2026-08-24): both POs are raised on the FIRST budget push**, and
+updated by every later push until Acumatica freezes them. An earlier reading of this
+section had M1 waiting for Site Audit Complete and M2 for Glass on Roof; that is not
+Harmon's workflow, and nothing in the engine waits on a date.
+
+| Milestone | Amount | Raised | Carries the date from |
+|---|---|---|---|
+| **M1** | `min(50% of commission, $2,500)` | first budget push | `Audit_Date_and_DateTime__c` (Q13) |
+| **M2** | the balance | first budget push | `Scheduled_Install_Date__c` (Q13) |
+
+The dates go on the line's **`Requested` + `Promised`**; a blank one sends nothing and
+Acumatica defaults to the order date, which is what happens on most first pushes.
 
 The cap is corroborated by the live attribute pull on R251282: SLSCOM1 = **2500.00
 exactly** and SLSCOM2 = **4814.00**, i.e. a 7,314 commission split by the cap biting. A
@@ -497,18 +533,33 @@ land in M2 rather than vanishing.
 
 **Idempotency**: the OrderNbr stored on the Salesforce record. Never a description scan.
 
-### THREE blockers, all outside the code
+**Write-back** goes through the eight §4f fields, and the ORDER is the design:
+`syncCommissionPos()` stores M1's OrderNbr before M2 is even attempted, so an M2 failure —
+or a Lambda dying between the two — cannot lose the fact that M1 was raised. Batching all
+eight into one tidy update at the end would be neater code and a duplicate payment the
+first time anything went wrong halfway.
 
-1. **§4f fields do not exist** — no idempotency without them (gap list above).
-2. **Q13 — the milestone triggers are not identified.** Read the formula on
-   `Days_to_Glass_on_Roof__c`; whatever it subtracts from is the M2 trigger.
-3. **Hand-proof** — [`acumatica-commission-po-runbook.md`](acumatica-commission-po-runbook.md),
-   which also records what a PO does to the SLPC OUT line's **committed** columns. The
-   budget push writes `OriginalBudgetedAmount`, so there is no write conflict by
-   construction, but step 6 checks that rather than assuming it.
+### Blockers — two of three cleared
+
+1. ✅ **§4f fields** — approved and packaged (`salesforce/v4-commission-po-fields/`).
+   **Still to deploy, with Read + Edit FLS for the integration user.**
+2. ✅ **Q13** — answered. See D23; the milestone dates turned out not to be triggers at all.
+3. ❌ **Hand-proof** — [`acumatica-commission-po-runbook.md`](acumatica-commission-po-runbook.md)
+   ran 2026-08-24 and is **not clean**. Create, re-read, every derived value and
+   update-by-guid all passed on R261065 / PO 016442. Two steps did not land: the
+   duplicate count (step 7) counted 28 pre-existing vendor+project POs and never isolated
+   ours, and the freeze test (step 8) ran against an `On Hold` PO — an updatable status by
+   design — so it tested nothing. Both re-tests are cheap and written up in the runbook's
+   §Results.
+
+**Step 6's committed-amount question came back clean:** `OriginalBudgetedAmount` on the
+SLPC OUT lines was byte-identical before and after the PO, so the budget push and the PO
+engine do not write the same column and there is no ordering constraint between them.
+`CommittedAmount` was absent from the ProjectBudget response entirely rather than zero, so
+the commitment is not observable through that endpoint — informational, not a gate.
 
 `PO_GATE.enabled` ships `false`, a repo constant rather than an env var, pinned by a test —
-same mechanism and same reasoning as D20's `CREATE_GATE`. **39 tests.**
+same mechanism and same reasoning as D20's `CREATE_GATE`. **60 tests.**
 
 ## 7. Attribute map (live enumeration, project R251282 — now concrete)
 | AttributeID | Description | Fed by | When |
@@ -525,7 +576,14 @@ same mechanism and same reasoning as D20's `CREATE_GATE`. **39 tests.**
 | MGRCOM1 / MGRCOM2 | Manager comm M1/M2 (75/25 of .04×W — verified 382.80/127.60 @12.76kW) | calc (mgr component) | budget/PO push |
 | MGMTOR1 / MGMTOR2 | Mgmt override M1/M2 (75/25 of .015×W — verified 143.55/47.85) | calc (overhead component) | budget/PO push |
 **Q10 fully resolved 2026-08-22. Built as `lib/acumatica-attributes.js` (15 tests); the
-PUT is hand-proof-gated.**
+PUT was hand-proof-gated and the ~~hand-proof passed 2026-08-24 (D24) — the builder needs
+no changes.~~**
+
+**Not every project carries all fourteen.** `R261065` had only ten; `GREENTAG`, `COMDATE`,
+`INDESIGN` and `INCOMDATE` were **absent, not blank**. A PUT creates them (D24), so this is
+not an obstacle — but it means the count on a given project is not evidence of anything,
+and an attribute the *template* does not define is silently discarded rather than
+rejected. That is why the sync re-reads.
 
 **SALESPERSO carries the selling COMPANY, not a person.** The AttributeID says "Sales
 Person", but R251282's value is "Familia Sicairos" — a `Sales_Company_Harmon_Solar_or_Third__c`
@@ -580,7 +638,10 @@ test**, and it is the reason that runbook exists.
 | Q12a | **RESOLVED (D18), then SUPERSEDED (D20)** | SOFTWARE + ENGR + SUBCON exist in the live template. **REFERRAL does NOT, and will not** — D20 re-keys it to `GENO · OTHER · REFERRAL` and has the push create the line on demand. No Harmon template action. |
 | Q12b | **RESOLVED (D18)** | BALANCE income **excludes** the DC rebate — confirmed by the live math. The rebate posts to its own `DCREBATE` income line. No change to the BALANCE row. |
 | Q12c | OPEN (Harmon) | Is the `DLR` dealer-fee expense line correct, given the calc already nets the dealer fee out of Balance of Revenue? Carried over from v1 rather than dropped, because the line exists in the live scaffold. |
-| Q13 | **OPEN (Tim) — blocks the PO engine** | §6 fires M1 "at Site Audit Complete" and M2 "at Glass on Roof". **Neither exists as a field.** Candidates: `Audit_Date_and_DateTime__c` / `Audit_Photos_Received__c` for M1; `Stanchion_Installation__c` / `Install_Complete__c` for M2. **Fastest answer: read the formula on `Days_to_Glass_on_Roof__c`** — whatever date it subtracts from IS the M2 trigger. Not guessed, because it decides when a dealer gets paid. |
+| Q13 | **RESOLVED 2026-08-24 (D23)** | ~~§6 fires M1 "at Site Audit Complete" and M2 "at Glass on Roof"; neither exists as a field.~~ The question dissolved rather than being answered as asked: **both POs are raised on the first budget push**, so there are no triggers to identify. The two dates are what each PO **carries** — **M1 = `Audit_Date_and_DateTime__c`, M2 = `Scheduled_Install_Date__c`**, the same fields feeding the `AUDITDATE` / `INCOMDATE` attributes. `Days_to_Glass_on_Roof__c` never had to be read. |
+| Q17 | **RESOLVED 2026-08-24 (Harmon) — PAD, and it is done** | Match the existing hand-entered convention: **money to 2 decimals (`2500.00`, `382.80`), KW to 3 (`8.360`)**. Attributes are string-valued and Acumatica stores exactly what it is given, so this was formatting rather than rounding. Implemented as `ATTRIBUTE_DECIMALS` + a `decimals` argument on `formatAttributeValue`, per-attribute rather than one rule for all numbers — a text attribute is passed through rather than turned into `NaN`. The pinned R251282 expectations are now **textually** identical to the live pull, not merely numerically. |
+| Q15 | **RESOLVED 2026-08-24 (Tim)** | **`BizRun Tenant` IS the sandbox** — the original handoff fact. Both hand-proof runs (PO 016442 and the attribute writes on R261065) landed in the sandbox; **confirmed in both UIs**. The contradiction was in the docs, not the world: **`sundial/acumatica/connected-app` is a POINTER whose contents change** — BizRun through the rework, repointed at live at the end of the release window — so calling it "the live secret" or "the sandbox secret" is wrong in both directions and goes stale silently. §1 now says so. To find out which tenant you are on, read the `client_id` suffix; every runbook's step 2 does. |
+| Q16 | **RESOLVED 2026-08-24 (Harmon)** | **Terms is PER-VENDOR and derives from the vendor record.** The specimen (vendor 02118) is `30D`; the hand-proof PO (vendor 01736) is `DOR`; both are correct. The code assumption stands — `Terms` is out of `SPECIMEN_DEFAULTS` and **nothing asserts it**; it is recorded and returned instead (`RECORDED_HEADER_FIELDS`). No Acumatica change needed. Had it stayed asserted it would have rejected a good Blue Sky Solar PO on the first live job and blamed the specimen. |
 | Q14 | **OPEN (Harmon) — blocks 128 records** | 19 active Sales Company picklist values have no Acumatica vendor in the D4 map, and 128 existing Solar records carry one. Each is a commission PO that will refuse (correctly) until Harmon supplies the VendorID. Run `scripts/verify-dealer-vendor-coverage.mjs` for the current list. |
 
 ## 10. Execution plan
@@ -603,8 +664,8 @@ test**, and it is the reason that runbook exists.
   - **23 tests added** (the Lambda had none); suite 316 green.
   - **GATE: the harvest has run and both scaffolds reconcile clean offline.** Remaining before a live push: Tim re-runs the live reconcile after merge/deploy (to confirm against the org, not the saved dumps), Q12c on the `DLR` line, Harmon sign-off on APPT COM, and Harmon adding a REFERRAL line if referral fees are ever to be pushed.
 **C (remaining):** RSDC template selection; MAPPING_ROWS freeze after the harvest.
-**D — PO engine: 🔶 BUILT 2026-08-22, GATED OFF** (`lambdas/sundial-acumatica-commission-po/`, 39 tests). Milestone amounts, the D22 body shape, create-then-verify, freeze rule, and idempotency-by-stored-OrderNbr are all built and tested. Vendor resolution is `lib/acumatica-dealer-vendors.js`, generated from the CSV (14 tests). **Three blockers remain, none of them code:** the §4f fields do not exist (gap list, for review); Q13 — the milestone triggers are not identified; and the sandbox hand-proof. `PO_GATE.enabled = false` until all three clear.
-**E — attribute sync: 🔶 BUILT 2026-08-22** (`lib/acumatica-attributes.js`, 15 tests). Q10 fully resolved. The builder reproduces R251282's live commission attributes exactly (2500/4814 · 382.80/127.60 · 143.55/47.85) and omits blanks rather than blanking them. **One unproven assumption gates the wiring:** whether a partial `Attributes` PUT merges or replaces — step 5 of the attribute runbook.
+**D — PO engine: 🔶 BUILT 2026-08-22, EXTENDED 2026-08-24, GATED OFF** (`lambdas/sundial-acumatica-commission-po/`, 60 tests). Milestone amounts, the D22 body shape, create-then-verify, freeze rule, idempotency-by-stored-OrderNbr, the D23 milestone dates and the §4f write-back (`syncCommissionPos`) are all built and tested. Vendor resolution is `lib/acumatica-dealer-vendors.js`, generated from the CSV (14 tests). **Two of three blockers cleared:** §4f approved + packaged (`salesforce/v4-commission-po-fields/`, **awaiting deploy + FLS**), Q13 answered (D23). **The hand-proof is the remaining one** — it ran 2026-08-24 and two steps did not land. `PO_GATE.enabled = false` until it comes back clean.
+**E — attribute sync: 🟢 BUILDER PROVEN 2026-08-24, WIRING OUTSTANDING** (`lib/acumatica-attributes.js`, **24 tests**). Q10 fully resolved. The builder reproduces R251282's live commission attributes **textually** — `2500.00`/`4814.00` · `382.80`/`127.60` · `143.55`/`47.85`, KW `12.760` — since Q17 was resolved as "pad to Harmon's convention". Blanks are omitted rather than blanked. ~~**One unproven assumption gates the wiring:** whether a partial `Attributes` PUT merges or replaces.~~ **Answered by the hand-proof: it MERGES (D24).** `verifyAttributeWrite` is built and approved — the sync must re-read and compare (dates by date part), because an unknown AttributeID returns 200 and is silently discarded. What is left is the wiring itself, plus Tim's cleanup on `R261065` (the runbook had no restore step; it does now).
 **F — frontend:** commissions v3 inputs, COST adders, D7 read-only tabs, mapping deltas, PO/attribute status display.
   - **⚠️ PREREQUISITE — four existing output fields CHANGED MEANING in v2** (`budget-v2-output-gap.md` §A/§E). A Budget UI still on v1 semantics shows **zero commission on every internal deal**, **double-counts CO fee + permit** (`Constructive_Ops_Total__c` is now a *subset* of `Total_Other_Budget__c`), **double-counts QA** (`Audit_Labor_Cost__c` is now audit+QA), and understates labor (`Total_Labor_Budget__c` excludes burden; use `Total_Labor_And_Burden__c`). None of these throws — they all render a plausible wrong number on a margin screen. Read §A before touching the Budget UI.
 **Gates:** REVISED fixture green → deploy calc; reconcile 0-problems live RS + RSDC → enable push; sandbox PO proof → enable PO stage; supervised live end-to-end (one 3rd-party + one RSDC job).

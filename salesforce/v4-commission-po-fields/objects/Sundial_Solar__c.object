@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  §4f — commission PO tracking fields for Sundial_Solar__c.
+  Reference: docs/integrations/commission-po-field-gap.md (approved as proposed 2026-08-24).
+
+  8 NEW fields, ADDITIVE ONLY — no existing field is touched.
+
+  ALL WRITTEN BY lambdas/sundial-acumatica-commission-po. The integration user needs
+  READ + EDIT on all 8: without Edit the purchase order is still created and the
+  OrderNbr is lost, which is the single failure mode in this engine that costs money.
+
+  Collision-checked against the live describe 2026-08-24: none of these 8 API names
+  exists on Sundial_Solar__c (490 fields).
+
+  NOT the same thing as the pre-existing Bill_Out_in_Acumatica_Requested__c / _2__c
+  ("M1 / M2 Bill Out in Acumatica Requested", both Date). Those are Harmon's manual AR
+  request markers; these track the AP purchase orders this engine raises. Confirmed
+  unrelated 2026-08-24.
+
+  NO Commission_PO_Vendor__c: the vendor is derivable from
+  Sales_Company_Harmon_Solar_or_Third__c through the D4 dealer map at any time, and a
+  stored copy would go stale the moment the map changed. If it needs to be visible on the
+  layout, a formula field is the right shape.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Commission_PO_M1_Number__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. The Acumatica OrderNbr of the M1 commission purchase order — the first milestone payment to the third-party dealer, min(50% of commission, $2,500). THIS IS THE IDEMPOTENCY KEY. "Have we already raised this PO for this job?" is answered by this field and nothing else — the rejected alternative was scanning Acumatica for a PO whose description looks right, which matches a hand-typed PO and misses a renamed one, and both failure modes are Harmon paying a dealer twice. Clearing it by hand will cause a SECOND purchase order on the next budget push. Text, not Number: Acumatica order numbers are zero-padded (016102) and a Number field drops the leading zero. M1 and M2 are separate documents with separate lifecycles — M1 can be Completed and frozen while M2 has not been raised at all — which is why they have their own fields rather than one field plus a milestone flag.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Acumatica PO number for the M1 dealer commission payment. Do not edit — clearing it causes a duplicate PO.</inlineHelpText>
+        <label>Commission PO M1 Number</label>
+        <length>20</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_M2_Number__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. The Acumatica OrderNbr of the M2 commission purchase order — the balance of the dealer commission after M1. THIS IS THE IDEMPOTENCY KEY. "Have we already raised this PO for this job?" is answered by this field and nothing else — the rejected alternative was scanning Acumatica for a PO whose description looks right, which matches a hand-typed PO and misses a renamed one, and both failure modes are Harmon paying a dealer twice. Clearing it by hand will cause a SECOND purchase order on the next budget push. Text, not Number: Acumatica order numbers are zero-padded (016102) and a Number field drops the leading zero. M1 and M2 are separate documents with separate lifecycles — M2 can be Completed and frozen while M1 has not been raised at all — which is why they have their own fields rather than one field plus a milestone flag.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Acumatica PO number for the M2 dealer commission payment. Do not edit — clearing it causes a duplicate PO.</inlineHelpText>
+        <label>Commission PO M2 Number</label>
+        <length>20</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_M1_Amount__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. What the M1 purchase order was actually raised for. Strictly speaking redundant — the amount is on the PO in Acumatica — but it lets the portal show what was raised without an Acumatica round trip, and it makes "the commission has changed since we raised M1" answerable from the Salesforce record alone. Nothing in the engine depends on it.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>The amount the M1 commission PO was raised for.</inlineHelpText>
+        <label>Commission PO M1 Amount</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_M2_Amount__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. What the M2 purchase order was actually raised for. See Commission_PO_M1_Amount__c for why it is stored rather than read back from Acumatica.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>The amount the M2 commission PO was raised for.</inlineHelpText>
+        <label>Commission PO M2 Amount</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_M1_Created__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. When the M1 purchase order was RAISED. Stamped on creation only and never on a later update, so it keeps meaning "when this PO came into existence" rather than drifting into "when we last touched it". NOT the milestone date — the site audit date the PO carries is Audit_Date_and_DateTime__c (Q13).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>When the M1 commission PO was created in Acumatica. Not the site audit date.</inlineHelpText>
+        <label>Commission PO M1 Created</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_M2_Created__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. When the M2 purchase order was RAISED. Creation only, never updated. NOT the milestone date — the install date the PO carries is Scheduled_Install_Date__c (Q13).</description>
+        <externalId>false</externalId>
+        <inlineHelpText>When the M2 commission PO was created in Acumatica. Not the scheduled install date.</inlineHelpText>
+        <label>Commission PO M2 Created</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_Status__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. Where this job's commission POs stand. None = nothing raised, which is the CORRECT resting state for an internal deal (commission is payroll, D16) and for a job with no third-party commission. M1 Raised / Both Raised = the ordinary progression. Failed = something needs a human. Frozen = a released PO could not be changed and the difference belongs in M2 (§6) — an EXPECTED state, deliberately not filed under Failed, because filing expected outcomes under failure is how people learn to ignore failures. RESTRICTED: the engine only ever writes these five literals.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Where the dealer commission POs stand. 'None' is correct for internal deals; 'Frozen' is expected, not an error.</inlineHelpText>
+        <label>Commission PO Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>None</fullName>
+                    <default>false</default>
+                    <label>None</label>
+                </value>
+                <value>
+                    <fullName>M1 Raised</fullName>
+                    <default>false</default>
+                    <label>M1 Raised</label>
+                </value>
+                <value>
+                    <fullName>Both Raised</fullName>
+                    <default>false</default>
+                    <label>Both Raised</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+                <value>
+                    <fullName>Frozen</fullName>
+                    <default>false</default>
+                    <label>Frozen</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Commission_PO_Error__c</fullName>
+        <description>WRITTEN by the commission PO engine (lambdas/sundial-acumatica-commission-po) — do not edit manually. The refusal or failure message from the last run, and CLEARED on a clean one. This is where a frozen PO says which two amounts it is between, where an unmapped dealer names the CSV row it needs, and where a create that half-succeeded says so — without it those outcomes are a CloudWatch line nobody reads.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Why the last commission PO run refused or failed. Blank when everything succeeded.</inlineHelpText>
+        <label>Commission PO Error</label>
+        <length>4000</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+</CustomObject>

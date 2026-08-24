@@ -1,17 +1,21 @@
 # Commission PO — Salesforce field gap list (§4f)
 
-> **For review, not a package.** These fields do not exist on `Sundial_Solar__c`. I have
-> not built the metadata for them, because naming Salesforce fields on Harmon's behalf is
-> how an org ends up with two fields meaning the same thing. Approve, amend, or rename the
-> list below and I will build the additive package.
+> **✅ APPROVED AS PROPOSED, 2026-08-24. Built.** The package is
+> [`salesforce/v4-commission-po-fields/`](../../salesforce/v4-commission-po-fields/) —
+> generator, `.object`, `package.xml` and a deploy README. All eight fields exactly as
+> listed below, unrenamed.
+>
+> **Still to do:** deploy it, then grant the integration user **Read + Edit on all eight**
+> (see the README — that FLS is the one that costs money if it is missed).
 
-**Verified absent by live describe, 2026-08-22.** A search of `Sundial_Solar__c` for
-`%PO%`, `%Commission%` and `%Milestone%` returns 37 fields, none of which is a commission
-PO tracker. The nearest existing things are `Bill_Out_in_Acumatica_Requested__c` /
-`_2__c` ("M1/M2 Bill Out in Acumatica Requested", both Date) — those are Harmon's manual
-*request* markers on the AR side and are **not** the same thing as the AP purchase order
-this engine raises. Worth confirming that reading before we add more M1/M2 fields beside
-them.
+**Verified absent by live describe, 2026-08-22, re-verified 2026-08-24** against 490 fields
+on `Sundial_Solar__c` — no collisions. Re-check any time with
+`node scripts/probe-commission-po-fields.mjs`.
+
+The nearest existing things are `Bill_Out_in_Acumatica_Requested__c` / `_2__c` ("M1/M2 Bill
+Out in Acumatica Requested", both Date) — Harmon's manual *request* markers on the **AR**
+side, **not** the AP purchase order this engine raises. **Confirmed unrelated 2026-08-24**;
+the eight new fields sit beside them deliberately.
 
 ---
 
@@ -76,29 +80,39 @@ layout, a formula field is the right shape, not a stored one.
 
 ---
 
-## The other blocker — Q13, the milestone triggers
+## The other blocker — Q13 — ✅ RESOLVED 2026-08-24 (D23)
 
-Not a field-creation question; a "which existing field means this" question, and it needs
-Tim rather than a describe.
+It dissolved rather than being answered as asked. ~~§6 says M1 fires **at Site Audit
+Complete** and M2 **at Glass on Roof**, and neither exists under that name.~~ There are no
+triggers to identify, because **both POs are raised on the first budget push** and updated
+by later pushes until Acumatica freezes them — which is how `planMilestone()` already
+worked.
 
-§6 says M1 fires **at Site Audit Complete** and M2 **at Glass on Roof**. Neither exists
-under that name:
+What the two fields actually decide is which date each PO **carries**:
 
-| Milestone | Candidates found on the object | Note |
-|---|---|---|
-| Site Audit Complete | `Audit_Date_and_DateTime__c` (Date) · `Audit_Photos_Received__c` (Date) · `Audit_Scheduled_Date__c` (Date) | `Audit_Date_and_DateTime__c` is already the AUDITDATE attribute source, so it is the obvious candidate — but "audit happened" and "audit signed off" may be different moments in Harmon's process. |
-| Glass on Roof | `Stanchion_Installation__c` (Date) · `Install_Complete__c` (Date) · `Scheduled_Install_Date__c` (Date) | **`Days_to_Glass_on_Roof__c` is a formula field on this object**, so something it references already represents glass-on-roof. Reading that formula's definition would settle it outright — it needs Metadata API access, which the integration user does not have. |
+| Milestone | Field | Type | Also feeds |
+|---|---|---|---|
+| M1 | `Audit_Date_and_DateTime__c` | Date (despite the name) | the `AUDITDATE` attribute |
+| M2 | `Scheduled_Install_Date__c` | Date | the `INCOMDATE` attribute |
 
-Picking one would be guessing about when a dealer gets paid, so I have not. **Fastest
-path: open `Days_to_Glass_on_Roof__c` in Setup and read its formula** — whatever date it
-subtracts from is the M2 trigger, and that is a thirty-second answer.
+Reusing the attribute sources is the point: the PO and the attribute sync cannot end up
+disagreeing about when the same milestone happened. They land on the PO line's `Requested`
+and `Promised`; a blank date sends nothing and Acumatica defaults to the order date, which
+is the ordinary case on a first push. `Days_to_Glass_on_Roof__c` never had to be read.
 
 ---
 
-## Once these land
+## What is left
 
-1. Deploy the additive package (I will build it from whatever this list becomes).
-2. FLS: the integration user needs **Read + Edit** on all eight — it writes them.
-3. Answer Q13 so the engine knows when to fire.
-4. Run [`acumatica-commission-po-runbook.md`](acumatica-commission-po-runbook.md).
-5. Open `PO_GATE` in a reviewed commit, same discipline as D20's `CREATE_GATE`.
+1. ~~Approve the list.~~ ✅ 2026-08-24, unchanged.
+2. ~~Build the additive package.~~ ✅ `salesforce/v4-commission-po-fields/`.
+3. **Deploy it** — Check Only first, expect 8/8.
+4. **FLS: the integration user needs Read + Edit on all eight.** Without Edit on
+   `Commission_PO_M1_Number__c` the engine raises a real PO and loses its number, and the
+   next push raises a second one.
+5. ~~Answer Q13.~~ ✅ D23.
+6. Re-run [`acumatica-commission-po-runbook.md`](acumatica-commission-po-runbook.md) steps
+   7 and 8 — the 2026-08-24 run did not settle either.
+7. Open `PO_GATE` in a reviewed commit, same discipline as D20's `CREATE_GATE`.
+8. Layout: the eight render read-only at the bottom of the Budget tab. **harmon-crm sheet
+   edit, after the deploy — not this repo.**

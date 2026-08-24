@@ -44,6 +44,42 @@ from never having run, and blank status is what carries that.
 four outcomes, and an absent value says so without adding a fifth that would need
 explaining.
 
+## ⚠️ Field metadata limits — this package failed its first deploy on one
+
+The first Workbench attempt came back with:
+
+```
+problem: Value too long for field: Description maximum length is:1000
+fullName: Sundial_Solar__c.Attribute_Sync_Status__c
+```
+
+`Attribute_Sync_Status__c`'s description was **1,137 characters**. Nothing local caught it:
+the `.object` file was well-formed XML and the generator printed a tidy summary — the only
+feedback was a `componentFailure` after a round trip through zip, upload and Check Only.
+
+**Now guarded at build time.** `salesforce/field-limits.mjs` fails the generator before it
+writes anything, naming every offending field with its length and overage:
+
+```
+v5-attribute-sync-fields: 1 field(s) exceed Salesforce metadata limits —
+Workbench would reject this with "Value too long for field".
+  Attribute_Sync_Status__c: description is 1137 chars, limit 1000 (over by 137)
+```
+
+Every generator now prints headroom too, so a near miss is visible before it becomes a
+failed deploy:
+
+| Field | desc/1000 | help/255 |
+|---|---|---|
+| `Attribute_Sync_Status__c` | 929 | 133 (tight) |
+| `Attribute_Sync_Error__c` | 518 | 85 |
+| `Attribute_Synced_At__c` | 606 | 98 |
+
+The limits are **Description 1,000** and **inlineHelpText 255**. The same guard was added
+to `v4-commission-po-fields`, which deployed fine but sits at **975/1000** on
+`Commission_PO_M1_Number__c` — one clarifying sentence from the same failure. Its generated
+output is unchanged.
+
 ## Collision check
 
 Live describe 2026-08-24, 498 fields on `Sundial_Solar__c`: **none of the 3 names exists**,

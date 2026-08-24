@@ -17,6 +17,7 @@
 // and the idempotency key is dead. Same trap as the `01926`-shaped vendor ids.
 import fs from "node:fs";
 import path from "node:path";
+import { assertFieldLimits, reportFieldLimitHeadroom } from "../field-limits.mjs";
 
 const OUT = path.resolve("salesforce/v4-commission-po-fields");
 fs.mkdirSync(path.join(OUT, "objects"), { recursive: true });
@@ -134,6 +135,11 @@ const FIELDS = [
   },
 ];
 
+// Same build-time guard the v5 package needed. This package DEPLOYED FINE, but
+// Commission_PO_M1_Number__c sits at 975 of the 1,000-character limit — one clarifying
+// sentence away from the failure v5 actually hit.
+assertFieldLimits(FIELDS, "v4-commission-po-fields");
+
 function fieldXml(f) {
   const L = ["    <fields>", `        <fullName>${f.api}</fullName>`];
   L.push(`        <description>${esc(f.description)}</description>`);
@@ -241,4 +247,5 @@ for (const f of FIELDS) {
         : f.type;
   console.log(`  ${f.api.padEnd(30)} ${t}`);
 }
+reportFieldLimitHeadroom(FIELDS);
 console.log("\n  FLS: the integration user needs Read + Edit on all of them.");

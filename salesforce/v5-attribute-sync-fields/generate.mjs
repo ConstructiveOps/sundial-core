@@ -16,6 +16,7 @@
 //   node scripts/probe-attribute-sync-fields.mjs
 import fs from "node:fs";
 import path from "node:path";
+import { assertFieldLimits, reportFieldLimitHeadroom } from "../field-limits.mjs";
 
 const OUT = path.resolve("salesforce/v5-attribute-sync-fields");
 fs.mkdirSync(path.join(OUT, "objects"), { recursive: true });
@@ -34,20 +35,21 @@ const FIELDS = [
     label: "Attribute Sync Status",
     type: "Picklist",
     picklist: ["Synced", "Nothing to Sync", "Unverified", "Failed"],
+    // Trimmed to fit Salesforce's 1,000-character Description limit (the first deploy
+    // attempt came back at 1,137). What survived the cut is the part a reader cannot
+    // reconstruct from the value names: why Unverified is not Failed. What went is the
+    // restatement of which attributes the sync covers, which the docs carry anyway.
     description:
       `${WRITTEN_BY} Where this job's Acumatica project ATTRIBUTES stand — the lifecycle ` +
-      "dates, system size, sales company and (on the budget push path only) the commission " +
-      "milestone amounts that Harmon's accounting reporting reads. " +
-      "BLANK means the sync has never run on this record, which is different from every " +
-      "value below and is why there is no 'None'. " +
+      "dates, system size, sales company, and on the push path the commission milestone " +
+      "amounts. BLANK = the sync has never run here, which is why there is no 'None'. " +
       "Synced = every attribute sent was confirmed present by a re-read. " +
-      "Nothing to Sync = the sync ran and the record had no populated values to send " +
-      "(blanks are omitted, never written as empty). " +
-      "UNVERIFIED IS NOT A FAILURE and is deliberately separate from it: Acumatica returns " +
-      "200 and SILENTLY DISCARDS an AttributeID the project's template does not define, so " +
-      "the write may have partly happened and was not confirmed. Failed = the write did not " +
-      "happen. The two need different responses, which is why they are different values. " +
-      "RESTRICTED: the sync only ever writes these four literals.",
+      "Nothing to Sync = it ran and the record had no populated values (blanks are omitted, " +
+      "never written as empty). " +
+      "UNVERIFIED IS NOT A FAILURE: Acumatica returns 200 and SILENTLY DISCARDS an " +
+      "AttributeID the project template does not define, so the write may have partly " +
+      "happened and was not confirmed. Failed = it did not happen. Different problems, " +
+      "different fixes, so different values. RESTRICTED to these four literals.",
     help: "Where the Acumatica attribute sync stands. Blank = never run. 'Unverified' means Acumatica accepted the write but did not confirm it.",
   },
   {
@@ -74,6 +76,10 @@ const FIELDS = [
     help: "When this project's Acumatica attributes were last confirmed good. Does not move on a failed sync.",
   },
 ];
+
+// Fail HERE, not in Workbench. The first deploy of this package was rejected for a
+// 1,137-character description; a build-time check turns that into a re-run.
+assertFieldLimits(FIELDS, "v5-attribute-sync-fields");
 
 function fieldXml(f) {
   const L = ["    <fields>", `        <fullName>${f.api}</fullName>`];
@@ -166,4 +172,5 @@ for (const f of FIELDS) {
       : f.type;
   console.log(`  ${f.api.padEnd(28)} ${t}`);
 }
+reportFieldLimitHeadroom(FIELDS);
 console.log("\n  FLS: the integration user needs Read + Edit on all of them.");

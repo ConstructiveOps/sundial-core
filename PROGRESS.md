@@ -46,6 +46,23 @@ none. `Unverified` is kept separate from `Failed` (a write that may have partly 
 needs a different response from one that did not), and `Attribute_Synced_At__c` means
 last-known-good and does not move on failure, so a stale record cannot look fresh.
 
+**Deploy fix (same day).** The v5 package failed its first Workbench deploy:
+`Value too long for field: Description maximum length is:1000` —
+`Attribute_Sync_Status__c`'s description was 1,137 characters. Trimmed to 929, keeping the
+part a reader cannot reconstruct from the value names (why `Unverified` is not `Failed`)
+and dropping the restatement of which attributes the sync covers, which the docs carry.
+
+The interesting part is that **nothing local could have caught it**: the `.object` was
+well-formed XML, the generator printed a tidy summary, and the only feedback was a
+`componentFailure` after a zip, an upload and a Check Only. So the check moved to build
+time — `salesforce/field-limits.mjs` now fails a generator before it writes, naming every
+offender with its length and overage rather than one per deploy round trip, and each
+generator prints headroom so a near miss is visible. Wired into v4 as well as v5, because
+v4 deployed fine while sitting at **975 of 1,000** on `Commission_PO_M1_Number__c` — one
+clarifying sentence from the identical failure. v4's generated output is byte-identical, so
+the already-deployed package is untouched. 6 tests on the guard itself, because a build
+gate that silently stops guarding is worse than none.
+
 **One incidental fix.** `generate-dealer-vendors.mjs --check` compared raw bytes, so it
 reported the generated module STALE after any `git checkout` on Windows — CRLF working copy
 against LF generator output. The guard was firing on a checkout artifact rather than the

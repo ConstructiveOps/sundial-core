@@ -46,7 +46,10 @@ Branch `fix/burden-rate-percent-domain`.
       (MODIFY) carries the fix, defaults → **`0.75`**.
 - [x] **Customer copies unaffected** — no default at all, and `Percent(5,2)` (max 999.99)
       makes 7500 structurally unstorable. Left alone deliberately.
-- [x] **Data fix applied: 4,473 Solar records**, canary-gated.
+- [x] **Data fix applied: 4,473 of 4,473 Solar records; 0 remain at 7500.** Canary-gated.
+      First pass wrote 4,471 with 2 transient `fetch failed`; the script is idempotent, so a
+      second run cleaned them up. Do NOT pipe a real run — the shell reports the pipe's exit
+      status, so a partial write looks like success.
 - [x] **Automation verified EMPIRICALLY.** The integration user cannot read
       `FlowDefinitionView` or `ApexTrigger`, so the canary write is the only available
       check. Passed; `Budget_Calc_Status__c = 'Pending'` held at 0 throughout.

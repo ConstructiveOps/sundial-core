@@ -49,6 +49,16 @@ That safety was **an accident of sequencing, not a design property**, and it is 
 standing rule in CLAUDE.md: when the recalc Flow is activated, bulk fixes must deactivate
 it first — with the canary carrying the rule forward when nobody remembers the note.
 
+**Outcome: 4,473 of 4,473 records fixed, 0 remaining at 7500.** The first pass wrote 4,471
+and hit **2 transient `fetch failed`** network errors; the script re-reads the org every
+run and only plans records still holding the broken value, so a second run cleaned them up.
+`Budget_Calc_Status__c = 'Pending'` held at **0** from the canary through to the last write.
+
+One gotcha caught in the process and now written into the script header: the first run was
+invoked through a pipe (`| sed | head`), and **the shell reports the last command's exit
+status**, so the partial write exited 0 and the non-zero signal was swallowed. The failures
+were visible only because the script prints them. Do not pipe a real run.
+
 Also swept up: two Customer records created between the D-063 data fix and the metadata
 deploy still carried 2500 on all five NS markups. The sweep is idempotent, so re-running it
 caught them.

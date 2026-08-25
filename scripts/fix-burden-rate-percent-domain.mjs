@@ -45,6 +45,16 @@
 //
 //   node scripts/fix-burden-rate-percent-domain.mjs           # READ-ONLY. Default.
 //   node scripts/fix-burden-rate-percent-domain.mjs --apply   # writes
+//
+// ⚠️ DO NOT PIPE THE OUTPUT through `head`/`sed`/`tail` on a real run. The shell reports
+// the LAST command's exit status, so a partial write exits 0 and the failure signal is
+// swallowed — which is exactly the case where you need it. On the 2026-08-24 run, 2 of
+// 4,473 records failed with transient `fetch failed` and the piped invocation still
+// reported success; the failures were only visible because the script prints them.
+//
+// This script is IDEMPOTENT: it re-reads the org every run and only plans records still
+// holding the broken value. Re-running after a partial write is the correct recovery, and
+// costs nothing when there is nothing left to do.
 
 import { sfQuery, sfUpdateRecord } from "../lib/salesforce.js";
 

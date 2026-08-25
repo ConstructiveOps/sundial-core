@@ -379,6 +379,46 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
 - Flows for cross-object automation; Apex only when Flow can't do it
 - Use Platform Events for queue-triggering integration calls
 
+### ⚠️ Portal testing uses the designated test record — never a live customer
+
+**All portal round-trip, save, and field-diff testing runs against the designated test
+record. Never a live customer.**
+
+| | |
+|---|---|
+| **Record** | `Sundial_Customer__c` **`a1P7y00000AmyXCEAZ`** — *"ZZ PORTAL TEST — DO NOT USE"* |
+| **Seed / reset** | `node scripts/create-portal-test-record.mjs --apply` (idempotent re-seed) |
+| **Known baseline** | `Total_Adder_Price__c` **16,387.50** · `Commission_Total__c` **3,834.50** · `Commission_Redline_PPW__c` **1.85** |
+
+It is deliberately **rich** — adder prices *and* quantities, adders that carry no metadata
+default, an NS block with material + hours + markup, a battery, and enough contract/system
+data that the commission formulas produce real numbers instead of blanks.
+
+**Why (2026-08-24, the Doug Malde false alarm).** A "blank Adders tab" incident was
+triaged against live customer `a1P7y00000AmMy9EAF` on the belief that a portal save had
+nulled its fields. It had not. The record was a fresh unlinked lead that had *never* held
+adder data — 13 of the 20 adder prices carry no metadata default and are null on
+essentially every record in the org (`Adder_Sub_Panel_Price__c`: 0 of 31,626). Hours went
+into proving a negative.
+
+Worse, it could not answer the question that mattered. **A record with almost nothing
+populated cannot distinguish "the save didn't send that field" from "the save sent it as
+null"** — a field that was already blank looks identical either way. The live record was
+simultaneously the wrong thing to risk *and* a useless witness.
+
+Two rules follow:
+
+1. **Never test saves against a live customer.** If a save does null fields, you have
+   damaged real data to find out.
+2. **Test against a record rich enough to fail loudly.** The designated record holds values
+   that exist nowhere else in the org, so a blanket-null save is unmissable.
+
+Reset it with the seed script after any test that writes to it, and re-run the script
+rather than hand-editing if the baseline ever drifts. Solar-side testing needs its own
+designated record when the need arises — note that `Sundial_Budget_Recalc_Trigger` fires
+on `Sundial_Solar__c` writes and publishes a recalc platform event, which
+`Sundial_Customer__c` does not.
+
 ### Git Workflow
 
 - **`master` is the mainline in THIS repo (sundial-core) — not `main`.** Deployed code

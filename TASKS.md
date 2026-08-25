@@ -4,6 +4,38 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Portal testing hygiene (2026-08-24)
+
+- [x] **Designated portal test record created**: `Sundial_Customer__c`
+      **`a1P7y00000AmyXCEAZ`** — *"ZZ PORTAL TEST — DO NOT USE"*. Rich by design: adder
+      prices AND qtys, two adders with no metadata default, NS block 1 with
+      material+hours+markup, battery qty 1, and full contract/system data so the commission
+      formulas produce real numbers. Baseline 16,387.50 / 3,834.50 / 1.85.
+- [x] **Seed + reset script** `scripts/create-portal-test-record.mjs --apply` (idempotent;
+      asserts the baseline on every run).
+- [x] **CLAUDE.md rule added** — all portal round-trip/save testing uses that record, never
+      a live customer, citing the Doug Malde false alarm.
+- [ ] **The frontend `record-editing.ts` question is still open.** Doug Malde did NOT
+      falsify "sends only changed fields" (7 defaulted currency fields and 4 untouched
+      percent fields survived the 22:57:30 save), but he was a weak witness. **Run one
+      single-field save from that branch against `a1P7y00000AmyXCEAZ` and re-read** — that
+      is the test that can actually fail.
+- [ ] **A Solar-side designated record** if/when Solar save testing is needed. Note
+      `Sundial_Budget_Recalc_Trigger` fires on Solar writes and publishes a recalc platform
+      event; Customer has no such trigger.
+
+## Post-deploy verification (2026-08-24)
+
+- [x] **v3 + v2-field-alignments deployed** (8/8 and 10/10) and verified against the LIVE
+      org by `scripts/verify-ns-markup-postdeploy.mjs`: no `/100` in
+      `Total_Adder_Price__c`, markup default `0.25`, Customer widened to `Percent(18,4)`,
+      and the arithmetic probe returning exactly **+1,250.00**.
+- [ ] **TIM: Hugo Quintana `a1P7y00000AbJXNEA3` is still broken.**
+      `Adder_Flat_Roof_Price__c` = **220**, commission **-2,123,506**. No edit since this
+      session's backfill at 21:16:52. Nicholas Suwyn was fixed; this one was not.
+- [ ] Optional: Solar `a1Q7y00000JD2u7EAD` (SOL-9428, TEST) still has
+      `Adder_Conduit_Attic_Price__c` = 450 — latent, qty 0 and no system size.
+
 ## D-063 NS markup percent-domain fix (2026-08-24)
 
 Branch `fix/ns-markup-percent-domain` (based on `feature/battery-expansion-adder-commission`,

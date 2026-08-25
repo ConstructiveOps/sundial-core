@@ -1,5 +1,42 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — percent-domain fix verified on the deployed org; a designated portal test record
+
+Both Workbench packages landed (v3 8/8, v2-field-alignments 10/10) and the post-deploy
+probe passes on the nose. `scripts/verify-ns-markup-postdeploy.mjs` automates the README's
+manual check so it is repeatable and the restore cannot be forgotten:
+
+- **Metadata**: `Total_Adder_Price__c` no longer contains `/100` on either object, the
+  markup default reads `0.25`, and Customer's fields are now `Percent(18,4)`.
+- **Arithmetic**: material 1000, hours 0, markup 25 (a true 25% in the REST domain) moved
+  `Total_Adder_Price__c` by exactly **+1,250.00** — not +1,002.50 (formula not deployed)
+  and not +26,000 (legacy 2500 surviving). Test record restored.
+
+**A designated portal test record now exists**: `a1P7y00000AmyXCEAZ`, *"ZZ PORTAL TEST —
+DO NOT USE"*, seeded by `scripts/create-portal-test-record.mjs` and pinned in CLAUDE.md.
+Baseline `Total_Adder_Price__c` 16,387.50 / `Commission_Total__c` 3,834.50 / redline 1.85,
+all three matching the org's own computation.
+
+The reason is the Doug Malde false alarm earlier today, and the second half of that reason
+matters more than the first. Triaging a save against a live customer was a risk taken for
+nothing — but the live record was also a **useless witness**, because a record whose fields
+were already null cannot distinguish "the save didn't send it" from "the save sent null".
+The designated record is deliberately rich, including adders that carry no metadata default
+and therefore hold values found nowhere else in the org, so a blanket-null save is
+unmissable.
+
+**Caught while seeding it:** the expected baseline in the script was wrong — 14,887.50
+against the org's 16,387.50. The org was right; the script had omitted the two extra adders
+it seeds itself (Derate 600 + Heat Detector 450x2 = exactly the 1,500 gap). Corrected, and
+the script now asserts the baseline on every re-seed rather than printing it as prose.
+
+**Hugo Quintana (`a1P7y00000AbJXNEA3`) is NOT fixed.** `Adder_Flat_Roof_Price__c` still
+reads **220**, `Total_Adder_Price__c` 2,143,000 and `Commission_Total__c` **-2,123,506**.
+Its `LastModifiedDate` is 21:16:52, which is this session's storage backfill — there has
+been no later edit. Nicholas Suwyn *was* fixed (`Adder_Roof_Tile_Price__c` now 0.02,
+commission +3,547.60, edited 22:20:20), so one of the two landed and the other did not.
+
+
 ## 2026-08-24 — the NS markup percent-domain bug: three domains, two cancelling errors
 
 `<defaultValue>25</defaultValue>` on a Percent field never meant 25%. Salesforce evaluates

@@ -64,6 +64,17 @@ env vars are needed here** — the shared helper (and the execution role's
   because a formula already receives the decimal. The two look inconsistent and are not;
   both land on the same multiplier. `<defaultValue>25</defaultValue>` on the NS markup
   fields is what caused the 2500 incident — it meant 2500%.
+- **`BURDEN_RATE_IMPLAUSIBLE`** throws when `Labor_Burden_Rate__c` or
+  `Commission_Burden_Rate__c` exceeds **100%**, checked before either becomes a multiplier.
+  These two feed almost every cost line, so a bad one moves the whole budget rather than one
+  number. `<defaultValue>75</defaultValue>` stored **7500** on 4,473 of 4,474 Solar records
+  (D-063a) — and unlike the markup case nothing cancelled it, so the calc would have
+  produced burden figures 100x too large. Sweep with
+  `node scripts/fix-burden-rate-percent-domain.mjs` (read-only by default).
+- **Before adding any Percent field**, run `node scripts/audit-percent-field-defaults.mjs`.
+  It checks every Percent field on every Sundial object, metadata *and* data, and exits
+  non-zero on a suspect. Six instances of this bug were found by that audit rather than by
+  anyone noticing.
 - **`NS_MARKUP_IMPLAUSIBLE`** throws when any NS block's markup exceeds **100%**, before any
   adder maths and regardless of whether the block has material. A 2500 is the decimal-domain
   default bug and would be a 26x multiplier on materials. Sweep with

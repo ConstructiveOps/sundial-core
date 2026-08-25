@@ -419,6 +419,36 @@ designated record when the need arises — note that `Sundial_Budget_Recalc_Trig
 on `Sundial_Solar__c` writes and publishes a recalc platform event, which
 `Sundial_Customer__c` does not.
 
+### ⚠️ Bulk data fixes: canary first, and mind the recalc Flow
+
+**Any script that writes more than a handful of Salesforce records must write ONE record
+first, re-read it, and abort if a field it did not write has changed.**
+`scripts/fix-burden-rate-percent-domain.mjs` is the reference implementation.
+
+This is not belt-and-braces, it is the *only* check available: **the integration user
+cannot read `FlowDefinitionView` or `ApexTrigger`** (both return `INVALID_TYPE` — no View
+Setup permission), so there is no way to ask the org what automation is live. The repo
+cannot answer it either — `salesforce/flows/` holds drafts that may never have been
+deployed. A canary write is empirical where everything else is assumption.
+
+⚠️ **`Sundial_Budget_Recalc_Trigger` is currently a DRAFT — it has never been deployed, and
+the SF→AWS platform-event relay was never wired** (see TASKS.md). It lists ~60 fields as
+`ISCHANGED` inputs, including every adder, NS block, burden rate and cost parameter.
+
+**When that Flow is activated, bulk data fixes on `Sundial_Solar__c` must deactivate it
+first**, then reactivate afterwards. Otherwise a fix touching N records fans out to N
+platform events and N Lambda invocations — and today, with 83% of Solar records carrying a
+blank sales company, most of those would come back as `SALES_COMPANY_MISSING` errors
+written to N records.
+
+On 2026-08-24 a 4,473-record burden-rate fix ran with no fan-out at all. That was **an
+accident of sequencing, not a design property** — the Flow simply wasn't live yet. Do not
+let its absence today become an assumption tomorrow; the canary is what carries the rule
+forward when nobody remembers this note.
+
+`Sundial_Customer__c` has no such trigger, which is why Customer is the safer object to
+probe and test against.
+
 ### Git Workflow
 
 - **`master` is the mainline in THIS repo (sundial-core) — not `main`.** Deployed code

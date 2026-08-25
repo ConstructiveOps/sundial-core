@@ -1,5 +1,59 @@
 # Sundial — Progress Log
 
+## 2026-08-24 — the percent-domain class, audited to extinction (D-063a)
+
+Two more fields carrying D-063's defect, then an audit that found six more nobody was
+looking for. Suite green: 208 budget checks, 35 formula checks, 496 node tests.
+
+**The burden rates.** `Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` on
+`Sundial_Solar__c` shipped with `<defaultValue>75</defaultValue>` — 7500% — and **4,473 of
+4,474 Solar records** carried it. Neither field is in any package in this repo; they predate
+it and were made in Setup, so the MODIFY package (`v2-field-alignments`) was the only
+vehicle, which is exactly what it exists for.
+
+**This one had no cancelling error**, unlike the markup bug. `budgetCalc` divides by 100
+once and correctly, so 7500 becomes a **75.0 multiplier** — every burden figure 100× too
+large. It never bit only because **exactly one Solar record has ever completed a budget
+calc**, and that record (`SOL-10014`, a test clone) holds the correct 75. Luck, not a
+control, which is what `BURDEN_RATE_IMPLAUSIBLE` now replaces.
+
+**The audit is the actual deliverable.** `scripts/audit-percent-field-defaults.mjs` sweeps
+every Percent field on every Sundial object, checks the default literal against the decimal
+rule *and* the stored data, and exits non-zero on any suspect. **Six of the ten instances of
+this bug were found by the audit rather than by anyone noticing** — all on
+`Sundial_Roofing__c` (`Burden_Rate__c` 20→2000%, `Labor_Markup_Percent__c` 35→3500%,
+`Material_Markup_Percent__c` and `Other_Markup_Percent__c` 30→3000%,
+`Commission_Markup_Percent__c` 20→2000%, `Commission_Rate_Percent__c` 2.5→250%), one bad
+record each. Tim corrected those defaults and records directly in Setup.
+
+Roofing has no calc engine yet, which is why they sat unnoticed. **When Roofing's budget
+work starts, the burden and markup guards come with it** rather than after an incident.
+
+**One false positive, documented rather than silently suppressed.**
+`Customer.Proposed_Offset__c` has 1,563 records above 100% and that is correct — a system
+routinely produces more than a customer uses. The fractional values (104.76, 113.03,
+151.92) are the tell: a 100×-inflated 1% would read as a round 100. Exempted by name with
+the reasoning inline, because an unexplained exemption is how a real defect eventually
+hides.
+
+**The automation question was answered empirically, because it could not be answered any
+other way.** The repo's `Sundial_Budget_Recalc_Trigger` lists both burden fields as
+`ISCHANGED` inputs, which on paper made 4,473 writes into 4,473 platform events. Tim
+confirmed the Flow was never deployed and the SF→AWS relay never wired — and the
+integration user **cannot read `FlowDefinitionView` or `ApexTrigger`** (`INVALID_TYPE`, no
+View Setup), so there was no way to verify that from this side. So the fix script writes
+**one record first**, re-reads it, and aborts if anything it did not write has changed. It
+passed, and `Budget_Calc_Status__c = 'Pending'` held at **0** across the entire run.
+
+That safety was **an accident of sequencing, not a design property**, and it is now a
+standing rule in CLAUDE.md: when the recalc Flow is activated, bulk fixes must deactivate
+it first — with the canary carrying the rule forward when nobody remembers the note.
+
+Also swept up: two Customer records created between the D-063 data fix and the metadata
+deploy still carried 2500 on all five NS markups. The sweep is idempotent, so re-running it
+caught them.
+
+
 ## 2026-08-24 — percent-domain fix verified on the deployed org; a designated portal test record
 
 Both Workbench packages landed (v3 8/8, v2-field-alignments 10/10) and the post-deploy

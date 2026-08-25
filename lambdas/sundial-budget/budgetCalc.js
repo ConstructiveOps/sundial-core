@@ -203,6 +203,32 @@ const PPW_PRICE_FIELDS = [
  */
 const NS_MARKUP_CEILING = 100;
 
+/**
+ * BURDEN RATE CEILING, same REST/SOQL domain (75 means 75%).
+ *
+ * The same percent-domain defect as the NS markup, on two more fields:
+ * `Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` on `Sundial_Solar__c` were
+ * created with `<defaultValue>75</defaultValue>`, which Salesforce evaluates in the
+ * DECIMAL domain — 7500% — so 4,473 of 4,474 Solar records store **7500**.
+ *
+ * ⚠️ THIS ONE HAS NO CANCELLING ERROR. The markup bug survived because a matching `/100`
+ * in the Salesforce formula happened to undo it. Nothing undoes this: these fields are
+ * read only through SOQL, `/100` is applied once and correctly, and 7500 becomes a **75.0
+ * multiplier** — every burden figure 100x too large, silently, in a number nobody
+ * eyeballs.
+ *
+ * It has not bitten only because exactly one Solar record has ever completed a budget
+ * calc, and that record holds the correct 75. This guard is what makes that luck
+ * unnecessary.
+ *
+ * 100 is the ceiling for the same reason as the markup: it is not a pricing judgement
+ * about how high a burden rate may legitimately go, it is "this is not a percentage".
+ */
+const BURDEN_RATE_CEILING = 100;
+
+/** The burden-rate inputs, both read in the display domain and divided by 100 below. */
+const BURDEN_RATE_FIELDS = ['Labor_Burden_Rate__c', 'Commission_Burden_Rate__c'];
+
 const SUBCON_ADDERS = [
   { base: 'Structural',    row: 55, priceKind: 'flat', costKind: 'unit', line: 'engineerStamps' },
   { base: 'Bird_Blocking', row: 56, priceKind: 'ppw',  costKind: 'watt', line: 'subcontractor' },
@@ -297,6 +323,24 @@ function calculateBudget(rec) {
   const g = (f) => num(rec[f]);
 
   // ---- Rates -------------------------------------------------------------
+  // Guarded FIRST, before either rate is read into a multiplier. These two feed almost
+  // every cost line, so an implausible one does not produce a localised wrong number —
+  // it moves the whole budget.
+  for (const field of BURDEN_RATE_FIELDS) {
+    const raw = g(field);
+    if (raw > BURDEN_RATE_CEILING) {
+      throw new BudgetInputError(
+        `${field} is ${raw}, i.e. a ${raw}% burden rate, above the ` +
+          `${BURDEN_RATE_CEILING}% sanity ceiling. Through SOQL a Percent field reads as the ` +
+          'display number, so 75 means 75% — a value this size is almost always the ' +
+          'decimal-domain default bug, where <defaultValue>75</defaultValue> stored 7500. ' +
+          'Fix the value on the record (a true 75% is stored as 75), then recalculate.',
+        'BURDEN_RATE_IMPLAUSIBLE'
+      );
+    }
+  }
+
+  // /100 IS CORRECT on both: SOQL hands us the display number (a true 75% arrives as 75).
   const burden = g('Labor_Burden_Rate__c') / 100;         // B19
   const commBurdenRate = g('Commission_Burden_Rate__c') / 100; // K12
 

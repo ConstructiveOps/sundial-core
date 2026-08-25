@@ -40,6 +40,19 @@ project — the fix would appear to work and then quietly not.
 | Customer | `Battery_Install_Hours__c` | *(none)* | **`16`** | Same, and it feeds Solar via the create-map. |
 | Solar | `NS_Adder_1..5_Markup_Percent__c` | `25` | **`0.25`** | The percent-domain fix — see below. `25` meant **2500%**. |
 | Customer | `NS_Adder_1..5_Markup_Percent__c` | `25` | **`0.25`** | Same, **plus a widening** `Percent(6,3)` → `Percent(18,4)`. |
+| Solar | `Labor_Burden_Rate__c` | `75` | **`0.75`** | Same defect, found 2026-08-24 (D-063a). `75` meant **7500%**, on 4,473 of 4,474 records. |
+| Solar | `Commission_Burden_Rate__c` | `75` | **`0.75`** | Same. |
+
+> The two burden fields were **never created by a package in this repo** — they predate it
+> and were made in Setup. A MODIFY package is the only vehicle we have for them, which is
+> precisely what this one is for. Customer's copies are not listed: they carry no default
+> at all, and their narrower `Percent(5,2)` (max 999.99) makes 7500 structurally unstorable.
+>
+> ⚠️ **The burden case had no cancelling error.** The markup bug survived because a matching
+> `/100` in the Salesforce formula undid it; nothing undid this one. `budgetCalc` divides by
+> 100 once and correctly, so 7500 became a **75.0 multiplier** — every burden figure 100×
+> too large. It never bit only because exactly one Solar record has ever completed a budget
+> calc, and it holds the correct 75.
 
 ---
 
@@ -194,10 +207,14 @@ source to Harmon's org on every deploy. The builder excludes them.
    the printed change table; every line should be one attribute, and the `from` values
    should match what you expect production to hold. Anything already at target is listed
    under **skipped** and left out of the package.
-2. **Build the zip** — `node scripts/zip-package.mjs salesforce/v2-field-alignments`.
+2. **Build the zip** — `npm run build-zips` (all packages), or
+   `node scripts/zip-package.mjs salesforce/v2-field-alignments` for just this one.
 3. Workbench → **Migration → Deploy** → choose `salesforce/v2-field-alignments.zip` →
    tick **Single Package**.
-4. **"Check Only" first**, "Rollback on Error" ticked. Expect **`Components: 10/10`**.
+4. **"Check Only" first**, "Rollback on Error" ticked. The component count is whatever
+   the generator just printed as *modified* — everything already at target is skipped, so
+   the number shrinks as fixes land. As of 2026-08-24 it is **`Components: 2/2`** (the two
+   burden defaults; the markup fields are now deployed and skip).
 5. Re-run without Check Only.
 6. **Then deploy `salesforce/v3-redline-commission-fields.zip`** the same way — it carries
    the matching formula fix (`Material × (1 + Markup)`, no `/100`). The data fix has

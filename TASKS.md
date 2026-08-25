@@ -36,6 +36,45 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Optional: Solar `a1Q7y00000JD2u7EAD` (SOL-9428, TEST) still has
       `Adder_Conduit_Attic_Price__c` = 450 — latent, qty 0 and no system size.
 
+## D-063a percent-domain class audit + burden rates (2026-08-24)
+
+Branch `fix/burden-rate-percent-domain`.
+
+- [x] **Burden rates confirmed as the same defect.** `Labor_Burden_Rate__c` and
+      `Commission_Burden_Rate__c` on Solar, `<defaultValue>75</defaultValue>` → stored 7500.
+      Neither is in any package here — they predate the repo, so `v2-field-alignments`
+      (MODIFY) carries the fix, defaults → **`0.75`**.
+- [x] **Customer copies unaffected** — no default at all, and `Percent(5,2)` (max 999.99)
+      makes 7500 structurally unstorable. Left alone deliberately.
+- [x] **Data fix applied: 4,473 Solar records**, canary-gated.
+- [x] **Automation verified EMPIRICALLY.** The integration user cannot read
+      `FlowDefinitionView` or `ApexTrigger`, so the canary write is the only available
+      check. Passed; `Budget_Calc_Status__c = 'Pending'` held at 0 throughout.
+- [x] **`BURDEN_RATE_IMPLAUSIBLE`** above 100%, before either rate becomes a multiplier.
+- [x] **Class audit built** — `scripts/audit-percent-field-defaults.mjs`, every Percent
+      field on every Sundial object, metadata AND data, non-zero exit on any suspect.
+- [x] **`npm run build-zips`** rebuilds every package zip in one command, so a fixed
+      package can no longer ship beside a stale sibling.
+- [x] **Two straggler Customer records** (created between the D-063 fix and its deploy)
+      swept to 25.
+- [x] **Roofing's six fields listed** and fixed by Tim in Setup — defaults to
+      0.20 / 0.20 / 0.025 / 0.35 / 0.30 / 0.30, records to 20 / 20 / 2.5 / 35 / 30 / 30.
+- [ ] **TIM: deploy `salesforce/v2-field-alignments.zip`** — 2 fields, the burden defaults.
+      Check Only first, expect `Components: 2/2`. The data fix has already run, so this only
+      governs NEW records.
+- [ ] **TIM: four human-set burden values to review** — the mirror-image error (decimal form
+      written into the display domain), left untouched:
+      - Solar `a1Q7y00000JR27dEAD` (SOL-10027) `Commission_Burden_Rate__c` = **0.75**
+      - Solar `a1Q7y00000JRgGLEA1` (SOL-10028) `Commission_Burden_Rate__c` = **0.75**
+      - Customer `a1P7y00000AiYeXEAV` (Gary Rayfield) `Commission_Burden_Rate__c` = **1.75**
+      - Customer `a1P7y00000Aj9NxEAJ` (Edward Crain) `Commission_Burden_Rate__c` = **0.75**
+- [ ] **When Roofing's budget/calc work starts, its burden + markup guards ship with it**
+      — the equivalents of `BURDEN_RATE_IMPLAUSIBLE` / `NS_MARKUP_IMPLAUSIBLE`, from day one.
+- [ ] **When `Sundial_Budget_Recalc_Trigger` is activated**, bulk data fixes on Solar must
+      deactivate it first (CLAUDE.md). Today's zero fan-out was sequencing, not design.
+- [ ] **Run the audit before any deploy that adds a Percent field.**
+      `node scripts/audit-percent-field-defaults.mjs` — exits non-zero on a suspect.
+
 ## D-063 NS markup percent-domain fix (2026-08-24)
 
 Branch `fix/ns-markup-percent-domain` (based on `feature/battery-expansion-adder-commission`,

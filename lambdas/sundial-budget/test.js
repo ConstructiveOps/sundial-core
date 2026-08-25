@@ -828,6 +828,58 @@ it('NS markup guard: covers all five blocks, and 100 exactly is allowed', () => 
   );
 });
 
+// ---------------------------------------------------------------------------
+// Burden rates — the same percent-domain defect, two more fields
+// ---------------------------------------------------------------------------
+
+it('burden rates: 75 through SOQL means 75%, not 7500%', () => {
+  // The fixture already ships 75/75. This pins the DOMAIN rather than the arithmetic:
+  // if anyone ever "aligns" these reads with the Salesforce formula convention and drops
+  // the /100, every burden figure moves by 100x and this fails.
+  const r = calculateBudget(REVISED);
+  // Adder burden is the hardcoded 75% (ADDER_BURDEN_RATE), so use a line driven by
+  // Labor_Burden_Rate__c itself: audit burden = audit labor x 0.75.
+  assert.ok(Math.abs(r.cells.F22 - r.cells.F21 * 0.75) < TOL,
+    `audit burden ${r.cells.F22} is not 75% of audit labor ${r.cells.F21}`);
+  assert.ok(Math.abs(r.cells.K12 - 0.75) < TOL, `commission burden rate reads ${r.cells.K12}, expected 0.75`);
+});
+
+it('burden guard: the legacy 7500 value throws BURDEN_RATE_IMPLAUSIBLE', () => {
+  for (const field of ['Labor_Burden_Rate__c', 'Commission_Burden_Rate__c']) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, [field]: 7500 }),
+      (e) =>
+        e instanceof BudgetInputError &&
+        e.code === 'BURDEN_RATE_IMPLAUSIBLE' &&
+        e.message.includes(field) &&
+        e.message.includes('7500'),
+      `${field} was not guarded`
+    );
+  }
+});
+
+it('burden guard: 100 exactly passes, 100.01 throws', () => {
+  assert.doesNotThrow(() => calculateBudget({ ...REVISED, Labor_Burden_Rate__c: 100 }));
+  assert.throws(
+    () => calculateBudget({ ...REVISED, Labor_Burden_Rate__c: 100.01 }),
+    (e) => e instanceof BudgetInputError && e.code === 'BURDEN_RATE_IMPLAUSIBLE'
+  );
+});
+
+it('burden guard: runs BEFORE the commission validations', () => {
+  // Ordering matters for the error a user actually sees. A record with 7500 AND a blank
+  // sales company should report the burden problem, because that is the one that would
+  // silently produce a 100x-wrong number if it got past.
+  assert.throws(
+    () => calculateBudget({
+      ...REVISED,
+      Labor_Burden_Rate__c: 7500,
+      Sales_Company_Harmon_Solar_or_Third__c: '',
+    }),
+    (e) => e instanceof BudgetInputError && e.code === 'BURDEN_RATE_IMPLAUSIBLE'
+  );
+});
+
 it('NS markup guard: fires on the markup alone, with no material on the block', () => {
   // Same reasoning as the per-watt guard: bad data is bad data, and a block with no
   // material today is one edit away from having some.

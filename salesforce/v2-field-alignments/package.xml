@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  ⚠️ MODIFY PACKAGE — v2 field alignments. These 10 fields ALREADY EXIST and this
+  ⚠️ MODIFY PACKAGE — v2 field alignments. These 2 fields ALREADY EXIST and this
   deploy REPLACES their definitions. Generated from the live org; see README.md.
 
   Run CHECK ONLY first, then deploy. Zip with Windows Explorer "Send to > Compressed
@@ -9,16 +9,8 @@
 -->
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
     <types>
-        <members>Sundial_Solar__c.NS_Adder_1_Markup_Percent__c</members>
-        <members>Sundial_Solar__c.NS_Adder_2_Markup_Percent__c</members>
-        <members>Sundial_Solar__c.NS_Adder_3_Markup_Percent__c</members>
-        <members>Sundial_Solar__c.NS_Adder_4_Markup_Percent__c</members>
-        <members>Sundial_Solar__c.NS_Adder_5_Markup_Percent__c</members>
-        <members>Sundial_Customer__c.NS_Adder_1_Markup_Percent__c</members>
-        <members>Sundial_Customer__c.NS_Adder_2_Markup_Percent__c</members>
-        <members>Sundial_Customer__c.NS_Adder_3_Markup_Percent__c</members>
-        <members>Sundial_Customer__c.NS_Adder_4_Markup_Percent__c</members>
-        <members>Sundial_Customer__c.NS_Adder_5_Markup_Percent__c</members>
+        <members>Sundial_Solar__c.Labor_Burden_Rate__c</members>
+        <members>Sundial_Solar__c.Commission_Burden_Rate__c</members>
         <name>CustomField</name>
     </types>
     <version>62.0</version>

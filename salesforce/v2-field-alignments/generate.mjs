@@ -86,6 +86,27 @@ const CHANGES = {
       change: () => ({ defaultValue: "0.25" }),
     })),
 
+    // ---- Burden rates: the SAME percent-domain defect (D-063 amendment) ---
+    // `<defaultValue>75</defaultValue>` means 75.0 as a decimal fraction — 7500% — and
+    // 4,473 of 4,474 Solar records carry a stored API value of 7500.
+    //
+    // These two fields were NEVER created by a package in this repo; they predate it and
+    // were made in Setup. This MODIFY package is the only vehicle we have for them, which
+    // is precisely what it is for.
+    //
+    // ⚠️ WORSE THAN THE MARKUP CASE. budgetCalc divides these by 100 (`/100` is correct on
+    // the REST domain), so 7500 becomes a 75.0 multiplier — every burden figure 100x too
+    // large. No second error cancels it. The only saving grace is that exactly one Solar
+    // record has ever completed a budget calc, and it holds the correct 75.
+    //
+    // Sundial_Customer__c is NOT listed: its copies of both fields have no default at all,
+    // and their narrower Percent(5,2) (max 999.99) makes 7500 structurally unstorable.
+    ...["Labor_Burden_Rate__c", "Commission_Burden_Rate__c"].map((api) => ({
+      api,
+      why: "Percent-domain fix (D-063): a Percent defaultValue is evaluated in the DECIMAL domain, so `75` meant 7500%. A true 75% is written 0.75.",
+      change: () => ({ defaultValue: "0.75" }),
+    })),
+
     // ---- Relabels --------------------------------------------------------
     {
       api: "Adder_Upgrade_225_Price__c",

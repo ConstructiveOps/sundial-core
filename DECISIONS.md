@@ -2384,3 +2384,92 @@ Guarded going forward by `NS_MARKUP_IMPLAUSIBLE` (>100%), the same shape as
   people must remember is worse than a script that cannot get it wrong — and the script also
   prints each entry's mtime, because we shipped a **stale zip** once, and excludes
   `generate.mjs` / `README.md`, which Explorer had been uploading to Harmon's org.
+
+
+---
+
+## D-063a (amendment to D-063): the percent-domain class, audited to extinction
+
+**Date:** 2026-08-24 · **Decided by:** Tim
+**Amends:** [D-063](#d-063-salesforce-percent-fields-have-three-domains--metadata-defaults-are-decimal-the-api-is-display-formulas-are-decimal). Same defect, six more instances, plus the audit that makes the class closed rather than open.
+
+### Two more fields found the same way the first two were — by eye
+
+`Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` on `Sundial_Solar__c` were created
+with `<defaultValue>75</defaultValue>`, so they stored **7500**. **4,473 of 4,474 Solar
+records** carried it.
+
+**This instance had no cancelling error.** The NS markup bug survived undetected because a
+matching `/100` in the Salesforce formula happened to undo it. Nothing undid this one:
+these fields are read only through SOQL, `budgetCalc` divides by 100 once and correctly,
+and 7500 becomes a **75.0 multiplier** — every burden figure 100× too large.
+
+It never bit for a reason worth writing down: **exactly one `Sundial_Solar__c` record has
+ever completed a budget calc** (`SOL-10014`, a test clone), and that record holds the
+correct 75. Not a control — luck.
+
+Also found, and deliberately **not** touched: `Commission_Burden_Rate__c = 0.75` on two
+Solar records and `0.75` / `1.75` on two Customer records. Those are the **mirror-image
+error** — someone writing the *decimal* form into the *display* domain, yielding a 0.75%
+burden. Human-set, listed for review.
+
+### The class audit — `scripts/audit-percent-field-defaults.mjs`
+
+Chasing this field by field is how it took three rounds to find. The audit sweeps **every
+Percent field on every Sundial object**, checks the default literal against the decimal
+rule *and* the stored data, and exits non-zero on any suspect. Run it before any deploy
+that adds a Percent field.
+
+| Object | Field | Default | Stores | Verdict |
+|---|---|---|---|---|
+| Customer | `NS_Adder_1..5_Markup_Percent__c` | `0.25` | 25% | ✅ fixed (D-063) |
+| Solar | `NS_Adder_1..5_Markup_Percent__c` | `0.25` | 25% | ✅ fixed (D-063) |
+| Solar | `Labor_Burden_Rate__c` | `75` → **`0.75`** | 7500% → 75% | ✅ fixed here |
+| Solar | `Commission_Burden_Rate__c` | `75` → **`0.75`** | 7500% → 75% | ✅ fixed here |
+| Roofing | `Burden_Rate__c` | `20` → **`0.20`** | 2000% → 20% | ✅ **found by the audit**, fixed by Tim in Setup |
+| Roofing | `Commission_Markup_Percent__c` | `20` → **`0.20`** | 2000% → 20% | ✅ found by the audit, fixed by Tim |
+| Roofing | `Commission_Rate_Percent__c` | `2.5` → **`0.025`** | 250% → 2.5% | ✅ found by the audit, fixed by Tim |
+| Roofing | `Labor_Markup_Percent__c` | `35` → **`0.35`** | 3500% → 35% | ✅ found by the audit, fixed by Tim |
+| Roofing | `Material_Markup_Percent__c` | `30` → **`0.30`** | 3000% → 30% | ✅ found by the audit, fixed by Tim |
+| Roofing | `Other_Markup_Percent__c` | `30` → **`0.30`** | 3000% → 30% | ✅ found by the audit, fixed by Tim |
+| Roofing | `City_Tax_Rate__c` | `0` | 0% | ✅ correct either way |
+
+**Six of the ten instances were found by the audit, not by anyone noticing.** That is the
+argument for the audit existing. The Roofing six carried one bad record each; Tim corrected
+both the defaults and the six records directly in Setup.
+
+**Roofing has no calc engine yet.** Nothing reads those fields today, which is why one bad
+record each sat there unnoticed. **When the Roofing budget work starts, the burden and
+markup guards come with it** — the equivalents of `BURDEN_RATE_IMPLAUSIBLE` and
+`NS_MARKUP_IMPLAUSIBLE`, in the same shape, from day one rather than after an incident.
+
+**One documented false positive.** `Customer.Proposed_Offset__c` has 1,563 records above
+100%, and that is *correct* — a solar system routinely produces more than a customer's
+usage. Fractional values (104.76, 113.03, 151.92) confirm real measurements; a 100×-inflated
+1% would read as a round 100. It is exempted by name in `STORED_EXEMPT`, with the reasoning
+inline, because an unexplained exemption is how a real defect eventually hides.
+
+### Guard
+
+`BURDEN_RATE_IMPLAUSIBLE` throws above **100%** on both burden fields, before either is
+read into a multiplier — they feed almost every cost line, so an implausible one does not
+produce a localised wrong number, it moves the whole budget.
+
+### The automation lesson — we were safe by sequencing, not by design
+
+`salesforce/flows/Sundial_Budget_Recalc_Trigger.flow-meta.xml` lists both burden fields as
+`ISCHANGED` inputs. On paper, 4,473 writes meant 4,473 platform events. **That flow was
+never deployed** (TASKS.md still lists activating it and wiring the relay as open), and the
+SF→AWS relay was never wired, so nothing could fan out.
+
+Two things follow:
+
+1. **The repo is not the org.** The integration user cannot read `FlowDefinitionView` or
+   `ApexTrigger` (both `INVALID_TYPE` — no View Setup), so a metadata check was not
+   available. `scripts/fix-burden-rate-percent-domain.mjs` therefore writes **one record
+   first**, re-reads it, and aborts if any field it did not write has changed. It passed,
+   and `Budget_Calc_Status__c = 'Pending'` stayed at 0 across the whole run — empirical
+   proof rather than an assumption. Every future bulk fix should carry the same canary.
+2. ⚠️ **When the recalc Flow IS activated, bulk data fixes must deactivate it first.**
+   Today's safety is an accident of sequencing. Written into CLAUDE.md as a standing rule
+   so it does not have to be rediscovered.

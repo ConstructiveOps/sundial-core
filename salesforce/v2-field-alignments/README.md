@@ -181,9 +181,16 @@ node scripts/zip-package.mjs salesforce/v2-field-alignments
 ```
 
 Writes `salesforce/v2-field-alignments.zip` with `package.xml` at the root, forward-slash
-entry names, and **only the metadata** — `package.xml` plus `objects/`. It prints every
-entry with its size and last-modified time, so a stale input is visible *before* the
-upload.
+entry names, and **only the metadata** — `package.xml` plus `objects/`.
+
+**It validates the manifest against the contents and refuses to build on a mismatch.**
+Every field in every `.object` must be declared in `package.xml` and vice versa. This is
+not theoretical: on 2026-08-25 this package shipped a zip that failed Workbench Check with
+five *"Not in package.xml"* errors, because a stale `Sundial_Customer__c.object` from an
+earlier run survived after Customer dropped out of the package. The builder had been
+printing both files' mtimes six minutes apart the whole time — **a report someone has to
+notice is not a check.** The generator now deletes object files for objects with nothing
+left to change, so the source cannot create the state either.
 
 This replaces the old manual Explorer step, which had two failure modes we hit:
 

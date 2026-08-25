@@ -76,6 +76,60 @@ function walk(dir, prefix = "") {
   return out;
 }
 
+/**
+ * MANIFEST vs CONTENTS — refuse to build a zip whose package.xml and .object files
+ * disagree about which fields are being deployed.
+ *
+ * WHY THIS EXISTS. On 2026-08-24 this builder shipped exactly that inconsistency and
+ * Workbench rejected the deploy with five "Not in package.xml" errors. The cause was a
+ * STALE OBJECT FILE: the v2-field-alignments generator re-reads the live org and only
+ * writes an .object for objects that still have pending changes. Once the NS markup fix
+ * deployed, Customer had nothing left to change, so the generator stopped writing
+ * Customer — but never DELETED the previous run's file. package.xml was rewritten to two
+ * Solar members; objects/Sundial_Customer__c.object still listed five markup fields.
+ *
+ * The builder printed both files' mtimes, six minutes apart, and validated nothing. A
+ * report that a human has to read carefully is not a check. This is the check.
+ *
+ * Scope: CustomField members only. Other metadata types (PermissionSet, Flow) have no
+ * file in objects/ to compare against, so they are counted and reported but not verified
+ * here — claiming otherwise would be the same false assurance in a new place.
+ */
+function validateManifest(root, files) {
+  const pkgPath = path.join(root, "package.xml");
+  const pkg = fs.readFileSync(pkgPath, "utf8");
+
+  // Members declared per metadata type.
+  const declared = new Map();
+  for (const m of pkg.matchAll(/<types>([\s\S]*?)<\/types>/g)) {
+    const body = m[1];
+    const typeName = /<name>([^<]+)<\/name>/.exec(body)?.[1] ?? "(unnamed)";
+    const members = [...body.matchAll(/<members>([^<]+)<\/members>/g)].map((x) => x[1].trim());
+    declared.set(typeName, new Set(members));
+  }
+
+  const declaredFields = declared.get("CustomField") ?? new Set();
+
+  // Fields actually present in the object files being zipped.
+  const present = new Set();
+  const perFile = [];
+  for (const f of files) {
+    if (!/^objects\/.+\.object$/.test(f.rel.split(path.sep).join("/"))) continue;
+    const objName = path.basename(f.rel, ".object");
+    const xml = fs.readFileSync(f.abs, "utf8");
+    const names = [...xml.matchAll(/<fields>[\s\S]*?<fullName>([^<]+)<\/fullName>/g)].map((x) => x[1]);
+    for (const n of names) present.add(`${objName}.${n}`);
+    perFile.push({ objName, count: names.length });
+  }
+
+  const missingFromManifest = [...present].filter((x) => !declaredFields.has(x)).sort();
+  const missingFromContents = [...declaredFields].filter((x) => !present.has(x)).sort();
+
+  const otherTypes = [...declared.entries()].filter(([t]) => t !== "CustomField");
+
+  return { declaredFields, present, perFile, missingFromManifest, missingFromContents, otherTypes };
+}
+
 const folder = process.argv[2];
 if (!folder) {
   console.error("usage: node scripts/zip-package.mjs <package-folder>");
@@ -88,6 +142,44 @@ if (!fs.existsSync(path.join(root, "package.xml"))) {
 }
 
 const files = walk(root);
+
+// ---------------------------------------------------------------------------
+// VALIDATE BEFORE WRITING. A zip that cannot deploy should never reach the disk, because
+// a bad zip sitting next to a good one is exactly how the wrong file gets uploaded.
+// ---------------------------------------------------------------------------
+const v = validateManifest(root, files);
+if (v.missingFromManifest.length > 0 || v.missingFromContents.length > 0) {
+  console.error(`\n** ${folder}: package.xml and the .object files DISAGREE — refusing to build. **\n`);
+  console.error(
+    `  package.xml declares ${v.declaredFields.size} CustomField member(s); ` +
+      `the object files contain ${v.present.size} field(s).`
+  );
+  for (const f of v.perFile) console.error(`     objects/${f.objName}.object — ${f.count} field(s)`);
+
+  if (v.missingFromManifest.length) {
+    console.error(
+      `\n  IN AN .object FILE BUT NOT IN package.xml (${v.missingFromManifest.length}) —` +
+        ` Workbench rejects these as "Not in package.xml":`
+    );
+    for (const x of v.missingFromManifest) console.error(`     ${x}`);
+    console.error(
+      "\n  Usually a STALE object file: the generator stopped writing that object because it\n" +
+        "  had no pending changes, but the previous run's file is still on disk. Re-run the\n" +
+        "  package's generate.mjs (it now removes them), or delete the file by hand."
+    );
+  }
+  if (v.missingFromContents.length) {
+    console.error(
+      `\n  IN package.xml BUT NOT IN ANY .object FILE (${v.missingFromContents.length}) —` +
+        " the deploy would silently skip these:"
+    );
+    for (const x of v.missingFromContents) console.error(`     ${x}`);
+    console.error("\n  Usually a manifest written by hand, or a generator run that failed part way.");
+  }
+  console.error("");
+  process.exit(1);
+}
+
 const locals = [];
 const centrals = [];
 let offset = 0;
@@ -159,7 +251,15 @@ const outPath = `${root}.zip`;
 fs.writeFileSync(outPath, Buffer.concat([...locals, centralBuf, end]));
 
 console.log(`wrote ${outPath}`);
-console.log(`  ${files.length} entries, ${fs.statSync(outPath).size} bytes, forward-slash separators\n`);
+console.log(`  ${files.length} entries, ${fs.statSync(outPath).size} bytes, forward-slash separators`);
+console.log(
+  `  manifest ✅ ${v.declaredFields.size} CustomField member(s) match ${v.present.size} field(s) across ` +
+    `${v.perFile.length} object file(s)` +
+    (v.otherTypes.length
+      ? `; ${v.otherTypes.map(([t, m]) => `${m.size} ${t}`).join(", ")} declared (not file-verifiable)`
+      : "")
+);
+console.log("");
 console.log("  entry                                              bytes   last modified");
 for (const f of files) {
   console.log(

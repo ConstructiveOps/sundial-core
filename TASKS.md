@@ -62,9 +62,20 @@ Branch `fix/burden-rate-percent-domain`.
       swept to 25.
 - [x] **Roofing's six fields listed** and fixed by Tim in Setup — defaults to
       0.20 / 0.20 / 0.025 / 0.35 / 0.30 / 0.30, records to 20 / 20 / 2.5 / 35 / 30 / 30.
-- [ ] **TIM: deploy `salesforce/v2-field-alignments.zip`** — 2 fields, the burden defaults.
-      Check Only first, expect `Components: 2/2`. The data fix has already run, so this only
-      governs NEW records.
+- [x] **Zip packaging defect found and fixed (2026-08-25).** The zip I handed over failed
+      Workbench Check with five "Not in package.xml" errors — a stale
+      `objects/Sundial_Customer__c.object` left behind after Customer dropped out of the
+      package. `zip-package.mjs` now validates manifest vs contents and refuses to build;
+      the generator now deletes object files for objects with nothing left to change.
+- [ ] **TIM: the burden defaults are NOT deployed yet.** The org still reads `75` on both
+      `Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` (verified with `forceRefresh`
+      against a control that correctly shows yesterday's `0.25` markup default). Looks like
+      a Check Only that validated and stopped. **Re-run the deploy without Check Only** using
+      `salesforce/v2-field-alignments.zip` (rebuilt, validated, content-identical to your
+      `v2-burden-defaults-FIXED.zip`). Expect `Components: 2/2`.
+      Verify after with: `node scripts/audit-percent-field-defaults.mjs` — it exits 0 only
+      when every Percent default is decimal-correct.
+      The 4,473-record DATA fix is unaffected; this only governs NEW records.
 - [ ] **TIM: four human-set burden values to review** — the mirror-image error (decimal form
       written into the display domain), left untouched:
       - Solar `a1Q7y00000JR27dEAD` (SOL-10027) `Commission_Burden_Rate__c` = **0.75**

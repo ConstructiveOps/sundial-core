@@ -1,5 +1,49 @@
 # Sundial — Progress Log
 
+## 2026-08-25 — the zip builder shipped a manifest it never checked
+
+`v2-field-alignments.zip` failed Workbench Check with five "Not in package.xml" errors.
+The zip was mine and the defect was mine.
+
+**What happened.** The MODIFY generator re-reads the live org and only writes an `.object`
+for objects that still have pending changes. Once the NS markup fix deployed, Customer had
+nothing left to change — so the generator stopped writing Customer, rewrote `package.xml`
+to two Solar members, and **left the previous run's `Sundial_Customer__c.object` on disk**.
+The zip therefore carried five markup fields the manifest never declared.
+
+**The builder printed the evidence and validated nothing.** Its entry table showed
+`Sundial_Customer__c.object` at 20:08 and `package.xml` at 20:14 — six minutes apart. I
+read that output and did not notice. **A report a human has to read carefully is not a
+check**, which is the whole lesson: the builder already verified hashes and mtimes, neither
+of which can express "these two files disagree about what is being deployed".
+
+Two fixes, at both ends:
+
+- **`zip-package.mjs` now validates manifest vs contents** and refuses to write. It parses
+  `package.xml` members and every `.object` field list and compares both directions —
+  fields present but undeclared (what Workbench rejected), and fields declared but absent
+  (a deploy that would silently skip them). Re-run against the broken state, it reproduces
+  Workbench's five errors **by name** and exits 1. Validation happens before any write, so
+  a failed build cannot clobber a good zip. `npm run build-zips` propagates the non-zero.
+  Scope is CustomField only; PermissionSet/Flow members have no file to compare against and
+  are reported as unverifiable rather than waved through.
+- **The generator now DELETES an object file when the object drops out of the package**,
+  which is the root cause. It reports what it removed, because a file disappearing from a
+  package is a real change to what gets deployed.
+
+All 8 packages rebuilt clean, so no sibling carried the same defect. The rebuilt
+`v2-field-alignments.zip` is content-identical to the `v2-burden-defaults-FIXED.zip` Tim
+hand-corrected — same single object file, same two members.
+
+**⚠️ The burden defaults are still `75` in the org.** Read with `forceRefresh` against a
+control (`NS_Adder_1_Markup_Percent__c` correctly reads `0.25` from yesterday's deploy, so
+describe does reflect deploys): `Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` both
+still read `75`. The packaging error is fixed and the corrected zip validated, but **the
+metadata change has not actually landed** — consistent with a Check Only run that validated
+and stopped. The 4,473-record DATA fix is unaffected and remains correct; this only governs
+what NEW records inherit.
+
+
 ## 2026-08-24 — the percent-domain class, audited to extinction (D-063a)
 
 Two more fields carrying D-063's defect, then an audit that found six more nobody was

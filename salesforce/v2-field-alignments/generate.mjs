@@ -257,6 +257,10 @@ function buildFieldXml(cur, overrides) {
 const run = async () => {
   const manifest = [];
   const skipped = [];
+  // Object files removed because the object no longer has anything to change. Reported
+  // rather than silent: a file disappearing from the package is a real change to what
+  // gets deployed, and the reader should see it.
+  const removed = [];
 
   for (const [objName, entries] of Object.entries(CHANGES)) {
     const d = await describeObject(objName);
@@ -316,7 +320,20 @@ const run = async () => {
       });
     }
 
-    if (out.length === 0) continue;
+    if (out.length === 0) {
+      // ⚠️ DELETE, do not merely skip. This generator re-reads the live org, so an object
+      // legitimately drops out of the package once its changes are deployed — and on
+      // 2026-08-24 that is exactly what happened to Customer after the NS markup fix
+      // landed. Leaving the previous run's .object on disk while rewriting package.xml
+      // without it produced a zip Workbench rejected with five "Not in package.xml"
+      // errors. An object with nothing to change must leave nothing behind.
+      const stale = path.join(OUT, "objects", `${objName}.object`);
+      if (fs.existsSync(stale)) {
+        fs.unlinkSync(stale);
+        removed.push(objName);
+      }
+      continue;
+    }
     const header = `<?xml version="1.0" encoding="UTF-8"?>
 <!--
   ⚠️ MODIFY PACKAGE — these fields ALREADY EXIST. Deploying REPLACES their full
@@ -386,6 +403,13 @@ ${members}
     console.log(
       `  ${m.optional ? "[OPT] " : "      "}${(m.object.replace("Sundial_", "").replace("__c", "") + "." + m.api).padEnd(52)} ${m.attribute.padEnd(13)} ${m.from} -> ${m.to}`
     );
+  }
+  if (removed.length) {
+    console.log(`\n=== removed ${removed.length} stale object file(s) ===`);
+    for (const o of removed) {
+      console.log(`  objects/${o}.object — deleted; nothing left to change on this object.`);
+    }
+    console.log("  (Leaving these behind is what shipped a zip Workbench rejected on 2026-08-24.)");
   }
   console.log(`\n=== skipped (${skipped.length}) ===`);
   for (const s of skipped) console.log(`  ${s.object}.${s.api}: ${s.reason}`);

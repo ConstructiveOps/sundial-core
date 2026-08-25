@@ -2473,3 +2473,23 @@ Two things follow:
 2. ⚠️ **When the recalc Flow IS activated, bulk data fixes must deactivate it first.**
    Today's safety is an accident of sequencing. Written into CLAUDE.md as a standing rule
    so it does not have to be rediscovered.
+
+### Addendum, 2026-08-25 — the zip builder validated everything except the thing that mattered
+
+The `v2-field-alignments.zip` produced for this fix failed Workbench Check with five
+"Not in package.xml" errors. The MODIFY generator only writes an `.object` for objects with
+pending changes, so once the NS markup fix deployed it stopped writing Customer — and left
+the **previous run's file on disk** while rewriting `package.xml` without it.
+
+The builder had been reporting both files' mtimes, six minutes apart, on every run. Nobody
+noticed, because **a report a human has to read carefully is not a check**. It verified
+CRCs and printed timestamps — neither of which can express "the manifest and the contents
+disagree about what is being deployed".
+
+`zip-package.mjs` now compares `package.xml` members against the field list in every
+`.object`, both directions, and **refuses to write** on a mismatch. The generator deletes
+object files for objects that drop out. Two ends of the same defect: the tool cannot emit
+it, and the source cannot create it.
+
+The general rule, worth carrying to any future build step: **if a build tool prints
+something a person is expected to notice, that thing should be an assertion instead.**

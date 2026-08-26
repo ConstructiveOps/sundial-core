@@ -335,7 +335,33 @@ Branch `feat/mapping-v3`. **Build + report only — no deploy, no live push.** G
 - [ ] **Q12a — does the live RS scaffold contain REFERRAL / SOFTWARE / ENGR / SUBCON?** D13 says REFERRAL is a new task code absent from the v1 sandbox scaffold. If it is missing from live too, that is an **Acumatica template change**, not a code fix.
 - [ ] **Q12b (Harmon):** does BALANCE income include the DC rebate, or does the rebate stand alone? v3 assumes stand-alone so the two cannot double-count.
 - [ ] **Q12c (Harmon):** is `DLR` genuinely an expense line? The calc already subtracts the dealer fee from Balance of Revenue, so carrying the v1 expense row may be a v1 double-count. Kept for now because dropping a line that exists in the live scaffold would leave it unwritten.
-- [ ] **Then:** MAPPING_ROWS freeze, RSDC template selection (`resolveProjectTemplate`), and the supervised live end-to-end.
+- [ ] **Then:** MAPPING_ROWS freeze and the supervised live end-to-end. ~~RSDC template selection (`resolveProjectTemplate`)~~ **DONE 2026-08-26** — see below.
+
+### RS/RSDC template selection — **BUILT 2026-08-26** (branch `fix/rsdc-template-selection`, NOT deployed)
+
+Production bug: Layer-1 hardcoded `resolveProjectTemplate(DEFAULT_PROJECT_TYPE)` with a map
+containing only `RS`, and selected no domestic-content field at all. Every project ever created
+was scaffolded RS. Specified in the rework doc since the first draft, never implemented.
+
+- [x] **`sundial-acumatica-push`** — `PROJECT_TEMPLATE_MAP` gains `residential_solar_dc: "RSDC"`;
+      new `isDomesticContentEligible(cust)` picks the project type per record;
+      `Domestic_Content_Eligible__c` added to `CUSTOMER_FIELDS` (existing SOQL, no second query);
+      `summary.project.domesticContentEligible` added next to `summary.project.templateId`.
+- [x] **`sundial-budget`** — the DC rebate toggle moved OFF `Sundial_Solar__c.Domestic_Content__c`
+      (free text, permissive parse) ONTO `Sundial_Customer__r.Domestic_Content_Eligible__c`, the
+      same picklist the template reads. One field drives both, so they cannot disagree —
+      which is the exact state the DCREBATE row aborts on. `Domestic_Content__c` is out of
+      `INPUT_FIELDS` and **is no longer read by any Lambda**.
+- [x] **`sundial-acumatica-budget-push` needs no change** — its DCREBATE row keys off the calc
+      output `DC_Rebate_Amount__c` and off which scaffold exists. Verified, nothing there reads
+      `Domestic_Content__c`.
+- [x] **Tests green** — suite 496 (budget 208 checks incl. both DC branches + the picklist rule).
+- [!] **TIM: remediate the one known production project** created RS that should have been RSDC —
+      delete-and-recreate in Acumatica. Not fixable by this code change.
+- [ ] **Deploy** `sundial-acumatica-push` + `sundial-budget` after review.
+- [ ] **Stale metadata:** `salesforce/v2-budget-output-fields/generate.mjs` still describes
+      `DC_Rebate_Amount__c` as keyed off `Domestic_Content__c`. Needs a metadata deploy to fix;
+      left alone deliberately.
 
 ### Harvest applied (2026-08-20, D18) — R261077 RS / R261066 RSDC
 

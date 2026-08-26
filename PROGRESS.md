@@ -1,5 +1,49 @@
 # Sundial — Progress Log
 
+## 2026-08-26 — Domestic Content projects were all built from the wrong template
+
+Every Acumatica project Layer-1 ever created was scaffolded **RS**. The template was
+hardcoded from the first deploy:
+
+```js
+const PROJECT_TEMPLATE_MAP = { residential_solar: "RS" };   // RSDC absent entirely
+const templateId = resolveProjectTemplate(DEFAULT_PROJECT_TYPE);   // always "RS"
+```
+
+RS/RSDC selection had been **specified in `docs/integrations/acumatica-budget-rework-v2.md`
+since the first draft and simply never built**. The customer SOQL did not select any
+domestic-content field either, so the information needed to decide was never read — this was
+not a logic bug that got the answer wrong, it was a decision that was never made. Correct for
+the overwhelming majority of jobs, which are non-DC; silently wrong for every DC one. One known
+production project is affected and is being remediated by delete-and-recreate.
+
+**One field now drives both halves.** The business owner ruled that
+`Sundial_Customer__c.Domestic_Content_Eligible__c` (Yes/No picklist) is the single source of
+truth: *eligible IS the election*. `"Yes"` → RSDC template **and** a $0.45/W rebate; anything
+else → RS and zero. Trimmed and case-insensitive so a label edit does not break it, but not
+permissive — it is a picklist, so only `"Yes"` wins.
+
+That ruling also moved the calc. `budgetCalc.js` had been reading
+`Sundial_Solar__c.Domestic_Content__c` — unrestricted free text, parsed permissively for
+`yes`/`y`/`true`/`1`. **Two fields on two objects fed one decision, so the template and the
+rebate could disagree** — which is precisely the state the budget push's DCREBATE row aborts
+on (a non-zero rebate on an RS scaffold, where the income has nowhere to land). With both
+sides on the same field they agree by construction, and the abort goes back to being a safety
+net rather than a live hazard. `Domestic_Content__c` is out of `INPUT_FIELDS` and is now read
+by **no Lambda**; a test asserts that setting it to `'YES'` changes nothing.
+
+`sundial-acumatica-budget-push` needed no change at all — it keys off the calc output
+`DC_Rebate_Amount__c` and off which scaffold actually exists in Acumatica.
+
+**The diagnostic that was missing.** The DCREBATE abort only fires at budget-push time, long
+after the wrong project exists, and it names the symptom rather than the input. The Layer-1
+response now carries `summary.project.domesticContentEligible` alongside
+`summary.project.templateId`, so the decision *and its input* are visible in the button
+response at creation time, without re-reading Salesforce.
+
+Suite 496 green (budget 208 checks, both DC branches covered). Built on
+`fix/rsdc-template-selection`, **not deployed**.
+
 ## 2026-08-25 — the zip builder shipped a manifest it never checked
 
 `v2-field-alignments.zip` failed Workbench Check with five "Not in package.xml" errors.

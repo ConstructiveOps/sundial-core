@@ -69,7 +69,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 - ProjectBudget write machinery: fresh filter-read → 4-part-key match → PUT-by-guid; sum-into-one-line; skip-zero on expense lines; income always written; fail-loud on 0 lines or ambiguous key; backoff; per-PUT logging; dryRun.
 - Async push pattern (202 → self-invoke worker → SF status write-back). Re-push idempotent.
 - Unified Create Project button (3-state), recalc button, Update Budget button, snapshot→S3→Files/XFiles/Dropbox chain, Supabase metadata registration.
-- Layer-1 push incl. tax zones, skip-guards, RESIDENT. Only change: RS/RSDC template selection.
+- Layer-1 push incl. tax zones, skip-guards, RESIDENT. The one outstanding change — RS/RSDC template selection — is now **DONE 2026-08-26** (see §2 and §8).
 - Standing facts: GET-by-guid empty (never use); `RESIDENTAL` misspelling; API GW 29s cap on the synchronous /acumatica/push.
 
 ## 2. What is rebuilt / net-new
@@ -83,7 +83,7 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | Portal Budget UI | Commissions v3 inputs, COST adders, Customer read-only tabs (D7), PO status. |
 | PO engine | NET-NEW stage in push worker. §6. |
 | Attribute sync | NET-NEW, two triggers. §7. |
-| resolveProjectTemplate | RS / RSDC by Domestic Content. |
+| resolveProjectTemplate | ✅ **DONE 2026-08-26** (branch `fix/rsdc-template-selection`, not deployed). `PROJECT_TEMPLATE_MAP` gains `residential_solar_dc: "RSDC"`; the project type is chosen per record by `isDomesticContentEligible(cust)` — `Sundial_Customer__c.Domestic_Content_Eligible__c` trimmed + case-insensitive `= "Yes"` → **RSDC**, anything else ("No", blank, null) → **RS**. `Domestic_Content_Eligible__c` is added to `CUSTOMER_FIELDS` (the existing customer SOQL — no second query), and the response carries `summary.project.domesticContentEligible` next to `summary.project.templateId` so a wrong template is diagnosable from the button response alone. See §8 for the root cause. |
 
 ## 3. REVISED sheet mechanics (final)
 
@@ -727,7 +727,77 @@ the sync needs a read-modify-write cycle before it can be wired at all. **Step 5
 [`acumatica-attribute-sync-runbook.md`](acumatica-attribute-sync-runbook.md) is that
 test**, and it is the reason that runbook exists.
 
-## 8. Template selection (RS / RSDC) — unchanged from prior draft; JOBTYPE attribute should carry the same code.
+## 8. Template selection (RS / RSDC) — **IMPLEMENTED 2026-08-26**; JOBTYPE attribute should carry the same code.
+
+### The rule (single source of truth)
+
+`Sundial_Customer__c.Domestic_Content_Eligible__c` — a **Yes/No picklist on the CUSTOMER** —
+decides **both** halves of domestic content. Per the business owner, *eligible IS the election*;
+there is no second "elected" decision anywhere in the model.
+
+| `Domestic_Content_Eligible__c` | Acumatica template | DC rebate |
+|---|---|---|
+| `"Yes"` (trimmed, case-insensitive) | **RSDC** | `DC_Rebate_Amount__c = 0.45 × watts` (D2), pushed to `DCREBATE · BILLING · <N/A> · Income` |
+| `"No"`, blank, null, anything else | **RS** | 0 |
+
+Matching is trimmed and case-insensitive so a value/label edit does not break it, but it is
+**not permissive** — it is a picklist, so only `"Yes"` wins. `"Y"`, `"true"`, `"1"` do **not**.
+
+Two Lambdas read this field, with the identical rule, from the identical place:
+
+| Lambda | Function | Reads |
+|---|---|---|
+| `sundial-acumatica-push` (Layer 1) | `isDomesticContentEligible(cust)` | `Domestic_Content_Eligible__c` off the customer record already in hand |
+| `sundial-budget` (calc) | `isDomesticContent(rec)` in `budgetCalc.js` | `Sundial_Customer__r.Domestic_Content_Eligible__c` (relationship read-through, same pattern as the D17 setter) |
+
+`sundial-acumatica-budget-push` needs **no change**: its `DCREBATE` row keys off the calc
+output `DC_Rebate_Amount__c` and off which scaffold actually exists in Acumatica. With the
+template and the rebate driven by one field, the two agree **by construction**.
+
+### Root cause — specified here, never implemented
+
+RS/RSDC selection was written into this document from the first draft and **was never built**.
+`lambdas/sundial-acumatica-push/index.js` shipped with the template hardcoded:
+
+```js
+const PROJECT_TEMPLATE_MAP = { residential_solar: "RS" };   // RSDC absent entirely
+const templateId = resolveProjectTemplate(DEFAULT_PROJECT_TYPE);   // always "RS"
+```
+
+No domestic-content field was selected in the customer SOQL either, so the information needed
+to decide was never even read. **Every project created by Layer 1, from its first deploy until
+this fix, was scaffolded RS** — correct for the overwhelming majority (non-DC jobs), silently
+wrong for every domestic-content job. **One known production project was created RS that should
+have been RSDC**; it is remediated separately by delete-and-recreate, not by this code change.
+
+This is exactly the failure the `DCREBATE` conditional row (§5, D18) was built to catch: a
+non-zero rebate on an RS scaffold **aborts** rather than letting the income silently vanish. The
+abort is the safety net; it is not the fix, and it only fires at budget-push time — long after
+the wrong project has been created.
+
+`summary.project.domesticContentEligible` now rides alongside `summary.project.templateId` in
+the button response specifically so the next such divergence is visible at creation time,
+without re-reading Salesforce.
+
+### The calc's DC toggle changed source at the same time
+
+Previously `budgetCalc.js` read **`Sundial_Solar__c.Domestic_Content__c`** — unrestricted free
+text, parsed permissively (`yes` / `y` / `true` / `1`, plus boolean `true`). Two independent
+fields on two different objects fed one decision, so template and rebate could disagree, which
+is precisely the state the `DCREBATE` row aborts on.
+
+The calc now reads the Customer picklist. **`Domestic_Content__c` is retired as an integration
+input and is no longer read by any Lambda** — it is gone from `INPUT_FIELDS` in
+`handler.js` (and its comment block with it). It still exists on `Sundial_Solar__c` for history;
+do not re-add it expecting the calc to read it, because it does not. A test asserts that setting
+it to `'YES'` has no effect.
+
+> **Not changed by this fix:** the `JOBTYPE` attribute (§7) is still sourced separately and
+> should carry the same `RS`/`RSDC` code the project was scaffolded from. The Salesforce field
+> metadata for `DC_Rebate_Amount__c` (`salesforce/v2-budget-output-fields/generate.mjs`) still
+> describes the rebate as keyed off `Domestic_Content__c`; that description is now stale and
+> needs a metadata deploy to correct, so it is deliberately left alone here.
+
 
 ## 9. Open questions (updated 2026-08-20)
 | # | Status | Question |

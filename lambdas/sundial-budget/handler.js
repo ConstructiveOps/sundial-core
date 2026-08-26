@@ -72,10 +72,6 @@ const ADDER_COST_BASES = [
 const INPUT_FIELDS = [
   "Name", "Project_Name__c", "Panel_Type__c", "Contract_Amount__c", "Dealer_Fee__c",
   "System_Size__c", "Module_STC_Wattage__c", "Module_Cost_Per_Watt__c",
-  // DC rebate toggle (D2). Solar's Domestic_Content__c is the only domestic-content
-  // field on this object; Customer's Domestic_Content_Eligible__c answers a different
-  // question ("eligible", not "elected") and the calc is Solar-side.
-  "Domestic_Content__c",
   // Commissions — D19 redline model. The REP commission arrives in DOLLARS from the
   // Commission_Total__c formula field and is routed by the sales company; the two
   // rep-PPW inputs (Sales_Rep_Commission_PPW__c, Internal_Rep_Commission_PPW__c) are
@@ -94,6 +90,12 @@ const INPUT_FIELDS = [
   // so it is read through the relationship. A setter added to the Customer after the
   // project was created therefore lands in the next recalc with no backfill.
   "Sundial_Customer__r.Setter__c",
+  // DC rebate toggle (D2), read through the same relationship. The election lives on
+  // the CUSTOMER picklist Domestic_Content_Eligible__c and drives BOTH this rebate and
+  // the RS/RSDC Acumatica template (sundial-acumatica-push). Solar's free-text
+  // Domestic_Content__c is retired as an integration input and deliberately NOT
+  // selected — one field, one answer, so template and rebate cannot disagree.
+  "Sundial_Customer__r.Domestic_Content_Eligible__c",
   "Combiner_Unit_Cost__c", "Combiner_Qty__c",
   // Gateway_* is REUSED for the Tesla Expansion Pack (§3) — relabel pending.
   "Gateway_Unit_Cost__c", "Gateway_Qty__c",

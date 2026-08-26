@@ -43,7 +43,6 @@ const REVISED = {
   // Contract block
   Contract_Amount__c: 36502,        // N6
   Dealer_Fee__c: 0,                 // N8
-  Domestic_Content__c: 'NO',        // D3 — no rebate in the cached example
   System_Size__c: 8.8,              // D7 -> 8800 W
   Module_STC_Wattage__c: 440,       // B8
   Module_Cost_Per_Watt__c: 0.6,     // B9
@@ -81,8 +80,9 @@ const REVISED = {
   Overhead_Commission_PPW__c: 0.015,
   Geo_Commission_Amount__c: 70,           // J10
   Commission_Burden_Rate__c: 75,          // K12
-  // D17: setter read through the Customer relationship.
-  Sundial_Customer__r: { Setter__c: SETTER_ID },
+  // Read through the Customer relationship: the setter (D17) and the domestic-content
+  // election (D2/D3). This is a non-DC example, so the picklist is 'No'.
+  Sundial_Customer__r: { Setter__c: SETTER_ID, Domestic_Content_Eligible__c: 'No' },
 
   // ---- Adders. Selected in the cached example: Sub Panel, Structural,
   //      Bird Blocking, Software, Active Monitoring, LR Warranty, Referral.
@@ -520,7 +520,7 @@ it('D19: the snapshot rate cell multiplies out to the amount cell beside it', ()
 });
 
 it('D17: no setter on the Customer means no setter commission', () => {
-  const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { Setter__c: null } });
+  const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { Setter__c: null, Domestic_Content_Eligible__c: 'No' } });
   assert.strictEqual(r.extras.setterCommissionAmt, 0);
   // Burden drops by 0.75 × 70 = 52.50, and the total by the 70 as well: 18081.50 − 122.50.
   assert.ok(Math.abs(r.fields.Commission_Burden_Amt__c - 363) < TOL);
@@ -531,7 +531,10 @@ it('D17: the setter is also readable from a flattened relationship key', () => {
   const flat = { ...REVISED };
   delete flat.Sundial_Customer__r;
   flat['Sundial_Customer__r.Setter__c'] = SETTER_ID;
-  assert.strictEqual(calculateBudget(flat).extras.setterCommissionAmt, 70);
+  const rFlat = calculateBudget(flat);
+  assert.strictEqual(rFlat.extras.setterCommissionAmt, 70);
+  // ...and with no Sundial_Customer__r at all, domestic content reads NO, not a throw.
+  assert.strictEqual(rFlat.extras.domesticContent, false);
 });
 
 it('D15: a blank Cost on a SELECTED adder throws instead of costing zero', () => {
@@ -568,7 +571,9 @@ it('D15: per-watt cost multiplies by WATTS, not by qty', () => {
 });
 
 it('D2: domestic content adds a 0.45/W revenue line and lifts GP by the same', () => {
-  const r = calculateBudget({ ...REVISED, Domestic_Content__c: 'YES' });
+  const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { ...REVISED.Sundial_Customer__r, Domestic_Content_Eligible__c: 'Yes' } });
+  assert.strictEqual(r.cells.D3, 'YES');
+  assert.ok(Math.abs(r.cells.D4 - 0.45) < TOL);
   assert.ok(Math.abs(r.extras.dcRebateAmount - 3960) < TOL);         // 0.45 × 8800
   // The rebate is pure upside: it is NOT in the D19 commission formula (contract −
   // redline×W − adders), so it lifts revenue and GP by its full amount and moves the
@@ -578,13 +583,28 @@ it('D2: domestic content adds a 0.45/W revenue line and lifts GP by the same', (
   assert.ok(Math.abs(r.fields.Total_Commissions__c - 18081.5) < TOL);
 });
 
-it('DC parsing is permissive on affirmatives and defaults to NO', () => {
-  for (const v of ['YES', 'yes', ' Yes ', 'true', '1', true]) {
-    assert.ok(calculateBudget({ ...REVISED, Domestic_Content__c: v }).extras.domesticContent, `${v} should be DC`);
+it('DC reads the Customer picklist: only "Yes" wins, everything else is NO', () => {
+  const withDC = (v) => calculateBudget({
+    ...REVISED,
+    Sundial_Customer__r: { ...REVISED.Sundial_Customer__r, Domestic_Content_Eligible__c: v },
+  });
+  // Trimmed and case-insensitive, so a value/label edit does not break it...
+  for (const v of ['Yes', 'YES', 'yes', ' Yes ']) {
+    assert.ok(withDC(v).extras.domesticContent, `${v} should be DC`);
   }
-  for (const v of ['NO', '', null, undefined, 'maybe', 'N']) {
-    assert.ok(!calculateBudget({ ...REVISED, Domestic_Content__c: v }).extras.domesticContent, `${v} should NOT be DC`);
+  // ...but NOT permissive. It is a picklist, so the old free-text affirmatives lose.
+  for (const v of ['No', 'NO', '', null, undefined, 'maybe', 'Y', 'true', '1', true]) {
+    assert.ok(!withDC(v).extras.domesticContent, `${v} should NOT be DC`);
   }
+  // A record with no Customer relationship at all is NO, not a crash.
+  const noCust = { ...REVISED };
+  delete noCust.Sundial_Customer__r;
+  const r = calculateBudget(noCust);
+  assert.strictEqual(r.extras.domesticContent, false);
+  assert.strictEqual(r.extras.dcRebateAmount, 0);
+  assert.strictEqual(r.cells.D3, 'NO');
+  // The RETIRED Solar field must have no effect whatsoever, even set to 'YES'.
+  assert.ok(!calculateBudget({ ...REVISED, Domestic_Content__c: 'YES' }).extras.domesticContent);
 });
 
 it('Travel hours are a selection FLAG, not hours × qty (sheet E52)', () => {

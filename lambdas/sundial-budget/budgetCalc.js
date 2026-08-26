@@ -293,21 +293,32 @@ function resolveSetterId(rec) {
 /**
  * Domestic Content → does this job get the DC rebate revenue line?
  *
- * SOURCE FIELD: `Sundial_Solar__c.Domestic_Content__c`. It is the ONLY domestic-content
- * field on the object the calc reads. (Customer has `Domestic_Content_Eligible__c`, a
- * Yes/No picklist — "eligible" is a different question from "elected", and the calc is
- * Solar-side, so it is not used here.)
+ * SOURCE FIELD: `Sundial_Customer__r.Domestic_Content_Eligible__c`, a Yes/No picklist on
+ * the CUSTOMER, read through the relationship the same way the setter is (D17).
  *
- * ⚠️ It is an unrestricted TEXT field, so it can hold anything. Parsed permissively for
- * affirmatives and defaulted to NO: a missing or unrecognised value must never invent a
- * $0.45/W revenue line. Sheet D3 is a YES/NO validation list (Sheet2), which a picklist
- * or checkbox would model better — flagged in the rework doc.
+ * THE RULING (business owner): eligible IS the election. There is no second, separate
+ * "elected" decision — one field answers both questions it feeds:
+ *   "Yes" → the Acumatica project is scaffolded from the RSDC template AND this calc
+ *           produces DC_Rebate_Amount__c > 0 (0.45/W), which the budget push writes to
+ *           the DCREBATE | BILLING | <N/A> | Income line that exists only on RSDC.
+ *   anything else ("No", blank, null, no Customer at all) → RS template, rebate 0.
+ * `sundial-acumatica-push` picks the template from this same field with the identical
+ * rule, so template and rebate cannot disagree — and disagreement is precisely what the
+ * push's DCREBATE row aborts on (a non-zero rebate on an RS scaffold would silently
+ * vanish).
+ *
+ * `Sundial_Solar__c.Domestic_Content__c` — free text, formerly parsed permissively for
+ * 'yes'/'y'/'true'/'1' — is RETIRED as an integration input and is no longer read by any
+ * Lambda. Do not re-add it.
+ *
+ * Being a picklist, matching is trimmed and case-insensitive (so a value/label edit does
+ * not break it) but NOT permissive: only "Yes" wins. Everything else defaults to NO,
+ * because an unrecognised value must never invent a $0.45/W revenue line.
  */
 function isDomesticContent(rec) {
-  const raw = rec?.Domestic_Content__c;
-  if (raw === true) return true;
+  const raw = rec?.Sundial_Customer__r?.Domestic_Content_Eligible__c;
   if (typeof raw !== 'string') return false;
-  return ['yes', 'y', 'true', '1'].includes(raw.trim().toLowerCase());
+  return raw.trim().toLowerCase() === 'yes';
 }
 
 /** Typed calc error so the handler can distinguish bad data from a bug. */

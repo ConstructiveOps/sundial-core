@@ -51,14 +51,37 @@ const SOLAR_SF_OBJECT = "Sundial_Solar__c";
 const CUSTOMER_CLASS = "RESIDENT";
 
 // Project template lookup: Sundial project type -> Acumatica ProjectTemplateID.
-// Layer 1 always uses residential solar ("RS"); the map is the extension point
-// so Roofing/Commercial templates can be added later without changing the flow.
+// RS and RSDC differ by exactly one budget line — DCREBATE | BILLING | <N/A> | Income —
+// so the template choice IS the decision about whether the $0.45/W domestic-content
+// rebate has anywhere to land. The map stays the extension point so Roofing/Commercial
+// templates can be added later without changing the flow.
 const PROJECT_TEMPLATE_MAP = {
   residential_solar: "RS",
+  residential_solar_dc: "RSDC",
 };
 const DEFAULT_PROJECT_TYPE = "residential_solar";
 function resolveProjectTemplate(projectType) {
   return PROJECT_TEMPLATE_MAP[projectType] ?? PROJECT_TEMPLATE_MAP[DEFAULT_PROJECT_TYPE];
+}
+
+/**
+ * Domestic Content election — the SINGLE source of truth for both the Acumatica
+ * template (RS vs RSDC) and the budget calc's DC rebate line.
+ *
+ * SOURCE FIELD: `Sundial_Customer__c.Domestic_Content_Eligible__c`, a Yes/No picklist.
+ * Per the business owner, "eligible" IS the election: Yes means RSDC template AND a
+ * non-zero DC_Rebate_Amount__c; anything else (No, blank, null) means RS and zero.
+ *
+ * It is a picklist, so ONLY "Yes" wins — trimmed and case-insensitive to survive a
+ * value-label edit, but deliberately NOT permissive about other affirmative spellings.
+ * The budget calc's isDomesticContent() implements the identical rule against the
+ * identical field; if these two ever disagree the budget push aborts on the DCREBATE
+ * row (non-zero rebate on an RS scaffold), which is the failure this pairing prevents.
+ */
+function isDomesticContentEligible(cust) {
+  const raw = cust?.Domestic_Content_Eligible__c;
+  if (typeof raw !== "string") return false;
+  return raw.trim().toLowerCase() === "yes";
 }
 
 // Customer fields read from Salesforce (per the Layer 1 spec).
@@ -75,6 +98,8 @@ const CUSTOMER_FIELDS = [
   "Description__c",
   "Linked_Solar_Project__c",
   "Client__c",
+  // Drives RS vs RSDC template selection (see isDomesticContentEligible above).
+  "Domestic_Content_Eligible__c",
 ];
 
 // --- CORS (mirrors the other Lambdas; this route is POST/OPTIONS) -----------
@@ -230,7 +255,7 @@ export const handler = async (event) => {
   const summary = {
     recordId: null,
     customer: { stage: null, acumaticaCustomerId: null, acumaticaCustomerGuid: null },
-    project: { stage: null, projectId: null, templateId: null },
+    project: { stage: null, projectId: null, templateId: null, domesticContentEligible: null },
     finalize: { synced: false },
     warnings: [],
   };
@@ -434,8 +459,16 @@ export const handler = async (event) => {
 
     const projectAlreadyCreated = cleanStr(solar.Project_Created_in_Acumatica__c) !== "";
     const projectId = cleanStr(cust.Acumatica_Project_ID__c);
-    const templateId = resolveProjectTemplate(DEFAULT_PROJECT_TYPE);
+    // RS vs RSDC is decided here, from the customer record already in hand. Both the
+    // decision and its input are reported so a wrong template is diagnosable from the
+    // button response alone, without re-reading Salesforce.
+    const domesticContentEligible = isDomesticContentEligible(cust);
+    const projectType = domesticContentEligible
+      ? "residential_solar_dc"
+      : "residential_solar";
+    const templateId = resolveProjectTemplate(projectType);
     summary.project.templateId = templateId;
+    summary.project.domesticContentEligible = domesticContentEligible;
 
     if (projectAlreadyCreated) {
       // Already in Acumatica -> skip create.

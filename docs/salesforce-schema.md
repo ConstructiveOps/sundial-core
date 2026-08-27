@@ -38,8 +38,33 @@ Examples:
 **Purpose:** Represents portal users (Harmon employees, dealers, sales reps) and their organizational hierarchy. Does NOT represent Salesforce login users; Harmon users authenticate via Supabase.
 
 **Key Fields:**
-- `Hierarchy_Level__c` — Picklist: Client, Dealer, Sales Manager, Sales Rep
-- `Parent_User__c` — Lookup to `Sundial_User__c` (self-referential, the user above in the hierarchy)
+
+**Access control (D-043, D-064).** `Access_Level__c` is the ONLY input to role
+resolution in the access model; the three hierarchy fields below it are legacy.
+
+- `Access_Level__c` — Restricted picklist: **Executive, Manager, Admin, Sales Dealer,
+  Sales Rep, Technician** (nillable). The single input to the D-064 scope resolution:
+  Executive/Manager/Admin → `tenant`, Sales Dealer → `dealer`, Sales Rep → `own`,
+  Technician → `none`, and null/unknown → `none` (fail closed). Surfaced on
+  `GET /auth/me` as `user.accessLevel`.
+- `Super_Admin__c` — Checkbox, default false. Gates the Manage Users surface **only**,
+  and implies nothing about record scope. **Set exclusively by hand in Salesforce;
+  never writable through any Sundial endpoint** (D-043). Read as a strict boolean
+  (`=== true`, fail closed). `sundial-user-admin` refuses to create a user that
+  combines it with a sales access level (D-064 §1.2).
+- `Hierarchy_Level__c` — Restricted picklist, **required**: Client, Dealer, Manager,
+  Sales Rep, Sales Manager, Technician. *(The last two were added 2026-08-27; the
+  documented list previously read "Client, Dealer, Sales Manager, Sales Rep", which
+  never matched the org — `Manager` was live and `Sales Manager` was not.)*
+  **DEPRECATED as an input.** Since 2026-08-27 `sundial-user-admin` **derives** it
+  from `Access_Level__c` (Sales Rep → `Sales Rep`, Sales Dealer → `Sales Manager`,
+  everything else → `Client`) and it is never accepted from request input. It is kept
+  and written only because the field is required; after D-064 Phase 3 nothing reads
+  it. Until then the TEMP guard in `sundial-sf-query` keys on the exact string
+  `"Sales Rep"`, which is why the derivation matters.
+- `Parent_User__c` — Lookup to `Sundial_User__c` (self-referential). **UNREAD.**
+  `lib/identity.js` returns it as `parentUserId` and no Lambda or frontend consumes
+  it. D-064 replaces the intended tree-walk with `Sundial_User__c.Dealer__c`.
 - `Supabase_User_Id__c` — External ID, links to Supabase auth user record
 - `First_Name__c` — Text
 - `Last_Name__c` — Text
@@ -48,7 +73,14 @@ Examples:
 - `Active__c` — Checkbox
 - `Client__c` — Lookup to `Sundial_Tenant__c` (the tenant anchor; "harmon" record), used for sharing scope across multi-client deployments. (Previously pointed to the top-level `Sundial_User__c` org record; superseded by `Sundial_Tenant__c` per DECISIONS.md D-034. API name unchanged: `Client__c`.)
 - `Default_Department__c` — Picklist: Residential Solar, Roofing, Service, Commercial (controls portal landing experience)
-- `Roles__c` — Multi-select picklist for cross-departmental access (Dispatcher, Office Admin, PM, Sales Rep, etc.)
+- `Roles__c` — Multi-select picklist (Dispatcher, Office Admin, Project Manager, Sales Rep,
+  Sales Manager, Technician, Executive). **UNUSED — zero code references in either repo.**
+  Intended for cross-departmental access and never wired up. Kept, unread, documented
+  as unused (D-064 §10); if cross-department module access is ever needed, the module
+  gate in §3.1 of `access-model.md` is the hook and that is a new decision.
+- `Dealer__c` — Lookup to `Sundial_Dealer__c`. **DOES NOT EXIST YET** — added in D-064
+  Phase 1 (`salesforce/v6-access-model/`). It will carry dealer-scope row visibility;
+  a sales-role user with a null `Dealer__c` resolves to scope `none`, never "all dealers".
 
 **Relationships:**
 - Self-lookup via `Parent_User__c`
@@ -506,9 +538,12 @@ Sundial data lives alongside other Constructive Operations clients in the same S
 2. **Org-wide defaults set to Private** on Sundial custom objects.
 3. **Criteria-based sharing rules** based on `Client__c` field value.
 4. **Sundial Integration User** owns most records by default; explicit sharing is granted to Tim (admin) and any cross-client roles.
-5. **Role hierarchy within a client** uses the `Sundial_User__c.Parent_User__c` chain. Sharing logic resolves this chain to determine which records each user can see in the portal.
+5. **Role hierarchy within a client** ~~uses the `Sundial_User__c.Parent_User__c` chain~~ —
+   **SUPERSEDED BY D-064.** `Parent_User__c` is unread by any code. Row visibility resolves
+   from `Access_Level__c` to a scope (`tenant`/`dealer`/`own`/`none`) and filters on
+   `Sales_Rep__c` or `Dealer__c` id equality. See `docs/access-model.md` §1.
 
-**Important:** Salesforce native role hierarchy is NOT used to drive Sundial user visibility because Harmon users don't have Salesforce licenses. Visibility is enforced at the portal layer based on the `Sundial_User__c.Parent_User__c` chain when constructing SOQL queries.
+**Important:** Salesforce native role hierarchy is NOT used to drive Sundial user visibility because Harmon users don't have Salesforce licenses. Visibility is enforced in the Lambda layer from the verified Supabase JWT (~~based on the `Sundial_User__c.Parent_User__c` chain~~ — **superseded by D-064**: the filter is an id equality on `Sales_Rep__c` / `Dealer__c`, applied before any caller filter). Every portal session reaches Salesforce through ONE integration user, so Salesforce profiles, roles and sharing rules can do nothing per user.
 
 ---
 
@@ -521,5 +556,7 @@ These are still pending:
 - **Material/inventory tracking depth.** Per-truck inventory is out of scope per Tim's prior decision. Per-job material usage will be tracked. Confirm exact data model during service module build.
 - **Custom PO field name and content.** Awaiting finance discovery answer.
 - **Acumatica template IDs and required field maps.** Awaiting finance discovery.
-- **Hierarchy_Level__c picklist for non-Harmon clients.** Currently lists Client, Dealer, Sales Manager, Sales Rep — sufficient for Harmon. May need to expand for future tenants.
+- ~~**Hierarchy_Level__c picklist for non-Harmon clients.**~~ **RESOLVED/OBSOLETE (D-064):** the
+  field is derived and unread; `Access_Level__c` is what a new tenant configures. The live
+  picklist is Client, Dealer, Manager, Sales Rep, Sales Manager, Technician.
 - **Aurora Solar data references.** Out of Phase 1 scope; revisit when Aurora integration is in scope.

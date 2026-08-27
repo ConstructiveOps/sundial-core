@@ -2493,3 +2493,65 @@ it, and the source cannot create it.
 
 The general rule, worth carrying to any future build step: **if a build tool prints
 something a person is expected to notice, that thing should be an assertion instead.**
+
+---
+
+## D-064: Sales-rep and dealer access model (row + field security in the Lambda layer and RLS)
+
+**Date:** 2026-08-26 · **Status:** **Proposed**
+**Supersedes:** enforcement scope of D-043; the TEMP restrict (TASKS "Sales Rep visibility", shipped 2026-08-03); harmon-crm D-048
+**Refines:** D-015 (dealer modeled as an object, not a `Parent_User__c` tree), D-035 (rowFilter composes like tenant scope), D-056 (scope materialized into server-owned `profiles` columns; no client update grant)
+**Full design:** [`docs/access-model.md`](docs/access-model.md) — this entry is the ADR; the document is the spec.
+
+**Context.** One Salesforce integration user serves every portal session, so Salesforce profiles, roles and sharing rules are inert per user. The only server-side access control is tenant scope plus a TEMP guard that name-matches one hardcoded rep on two objects, bypasses the cache, keys on a field D-043 reserved for something else, and defaults **open**. Manage Users stamps that key on every new user. Field visibility is a client-side rail-id list that has leaked twice. Harmon is onboarding outside dealers, each with reps and a manager.
+
+**Decision.**
+
+1. Role comes from `Access_Level__c` alone and resolves to a scope: `tenant` / `dealer` / `own` / `none`; unknown is `none`.
+2. Dealers are `Sundial_Dealer__c` rows; users and deals carry `Dealer__c`; reps are `Sales_Rep__c`. The server stamps and maintains both on deals; sales roles can never write them.
+3. `lib/access.js` is the single authority; every read/write/action Lambda calls it. Row filters are id equalities on cached, indexed columns and are applied before any caller filter.
+4. Field visibility is a per-role column in the field-design workbooks, generated into a server manifest and the client layout by one script in sundial-core; the server selects only visible fields and returns the editable set; the client renders what it is given.
+5. Roofing, Service, Commercial, PO and all action endpoints are denied to sales roles. Customer files are read/upload only on visible records; Solar files are denied.
+6. Browser-direct tables get RLS built on `security definer` helpers over server-owned scope columns on `profiles` and the rep/dealer columns on the cache tables; cache tables are RLS-denied to clients.
+7. Cutover runs shadow → enforce-with-overlap → remove, gated by a scripted per-user diff that must show no widening for the live rep.
+
+**Consequences.** Two new SF fields per deal object, one new object, five cache columns, a backfill, a manifest loader that fails cold start on a bad manifest, cross-repo generation with a version check, and `Hierarchy_Level__c` / `Roles__c` / `Parent_User__c` retired from code. Deals with a blank sales company remain invisible to dealers until attributed — by design. The client keeps no authorization tables. Adding a role is a sheet column plus one row in the scope table.
+
+**Alternatives rejected.** `Parent_User__c` tree walk (D-015) · name-string filtering (the current jank) · Salesforce sharing (inert under one integration user) · client-side field hiding (the current jank) · a `record_access` join table maintained by sync (more state to keep consistent than two columns; revisit if per-record sharing overrides are ever needed).
+
+### Phase 0 findings that amend the design before it is built (2026-08-27)
+
+Phase 0 was discovery and hardening only — no behaviour changed for any user. Four things it measured contradict assumptions the design was written on, and are recorded here because they change Phase 1's work, not just its documentation:
+
+1. **`Sales_Representative__c` is a PICKLIST**, not the REFERENCE the solar sheet claims nor the plain string `sf-query/test.js` assumes. Not a lookup, so it can never be filtered by id — name-resolution is the only backfill route. Same for `Sunbase_Sales_Rep__c`. (§2.4a)
+2. **The two dealer picklists do not match.** Customer `Dealer_Name__c` has 110 active values, Solar `Sales_Company_Harmon_Solar_or_Third__c` has 56, and only 36 match exactly — with near-misses (`ReFract Solar`/`Refract Solar`, `Sky's the Limit Solar`/`Skys the Limit Solar`) that an exact join drops silently. **`Sales_Company_Value__c` therefore cannot be one unique string per dealer**; `Sundial_Dealer__c` needs a value per object or an alias child, and the backfill needs the normalize-and-match step the vendor map already uses (D-060).
+3. **`Harmon Solar` is not a value on Customer `Dealer_Name__c` at all**, and that field is populated on 13 of 31,637 customers. Deriving a customer's dealer from it would leave essentially every customer with a null `Dealer__c` and therefore invisible to dealer scope. The workable derivation is `Sales_Rep__r.Dealer__c`, with the deal's own `Dealer__c` as the exception path.
+4. **The §7.2 cutover gate already passes for the live restricted user, before any backfill.** For Dennis Alessandro the legacy name match and the `Sales_Rep__c` id match return **identical id sets** — 3,534 on Customer, 777 on Solar, `onlyInOld` and `onlyInNew` both zero. The Phase 1 deal-ownership backfill has no work to do for him, and Phase 3's enforce step cannot change what he sees.
+
+Two further facts about the *current* system, measured by `scripts/verify-access-matrix.mjs` against ZZ TEST users:
+
+- The TEMP guard filters on a hardcoded rep **name**, so **any** user carrying `Hierarchy_Level__c = "Sales Rep"` is served Dennis's book of business — not their own records, which 404.
+- A `Technician` sees **everything** (all 31,638 customers, all solar, roofing, PO, and Solar files), because their hierarchy value does not match the guard and the guard's default is "no match → unrestricted". §1.2's note that this default is inverted, made concrete.
+
+---
+
+## Numbering note (2026-08-27): D-045…D-050 collide across the two repos, and D-049 collides inside this one
+
+**Across repos.** `D-045` through `D-050` name **six entirely different decisions** in sundial-core and in harmon-crm. They were assigned independently after the 2026-07-21 split, before the provenance note's "coordinate before reusing a number" rule had teeth:
+
+| # | sundial-core (backend) | harmon-crm (product/frontend) |
+|---|---|---|
+| D-045 | Salesforce describe cache gets a TTL | Frontend user-admin pattern, must-change-password gate |
+| D-046 | Auth email via Supabase Custom SMTP (SES) | Harmon feedback batch — persistent notes/comments |
+| D-047 | Aurora Design Request runs on the Customer module | Create Project — config-driven field map |
+| D-048 | Aurora inbound is doorbell + queue + worker | TEMP client-side role tab hiding |
+| D-049 | Dealer-originated Aurora deals auto-create the Customer | Customer config generated from the field-design sheet |
+| D-050 | List page size capped at 5000 on the cache path | "Send to Aurora" submits behind a confirm |
+
+**A bare "D-047" is therefore ambiguous and must always be qualified with its repo.** Note that access-model.md §11 (D-064) cites *harmon-crm's* D-048 as superseded, not this repo's.
+
+**Inside this repo.** `D-049` is additionally used **twice** here: "Budget push triggered by a direct portal API call (relay/SQS dropped from this path)" and "Dealer-originated Aurora deals auto-create the Customer on `signed`". Deliberately **not renumbered** — inbound references in PROGRESS, TASKS and the integration docs would silently point at the wrong decision, which is worse than a duplicate that is documented. Cite this one by title, not by number.
+
+Neither collision is being repaired retroactively. New backend decisions continue from the highest number in **this** file (D-064 as of today), and the coordination rule in the provenance note above stands.
+
+---

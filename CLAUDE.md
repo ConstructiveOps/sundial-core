@@ -419,6 +419,48 @@ designated record when the need arises — note that `Sundial_Budget_Recalc_Trig
 on `Sundial_Solar__c` writes and publishes a recalc platform event, which
 `Sundial_Customer__c` does not.
 
+### ⚠️ Access testing uses the designated test USERS — never a live user
+
+**Never log in as, re-level, or reassign the records of a real user to test what they
+can see.** Access-model work needs designated test users for the same reason save
+testing needs a designated test record, and the reason is sharper one level up.
+
+| | |
+|---|---|
+| **Users** | 10 ZZ TEST accounts, `tim+zz-*@constructiveoperations.com` (Supabase auth + `Sundial_User__c`) |
+| **Passwords** | Secrets Manager **`sundial/test-users`** — never in a file, never in a commit |
+| **Seed / reset** | `node scripts/seed-access-test-fixtures.mjs --apply` (idempotent, canary-first) |
+| **Records** | `ZZ PORTAL TEST 2` · `ZZ PORTAL TEST B` · `ZZ PORTAL TEST HARMON` + a Solar twin each, `ZZ PORTAL TEST ROOFING`, and the existing designated record stamped to `zz-rep-a1` |
+| **Matrix** | `node scripts/verify-access-matrix.mjs` — every test user × every read surface |
+
+**Why a live user is worse here than a live record.** Harmon has exactly **one**
+restricted user, Dennis Alessandro, and he is a working salesperson with 3,534
+customers. Testing visibility against him means one of three things, all bad:
+
+1. **Logging in as him** — you need his password, so either it gets shared or it gets
+   reset out from under him mid-workday. His session is his livelihood.
+2. **Re-levelling him** — changing `Access_Level__c` or `Hierarchy_Level__c` to see
+   what a different role sees changes *his* access while he is using the portal, and
+   the wrong value either blinds him or shows him the whole tenant.
+3. **Reassigning his records** — moving `Sales_Rep__c` to observe the filter changes
+   who owns real deals, and Salesforce keeps no undo for that.
+
+A test record can be re-seeded. **A person's live access cannot be un-broken while
+they are mid-sale**, and the failure is silent from your side and immediate from
+theirs.
+
+There is a second reason, the same one the test-record rule rests on: a fixture must
+be able to **fail loudly**. The ZZ users span every access level, both dealer sides,
+a null dealer and an inactive one, so a scope bug shows up as one user seeing the
+wrong set. One live rep can only ever demonstrate one path, and the paths that matter
+most — dealer scope, `none` scope, cross-dealer denial — have no live user at all.
+
+**Never substitute a real account to fill a gap in the fixtures.** If a fixture is
+missing, add it to the seed script. `scripts/verify-access-matrix.mjs` and
+`scripts/probe-cache-reachability.mjs` both take credentials only from
+`sundial/test-users` by design.
+
+
 ### ⚠️ Bulk data fixes: canary first, and mind the recalc Flow
 
 **Any script that writes more than a handful of Salesforce records must write ONE record

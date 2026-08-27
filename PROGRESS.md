@@ -1,5 +1,266 @@
 # Sundial — Progress Log
 
+## 2026-08-27 — Access model Phase 0: discovery, and one real fix
+
+Phase 0 of D-064 (`docs/access-model.md` §8). Discovery and hardening only, on
+`feature/access-model-p0` in both repos. **Nothing deployed.**
+
+### Nothing changed for Dennis, and here is the evidence
+
+Phase 0 was constrained to not widen or narrow what the one live restricted user can
+see. It did not, and the claim is measured rather than asserted:
+
+- **No code on his path was touched.** `sundial-sf-query`, `repRestrictFor`, the four
+  guarded call sites, and `sundial-list-files`'s Solar 403 are byte-for-byte
+  unchanged. The only Lambda edited is `sundial-user-admin`, which he never calls —
+  and it is not deployed.
+- **No existing user record was modified.** The audit script is read-only by design,
+  and the seed script writes only to `ZZ`-prefixed records and `tim+zz-*` users.
+- **His visible set is identical under both the old and new rules.** For Dennis the
+  legacy name match and the `Sales_Rep__c` id match return the *same id sets* —
+  Customer 3,534 vs 3,534, Solar 777 vs 777, with `onlyInOld` and `onlyInNew` both
+  zero. The comparison is on id sets, not counts: two disjoint sets of 3,534 rows
+  would pass a count check and lose him every record he has. So §7.2's cutover gate
+  already passes before any backfill exists, and Phase 3's enforce step cannot move
+  him.
+
+### The one real fix: `user-admin` stamped every user as a Sales Rep
+
+`DEFAULT_HIERARCHY_LEVEL = "Sales Rep"` was written to **every** user Manage Users
+created, whatever access level the admin picked. The TEMP guard restricts any caller
+carrying exactly that string to one hardcoded rep's records — so a user created
+through the portal and not hand-corrected in Salesforce afterwards was served
+Dennis's book of business instead of their own view. A **narrowing**, not a leak,
+which is why it surfaced as "why can't this person see anything" rather than as an
+incident.
+
+Now derived from `Access_Level__c`, on create and on `accessLevel` PATCH alike — the
+PATCH half matters because without it, moving someone off Sales Rep would leave the
+old value behind and the guard would keep restricting them. Create also now refuses
+`Super_Admin__c` together with a sales access level: a record-scoped user who can
+provision users is an account that can escape its own scope.
+
+**Both doors are now shut (added after the diff review).** The create-side refusal was
+always the less important half — this endpoint never writes `Super_Admin__c`, so a
+create request asking for it was only ever a misunderstanding. The path that could
+genuinely produce the combination is the other one: take an existing Salesforce-set
+super admin and PATCH their access level *down* to a sales role, two individually
+sane edits arriving at a row-scoped account that can manage users. `handleUpdate` now
+refuses that with the same `SUPER_ADMIN_WITH_SALES_ROLE` code, reading
+`Super_Admin__c` from the record rather than from request input — which meant adding
+the field to the PATCH ownership SOQL, since that query selected only `Id` and
+`Supabase_User_Id__c`. (It is selected in the *list* query; that is what made it look
+already available.) The earlier comment calling this a deliberate Phase 0 scope
+decision is gone, because it no longer is one.
+
+**Tests: 7 → 23 for this Lambda, suite 503 → 519 green.** The 16 new ones live in
+`lambdas/sundial-user-admin/handler.test.js` rather than in `test.js`: the existing
+file tests `deriveHierarchyLevel` as a pure function over constants and needs no
+mocks, while these drive the real handler through the router with `mock.module` stubs
+over Salesforce and Supabase, the same pattern as `sundial-comment-notify/test.js`.
+Salesforce writes are *recorded*, not swallowed, because every assertion is about the
+exact field map that reaches Salesforce.
+
+They cover what reading the code could only assert: that an `accessLevel` PATCH writes
+both fields in one patch, that a PATCH without `accessLevel` leaves
+`Hierarchy_Level__c` alone, that all four spellings of the super-admin key are caught
+on create, that a non-sales role still succeeds *without* `Super_Admin__c` being
+written, and the new PATCH refusal.
+
+Checked they aren't vacuous by mutation: removing the PATCH re-derive fails 5 tests;
+neutering the PATCH refusal fails 1; dropping `Super_Admin__c` from the ownership SOQL
+fails 1 — that last one only because a test asserts on the SOQL string directly, since
+the mock returns the field whether or not the query asked for it. Without that
+assertion the field could have been dropped and every refusal test would still pass.
+
+**Still not deployed.**
+
+The audit (`docs/access-model-phase0-user-audit.md`, 24 active users) says the blast
+radius was small: exactly **one** user is wrongly restricted today, and it is a test
+account. Thirteen more differ from the derived value but only cosmetically.
+
+### Describing the org first is what made the work correct
+
+Three things the design was written on turned out not to be true, and each would have
+failed at a different depth:
+
+- **`Hierarchy_Level__c` had no "Sales Manager" value.** It is a RESTRICTED picklist,
+  so the specified `Sales Dealer → Sales Manager` mapping would have failed *every*
+  Sales Dealer create with `INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST` — loudly, but
+  only at the first real create. Tim added the value (and `Technician`) the same day.
+  A unit test now asserts every access level derives to something the live picklist
+  accepts, so a future picklist edit fails in CI instead.
+- **`Sales_Representative__c` is a PICKLIST** — not the REFERENCE the solar sheet
+  claims, nor the plain string `sf-query/test.js` assumes. §2.4 asked Phase 0 to
+  settle which; the answer was a third thing. It is not a lookup, so it can never be
+  filtered by id and name-resolution is the only backfill route.
+- **The two dealer picklists do not match.** 110 values on Customer `Dealer_Name__c`,
+  56 on Solar `Sales_Company_Harmon_Solar_or_Third__c`, only **36** exact matches, and
+  near-misses (`ReFract Solar`/`Refract Solar`) that an exact join drops silently.
+  `Sales_Company_Value__c` cannot be one unique string per dealer. `Harmon Solar` is
+  not even a value on the Customer field, which is populated on **13 of 31,637** rows
+  — so deriving a customer's dealer from it would leave essentially every customer
+  invisible to dealer scope. Both are Phase 1 design changes, recorded not built.
+
+### What the current system actually does, measured
+
+`scripts/verify-access-matrix.mjs` logs in as ten ZZ TEST users and hits twelve read
+surfaces. Two results are worth stating plainly:
+
+- **A brand-new Sales Rep sees Dennis's records.** The guard filters on a hardcoded
+  rep *name*, so any user with the matching hierarchy value gets his 3,534 customers
+  and 777 solar projects, while their own assigned record 404s.
+- **A Technician sees everything** — all 31,638 customers, all solar, roofing, PO and
+  Solar files. Their hierarchy value doesn't match the guard, and the guard's default
+  is "no match → unrestricted". §1.2's note that the default is inverted, in practice.
+
+Neither is new, and neither is made worse here. They are now demonstrable on demand
+instead of inferred from reading the guard.
+
+### Supabase: the cache tables are reachable, and RLS is all that stops them
+
+`scripts/probe-cache-reachability.mjs` found all five `sundial_*_cache` tables plus
+`profiles`, `comments`, `comment_mentions` and `user_preferences` answering **200
+with zero rows** to the publishable key. 200 is the finding: a missing grant answers
+401 and a missing route 404, so PostgREST **routes these tables and a SELECT grant
+exists**. RLS is the only thing returning empty. That makes Phase 6's `revoke`
+load-bearing rather than belt-and-braces.
+
+The probe takes a service-role row count first and folds it into each verdict,
+because 200-with-zero-rows is ambiguous on its own — it reads identically for "RLS
+denied everything" and "the table is empty". `sundial_customer_cache` holds 31,637
+rows and returned none, which is a denial; `sundial_po_cache` holds 0, which proves
+nothing. Without the baseline, an empty table with a real hole would have read as
+safe.
+
+### Test fixtures, and a rule to go with them
+
+Ten ZZ TEST users now exist (Supabase auth + `Sundial_User__c`), with passwords in
+Secrets Manager `sundial/test-users`, plus three new ZZ customers, four Solar twins
+and a ZZ Roofing record. The seeder is idempotent and canary-first — and the canary
+fired on the first run, which was worth having even though the cause was my own bug
+(the re-read SOQL didn't select a field it was comparing). A canary that cries wolf
+gets disabled, so the select list is now derived from the fields being written.
+
+Both CLAUDE.md files gain the matching rule: **never log in as, re-level, or reassign
+the records of a real user to test visibility.** Harmon has exactly one restricted
+user and he is a working salesperson; a test record can be re-seeded, a person's live
+access cannot be un-broken while they are mid-sale. harmon-crm did not carry the
+existing test-*record* rule at all, so that was ported across too and both repos now
+hold the same pair.
+
+### The snapshot ran, and it corrected the thing §5.1 assumed
+
+`sql/live-snapshot-2026-08-27.sql` now exists — all twelve blocks of
+`sql/snapshot-supabase.sql` executed through the read-only Supabase MCP server
+(`supabase_read_only_user`, project `qfsdpkwxahakegjnyijj`, PG 17.6). Read-only
+throughout; nothing was created, altered, dropped or written.
+
+§5.1 assumed one helper, `current_user_tenant_id()`, reading `profiles`. There are **two**,
+and they read different tables:
+
+| helper | reads | used by |
+|---|---|---|
+| `current_user_tenant()` | `public.profiles` | `comments`, `comment_mentions` |
+| `current_user_tenant_id()` | `public.portal_users` | **all six** `sundial_*_cache` tables |
+
+`public.portal_users` exists and holds **zero rows**. So `current_user_tenant_id()` returns
+NULL for every session, `tenant_id = NULL` is NULL, and the cache tables deny everything —
+**by accident, not by design.**
+
+Two more accidents sit behind it. The grants were never narrowed: `anon` and `authenticated`
+hold `arwdDxtm` — the full set, INSERT/UPDATE/DELETE included — on all six cache tables. And
+`profiles.tenant_id` holds the tenant record id (`a1W7y000007AszBEAS`) while the cache tables'
+`tenant_id` holds the slug (`harmon`), so even repointing the helper at `profiles` would
+compare an id to a slug and still deny.
+
+Three independent accidents, all failing closed, none written down. Populating `portal_users`
+or "fixing" the helper — either one reads as an obvious correctness fix — opens 31,640
+customer rows and 4,481 solar rows to any authenticated session with no per-rep scoping.
+**The §3.3 revoke should move into Phase 1.** Nothing reads these tables from a browser
+today, so it costs nothing (below).
+
+Block 6 of the query set is **defective and was not silently patched**:
+`information_schema.role_table_grants` only shows grants involving a role the querying user
+belongs to, and the MCP user belongs to none of the three, so it returns zero rows whether or
+not anything is granted. The real grants were re-read through `pg_class.relacl` and recorded
+in the snapshot's appendix. Fix the block before the next snapshot, or Phase 6 will "verify"
+its revoke against a query that passes either way. Editing `snapshot-supabase.sql` is a
+Phase 6 review decision, not a side effect of running it once.
+
+### A Sales Rep reads every comment in the tenant
+
+The authenticated half of `probe-cache-reachability.mjs` ran for the first time, as
+`tim+zz-rep-a1` (ZZ TEST user, password from Secrets Manager `sundial/test-users`, never
+written to a file). Full table in `docs/access-model.md` §5.1a. The finding:
+
+- `comments` — **485 of 485 returned. Zero authored by this rep**, 10 distinct authors,
+  threads on `solar` and `customer` records the rep cannot open in the portal.
+- `comment_mentions` — **14 of 14 returned, none of them mentioning this rep**, 8 distinct
+  `mentioned_user_id`.
+- `profiles` — 1 of 35, own row only. Correct.
+- Every cache table — 0 rows, for the accidental reason above.
+
+No cross-**tenant** row appeared anywhere, but Harmon is the only tenant in the project, so
+that proves the filter isn't inverted and nothing more. The cross-**user** leak is real and is
+exactly what §5.3 closes.
+
+### Nobody reads the cache tables from a browser
+
+Grepped both repos for any cache-table read from the browser or a non-service-role client.
+**Zero hits.** Every occurrence, with file:line:
+
+Prose only, in `harmon-crm/src` — neither is code:
+- `src/config/customer-status-columns.ts:11` — `/** Cache column name on sundial_customer_cache. */`
+- `src/pages/RoofingProjectsPage.tsx:7` — `// NOTE: list/board read from the roofing cache (sundial_roofing_cache) via the …`
+
+The one browser Supabase client is `src/lib/supabase.ts:19` (anon key; `createClient` is
+called nowhere else, by comment and in fact). Its eight importers touch exactly three tables,
+none of them a cache table:
+- `src/components/comments/CommentThread.tsx:129,255,309` — `comments`
+- `src/components/comments/CommentThread.tsx:292` — `comment_mentions`
+- `src/components/comments/MentionsFeed.tsx:79,105` — `comment_mentions`
+- `src/components/comments/MentionsFeed.tsx:122` — `comments`
+- `src/contexts/UserPreferencesContext.tsx:200,267` — `.from(TABLE)`, and
+  `UserPreferencesContext.tsx:85` pins `const TABLE = 'user_preferences'`
+- `src/lib/api.ts:11`, `src/contexts/AuthContext.tsx:21`, `src/pages/LoginPage.tsx:13`,
+  `src/pages/ResetPasswordPage.tsx:31`, `src/components/settings/ChangePasswordModal.tsx:20`
+  — import it for the session JWT / auth calls, no `.from()` at all
+
+Backend (`sundial-core/lambdas`, `sundial-core/lib`) is service-role only. `lib/supabase.js`
+reads `sundial/supabase/service-role` and says so in its header; the four raw-PostgREST call
+sites all send `apikey: cfg.serviceRoleKey`:
+- `lambdas/sundial-cache-sync/index.js:150`
+- `lambdas/sundial-sf-query/index.js:437`
+- `lambdas/sundial-welcome-call/writeback.js:134`
+- `lib/realtime.js:70`
+
+The cache-table names appear in these backend files as the `cacheTable` registry and in
+tests — all behind the service role: `sundial-cache-sync/index.js:53,56,58,59,60`,
+`sundial-sf-query/index.js:39,42,44,45,46`, `sundial-sf-update/index.js:45,48,50,51,52`,
+`sundial-comment-notify/notify.js:39,41,45`, `sundial-welcome-call/writeback.js:24`, plus
+test fixtures in the matching `test.js` files. No anon or publishable key exists anywhere in
+`lambdas/` or `lib/`.
+
+So the revoke is a no-op for the portal, which is what makes pulling it into Phase 1 cheap.
+
+### Open, and deliberately not closed here
+
+- **Block 6 of `sql/snapshot-supabase.sql` is wrong** (above). Left unedited on purpose —
+  the file's contract is that its blocks stay stable so snapshots diff cleanly.
+- **`Super_Admin__c` on `tim+zz-admin`** needs ticking by hand (D-043: Salesforce-set
+  only). The derived-hierarchy assertion in `verify-provisioning-e2e.mjs` SKIPs with
+  that exact instruction until then, rather than failing — an un-ticked box is a setup
+  step, not a regression.
+- **Unrelated drift on the designated test record.** `a1P7y00000AmyXCEAZ` carries
+  `Battery_Qty__c = 4` where the seed script sets `1`, inflating `Total_Adder_Price__c`
+  to 46,237.50 against the documented 16,387.50 baseline. (4−1) × 9,950 = 29,850,
+  exactly the delta. **Not caused by Phase 0**: both formulas reference only the
+  Customer's own fields — zero cross-object references, checked — and Phase 0 wrote
+  only `Sales_Rep__c` and `Linked_Solar_Project__c` to that record. Left alone rather
+  than reset, in case it is mid-test; `create-portal-test-record.mjs --apply` fixes it.
+
+
 ## 2026-08-26 — Domestic Content projects were all built from the wrong template
 
 Every Acumatica project Layer-1 ever created was scaffolded **RS**. The template was

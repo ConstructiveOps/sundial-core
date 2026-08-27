@@ -506,6 +506,98 @@ Runbook: `docs/integrations/retell-welcome-call.md`. **No portal UI** — do not
 
 ## Sales Rep visibility (proper feature — replaces the TEMP guard below)
 
+### The real feature: phased plan (D-064, `docs/access-model.md` §8)
+
+Design approved 2026-08-26. Server first in every phase; the client change of a phase
+lands only after its server change is verified in prod. Branch per repo per phase:
+`feature/access-model-pN`.
+
+- [x] **Phase 0 — Discovery and hardening (2026-08-27).** No behaviour change for any
+      user, verified. Branch `feature/access-model-p0`.
+  - [x] `sql/snapshot-supabase.sql` — committed, re-runnable catalog introspection
+        (DDL, policies, grants, definer functions, PostgREST schemas, triggers).
+  - [x] **`sql/live-snapshot-2026-08-27.sql` — PRODUCED (2026-08-27).** All twelve
+        blocks run through the read-only Supabase MCP server. It **corrects** §5.1:
+        there are TWO tenant helpers, not one — `current_user_tenant()` reads
+        `profiles` (comments/mentions) and `current_user_tenant_id()` reads
+        `public.portal_users` (all six cache tables), **which holds zero rows**. The
+        cache tables deny by accident, not design.
+  - [!] **Block 6 of `sql/snapshot-supabase.sql` is defective** —
+        `information_schema.role_table_grants` is member-filtered and returns zero
+        rows for the MCP user regardless of the real grants. Re-read via
+        `pg_class.relacl`: **anon and authenticated hold `arwdDxtm` (full privileges,
+        writes included) on all six cache tables.** Rewrite the block before the next
+        snapshot or Phase 6 verifies its revoke against a query that passes either way.
+  - [!] **Pull the §3.3 cache-table `revoke` + policy drop forward into Phase 1.**
+        Three independent accidents currently fail closed (empty `portal_users`;
+        never-narrowed grants; `profiles.tenant_id` = record id vs cache `tenant_id` =
+        slug). Populating `portal_users` or repointing the helper at `profiles` —
+        either reads as an obvious bug fix — exposes 31,640 customer + 4,481 solar rows
+        to any authenticated session with no per-rep scoping. Verified free of cost:
+        nothing reads a cache table from a browser (§5.1c).
+  - [x] `scripts/probe-cache-reachability.mjs` — **both halves done.** anon
+        (2026-08-26): all five `sundial_*_cache` tables ROUTABLE (200, grant exists),
+        zero rows. authenticated (2026-08-27, `tim+zz-rep-a1`): cache tables 0 rows,
+        but **`comments` returned 485 of 485 with none authored by the rep** and
+        **`comment_mentions` 14 of 14 with none mentioning them** — a cross-user leak
+        within the tenant, which is what §5.3 closes. No cross-tenant row anywhere
+        (weak result: Harmon is the only tenant). Recorded in `docs/access-model.md`
+        §5.1a.
+  - [x] `scripts/describe-access-fields.mjs` + `docs/access-model.md` §2.4a — field
+        types, lookup targets, populated/blank counts, dealer picklist comparison,
+        and the Dennis backfill gate measured as SET equality.
+  - [x] **`user-admin` fixed** — `Hierarchy_Level__c` derived from `Access_Level__c`
+        on create AND on `accessLevel` PATCH; super-admin-with-sales-role refused.
+        7 unit tests. **NOT DEPLOYED** — awaiting diff review.
+  - [x] `docs/access-model-phase0-user-audit.md` — all 24 active users. Exactly **one**
+        is wrongly restricted today (`Temp Passtwo`, a test account).
+  - [x] `scripts/seed-access-test-fixtures.mjs` — applied. 10 ZZ TEST users +
+        passwords in Secrets Manager `sundial/test-users`, 3 new ZZ customers, 4 Solar
+        twins, 1 ZZ Roofing. Idempotent, canary-first, ZZ-prefix guarded.
+  - [x] `scripts/verify-access-matrix.mjs` — runs green, 12 surfaces × 10 users, all
+        new-model expectations `pending`.
+  - [x] D-064 + the D-045…D-050 numbering note appended to `DECISIONS.md`.
+  - [ ] **TIM: tick `Super_Admin__c`** on `tim+zz-admin@constructiveoperations.com` in
+        Salesforce (D-043: Salesforce-set only). Unblocks the derived-hierarchy
+        assertion in `verify-provisioning-e2e.mjs`, which SKIPs until then.
+  - [ ] **TIM: review + deploy `sundial-user-admin`.**
+  - [ ] **Unrelated pre-existing drift found:** the designated portal test record
+        `a1P7y00000AmyXCEAZ` has `Battery_Qty__c = 4` where the seed script sets `1`,
+        inflating `Total_Adder_Price__c` to 46,237.50 (baseline 16,387.50) and
+        `Commission_Total__c` to −26,015.50. (4−1) × 9,950 = 29,850, exactly the
+        delta. Not caused by Phase 0 — the formulas have zero cross-object refs and
+        Phase 0 wrote only `Sales_Rep__c` / `Linked_Solar_Project__c` to it. Fix is
+        `node scripts/create-portal-test-record.mjs --apply` when convenient.
+
+- [ ] **Phase 1 — Data model and cache.** `Sundial_Dealer__c` + `Dealer__c` lookups
+      (`salesforce/v6-access-model/`), backfill scripts (canary-first, report-only by
+      default), `sql/sundial_access_cache_columns.sql` + full resync, `lib/access.js`
+      with unit tests, `access` block on `/auth/me`.
+  - [ ] **AMENDED BY PHASE 0:** `Sales_Company_Value__c` cannot be one unique string —
+        the two dealer picklists share only 36 of 110/56 values and carry near-miss
+        spellings. Needs a value-per-object or an alias child, plus normalize-and-match.
+  - [ ] **AMENDED BY PHASE 0:** derive a customer's dealer from `Sales_Rep__r.Dealer__c`,
+        not from `Dealer_Name__c` (populated on 13 of 31,637 rows).
+  - [ ] Stamp `Dealer__c` on the ZZ TEST users — `seed-access-test-fixtures.mjs`
+        carries the intended dealer per user and has a TODO where it goes.
+- [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
+      of logs with zero `onlyInNew` for Dennis; every other user reconciled and
+      re-levelled before the flip.
+- [ ] **Phase 3 — Enforce reads, retire TEMP.** Enforce-with-overlap, then TEMP removal
+      as two separate deploys. Gate: matrix passes; Dennis's counts unchanged.
+- [ ] **Phase 4 — Field manifest, writes, client cutover.** Sheets move to
+      sundial-core, `generate-field-configs.mjs`, manifest loader, `?full=true`
+      projection, `sf-update` row+field+protected rules, delete
+      `temp-role-tab-visibility.ts`.
+- [ ] **Phase 5 — Actions and files.** `canAction` in budget / acumatica-push /
+      aurora-push / all four file Lambdas; `assertVisibleRecord` on customer files.
+- [ ] **Phase 6 — Supabase RLS.** `sql/sundial_access_rls.sql`: definer helpers,
+      comments/mentions policies, cache-table RLS deny **and revoke** (Phase 0 proved
+      the grant is live).
+- [ ] **Phase 7 — Cleanup and docs.** `profiles.role` dropped from the upsert;
+      `Hierarchy_Level__c` deprecated; `Roles__c` documented unused; api-endpoints and
+      caching-architecture corrected.
+
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:
   - `sundial-sf-query`: `customer`/`solar` list + single + `?full=true` reads are filtered to `Sunbase_Sales_Rep__c`/`Sales_Representative__c` = `Dennis Alessandro`. **Rep reads BYPASS the cache and go live to Salesforce** (the authoritative field isn't cached; `sales_rep_name` is a different formula field). **Known jank:** SOQL `OFFSET` caps at 2000, so on the customer list a rep can page the first ~2000 of Dennis's 3,511 (SAFE — never another rep's records — but incomplete on deep pages). **Roofing NOT gated** (no rep field in scope; ~1 record; revisit with the real feature).

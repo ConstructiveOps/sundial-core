@@ -1,15 +1,52 @@
 # Sundial Access Model — sales reps and dealers
 
-**Status:** DESIGN (2026-08-26). Nothing in this document is built. Companion ADR: D-064 (§11, to be
-appended to `DECISIONS.md` when the first phase lands). Supersedes the enforcement sections of D-043
-and retires the TEMP restrict (`sundial-sf-query` "TEMP — Sales Rep hard-restrict", 2026-08-03) and the
-cosmetic tab hiding (harmon-crm D-048).
+**Status:** BUILDING. Phase 0 and **Phase 1 shipped 2026-08-27** on `feature/access-model-p1`
+(data model, backfills, cache columns, `lib/access.js`, the `access` block on `/auth/me`). All six
+Phase 1 gates pass — evidence table in §8. **Nothing any live user sees has changed**, measured
+twice. **Phase 1b (comments/mentions RLS) is next.** Nothing is enforced yet: `sundial-sf-query`
+still runs the TEMP guard untouched. Companion ADR: D-064 in
+`DECISIONS.md` (§11 here is its text). Supersedes the enforcement sections of D-043 and retires the
+TEMP restrict (`sundial-sf-query` "TEMP — Sales Rep hard-restrict", 2026-08-03) and the cosmetic tab
+hiding (harmon-crm D-048).
+
+**Six design amendments were decided on 2026-08-27**, after Phase 0 measured the org, and they change
+what §2 and §8 say. They are indexed under "Amendments" below and applied **in place** in the sections
+they touch, so no section is left contradicting them. The matching ADR text is the "Amended
+2026-08-27" block under D-064.
 
 **Why this document exists.** Every portal user reaches Salesforce through one integration user, so
 Salesforce profiles, roles, and sharing rules can do nothing per user. Row-level and field-level
 security must be decided in the Lambda layer from the verified Supabase JWT, and re-derived in
 Supabase RLS for the tables the browser touches directly. This document is the single description of
 how that decision is made, where it is enforced, and how each surface behaves for each role.
+
+---
+
+## Amendments — 2026-08-27 (Phase 1)
+
+Decided by Tim after the Phase 0 findings (§2.4a, §5.1a–c). Each is applied in place in the section
+named; this table is the index, not a second source of truth.
+
+| # | Amendment | Applied in |
+|---|---|---|
+| **A1** | **A deal's dealer is derived from its rep**, never from a sales-company picklist: `Dealer__c := Sales_Rep__r.Dealer__c`, stamped by the server on create and re-stamped on any `Sales_Rep__c` change. The picklists (Customer `Dealer_Name__c` / `Sales_Company__c`, Solar `Sales_Company_Harmon_Solar_or_Third__c`) stay the **commission discriminator only** and are not an ownership source. | §2.2, §2.3, §2.4 |
+| **A2** | **`Sundial_Dealer__c.Sales_Company_Value__c` is dropped.** Dealer-name aliasing lives in a reviewed CSV, `docs/integrations/dealer-aliases.csv` (`DealerName,Alias,Object,Note`), used **only** by the Solar-side backfill for deals that carry a dealer picklist value but no `Sales_Rep__c`. Exact matches auto-map; near-misses (case, punctuation, whitespace) are listed for Tim's approval and never auto-applied; unmatched stay null. | §2.1, §2.4 |
+| **A3** | **Dennis needs no rep backfill.** Phase 0 measured `Sales_Rep__c` as already equal to the legacy name match (3,534 Customer / 777 Solar, zero difference — §2.4a). The backfill still runs that comparison on every run and **aborts** if it is no longer true. | §2.4, §7 |
+| **A4** | **The cache-table `REVOKE` moves from Phase 6 to the first SQL of Phase 1.** | §3.3, §5.1b, §8 |
+| **A5** | **The comments/mentions RLS (§5.3) moves up to a new Phase 1b**, immediately after Phase 1, because Phase 0 showed a Sales Rep reads all 485 tenant comments today. | §5.3, §8 |
+| **A6** | Users mis-stamped `Hierarchy_Level__c = "Sales Rep"` by the old `user-admin` default are repaired by a one-shot script that re-PATCHes each one's **current** `accessLevel` through the live `/admin/users` endpoint as `tim+zz-admin`, so the server-side derivation runs. Report-only by default, `--apply` to run, canary-first, and it skips Dennis and any user whose `Access_Level__c` **is** `Sales Rep`. | §8 |
+
+**Why A1 is the load-bearing one.** §2.2 already *preferred* rep-derivation while §2.4 still specified
+the picklist as the source — the document disagreed with itself, and Phase 0 settled which half was
+right. Customer `Dealer_Name__c` is populated on **13 of 31,637** rows and does not contain "Harmon
+Solar" at all, so a picklist-derived `Dealer__c` would be null on essentially every customer — and
+null is invisible to every dealer-scope user. The rep lookup is populated on 14,124 customers and
+3,262 solar projects and is a real `Sundial_User__c` reference on **both** objects. One source, one
+direction, and no string matching anywhere on a read path.
+
+**A2 is what is left of the string matching, and it is deliberately quarantined.** It runs once, on
+one object, for records that have no rep to derive from, out of a CSV a human reviewed — not in a
+Lambda, not on a read, and never on a value it had to guess at.
 
 ---
 
@@ -111,14 +148,32 @@ have refused them — the client reflects, never decides.
 |---|---|---|
 | `Name` | Text | Display name ("High Desert Energy", "Harmon Solar") |
 | `Client__c` | Lookup → `Sundial_Tenant__c` | Tenant scoping, same as every Sundial object |
-| `Sales_Company_Value__c` | Text(255), unique per tenant | The exact `Sales_Company_Harmon_Solar_or_Third__c` picklist value this dealer corresponds to. Join key for backfill and for the commission-PO vendor map (`docs/integrations/dealer-vendor-map.csv`). |
 | `Is_Internal__c` | Checkbox | True for Harmon Solar. Informational; grants nothing. |
 | `Active__c` | Checkbox | Inactive dealer → its users resolve to scope `none`. |
 
-One row per value in `Sales_Company_Harmon_Solar_or_Third__c` that has ever appeared on a record (~55),
-`Active__c = true` only for the several dealers who get portal access plus Harmon Solar. Creating the
-rows is a one-time script; new dealers are added by a super admin (Manage Users grows a Dealers tab in
-a later phase; until then, Salesforce UI).
+Four fields, and `Name` is the only string anything matches on — once, in a backfill (§2.4).
+
+> **A2 (2026-08-27): `Sales_Company_Value__c` is dropped from this object.** It was specified as
+> "Text(255), unique per tenant — the exact picklist value this dealer corresponds to", and Phase 0
+> proved it cannot exist: the two dealer picklists carry **110** values (Customer `Dealer_Name__c`)
+> and **56** (Solar `Sales_Company_Harmon_Solar_or_Third__c`) with only **36** exact matches, plus
+> near-miss spellings (`ReFract Solar`/`Refract Solar`, `Sky's the Limit Solar`/`Skys the Limit
+> Solar`) that an exact join drops **silently** rather than failing on (§2.4a finding 3). A single
+> unique column would have had to pick one spelling and quietly lose the other.
+>
+> The successor is **not** a second column or an alias child object, because after A1 the dealer of a
+> deal comes from its rep and the picklist is not consulted at all on the ownership path. What is
+> left is one backfill's worth of name matching, and that lives in a reviewed CSV —
+> `docs/integrations/dealer-aliases.csv` — for the same reason `dealer-vendor-map.csv` does: the
+> aliases are judgement calls about which two strings are one organization, and a judgement call
+> belongs in a file a human diffed, not in normalization code that will one day be "improved".
+
+One row per distinct dealer picklist value seen on any record, across **both** picklists (so the
+Customer-only and Solar-only values each get a row). `Active__c = true` only for the dealers who get
+portal access — at launch **Harmon Solar**, **Heavenly Power**, **Property Upgrades LLC** (§12.4) —
+and every other row is created inactive. `Is_Internal__c` is set on Harmon Solar alone. Creating the
+rows is a one-time script (§2.4); new dealers are added by a super admin (Manage Users grows a Dealers
+tab in a later phase; until then, the Salesforce UI).
 
 Rejected alternatives: **`Parent_User__c` tree** (D-015's plan) — conflates reporting line with
 ownership, has no place to hang `Active__c`/vendor mapping, and a tree walk in SOQL/SQL is slower and
@@ -136,11 +191,33 @@ is what we are escaping; renaming a picklist value would silently re-scope users
 | `Sundial_Roofing__c`, `Sundial_Commercial__c`, Service | `Dealer__c` | Lookup | Added in the same package for consistency; these modules are hidden from sales roles entirely (§3.1), so the column is not load-bearing yet. |
 | Customer / Solar / Roofing | `Sales_Rep__c` | **existing** Lookup → `Sundial_User__c` | The rep attribution. No new field. |
 
-A rep belongs to exactly one dealer (one `Sundial_User__c` per dealer if a person sells for two). A
-deal's dealer is therefore normally `Sales_Rep__r.Dealer__c`; the explicit `Dealer__c` on the deal
-exists for the cases where that derivation fails — no rep yet (Aurora dealer-originated deals, D-049,
-arrive with a dealer name and no rep), or a rep record that was later deleted — and so the cache can
-carry one indexed column rather than a join.
+#### A1 — the deal's dealer comes from its rep, and from nothing else
+
+**`Dealer__c := Sales_Rep__r.Dealer__c`.** The server stamps it on create and **re-stamps it on any
+`Sales_Rep__c` change**, in the same write (§2.3). A rep belongs to exactly one dealer — a person who
+sells for two gets two `Sundial_User__c` records — so the derivation is total wherever a rep is set.
+
+The deal keeps its own `Dealer__c` column rather than being read through the join for two reasons,
+one of which is the whole point of the design: **the cache can carry one indexed column** instead of
+resolving a lookup per row, and **a deal with no rep still has somewhere to record a dealer** —
+Aurora dealer-originated deals (D-049) arrive with a dealer name and no rep at all.
+
+**The sales-company picklists are not an ownership source.** `Sundial_Customer__c.Dealer_Name__c`,
+`Sundial_Customer__c.Sales_Company__c` and `Sundial_Solar__c.Sales_Company_Harmon_Solar_or_Third__c`
+remain exactly what D19 made them — **the commission discriminator** — and nothing on a read path
+consults them. Three reasons this is not merely a preference:
+
+1. **They are not populated.** Customer `Dealer_Name__c`: 13 of 31,637 rows. Solar's sales company:
+   780 of 4,477. Derived ownership would be null almost everywhere, and null is invisible to every
+   dealer-scope user.
+2. **They disagree with each other.** 110 values against 56, 36 in common, with near-misses that an
+   exact join drops silently (§2.4a).
+3. **They are editable text-ish values with a different job.** A commission discriminator is allowed
+   to be re-spelled or re-scoped when the commission model changes; an ownership key is not. Tying
+   them together means a D19 edit silently re-shares records.
+
+The one place a picklist value still reaches `Dealer__c` is the **Solar-side backfill for records
+that have no rep** (§2.4, A2) — once, offline, out of a reviewed alias CSV, never in a Lambda.
 
 ### 2.3 Invariants the server maintains
 
@@ -149,17 +226,29 @@ carry one indexed column rather than a join.
    like `Client__c` today (harmon-crm D-047). A `Sales Dealer` may name any *active user in their own
    dealer* as `Sales_Rep__c`; default self.
 2. **Reassignment** (`PATCH … Sales_Rep__c`): allowed for `tenant` scope only. The server re-stamps
-   `Dealer__c := new rep's Dealer__c` in the same PATCH. Sharing follows the record immediately: the
-   old rep's next read 404s (their cache filter no longer matches once the write-through stale-flag
-   and re-read land — the existing D-035 write path).
+   `Dealer__c := new rep's Dealer__c` in the same PATCH — **A1, and this is the half that is easy to
+   forget.** Stamping on create alone would leave a reassigned deal pointing at the *old* rep's
+   dealer, i.e. shared with an organization that no longer sells it, and nothing would ever notice:
+   the record looks fine, the new rep can see it (their own `Sales_Rep__c` matches), and only the
+   losing dealer's manager sees something they should not. Sharing follows the record immediately:
+   the old rep's next read 404s (their cache filter no longer matches once the write-through
+   stale-flag and re-read land — the existing D-035 write path).
 3. **Departure**: super admin deactivates the user (`Active__c=false` + Supabase ban, D-044). The
    records keep `Sales_Rep__c` pointing at the inactive user, and `Dealer__c` is unchanged, so the
    dealer's manager still sees them. A person joining another dealer gets a new user; the old deals
    do not follow.
 4. **Create Project** (Customer → Solar) copies `Sales_Rep__c` and `Dealer__c` server-side, closing
    punchlist A5 by construction (`Sales_Representative__c` text is no longer what visibility keys on).
-5. `Dealer__c` never disagrees with `Sales_Rep__r.Dealer__c` when a rep is set. A nightly check in
-   `sundial-cache-sync` reconcile mode reports disagreements; it does not silently fix them.
+5. `Dealer__c` never disagrees with `Sales_Rep__r.Dealer__c` when a rep is set — that is A1 restated
+   as an invariant, and it is checkable. A nightly check in `sundial-cache-sync` reconcile mode
+   reports disagreements; it does not silently fix them. (Auto-fixing would hide whichever write path
+   is failing to re-stamp, which is the actual defect.)
+6. **A rep-less deal's `Dealer__c` is set once and then left alone.** Aurora dealer-originated deals
+   (D-049) and the Solar backfill's alias matches (§2.4) are the only writers. When such a deal later
+   gets a `Sales_Rep__c`, invariant 2 applies and the rep's dealer wins — the rep is the source, so a
+   disagreement is resolved in the rep's favour, not merged.
+7. **A sales-company picklist value is never read to decide visibility**, on any path, in any Lambda.
+   The only consumer stays the commission model (D19) and the PO vendor map (D-060).
 
 ### 2.4a Phase 0 describe results — the live org, 2026-08-27
 
@@ -231,10 +320,16 @@ Roofing Pros`. The first of those pairs also contains a typo that `docs/integrat
 already carries as a deliberate alias — see D-060's "aliased spellings are separate keys reaching the
 same vendor".)
 
-So `Sales_Company_Value__c` cannot be *one* unique string per dealer. `Sundial_Dealer__c` needs either
-two value columns (one per object) or a child alias table, and the backfill needs the normalize-and-
-match step the vendor map already uses. **This is a Phase 1 design change, not a Phase 0 fix** — it is
-recorded here and nothing is built on it yet.
+So `Sales_Company_Value__c` cannot be *one* unique string per dealer. **This is a Phase 1 design
+change, not a Phase 0 fix** — it was recorded here and nothing was built on it.
+
+> **RESOLVED by A1 + A2 (2026-08-27), and not the way this paragraph guessed.** The options weighed
+> here — "two value columns (one per object) or a child alias table" — both assume the picklist stays
+> the *source* of a deal's dealer. **A1 removes that assumption entirely:** the dealer comes from
+> `Sales_Rep__r.Dealer__c`, so no read path ever resolves a picklist string and neither extra column
+> nor alias child is needed. **A2 then drops `Sales_Company_Value__c` from the object** and puts the
+> residue — one backfill's worth of name matching, on Solar, for rep-less records only — in a reviewed
+> CSV (`docs/integrations/dealer-aliases.csv`). See §2.1 and §2.4.
 
 **(4) `Harmon Solar` is not a value on Customer `Dealer_Name__c` at all.** It exists only on Solar
 (256 rows). §2.4's "Harmon Solar → `Is_Internal__c`" and §12.4's launch-dealer list both assume it is
@@ -286,26 +381,69 @@ exactly why §7.2 re-runs the diff at enforce rather than trusting this measurem
 
 ### 2.4 Backfill (once, scripted, canary-first per CLAUDE.md)
 
-- **Dealers:** one `Sundial_Dealer__c` per distinct value of the dealer picklists: **Customer
-  `Dealer_Name__c`** and **Solar `Sales_Company_Harmon_Solar_or_Third__c`** (Tim, 2026-08-26: these
-  two carry the dealer; ~~the values are identical across objects~~ **[CORRECTED by 2.4a: 110 vs 56 values, only 36 exact matches, and "Harmon Solar" is absent from Customer]**, e.g. "Heavenly Power",
-  "Property Upgrades LLC"; Phase 0 confirms the Solar API name by describe). Customer `Sales_Company__c`
-  (2 values) is the internal/external discriminator, not a dealer list. "Harmon Solar" → `Is_Internal__c`.
-- **Deal `Dealer__c`:** from the record's sales-company value via `Sales_Company_Value__c`. Blank
-  sales company (83% of Solar, CLAUDE.md:441) → **left null**, never defaulted to Harmon. A null
-  `Dealer__c` is invisible to every sales role and visible to tenant scope — fail closed, and the
-  same "blank ⇒ NULL, never the default" rule D19 already applies to commissions.
-- **Deal `Sales_Rep__c`:** where null, resolved from the legacy name text — `Sunbase_Sales_Rep__c`
-  (Customer) and `Sales_Representative__c` (Solar) — by exact, trimmed, case-insensitive match against
-  active-or-inactive `Sundial_User__c` first+last name **within the tenant**. Ambiguous or
-  unmatched names are written to a report, not guessed. *~~Phase 0 must confirm `Sales_Representative__c`'s
-  actual type by describe~~ **[ANSWERED in 2.4a: it is a PICKLIST, neither guess. Not a lookup, so name-resolution is the only route; the sheet's REFERENCE label is wrong.]** — the solar sheet says REFERENCE, `sf-query/test.js` treats it as a string.*
-- **Users:** `Dealer__c` set by hand for the handful of existing users (Dennis → Harmon Solar; staff
-  → Harmon Solar or null, irrelevant at tenant scope).
-- **Dennis specifically:** the gate for the whole migration (§7) is that the set
-  `{Customer where Sales_Rep__c = Dennis}` ∪ `{Solar where Sales_Rep__c = Dennis}` after backfill
-  equals the set the TEMP name-match returns today. Any record in the old set and not the new one is a
-  backfill defect to fix before cutover, not a tolerance.
+**Rewritten 2026-08-27 for A1/A2/A3.** Two scripts, in this order, each report-only by default with an
+explicit `--apply`, each canary-first per CLAUDE.md.
+
+#### `scripts/backfill-dealers.mjs` — the dealer rows and the user stamps
+
+- **Dealer rows:** one `Sundial_Dealer__c` per **distinct value seen on any record**, across both
+  picklists — Customer `Dealer_Name__c` (110 values) and Solar
+  `Sales_Company_Harmon_Solar_or_Third__c` (56). The union, not the intersection: a Customer-only
+  value and a Solar-only value are each a real dealer somebody sold through.
+  `Active__c = true` for exactly three — **Harmon Solar**, **Heavenly Power**, **Property Upgrades
+  LLC** (§12.4) — and `Is_Internal__c` on **Harmon Solar** alone. Everything else is created
+  inactive, which under §1.2 means a user attached to it resolves to `none`.
+  Plus the three §9 fixtures: `ZZ TEST DEALER A`, `ZZ TEST DEALER B` (active),
+  `ZZ TEST DEALER INACTIVE` (inactive — the fixture that proves §2.1's inactive rule fails closed).
+- **User `Dealer__c`:** the ten ZZ TEST users per §9's table, and **Dennis → Harmon Solar**. No other
+  live user is touched by this script. Harmon staff resolve to `tenant` scope, where the dealer is
+  not read at all, so leaving them null is correct rather than merely tolerable.
+  `seed-access-test-fixtures.mjs` already carries the intended dealer per test user and marks the
+  spot with a TODO; this script is what fills it.
+- `Sales_Company__c` on Customer (two values: `Harmon Solar` / `Third-Party Dealer`) is the
+  internal/external discriminator and is **not** a dealer list. It produces no rows.
+
+#### `scripts/backfill-deal-ownership.mjs` — `Dealer__c` on Customer and Solar
+
+Runs in two passes, and **the first one is the rule**:
+
+1. **From the rep (A1), both objects.** `Dealer__c := Sales_Rep__r.Dealer__c` for every record with a
+   `Sales_Rep__c`. A rep with a null `Dealer__c` leaves the deal null — the derivation is not
+   guessed at from anything else.
+2. **From the alias CSV (A2), Solar only, rep-less records only.** For a `Sundial_Solar__c` record
+   with **no** `Sales_Rep__c` but a populated `Sales_Company_Harmon_Solar_or_Third__c`, resolve the
+   value through `docs/integrations/dealer-aliases.csv`. **Exact matches auto-map. Near-misses —
+   differing only by case, punctuation or whitespace — are listed in the report for Tim's approval
+   and are never applied automatically. Anything else stays null.** Customer is deliberately excluded:
+   `Dealer_Name__c` is populated on 13 rows, so the pass would do nothing but add risk.
+
+Blank everywhere else → **left null**, never defaulted to Harmon. A null `Dealer__c` is invisible to
+every sales role and visible to tenant scope — fail closed, the same "blank ⇒ NULL, never the default"
+rule D19 already applies to commissions.
+
+**`Sales_Rep__c` is not backfilled from the legacy name text.** The previous version of this section
+specified a name→id resolution pass over `Sunbase_Sales_Rep__c` / `Sales_Representative__c`. **A3
+retires it**: Phase 0 measured the one case it existed for and found nothing to do (below). Records
+with no rep and no alias match stay unowned, visibly, in the report — which is the honest state for a
+record nobody has attributed, and a far better input to a human decision than a guessed rep.
+
+#### A3 — Dennis, and the abort the script keeps anyway
+
+§2.4a measured it: `Sales_Rep__c` already returns the **identical id set** to the legacy name match —
+3,534 on Customer, 777 on Solar, `onlyInOld` and `onlyInNew` both zero. So the migration gate in §7
+already passes before any backfill exists, and this backfill has **zero rep work to do for Dennis**.
+
+**The script runs the comparison on every run regardless, and aborts if the sets are no longer
+equal.** That is not ceremony. The Phase 0 measurement is a point-in-time snapshot of a live org: one
+record created or reassigned between then and the run breaks the equality, and the failure mode is
+silent — the backfill would complete, the report would look ordinary, and the one live restricted user
+would quietly lose records. An abort is the only way that arrives as a question rather than as a
+support ticket.
+
+The gate for the whole migration (§7) is unchanged: after backfill, the set
+`{Customer where Sales_Rep__c = Dennis}` ∪ `{Solar where Sales_Rep__c = Dennis}` must equal the set
+the TEMP name-match returns today. Any record in the old set and not the new one is a backfill defect
+to fix before cutover, not a tolerance.
 
 ---
 
@@ -373,10 +511,23 @@ column exists the endpoint must **deny** sales-role reads (not fall back to unfi
 opposite of the `created_date` "column absent → stable order" tolerance, because here absence means
 the filter cannot be applied.
 
-The cache tables are populated by service-role Lambdas only. Phase 0 verifies whether PostgREST
-exposes them to `authenticated`; if it does, RLS is enabled with **no policies** (deny) plus `revoke`,
-the `private.app_config` pattern (D-056 amendment). That is the answer to "what stops a crafted direct
-query": nothing reads the cache from the browser, and after Phase 6 nothing can.
+The cache tables are populated by service-role Lambdas only. Phase 0 verified what PostgREST exposes,
+and the answer moved the hardening forward.
+
+> **A4 (2026-08-27): the `REVOKE` is the first SQL of Phase 1, not Phase 6.**
+> `sql/sundial_access_p1_cache_hardening.sql` revokes ALL privileges on every `sundial_*_cache` table
+> from `anon` and `authenticated`. RLS stays enabled and **no policy is added, changed or dropped** —
+> the existing per-table SELECT policy is left exactly as the Phase 0 snapshot found it, so Phase 6's
+> diff shows the policy drop alone and is reviewable as one thing.
+>
+> Why it moved: `anon` and `authenticated` hold `arwdDxtm` — the full privilege set, INSERT/UPDATE/
+> DELETE included — on all six tables, and the only thing standing between a browser session and
+> 31,640 customer rows is an RLS policy that denies **by accident** (§5.1b). Why it is free: nothing
+> reads a cache table from a browser, verified file-by-file (§5.1c), so the revoke is a no-op for the
+> portal today and a wall tomorrow.
+
+That is the answer to "what stops a crafted direct query": nothing reads the cache from the browser,
+and after Phase 1 nothing **can**.
 
 ### 3.4 Writes — `sundial-sf-update`
 
@@ -630,9 +781,23 @@ A third accident currently blocks (2): `profiles.tenant_id` holds the `Sundial_T
 (`a1W7y000007AszBEAS`) while the cache tables' `tenant_id` holds the slug (`harmon`) and keep the
 record id in `client_sf_id`. So the comparison would still fail — for a reason nobody wrote down.
 
-Three independent accidents, all failing closed, none designed. **Pull the §3.3 `revoke` + policy
-drop forward into Phase 1** rather than leaving it in Phase 6. Blocking prerequisite: nothing reads
-these tables from a browser today (verified — §5.1c), so the revoke is a no-op for the portal.
+Three independent accidents, all failing closed, none designed. **A4 (2026-08-27) pulls the §3.3
+`revoke` forward into Phase 1**, as its first SQL, rather than leaving it in Phase 6. Blocking
+prerequisite: nothing reads these tables from a browser today (verified — §5.1c), so the revoke is a
+no-op for the portal.
+
+> **`public.portal_users` and `current_user_tenant_id()` are LOAD-BEARING ACCIDENTS. Populating that
+> table, or repointing that helper at `profiles`, would expose the entire cache — 31,640 customer
+> rows and 4,481 solar rows — to any authenticated session in the tenant, with no per-rep scoping
+> whatsoever. NEITHER MAY BE "FIXED" BEFORE THE REVOKE IS APPLIED.**
+>
+> This is written in this register because both edits read as obvious housekeeping. `portal_users` is
+> an empty table that looks abandoned; `current_user_tenant_id()` reads it while its near-namesake
+> `current_user_tenant()` reads `profiles`, which looks like a copy-paste bug someone should tidy.
+> Either "fix" is a one-line change, would pass review from anyone who had not read this paragraph,
+> and would turn six deny-everything policies into allow-everything policies in the same instant.
+> After the revoke, both edits become harmless — the grant is gone, so the policy expression no longer
+> decides anything. **Apply the revoke first. Then tidy, if it still seems worth it.**
 
 Fix block 6 of `sql/snapshot-supabase.sql` before the next snapshot, or Phase 6 will "verify" its
 revoke against a query that returns zero rows whether or not the revoke happened.
@@ -693,6 +858,18 @@ is populated read-through, so the record's detail page — which a rep must have
 already put it there).
 
 ### 5.3 Policies
+
+> **A5 (2026-08-27): this section is now Phase 1b, immediately after Phase 1** — not Phase 6.
+> Phase 0 measured what it closes: a Sales Rep with no elevated access reads **every comment in the
+> tenant**, all 485, none of them their own, on records they cannot open (§5.1a). That is a live
+> cross-user leak, not a hardening item, and it does not depend on the field manifest, the module
+> gate, or anything else Phases 2–5 build. It needs `record_visible()`, which needs the cache columns
+> Phase 1 adds — so Phase 1b is the earliest it can run, and there is no reason for it to run later.
+>
+> The cache-table half of Phase 6 came forward too, as A4. What is left in Phase 6 is the policy drop
+> on the cache tables and the `profiles` policy work.
+>
+> **Not built in the Phase 1 session.** Re-sequenced in §8 and TASKS.md only.
 
 ```sql
 -- comments
@@ -816,20 +993,88 @@ sundial-core:
 the derived hierarchy; test users can log in and `/auth/me` resolves.
 
 ### Phase 1 — Data model and cache
-sundial-core:
-- SF package `salesforce/v6-access-model/`: `Sundial_Dealer__c`, `Dealer__c` lookups (User, Customer,
-  Solar, Roofing, Commercial), permission set entries for the integration user.
-- `scripts/backfill-dealers.mjs`, `scripts/backfill-deal-ownership.mjs` (canary-first, report-only by
-  default, `--apply`), `scripts/access-shadow-report.mjs` (report mode only, using the not-yet-wired
-  `rowFilter`).
-- `sql/sundial_access_cache_columns.sql`; full resync per object.
-- `lib/access.js` with `resolveScope`, `rowFilter`, `canReadObject`, `canAction` + unit tests
-  (every access level × every object × null-dealer × inactive-dealer, fail-closed cases asserted).
-- `lib/identity.js` + `auth-proxy`: `access` block on `/auth/me`; `profiles` new columns (columns only,
-  no policy change yet).
-**Gate:** backfill report: Dennis's new set ⊇ old set on customer and solar with `onlyInOld = ∅`;
-cache counts by `sales_rep_sf_id` match SOQL counts; unit tests green; `/auth/me` for each test user
-returns the expected scope.
+sundial-core, branch `feature/access-model-p1`. **Nothing on Dennis's read path is touched:**
+`sundial-sf-query`, `repRestrictFor`, its four call sites and `sundial-list-files`'s Solar 403 are
+unchanged this phase, which is what makes "nothing changes for Dennis" a fact rather than an intention.
+
+1. **`sql/sundial_access_p1_cache_hardening.sql` (A4, first)** — revoke ALL on every `sundial_*_cache`
+   table from `anon` and `authenticated`. RLS stays enabled; **no policy change**. Applied by Tim in
+   the Supabase SQL editor, with a verification query. It ships first because it is the one item that
+   is strictly a reduction in exposure and depends on nothing else in the phase.
+2. **SF package `salesforce/v6-access-model/`** — `Sundial_Dealer__c` (`Name`, `Client__c` →
+   `Sundial_Tenant__c`, `Is_Internal__c`, `Active__c`) and the `Dealer__c` lookup on
+   `Sundial_User__c`, `Sundial_Customer__c`, `Sundial_Solar__c`, `Sundial_Roofing__c`,
+   `Sundial_Commercial__c`; permission-set entries so the integration user can read and write all of
+   it. Deployed by Tim from Workbench; every step after this blocks on it being live.
+3. **`scripts/backfill-dealers.mjs`** — dealer rows, the ZZ TEST user stamps, and Dennis (§2.4).
+   Report-only by default, `--apply`, canary-first. Report reviewed before apply.
+4. **`scripts/backfill-deal-ownership.mjs`** — `Dealer__c` on Customer and Solar from the rep (A1),
+   then the Solar alias pass for rep-less records (A2), with the A3 abort check. Report-only by
+   default; the report carries counts by outcome and the **full** near-miss list. Reviewed first.
+5. **`sql/sundial_access_p1_cache_columns.sql`** — `sales_rep_sf_id` + `dealer_sf_id` on the customer,
+   solar and roofing caches (add-if-missing), `dealer_sf_id` + `access_level` on
+   `sundial_user_cache`, and the `(client_sf_id, <col>)` indexes. Applied by Tim; then
+   `sundial-cache-sync` in full mode per object, and counts by `sales_rep_sf_id` reconciled against
+   SOQL. **No Lambda change:** `sfFieldToColumn()` already maps `Sales_Rep__c` and `Dealer__c` (both
+   `reference`) to `*_sf_id`, and `Access_Level__c` to `access_level`.
+6. **`lib/access.js`** — `resolveScope`, `rowFilter`, `canReadObject`, `canAction`,
+   `assertVisibleRecord` (§1.3/§3) + unit tests over every access level × every object × null dealer
+   × inactive dealer × unknown level, every fail-closed case asserted. **Not wired into any Lambda
+   this phase** — Phase 2 does that, behind `ACCESS_MODEL_MODE=shadow`.
+7. **`lib/identity.js` + `auth-proxy`** — the identity SOQL adds `Dealer__c, Dealer__r.Active__c,
+   Dealer__r.Is_Internal__c` and returns the `access` block; `/auth/me` upserts `access_scope`,
+   `access_level` and `dealer_sf_id` into `profiles` (columns via a small SQL file Tim applies — no
+   policy change, no client grant). **Deployed last**, after the columns exist.
+8. **`scripts/access-shadow-report.mjs`** — per portal user, per object: old visible id set (TEMP
+   rule) vs new (`rowFilter` over the cache), with `onlyInOld` / `onlyInNew`. Report only.
+9. **`scripts/repair-mis-stamped-users.mjs` (A6)** — report only until approved.
+
+**Gate:** backfill report shows Dennis `onlyInOld = ∅` on customer and solar; cache counts by
+`sales_rep_sf_id` match SOQL; unit tests green; `/auth/me` for each ZZ TEST user returns the expected
+scope and `dealerId` (§9 matrix); `zz-rep-nodealer` and `zz-tech` resolve to scope `none`;
+`verify-access-matrix.mjs` still passes against the unchanged TEMP behaviour.
+
+#### Phase 1 gate — evidence, 2026-08-27
+
+Every gate below is a command anyone can re-run, not a claim. Counts are from a live org
+and drift; the invariants do not.
+
+| Gate (§8) | Evidence | Result |
+|---|---|---|
+| Dennis `onlyInOld = ∅` on customer and solar | `scripts/access-shadow-report.mjs` | customer 3,535 = 3,535, solar 779 = 779, `onlyInOld` **0**, `onlyInNew` **0** |
+| Cache counts by `sales_rep_sf_id` match SOQL | `scripts/verify-cache-access-columns.mjs` | **every rep checked individually** — 106 on customer, 70 on solar, 1 on roofing — all agree |
+| Unit tests green | `npm test` | **641 pass, 0 fail** (was 503 before Phase 0, 628 before this phase) |
+| `/auth/me` returns the expected scope + `dealerId` per §9 | `scripts/verify-auth-me-access.mjs` | all ten fixtures match: `own`×4, `dealer`×1, `tenant`×2, `none`×3 |
+| `zz-rep-nodealer` and `zz-tech` resolve to `none` | same | both `scope=none`, **0 modules, 0 actions**; `zz-rep-inactive-dealer` likewise |
+| `verify-access-matrix.mjs` passes against unchanged TEMP behaviour | `scripts/verify-access-matrix.mjs` | exit 0. `rep-a1` still served Dennis's 3,535 customers and still 404s on its own record; `tech` still sees all 31,651. 51 rows differ from the NEW-model expectation and are **pending**, which is what "not built yet" looks like |
+
+**The gate that is not in the list, and matters most.** Nothing in Phase 1 changes what any
+live user sees. That is not asserted, it is measured twice: the shadow report shows **20 of
+34 active users with `no change` on both objects**, and the access matrix shows the TEMP
+guard behaving exactly as it did before the deploy. The only live user whose access moved is
+`Temp Passtwo`, deliberately, via A6 — and that was a *narrowing* being undone.
+
+Additional evidence not required by §8 but worth recording:
+
+- **`Dealer__c` never disagrees with the rep's dealer** (§2.3.5) — 0 of 4,312 on customer,
+  0 of 1,188 on solar. Checked client-side, because SOQL cannot compare two fields.
+- **Cache totals equal Salesforce** on every object, and reconcile reports **0 ghosts**
+  across all five tables (one was found and removed — see PROGRESS).
+- **Widenings: 4, all classified EXPECTED**, each a ZZ fixture gaining its own record from
+  a guard that filtered on a hardcoded name. None is a leak.
+
+### Phase 1b — Comments and mentions RLS (A5)
+sundial-core `sql/sundial_access_p1b_comments_rls.sql`: the `security definer` helpers
+(`current_profile`, `record_visible`, `record_visible_for`, `user_visible`) and the §5.3 policies on
+`comments` and `comment_mentions`. Applied by Tim in the dashboard, committed here.
+
+**Why it is here and not in Phase 6.** It closes a measured, live cross-user leak — a Sales Rep reads
+all 485 comments in the tenant, none of them their own, on records they cannot open (§5.1a). It
+depends on Phase 1's cache columns and on nothing else, so Phase 1b is the earliest it can run;
+leaving it at Phase 6 would mean carrying a known leak through four phases of unrelated work.
+**Gate:** as each ZZ TEST user via supabase-js: comments on a visible record → rows; on an invisible
+record → 0 rows; insert on an invisible record → `42501`; mention an other-dealer rep → `42501`;
+mention Harmon staff → ok; the mentions feed still returns the user's own rows.
 
 ### Phase 2 — Shadow
 sundial-core: `sf-query` wired to `lib/access` behind `ACCESS_MODEL_MODE=shadow`; module gate,
@@ -866,14 +1111,16 @@ harmon-crm: buttons from `user.access.actions`.
 **Gate:** matrix: every action × every test user returns the §3.6 table; solar files 403 on all four
 routes for sales roles; customer file upload on another rep's record → 404.
 
-### Phase 6 — Supabase RLS
-sundial-core `sql/sundial_access_rls.sql`: helper functions, comments/mentions policies, cache-table
-RLS deny + revoke. Applied by you in the dashboard (as D-056 was), committed here.
+### Phase 6 — Supabase RLS (what is left of it)
+**Reduced by A4 and A5.** The cache-table `revoke` shipped in Phase 1; the comments/mentions policies
+and their definer helpers shipped in Phase 1b. What remains here:
+sundial-core `sql/sundial_access_rls.sql`: **drop** the six accidental cache-table SELECT policies —
+the revoke already makes them inert, so this removes a misleading artefact rather than a control —
+together with `public.portal_users`, plus the `profiles` policy review. Applied by you in the
+dashboard (as D-056 was), committed here.
 harmon-crm: none required; `useActiveUsers` switches to `/sf/users` if it reads a table directly.
-**Gate:** as each test user via supabase-js: read comments on visible record → rows; on invisible record
-→ 0 rows; insert on invisible → `42501`; mention other-dealer rep → `42501`; mention Harmon staff → ok;
-select from any `sundial_*_cache` → 0 rows / denied; Realtime event on a record after reassignment not
-delivered to the old rep.
+**Gate:** select from any `sundial_*_cache` as an authenticated session → denied; Realtime event on a
+record after reassignment not delivered to the old rep; the Phase 1b comment gates re-run green.
 
 ### Phase 7 — Cleanup and docs
 `profiles.role` dropped from the upsert; `Hierarchy_Level__c` marked deprecated in `salesforce-schema.md`
@@ -925,10 +1172,15 @@ Expected-outcome matrix (excerpt; the script carries the full table):
 
 ## 11. ADR — D-064: Sales-rep and dealer access model (row + field security in the Lambda layer and RLS)
 
-**Date:** 2026-08-26 · **Status:** Proposed · **Supersedes:** enforcement scope of D-043; TEMP restrict
-(TASKS "Sales Rep visibility", shipped 2026-08-03); harmon-crm D-048 · **Refines:** D-015 (dealer
-modeled as an object, not a `Parent_User__c` tree), D-035 (rowFilter composes like tenant scope),
-D-056 (scope materialized into server-owned `profiles` columns; no client update grant).
+**Date:** 2026-08-26 · **Status:** Accepted, **amended 2026-08-27 (A1–A6)** · **Supersedes:**
+enforcement scope of D-043; TEMP restrict (TASKS "Sales Rep visibility", shipped 2026-08-03);
+harmon-crm D-048 · **Refines:** D-015 (dealer modeled as an object, not a `Parent_User__c` tree),
+D-035 (rowFilter composes like tenant scope), D-056 (scope materialized into server-owned `profiles`
+columns; no client update grant).
+
+> The canonical ADR is D-064 in `DECISIONS.md`, including its "Amended 2026-08-27" block. This section
+> is that text. Decision 2 below now reads with A1: the deal's dealer is **derived from its rep**, and
+> the sales-company picklists are the commission discriminator only.
 
 **Context.** One Salesforce integration user serves every portal session, so Salesforce sharing is
 inert per user. The only server-side access control is tenant scope plus a TEMP guard that name-matches
@@ -941,7 +1193,9 @@ and a manager.
 1. Role comes from `Access_Level__c` alone and resolves to a scope: tenant / dealer / own / none;
    unknown is `none`.
 2. Dealers are `Sundial_Dealer__c` rows; users and deals carry `Dealer__c`; reps are `Sales_Rep__c`.
-   The server stamps and maintains both on deals; sales roles can never write them.
+   The server stamps and maintains both on deals; sales roles can never write them. **A1: a deal's
+   `Dealer__c` is derived from `Sales_Rep__r.Dealer__c`** on create and re-stamped on every rep change;
+   the sales-company picklists are the commission discriminator only and are never an ownership source.
 3. `lib/access.js` is the single authority; every read/write/action Lambda calls it. Row filters are
    id equalities on cached, indexed columns and are applied before any caller filter.
 4. Field visibility is a per-role column in the field-design workbooks, generated into a server
@@ -976,8 +1230,10 @@ Resolved 2026-08-26:
    denied to sales roles. **Aurora Design Request is allowed** for sales roles on records they can see.
 3. `Technician` → `none` until Phase II — signed off.
 4. Active dealers at launch: **Harmon Solar** (Dennis Alessandro, sole rep), **Heavenly Power**,
-   **Property Upgrades LLC** — picklist strings exactly as written, on Customer `Dealer_Name__c` and
-   Solar `Sales_Company_Harmon_Solar_or_Third__c`. All other values get inactive rows.
+   **Property Upgrades LLC** — picklist strings exactly as written. All other values get inactive
+   rows. *[Corrected by §2.4a(4): "Harmon Solar" is a value on Solar's picklist only — it does not
+   exist on Customer `Dealer_Name__c` at all. The `Sundial_Dealer__c` row is created regardless; after
+   A1 the row's `Name` is a label, not a join key, so the picklist it came from stops mattering.]*
 5. Sheets done (2026-08-26, in `harmon-crm/docs`): Customer — Sales Rep 158 edit / 89 read / 83 hidden,
    Sales Dealer 158 / 93 / 79; Solar — Sales Rep 116 read / 357 hidden, Sales Dealer 119 / 354, zero
    edit (read-only Solar, as specified). Customer `edit` rows are confined to the sale-time sections

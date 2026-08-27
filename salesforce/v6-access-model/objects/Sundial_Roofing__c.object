@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Roofing__c — ONE new lookup field, Dealer__c -> Sundial_Dealer__c. D-064 (docs/access-model.md §2.2).
+
+  ADDITIVE: this file declares only the new field. Nothing existing on Sundial_Roofing__c is
+  touched, and the Metadata API leaves unlisted fields alone.
+
+  The dealer that owns this project. Not used for access today - the Roofing module is closed to sales roles.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Dealer__c</fullName>
+        <description>SERVER-OWNED. Written by the Sundial Lambda layer and by the one-time backfill (scripts/backfill-deal-ownership.mjs). A sales-role user can never write it: it is on the protected-field list in docs/access-model.md §3.4, so a PATCH naming it is rejected outright rather than ignored. Added for consistency with the other project objects. NOT LOAD-BEARING YET: the Roofing module is denied to every sales scope outright (docs/access-model.md §3.1), so no read is filtered on this column today. It exists so that the day roofing is opened to a dealer, the column and its cache index are already there and populated rather than being a migration.</description>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <externalId>false</externalId>
+        <inlineHelpText>The dealer that owns this project. Not used for access today - the Roofing module is closed to sales roles.</inlineHelpText>
+        <label>Dealer</label>
+        <referenceTo>Sundial_Dealer__c</referenceTo>
+        <relationshipLabel>Sundial Roofing Projects</relationshipLabel>
+        <relationshipName>Sundial_Roofing_Projects</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

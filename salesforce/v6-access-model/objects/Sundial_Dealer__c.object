@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Dealer__c — NEW custom object. D-064 (docs/access-model.md §2.1).
+
+  A selling organization WITHIN a tenant. Harmon Solar is itself a dealer, the internal
+  one. This is the object that replaces string matching on a sales-company picklist with
+  an id equality on an indexed column.
+
+  FOUR FIELDS, and Name is the only string anything ever matches on - once, in the
+  one-time backfill (scripts/backfill-dealers.mjs). No read path resolves a dealer by
+  name.
+
+  ⚠️ Sales_Company_Value__c IS DELIBERATELY ABSENT. The approved design specified it as
+  "Text(255), unique per tenant - the exact picklist value this dealer corresponds to".
+  Phase 0 proved it cannot exist: the two dealer picklists carry 110 and 56 values with
+  only 36 exact matches, plus near-miss spellings an exact join drops SILENTLY. D-064
+  amendment A1 then removed the need for it entirely by deriving a deal's dealer from its
+  rep. Do not add it back; see docs/integrations/dealer-aliases.csv for what replaced it.
+
+  The integration user needs Read + Create + Edit on the object and Read + Edit on
+  Is_Internal__c and Active__c (permissionsets/Sundial_Access_Model.permissionset).
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>A selling organization within a Sundial tenant (D-064). Users and deals carry a Dealer__c lookup to this object; row visibility for a Sales Dealer is an id equality against it. Harmon Solar is the internal dealer. Inactive dealers grant their users nothing.</description>
+    <enableActivities>false</enableActivities>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <label>Sundial Dealer</label>
+    <nameField>
+        <label>Dealer Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Sundial Dealers</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation key (D-034/D-035), identical in role to Client__c on every other Sundial object: it holds the Sundial_Tenant__c record id and every query filters on it. REQUIRED, matching Sundial_User__c / Sundial_Customer__c / Sundial_Solar__c, because a dealer row with no tenant is a row that leaks across tenants the moment a second tenant exists. Delete constraint is RESTRICT: a tenant with dealers cannot be deleted out from under them.</description>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <externalId>false</externalId>
+        <inlineHelpText>Which Sundial client this dealer belongs to. Required.</inlineHelpText>
+        <label>Client</label>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Sundial Dealers</relationshipLabel>
+        <relationshipName>Sundial_Dealers</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Is_Internal__c</fullName>
+        <description>TRUE for Harmon Solar, the tenant's own selling organization. INFORMATIONAL ONLY - it grants nothing and is read by no access decision. Scope comes from Access_Level__c alone (docs/access-model.md §1.1), so an internal dealer's rep is an `own`-scope user exactly like an external dealer's rep. It exists to label the row for reporting and to match the internal/external split the commission model already makes (D19, D16: internal deals are payroll, not POs).</description>
+        <defaultValue>false</defaultValue>
+        <externalId>false</externalId>
+        <inlineHelpText>Ticked for Harmon Solar itself. A label, not a permission - it grants nothing.</inlineHelpText>
+        <label>Is Internal</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Active__c</fullName>
+        <description>Whether this dealer's users may see anything. An INACTIVE dealer's users resolve to scope `none` and see NO records (docs/access-model.md §1.2, §2.1) - the same answer as a null dealer, and deliberately so: fail closed. DEFAULTS TO FALSE so a dealer created by hand in Salesforce, or by a future import, starts with no access and is switched on as a decision rather than by omission. Only Harmon Solar, Heavenly Power and Property Upgrades LLC are active at launch (§12.4); every other backfilled row is inactive.</description>
+        <defaultValue>false</defaultValue>
+        <externalId>false</externalId>
+        <inlineHelpText>Unticked means this dealer's users see nothing at all. Defaults to unticked.</inlineHelpText>
+        <label>Active</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+</CustomObject>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Customer__c — ONE new lookup field, Dealer__c -> Sundial_Dealer__c. D-064 (docs/access-model.md §2.2).
+
+  ADDITIVE: this file declares only the new field. Nothing existing on Sundial_Customer__c is
+  touched, and the Metadata API leaves unlisted fields alone.
+
+  The dealer that owns this deal, set from the sales rep. Blank until a rep with a dealer is assigned.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Dealer__c</fullName>
+        <description>SERVER-OWNED. Written by the Sundial Lambda layer and by the one-time backfill (scripts/backfill-deal-ownership.mjs). A sales-role user can never write it: it is on the protected-field list in docs/access-model.md §3.4, so a PATCH naming it is rejected outright rather than ignored. DERIVED FROM THE REP (D-064 A1): Dealer__c := Sales_Rep__r.Dealer__c, stamped on create and RE-STAMPED on every Sales_Rep__c change. It is NOT derived from Dealer_Name__c or Sales_Company__c - those stay the commission discriminator only (D19). Dealer_Name__c is populated on 13 of 31,637 rows and does not even contain 'Harmon Solar', so deriving from it would leave almost every customer invisible to dealer scope. A blank value is left NULL, never defaulted.</description>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <externalId>false</externalId>
+        <inlineHelpText>The dealer that owns this deal, set from the sales rep. Blank until a rep with a dealer is assigned.</inlineHelpText>
+        <label>Dealer</label>
+        <referenceTo>Sundial_Dealer__c</referenceTo>
+        <relationshipLabel>Sundial Customers</relationshipLabel>
+        <relationshipName>Sundial_Customers</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

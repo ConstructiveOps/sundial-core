@@ -11,6 +11,7 @@
 // See docs/api-endpoints.md (GET /auth/me).
 
 import { resolveIdentity } from "../../lib/identity.js";
+import { profileScopeColumns } from "../../lib/access.js";
 import { getSupabaseClient } from "../../lib/supabase.js";
 
 // --- CORS ------------------------------------------------------------------
@@ -117,6 +118,16 @@ async function upsertProfile(identity) {
     const fullName =
       [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || null;
 
+    // D-064 §5.2: the three SERVER-OWNED scope columns. This upsert is their ONLY
+    // writer, and it runs under the service role. There is no client `update` grant on
+    // profiles and none is added -- see sql/sundial_access_p1_profiles_revoke.sql for
+    // why that matters more now than it did yesterday: RLS is row-level, so one
+    // permissive update policy would let a session rewrite its own access_scope, which
+    // is the column Phase 1b's record_visible() reads.
+    //
+    // Derived by lib/access.js from the identity, never taken from request input.
+    const scopeColumns = profileScopeColumns(identity.access);
+
     const row = {
       id: authUserId, // = auth.users uuid (token sub) — the RLS key
       tenant_id: identity.tenantId ?? null, // Salesforce Client record id
@@ -124,6 +135,10 @@ async function upsertProfile(identity) {
       role: u.hierarchyLevel ?? null, // Hierarchy_Level__c, stored as-is
       email: u.email ?? null,
       full_name: fullName,
+      // access_scope | access_level | dealer_sf_id. Written on EVERY /auth/me, so a
+      // user re-levelled in Salesforce carries the new scope from their next request
+      // rather than from a scheduled job -- there is no cache to invalidate here.
+      ...scopeColumns,
       updated_at: new Date().toISOString(),
     };
 
@@ -171,9 +186,17 @@ export const handler = async (event) => {
     // profile-write failure can never break login.
     await upsertProfile(identity);
 
-    // Success: same body shape as before — user fields + tenant.clientId.
+    // Success. ADDITIVE: the existing `user` and `tenant` keys are byte-identical to
+    // what this endpoint returned before, so an un-updated client is unaffected.
+    //
+    // `user.access` (D-064 §1.3) is new. The client REFLECTS it -- hides navigation
+    // and buttons the server would refuse anyway -- and never DECIDES from it. That
+    // asymmetry is what makes shipping it before the enforcement safe in both
+    // directions: a client that ignores it renders what it always did and the server
+    // has not started refusing anything yet; a client that honours it renders a subset
+    // of what the server already agreed to send.
     return jsonResponse(200, cors, {
-      user: identity.user,
+      user: { ...identity.user, access: identity.access },
       tenant: { clientId: identity.tenantId },
     });
   } catch (err) {

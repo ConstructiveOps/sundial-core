@@ -169,7 +169,12 @@ async function getCacheColumns(table) {
 }
 
 // --- SF record -> cache row mapping (mirrors sundial-sf-query) --------------
-function sfFieldToColumn(field) {
+// EXPORTED for lib/access.test.js, which asserts that the column names in
+// lib/access.js OBJECT_ACCESS are exactly what this function derives. Nothing else
+// imports it and the runtime behaviour is unchanged -- a column name that drifts from
+// this derivation is not an error anywhere, it is a column of nulls and a row filter
+// that matches nothing, so it needs an assertion rather than a careful reading.
+export function sfFieldToColumn(field) {
   let base = field.name.replace(/__c$/i, "").toLowerCase();
   if (field.type === "reference") base += "_sf_id";
   return base;

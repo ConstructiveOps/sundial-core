@@ -230,6 +230,102 @@ Display columns (names match `sfFieldToColumn()` so `sundial-sf-query`/`sundial-
 
 **No new sync mechanism:** roofing is already registered in the `OBJECT_ALLOWLIST` of `sundial-sf-query` (read/list/full), `sundial-sf-update` (write), and `sundial-cache-sync` (scheduled populate). Creating the table is the only step — records then populate via read-through and the sync job. Until the table exists, `sundial-cache-sync` gracefully skips roofing.
 
+### The row-filter columns (D-064 Phase 1)
+
+`sql/sundial_access_p1_cache_columns.sql` adds the columns the access model filters on:
+
+| Table | Columns added | Salesforce source |
+|---|---|---|
+| `sundial_customer_cache` | `sales_rep_sf_id`, `dealer_sf_id` | `Sales_Rep__c`, `Dealer__c` |
+| `sundial_solar_cache` | `dealer_sf_id` (rep column already existed) | `Dealer__c` |
+| `sundial_roofing_cache` | `dealer_sf_id` (rep column already existed) | `Dealer__c` |
+| `sundial_user_cache` | `dealer_sf_id`, `access_level` | `Dealer__c`, `Access_Level__c` |
+
+Plus eight `(client_sf_id, <col>)` indexes — **always** with the tenant key leading, because
+`rowFilter()` puts `client_sf_id` in every branch it builds, tenant scope included.
+
+**No Lambda change was needed, and that is by construction.** `sfFieldToColumn()` derives a
+column name from the Salesforce field — name minus `__c`, lowercased, plus `_sf_id` when the
+field type is `reference` — and `buildCacheSelect()` selects exactly the fields whose derived
+name exists as a column. Creating the column *is* the wiring. Same pattern as
+`sql/sundial_roofing_cache_name_columns.sql`.
+
+> ⚠️ **The column names are not a free choice.** A column called `dealer_id` instead of
+> `dealer_sf_id` would never be populated — silently. The sync would not error, the resync
+> would report success, and the result would be a column of nulls, a row filter matching
+> nothing, and a sales rep seeing an empty portal. The verification query in the SQL file
+> counts `non_null` per column for exactly this reason: "the column exists" and "the column
+> has data in it" are different questions, and only the second one matters.
+
+**Why this kills the cache bypass.** The TEMP guard filters on a Salesforce field that is not
+cached (`sales_rep_name` is a different, formula-derived field), so a restricted rep's reads
+bypass the cache and go live to Salesforce — where SOQL `OFFSET` caps at 2000 and the deep
+pages of a 3,511-row book are simply unreachable. With an indexed id column on the row, the
+cache serves the filter and the whole book comes back in one request under the 5000-row page
+cap (D-050).
+
+**Until the column exists and is populated, a sales-role read must DENY, not fall back to
+unfiltered.** `lib/access.js` does this: `rowFilter()` returns `MODULE_FORBIDDEN` when its
+filter column is missing, and `rowMatchesFilter()` returns `false` for a row that lacks it.
+That is the opposite of the `created_date` tolerance ("column absent → fall back to a stable
+order") and deliberately so — there, absence degrades ordering; here it would remove a
+security filter.
+
+---
+
+## Who may read a cache table — nobody with a browser
+
+**`sql/sundial_access_p1_cache_hardening.sql` (D-064 A4, 2026-08-27).** Every
+`sundial_*_cache` table has **ALL privileges revoked from `anon` and `authenticated`**.
+The cache is service-role-only, and now structurally so rather than by convention.
+
+Before that file was applied, `anon` and `authenticated` held `arwdDxtm` — the full
+privilege set, INSERT/UPDATE/DELETE included — on all six tables. That was never a
+decision; it is the Supabase default for a table created through the dashboard, and
+nothing had ever narrowed it. The only thing standing between a logged-in browser session
+and 31,640 customer rows was one RLS policy per table:
+
+```sql
+USING (tenant_id = current_user_tenant_id())
+```
+
+**and that policy denied by accident.** `current_user_tenant_id()` reads
+`public.portal_users`, which holds zero rows, so it returns NULL for every session and
+nothing matches. Three independent accidents were stacked, all failing closed, none
+designed: the table was never populated, the grants were never narrowed, and
+`profiles.tenant_id` holds the Salesforce record id while the cache tables' `tenant_id`
+holds the slug — so even repointing the helper at `profiles` would have compared an id to
+a slug and still denied, for a reason nobody had written down.
+
+> ⚠️ **`public.portal_users` and `current_user_tenant_id()` were load-bearing accidents.**
+> Populating that table, or repointing that helper at `profiles`, would have exposed the
+> entire cache to any authenticated session with no per-rep scoping. Both edits read as
+> obvious housekeeping — an abandoned empty table, and a helper whose near-namesake
+> `current_user_tenant()` reads a different table, which looks exactly like a copy-paste
+> bug someone should tidy. After the revoke both are harmless, because the grant they
+> depended on is gone. **If the revoke has not been applied in some environment, apply it
+> before tidying anything in that area.**
+
+The revoke costs the portal nothing: no browser code reads a cache table. The single
+browser Supabase client (`harmon-crm/src/lib/supabase.ts`, anon key) issues `.from()`
+against exactly `comments`, `comment_mentions` and `user_preferences`. Every backend
+reader — `sundial-sf-query`, `sundial-cache-sync`, `sundial-sf-update`,
+`sundial-comment-notify`, the welcome-call writeback — sends the service-role key, and the
+service role bypasses RLS. Verified file-by-file, 2026-08-27 (`access-model.md` §5.1c).
+
+**The RLS policies were deliberately left in place.** The six `*_cache_select_tenant`
+policies still exist and RLS is still enabled; the file changes grants only. Dropping the
+policies is Phase 6, kept separate so its diff shows one thing. The order matters:
+revoking while the policy still stands is belt *and* braces, whereas dropping the policy
+while the grant stands would be neither.
+
+**When a new cache table is created** — `sundial_commercial_cache`,
+`sundial_service_cache`, `sundial_service_visit_cache` are all named above and do not
+exist yet — it arrives with the same wide-open default. The hardening file also revokes
+the schema's `default privileges` for `anon` and `authenticated`, which covers the next
+table automatically, but add the explicit `revoke` line for each new table anyway so the
+file stays a complete statement of what is closed.
+
 ---
 
 ## Operational Concerns

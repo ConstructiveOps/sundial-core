@@ -1,0 +1,3 @@
+DealerName,Alias,Object,Note
+James Campbell Consulting LLC,James Campbell Consulting,Customer,"Same organization spelled two ways. The bare form appears on Customer Dealer_Name__c only (1 record); the LLC form on Solar Sales_Company_Harmon_Solar_or_Third__c only (5 records). Merge approved by Tim 2026-08-27; canonical is the fuller spelling."
+Blue Sky Solar,Blue Sky,Solar,"Same organization spelled two ways, both on Solar Sales_Company_Harmon_Solar_or_Third__c (12 and 1 records). docs/integrations/dealer-vendor-map.csv already carries both as deliberate aliases of Acumatica vendor 01736 (Blue Sky Solar LLC) under D-060. Merge approved by Tim 2026-08-27; canonical is the fuller spelling."

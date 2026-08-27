@@ -78,8 +78,12 @@ const ZZ_ADMIN_EMAIL = 'tim+zz-admin@constructiveoperations.com';
 // RESTRICTED picklist that would reject an invalid one.
 const DERIVATION_CASES = [
   { accessLevel: 'Sales Dealer', expect: 'Sales Manager' },
-  { accessLevel: 'Manager', expect: 'Client' },
   { accessLevel: 'Sales Rep', expect: 'Sales Rep' },
+  // Admin and Manager both collapse to `Client` -- the point of asserting BOTH is that
+  // neither may come back as the literal "Sales Rep" the TEMP guard in sundial-sf-query
+  // keys on. That string on a non-rep is exactly the bug this endpoint change fixes.
+  { accessLevel: 'Admin', expect: 'Client' },
+  { accessLevel: 'Manager', expect: 'Client' },
 ];
 
 async function verifyDerivedHierarchy() {
@@ -168,6 +172,46 @@ async function verifyDerivedHierarchy() {
   check('super admin + sales role is refused',
     refusal.status === 400 && rBody?.code === 'SUPER_ADMIN_WITH_SALES_ROLE',
     `HTTP ${refusal.status} ${rBody?.code || ''}`);
+}
+
+// The ten users scripts/seed-access-test-fixtures.mjs owns. Anything else answering to
+// `tim+zz-` was created by THIS run and must not outlive it.
+const SEEDED_ZZ = [
+  'rep-a1', 'rep-a2', 'mgr-a', 'rep-b1', 'rep-harmon', 'rep-nodealer',
+  'rep-inactive-dealer', 'tech', 'admin', 'exec',
+].map((slug) => `tim+zz-${slug}@constructiveoperations.com`);
+
+// A leftover ZZ user is not cosmetic. The next `verify-access-matrix` run enumerates
+// every ZZ account and would test an eleventh one nobody defined a expectation for,
+// and `audit-user-levels` would count it as a real user. Sweep, THEN assert -- the
+// assertion is on what remains after the sweep, so a per-case cleanup that silently
+// failed still shows up as a failure here rather than as a surprise next week.
+async function verifyNoLeftoverZzUsers() {
+  const sfRows = await sfQuery(
+    `SELECT Id, Email__c, Active__c FROM Sundial_User__c WHERE Email__c LIKE 'tim+zz-%'`
+  );
+  const straySf = (sfRows || []).filter(
+    (r) => !SEEDED_ZZ.includes((r.Email__c || '').toLowerCase())
+  );
+  for (const r of straySf) await sfDeleteRecord('Sundial_User__c', r.Id).catch(() => {});
+
+  const { data: list } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+  const strayAuth = (list?.users || []).filter((u) => {
+    const e = (u.email || '').toLowerCase();
+    return e.startsWith('tim+zz-') && !SEEDED_ZZ.includes(e);
+  });
+  for (const u of strayAuth) await admin.auth.admin.deleteUser(u.id).catch(() => {});
+
+  const after = await sfQuery(
+    `SELECT Id, Email__c FROM Sundial_User__c WHERE Email__c LIKE 'tim+zz-%'`
+  );
+  const remaining = (after || []).map((r) => (r.Email__c || '').toLowerCase()).sort();
+  const expected = [...SEEDED_ZZ].sort();
+  check('only the ten seeded ZZ TEST users remain (Sundial_User__c)',
+    remaining.length === 10 && remaining.every((e, i) => e === expected[i]),
+    `${remaining.length} found` +
+      (straySf.length ? `, swept ${straySf.length} stray SF` : '') +
+      (strayAuth.length ? `, swept ${strayAuth.length} stray auth` : ''));
 }
 
 let authUserId = null;
@@ -265,6 +309,7 @@ try {
   // (D-043), so the checkbox is ticked by hand once; until then this SKIPS rather
   // than failing, because an un-ticked box is a setup step, not a regression.
   await verifyDerivedHierarchy();
+  await verifyNoLeftoverZzUsers();
 } finally {
   // 7. cleanup.
   if (authUserId) await admin.auth.admin.deleteUser(authUserId).catch(() => {});

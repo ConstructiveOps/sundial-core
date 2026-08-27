@@ -248,10 +248,9 @@ So the revoke is a no-op for the portal, which is what makes pulling it into Pha
 
 - **Block 6 of `sql/snapshot-supabase.sql` is wrong** (above). Left unedited on purpose —
   the file's contract is that its blocks stay stable so snapshots diff cleanly.
-- **`Super_Admin__c` on `tim+zz-admin`** needs ticking by hand (D-043: Salesforce-set
-  only). The derived-hierarchy assertion in `verify-provisioning-e2e.mjs` SKIPs with
-  that exact instruction until then, rather than failing — an un-ticked box is a setup
-  step, not a regression.
+- ~~**`Super_Admin__c` on `tim+zz-admin`** needs ticking by hand (D-043: Salesforce-set
+  only).~~ **Closed 2026-08-26** — ticked, `sundial-user-admin` deployed from `master`,
+  and the derived-hierarchy assertion now runs instead of skipping. See the entry below.
 - **Unrelated drift on the designated test record.** `a1P7y00000AmyXCEAZ` carries
   `Battery_Qty__c = 4` where the seed script sets `1`, inflating `Total_Adder_Price__c`
   to 46,237.50 against the documented 16,387.50 baseline. (4−1) × 9,950 = 29,850,
@@ -259,6 +258,62 @@ So the revoke is a no-op for the portal, which is what makes pulling it into Pha
   Customer's own fields — zero cross-object references, checked — and Phase 0 wrote
   only `Sales_Rep__c` and `Linked_Solar_Project__c` to that record. Left alone rather
   than reset, in case it is mid-test; `create-portal-test-record.mjs --apply` fixes it.
+
+
+## 2026-08-26 — The endpoint assertion stopped skipping: derived Hierarchy_Level__c, proven live
+
+`sundial-user-admin` was deployed from `master` and `Super_Admin__c` ticked on
+`tim+zz-admin@constructiveoperations.com`, which were the two setup steps the Phase 0
+merge left open. `node scripts/verify-provisioning-e2e.mjs` now runs **18/18 green** with
+no SKIP.
+
+### What the assertion actually proves that the unit tests cannot
+
+`lambdas/sundial-user-admin/test.js` already pins `deriveHierarchyLevel` as a pure
+function. That is not the risk. `Hierarchy_Level__c` is a **RESTRICTED** picklist, so a
+derived value the picklist does not contain fails at the Salesforce insert with
+`INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST` — a failure mode that lives entirely outside
+the function under test and cannot surface until a real record is written. The e2e case
+therefore POSTs to the deployed `/admin/users` and reads the field back **from Salesforce**,
+not from the endpoint's own response body; asserting on the response would only test the
+response.
+
+    PASS ✓  Sales Dealer -> Hierarchy_Level__c "Sales Manager"  (got "Sales Manager")
+    PASS ✓  Sales Rep    -> Hierarchy_Level__c "Sales Rep"      (got "Sales Rep")
+    PASS ✓  Admin        -> Hierarchy_Level__c "Client"         (got "Client")
+    PASS ✓  Manager      -> Hierarchy_Level__c "Client"         (got "Client")
+    PASS ✓  super admin + sales role is refused  (HTTP 400 SUPER_ADMIN_WITH_SALES_ROLE)
+
+`Admin` was added to `DERIVATION_CASES` in this pass; the merge shipped with
+Sales Dealer / Manager / Sales Rep only. Admin and Manager both collapse to `Client`,
+and asserting both is the point: neither may come back as the literal string
+`"Sales Rep"`, which is what the TEMP guard in `sundial-sf-query` keys on. That string
+landing on a non-rep *is* the bug this change fixes.
+
+### The bearer token came from the ZZ super admin, never from a live one
+
+Per CLAUDE.md's test-user rule. Harmon's real super admins are working accounts; logging
+in as one to test provisioning is the exact thing that rule forbids.
+
+### New: a sweep that asserts the fixture set is unchanged
+
+`verifyNoLeftoverZzUsers()` was added. Each derivation case already deleted its own user
+in a `finally`, but per-case cleanup that silently fails leaves an eleventh ZZ account
+behind — and `verify-access-matrix.mjs` enumerates ZZ accounts, so it would then test a
+user nobody wrote an expectation for, while `audit-user-levels.mjs` would count it as
+real. The sweep deletes any `tim+zz-` account outside the ten seeded slugs and *then*
+asserts on what remains, so a failed per-case cleanup fails here rather than surfacing a
+week later as a confusing matrix row.
+
+    PASS ✓  only the ten seeded ZZ TEST users remain (Sundial_User__c)  (10 found)
+
+Confirmed independently on the Supabase side afterwards: 10 ZZ auth users, 0 strays,
+0 leftover `e2everify` accounts. Nothing was swept, meaning per-case cleanup did its job
+this run — the sweep is a guard, not a crutch.
+
+### Unchanged and still open
+
+The `Battery_Qty__c = 4` drift on the designated test record (below) is untouched.
 
 
 ## 2026-08-26 — Domestic Content projects were all built from the wrong template

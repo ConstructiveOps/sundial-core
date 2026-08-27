@@ -557,10 +557,11 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [x] `scripts/verify-access-matrix.mjs` — runs green, 12 surfaces × 10 users, all
         new-model expectations `pending`.
   - [x] D-064 + the D-045…D-050 numbering note appended to `DECISIONS.md`.
-  - [ ] **TIM: tick `Super_Admin__c`** on `tim+zz-admin@constructiveoperations.com` in
-        Salesforce (D-043: Salesforce-set only). Unblocks the derived-hierarchy
-        assertion in `verify-provisioning-e2e.mjs`, which SKIPs until then.
-  - [ ] **TIM: review + deploy `sundial-user-admin`.**
+  - [x] **TIM: tick `Super_Admin__c`** on `tim+zz-admin@constructiveoperations.com` in
+        Salesforce (D-043: Salesforce-set only). Done 2026-08-26 — the derived-hierarchy
+        assertion in `verify-provisioning-e2e.mjs` no longer SKIPs.
+  - [x] **TIM: review + deploy `sundial-user-admin`.** Deployed from `master`
+        2026-08-26; verified live by `verify-provisioning-e2e.mjs` (18/18).
   - [ ] **Unrelated pre-existing drift found:** the designated portal test record
         `a1P7y00000AmyXCEAZ` has `Battery_Qty__c = 4` where the seed script sets `1`,
         inflating `Total_Adder_Price__c` to 46,237.50 (baseline 16,387.50) and

@@ -230,6 +230,47 @@ Display columns (names match `sfFieldToColumn()` so `sundial-sf-query`/`sundial-
 
 **No new sync mechanism:** roofing is already registered in the `OBJECT_ALLOWLIST` of `sundial-sf-query` (read/list/full), `sundial-sf-update` (write), and `sundial-cache-sync` (scheduled populate). Creating the table is the only step — records then populate via read-through and the sync job. Until the table exists, `sundial-cache-sync` gracefully skips roofing.
 
+### The row-filter columns (D-064 Phase 1)
+
+`sql/sundial_access_p1_cache_columns.sql` adds the columns the access model filters on:
+
+| Table | Columns added | Salesforce source |
+|---|---|---|
+| `sundial_customer_cache` | `sales_rep_sf_id`, `dealer_sf_id` | `Sales_Rep__c`, `Dealer__c` |
+| `sundial_solar_cache` | `dealer_sf_id` (rep column already existed) | `Dealer__c` |
+| `sundial_roofing_cache` | `dealer_sf_id` (rep column already existed) | `Dealer__c` |
+| `sundial_user_cache` | `dealer_sf_id`, `access_level` | `Dealer__c`, `Access_Level__c` |
+
+Plus eight `(client_sf_id, <col>)` indexes — **always** with the tenant key leading, because
+`rowFilter()` puts `client_sf_id` in every branch it builds, tenant scope included.
+
+**No Lambda change was needed, and that is by construction.** `sfFieldToColumn()` derives a
+column name from the Salesforce field — name minus `__c`, lowercased, plus `_sf_id` when the
+field type is `reference` — and `buildCacheSelect()` selects exactly the fields whose derived
+name exists as a column. Creating the column *is* the wiring. Same pattern as
+`sql/sundial_roofing_cache_name_columns.sql`.
+
+> ⚠️ **The column names are not a free choice.** A column called `dealer_id` instead of
+> `dealer_sf_id` would never be populated — silently. The sync would not error, the resync
+> would report success, and the result would be a column of nulls, a row filter matching
+> nothing, and a sales rep seeing an empty portal. The verification query in the SQL file
+> counts `non_null` per column for exactly this reason: "the column exists" and "the column
+> has data in it" are different questions, and only the second one matters.
+
+**Why this kills the cache bypass.** The TEMP guard filters on a Salesforce field that is not
+cached (`sales_rep_name` is a different, formula-derived field), so a restricted rep's reads
+bypass the cache and go live to Salesforce — where SOQL `OFFSET` caps at 2000 and the deep
+pages of a 3,511-row book are simply unreachable. With an indexed id column on the row, the
+cache serves the filter and the whole book comes back in one request under the 5000-row page
+cap (D-050).
+
+**Until the column exists and is populated, a sales-role read must DENY, not fall back to
+unfiltered.** `lib/access.js` does this: `rowFilter()` returns `MODULE_FORBIDDEN` when its
+filter column is missing, and `rowMatchesFilter()` returns `false` for a row that lacks it.
+That is the opposite of the `created_date` tolerance ("column absent → fall back to a stable
+order") and deliberately so — there, absence degrades ordering; here it would remove a
+security filter.
+
 ---
 
 ## Who may read a cache table — nobody with a browser

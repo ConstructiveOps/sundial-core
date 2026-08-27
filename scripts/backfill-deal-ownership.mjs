@@ -52,6 +52,25 @@ import {
 import { loadDealerAliases, normalizeDealerName, resolveDealerName } from "./dealer-aliases.mjs";
 
 const APPLY = process.argv.includes("--apply");
+
+// --limit N: write at most N records this run, then stop cleanly and report what is
+// left. Added because two unattended runs were stopped part-way by the environment
+// rather than by anything wrong -- 2,500 and 360 records in, no failures either time.
+//
+// It is safe ONLY because this script is idempotent: it re-reads the org every run and
+// plans only records that still need a write, so N chunks of a run and one long run end
+// in the same place. A bounded chunk that finishes and reports beats an unbounded one
+// that is killed and cannot.
+const LIMIT = (() => {
+  const i = process.argv.indexOf("--limit");
+  if (i === -1) return Infinity;
+  const n = Number(process.argv[i + 1]);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error("--limit needs a positive integer");
+    process.exit(2);
+  }
+  return n;
+})();
 const TENANT_ID = "a1W7y000007AszBEAS";
 
 // docs/access-model.md §2.4a. The gate for the whole migration.
@@ -461,6 +480,57 @@ async function canaryWrite(plan, w) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Transient failures — retried, and VISIBLE while they happen
+// ---------------------------------------------------------------------------
+// A 2026-08-27 run wrote 2,500 records cleanly and then failed ~600 in a burst before
+// recovering on its own. The error text existed only in the end-of-run summary, so when
+// the run was interrupted the diagnosis went with it: 600 failures, no reason. The
+// end-of-run report is still there; this makes the FIRST occurrence of each distinct
+// error shape print the moment it happens, so a long run says what is wrong while it is
+// still wrong.
+//
+// A bounded retry sits alongside it because that burst pattern -- clean, then a wall,
+// then clean again -- is what Salesforce rate limiting and transient socket failures
+// look like, not what a bad payload looks like. A bad payload fails identically every
+// time and the retry costs three attempts before reporting it, which is cheap.
+//
+// It is NOT an unbounded retry and never sleeps long: this script writes thousands of
+// records, and a retry loop that hides a real rate limit just makes the run take hours
+// and still fail. Three attempts, then report and move on. The script is idempotent, so
+// the honest recovery for a run with failures is to run it again.
+const MAX_ATTEMPTS = 3;
+const seenErrors = new Set();
+
+/** Distinct-error fingerprint: the message without ids, so 600 of one shape print once. */
+const errorShape = (s) => String(s).replace(/[0-9a-zA-Z]{15,18}/g, "<id>").slice(0, 120);
+
+async function writeWithRetry(sfObject, w) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await sfUpdateRecord(sfObject, w.id, { Dealer__c: w.dealerId });
+      if (attempt > 1) log(`     (recovered on attempt ${attempt}: ${w.id})`);
+      return { ok: true };
+    } catch (e) {
+      lastError = String(e.sfBody ?? e.message).slice(0, 300);
+      const shape = errorShape(lastError);
+      if (!seenErrors.has(shape)) {
+        seenErrors.add(shape);
+        log(`\n     ** first occurrence of a new error shape (attempt ${attempt}) **`);
+        log(`        ${sfObject} ${w.id}`);
+        log(`        ${lastError}`);
+      }
+      if (attempt < MAX_ATTEMPTS) {
+        // 1s, then 4s. Long enough for a rate-limit window to move, short enough that a
+        // genuinely broken run still ends today.
+        await new Promise((r) => setTimeout(r, attempt * attempt * 1000));
+      }
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
 // Progress every N rather than a line per record: 14,000 lines of "written" is a wall,
 // not a log.
 const PROGRESS_EVERY = 250;
@@ -479,19 +549,23 @@ for (const p of plans) {
     process.exit(1);
   }
 
-  const rest = p.writes.slice(1);
+  // The canary already consumed one of this run's budget.
+  const budget = Math.max(0, LIMIT - applied);
+  const rest = p.writes.slice(1, 1 + budget);
+  const deferred = p.writes.length - 1 - rest.length;
   log(`  writing ${rest.length.toLocaleString()} more, progress every ${PROGRESS_EVERY}...`);
   for (const [i, w] of rest.entries()) {
-    try {
-      await sfUpdateRecord(p.o.sfObject, w.id, { Dealer__c: w.dealerId });
-      applied++;
-    } catch (e) {
-      failures.push({ obj: p.o.label, id: w.id, error: String(e.sfBody ?? e.message).slice(0, 160) });
-    }
+    const res = await writeWithRetry(p.o.sfObject, w);
+    if (res.ok) applied++;
+    else failures.push({ obj: p.o.label, id: w.id, error: res.error });
     if ((i + 1) % PROGRESS_EVERY === 0) {
       log(`     ${applied.toLocaleString()} written, ${failures.length} failed  (${i + 1}/${rest.length})`);
     }
   }
+  if (deferred > 0) {
+    log(`     --limit reached: ${deferred.toLocaleString()} ${p.o.label} record(s) deferred to the next run.`);
+  }
+  if (applied >= LIMIT) break;
 }
 
 // ⚠️ DO NOT PIPE THIS SCRIPT'S OUTPUT through head/sed/tail on a real run: the shell

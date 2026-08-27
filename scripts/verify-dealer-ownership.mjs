@@ -83,11 +83,25 @@ for (const [obj, label] of [
 
   // The disagreement invariant (§2.3 rule 5): Dealer__c must equal the rep's dealer
   // wherever a rep is set. This is the check the nightly reconcile will run.
-  const disagree = await countWhere(
-    obj,
-    "Dealer__c != null AND Sales_Rep__c != null AND Sales_Rep__r.Dealer__c != null AND Dealer__c != Sales_Rep__r.Dealer__c"
+  //
+  // ⚠️ SOQL CANNOT COMPARE TWO FIELDS. `WHERE Dealer__c != Sales_Rep__r.Dealer__c` is a
+  // MALFORMED_QUERY, not an empty result -- the right-hand side of a comparison must be
+  // a literal. So the rows come back and the comparison happens here. Worth knowing
+  // before writing the nightly reconcile, which will hit the same wall.
+  const paired = await sfQuery(
+    `SELECT Id, Dealer__c, Sales_Rep__r.Dealer__c FROM ${obj} ` +
+      `WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' ` +
+      `AND Dealer__c != null AND Sales_Rep__c != null AND Sales_Rep__r.Dealer__c != null`
   );
-  check(`${label}: Dealer__c never disagrees with the rep's dealer (§2.3.5)`, disagree === 0, `${disagree}`);
+  const disagreeing = paired.filter((r) => r.Dealer__c !== r.Sales_Rep__r?.Dealer__c);
+  check(
+    `${label}: Dealer__c never disagrees with the rep's dealer (§2.3.5)`,
+    disagreeing.length === 0,
+    `${disagreeing.length} of ${paired.length} checked`
+  );
+  for (const r of disagreeing.slice(0, 10)) {
+    log(`       ${r.Id}: deal ${r.Dealer__c} vs rep ${r.Sales_Rep__r?.Dealer__c}`);
+  }
 }
 
 // --- 3. Per-dealer counts for the ACTIVE dealers ----------------------------

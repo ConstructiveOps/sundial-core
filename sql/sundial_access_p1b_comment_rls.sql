@@ -171,6 +171,15 @@
 -- Adding the column is therefore the entire change; the next full user sync fills
 -- it. Same mechanism `sql/sundial_roofing_cache_name_columns.sql` relies on.
 --
+-- IT IS NOT HYPOTHETICAL. Applied and synced 2026-08-27: 34 of 34 active users got a
+-- uuid, and exactly ONE of them — an active Executive, provisioned with a working
+-- Supabase login, who has never once signed in — has NO `profiles` row. Under a
+-- profiles-only lookup she would have been unmentionable and invisible to
+-- `user_visible()` for as long as she never logged in. Through the `u_by_uuid`
+-- branch she resolves to `tenant`, from the cache alone (verified: rank_a NULL,
+-- rank_b 3). One live user is the whole population of this case today, and would
+-- have been a silent, permanent bug.
+--
 -- IS PUTTING AUTH UUIDs IN A CACHE TABLE A LEAK? No. Phase 1's A4 revoke removed
 -- ALL privileges on every `sundial_*_cache` table from `anon` and `authenticated`,
 -- so no browser session can read this column at all — and the value is not secret

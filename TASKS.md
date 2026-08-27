@@ -697,6 +697,15 @@ lands only after its server change is verified in prod. Branch per repo per phas
     - [ ] Deactivate **or** attribute `tmurphy5213+inviteuser1@gmail.com` — an *active*
           Sales Rep with a null `Dealer__c`, so §1.2 resolves it to `none`. Either give
           it a dealer (if it is still a useful invite fixture) or deactivate it.
+- [ ] **Paige King's email address is misspelled in Salesforce** — `Sundial_User__c`
+      `a1O7y00000sTY2PEAW` carries `paigeking@harmonelec` **`e`** `tric.net`
+      ("harmonelecetric"). Found while verifying Phase 1b's Part A: she is the ONE
+      active user with a Supabase login and no `profiles` row, i.e. the only person
+      who has never signed in — and a bounced invite is the obvious reason. Not an
+      access-model bug and Phase 1b handles her correctly either way (the
+      `sundial_user_cache` fallback resolves her to `tenant`), but she has been
+      unable to reach the portal since she was provisioned. Fix the address, then
+      re-invite through the `/admin/users` path.
 - [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
       of logs with zero `onlyInNew` for Dennis; every other user reconciled and
       re-levelled before the flip.

@@ -52,6 +52,7 @@ import {
   PutSecretValueCommand,
 } from "@aws-sdk/client-secrets-manager";
 import { randomBytes } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 const APPLY = process.argv.includes("--apply");
 const USERS_ONLY = process.argv.includes("--users-only");
@@ -70,7 +71,7 @@ const EXISTING_TEST_CUSTOMER = "a1P7y00000AmyXCEAZ";
 // Emails are PLUS-ADDRESSED on a real mailbox Tim controls, not a fake domain: a
 // Supabase invite or password-reset for a test user then lands somewhere real and
 // bounces nowhere. The `zz-` local part keeps them obvious in any user list.
-const EMAIL = (slug) => `tim+zz-${slug}@constructiveoperations.com`;
+export const EMAIL = (slug) => `tim+zz-${slug}@constructiveoperations.com`;
 
 // §9's fixture table. `dealer` is recorded for Phase 1 and is NOT written today:
 // Sundial_User__c has no Dealer__c field yet (confirmed by describe, 2026-08-27), so
@@ -79,7 +80,12 @@ const EMAIL = (slug) => `tim+zz-${slug}@constructiveoperations.com`;
 // `dealer` key below. Until then every sales user resolves to scope `none` under the
 // new model's null-dealer rule — which is the correct fail-closed answer, and is
 // itself worth asserting in the matrix.
-const TEST_USERS = [
+// EXPORTED so scripts/backfill-dealers.mjs stamps Dealer__c from THIS table rather than
+// from a second copy of it. Two copies of "which test user belongs to which dealer" that
+// disagreed would let the access matrix assert one thing while the org held another --
+// and the matrix is the instrument every later phase is gated on, so it has to be
+// measuring the fixtures that actually exist.
+export const TEST_USERS = [
   { slug: "rep-a1", first: "ZZ Rep", last: "A One", accessLevel: "Sales Rep", dealer: "ZZ TEST DEALER A" },
   { slug: "rep-a2", first: "ZZ Rep", last: "A Two", accessLevel: "Sales Rep", dealer: "ZZ TEST DEALER A" },
   { slug: "mgr-a", first: "ZZ Mgr", last: "A", accessLevel: "Sales Dealer", dealer: "ZZ TEST DEALER A" },
@@ -469,7 +475,15 @@ async function main() {
   log(`     backfill-dealers.mjs creates the rows; a follow-up pass stamps Dealer__c.\n`);
 }
 
-main().catch((err) => {
-  console.error(`\nFAILED: ${err.message}\n`);
-  process.exit(1);
-});
+// Run the seeder ONLY when this file is executed directly. scripts/backfill-dealers.mjs
+// imports TEST_USERS from here for the dealer stamps, and an import that wrote ten
+// Salesforce users as a side effect would be a trap rather than a module.
+const invokedDirectly =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error(`\nFAILED: ${err.message}\n`);
+    process.exit(1);
+  });
+}

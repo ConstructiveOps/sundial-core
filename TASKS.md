@@ -640,6 +640,15 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [ ] Stamp `Dealer__c` on the ZZ TEST users — `seed-access-test-fixtures.mjs` carries
         the intended dealer per user and marks the spot with a TODO. Item 3 fills it.
 
+- [ ] **FOUND 2026-08-27: `user-admin` must require `Dealer__c` when a PATCH moves a
+      user INTO a sales role.** §1.2 resolves a sales role with a null dealer to scope
+      `none` — sees **nothing**. So re-levelling a Harmon manager down to `Sales Dealer`
+      without stamping a dealer in the same edit blanks their portal, and the cause is
+      not obvious from the edit that caused it. All six active users in
+      `docs/access-model-phase1-unattributed-reps.md` are one such edit away from it.
+      Refuse the PATCH the way `SUPER_ADMIN_WITH_SALES_ROLE` is refused. **Phase 4**
+      (with the rest of the user-admin work); harmless until Phase 3 enforces.
+
 - [ ] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
       measured a Sales Rep reading **all 485 comments in the tenant**, none of them their
       own, on records they cannot open. `sql/sundial_access_p1b_comments_rls.sql`: the

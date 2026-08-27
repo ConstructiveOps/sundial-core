@@ -36,7 +36,7 @@ import {
 } from "../../lib/http.js";
 
 const SF_OBJECT = "Sundial_User__c";
-const ACCESS_LEVELS = new Set([
+export const ACCESS_LEVELS = new Set([
   "Executive", "Manager", "Admin", "Sales Dealer", "Sales Rep", "Technician",
 ]);
 const DEPARTMENTS = new Set([
@@ -44,11 +44,53 @@ const DEPARTMENTS = new Set([
 ]);
 // ~100 years — an effectively permanent Supabase auth ban for deactivated users.
 const BAN_DURATION = "876000h";
-// Hierarchy_Level__c is REQUIRED on Sundial_User__c but is NOT part of the D-043
-// access model (reserved for the future dealer-visibility phase, and not admin-
-// editable here). New users default to the least-privilege base tier to satisfy the
-// requirement; a SF admin sets the real value when dealer visibility ships.
-const DEFAULT_HIERARCHY_LEVEL = "Sales Rep";
+// Hierarchy_Level__c is REQUIRED on Sundial_User__c and is DERIVED from the access
+// level -- never taken from request input, and never a flat default.
+//
+// THE BUG THIS REPLACES. Until 2026-08-27 this was a constant, `"Sales Rep"`, stamped
+// on EVERY user this endpoint created regardless of the access level the admin chose.
+// The TEMP guard in `sundial-sf-query` restricts any caller whose Hierarchy_Level__c
+// is exactly that string to one hardcoded rep's records. So every user created through
+// Manage Users and not hand-corrected in Salesforce afterwards was served a Sales
+// Rep's view of Customer and Solar whatever their real role -- a NARROWING, which is
+// why it surfaced as "why can this person not see anything" rather than as a leak.
+// docs/access-model-phase0-user-audit.md is the count.
+//
+// The picklist is RESTRICTED (Client, Dealer, Manager, Sales Rep, Sales Manager,
+// Technician), so an unmapped value is not a silent no-op -- Salesforce rejects the
+// insert with INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST. Every value this map can
+// produce must exist in it; a describe is the only way to know, and the unit tests
+// pin the three outputs so a picklist edit that removes one fails loudly here.
+//
+// access-model.md §10: the field is kept, written, and read by nothing once the TEMP
+// guard is retired. It is derived rather than dropped only because it is required.
+export const HIERARCHY_BY_ACCESS_LEVEL = {
+  "Sales Rep": "Sales Rep",
+  "Sales Dealer": "Sales Manager",
+};
+export const DEFAULT_HIERARCHY_LEVEL = "Client";
+
+/**
+ * Derive Hierarchy_Level__c from Access_Level__c.
+ *
+ * Everything that is not a sales role collapses to `Client` -- Executive, Admin,
+ * Manager and Technician alike. That is deliberate and lossy: the value is not read
+ * by anything, so precision here would be decoration. The one thing that matters is
+ * that a non-rep never receives `"Sales Rep"`, because that string is what the TEMP
+ * guard keys on.
+ *
+ * An unknown or missing access level also lands on `Client`, the least-privileged
+ * value -- fail closed.
+ */
+export function deriveHierarchyLevel(accessLevel) {
+  return HIERARCHY_BY_ACCESS_LEVEL[accessLevel] ?? DEFAULT_HIERARCHY_LEVEL;
+}
+
+// The access levels that carry a sales SCOPE (access-model.md §1.2: `dealer` and
+// `own`). Super_Admin__c gates Manage Users and implies nothing about scope, so a
+// super admin holding one of these would be a row-scoped user who can create users --
+// the combination §1.2 says must not exist.
+export const SALES_ACCESS_LEVELS = new Set(["Sales Rep", "Sales Dealer"]);
 
 // Base URL of the portal. Invited users are redirected here to set their password.
 // Env-configurable so a domain change is a Lambda config update, not a code edit.
@@ -220,6 +262,35 @@ async function handleCreate(identity, event, cors) {
   }
   const phone = trimStr(b.phone) || null;
 
+  // Super_Admin__c is Salesforce-set only (D-043) and this endpoint has never
+  // written it -- a `superAdmin` key in the body is silently ignored on the way to
+  // Salesforce. Silently is the problem: an admin who sends it believes they created
+  // a super admin, and nothing tells them otherwise.
+  //
+  // Refuse the combination outright. access-model.md §1.2: a super admin whose access
+  // level is a sales role resolves to `own`/`dealer` scope AND can manage users --
+  // a row-scoped account that can provision its way out of its own scope. The request
+  // is rejected rather than partially honoured, so the caller has to choose which of
+  // the two they actually meant.
+  //
+  // This does NOT stop the combination arriving by the other door: PATCHing an
+  // existing Salesforce-set super admin down to a sales access level. That path is
+  // deliberately left alone in Phase 0 -- see the note on the PATCH handler.
+  const requestedSuperAdmin =
+    b.superAdmin === true || b.superAdmin === "true" ||
+    b.Super_Admin__c === true || b.Super_Admin__c === "true";
+  if (requestedSuperAdmin && SALES_ACCESS_LEVELS.has(accessLevel)) {
+    return jsonResponse(400, cors, {
+      error: "invalid_role_combination",
+      code: "SUPER_ADMIN_WITH_SALES_ROLE",
+      message:
+        `A super admin cannot hold the sales access level "${accessLevel}": it would be a ` +
+        `record-scoped user who can manage users. Choose a tenant-wide access level ` +
+        `(Executive, Admin, Manager), or create the user without super admin. ` +
+        `Note that Super_Admin__c is set in Salesforce only and is never written by this endpoint.`,
+    });
+  }
+
   if (Object.keys(errors).length > 0) {
     return jsonResponse(400, cors, {
       error: "validation_error",
@@ -295,7 +366,8 @@ async function handleCreate(identity, event, cors) {
     Last_Name__c: lastName,
     Email__c: email,
     Access_Level__c: accessLevel,
-    Hierarchy_Level__c: DEFAULT_HIERARCHY_LEVEL, // required field; base default (see const)
+    // DERIVED, never from input. See deriveHierarchyLevel above.
+    Hierarchy_Level__c: deriveHierarchyLevel(accessLevel),
     Active__c: true,
     Supabase_User_Id__c: authUserId,
     Client__c: identity.tenantId,
@@ -379,7 +451,18 @@ async function handleUpdate(identity, event, cors) {
   if (hasOwn(b, "accessLevel")) {
     const v = trimStr(b.accessLevel);
     if (!ACCESS_LEVELS.has(v)) errors.accessLevel = "invalid accessLevel";
-    else fields.Access_Level__c = v;
+    else {
+      fields.Access_Level__c = v;
+      // Re-derive the hierarchy in the SAME patch. Without this, changing someone
+      // from Sales Rep to Manager would leave Hierarchy_Level__c = "Sales Rep"
+      // behind, and the TEMP guard would go on serving them a rep's records -- the
+      // create-time bug reappearing on the update path.
+      //
+      // `hierarchyLevel` stays in the DISALLOWED list above: it is derived here, not
+      // accepted from the caller. Those two facts are not in tension -- the server
+      // owns the field, the client may not touch it.
+      fields.Hierarchy_Level__c = deriveHierarchyLevel(v);
+    }
   }
   if (hasOwn(b, "defaultDepartment")) {
     const v = trimStr(b.defaultDepartment);

@@ -38,8 +38,42 @@ Now derived from `Access_Level__c`, on create and on `accessLevel` PATCH alike �
 PATCH half matters because without it, moving someone off Sales Rep would leave the
 old value behind and the guard would keep restricting them. Create also now refuses
 `Super_Admin__c` together with a sales access level: a record-scoped user who can
-provision users is an account that can escape its own scope. Seven unit tests, suite
-503 green. **Reviewed diff pending before deploy.**
+provision users is an account that can escape its own scope.
+
+**Both doors are now shut (added after the diff review).** The create-side refusal was
+always the less important half — this endpoint never writes `Super_Admin__c`, so a
+create request asking for it was only ever a misunderstanding. The path that could
+genuinely produce the combination is the other one: take an existing Salesforce-set
+super admin and PATCH their access level *down* to a sales role, two individually
+sane edits arriving at a row-scoped account that can manage users. `handleUpdate` now
+refuses that with the same `SUPER_ADMIN_WITH_SALES_ROLE` code, reading
+`Super_Admin__c` from the record rather than from request input — which meant adding
+the field to the PATCH ownership SOQL, since that query selected only `Id` and
+`Supabase_User_Id__c`. (It is selected in the *list* query; that is what made it look
+already available.) The earlier comment calling this a deliberate Phase 0 scope
+decision is gone, because it no longer is one.
+
+**Tests: 7 → 23 for this Lambda, suite 503 → 519 green.** The 16 new ones live in
+`lambdas/sundial-user-admin/handler.test.js` rather than in `test.js`: the existing
+file tests `deriveHierarchyLevel` as a pure function over constants and needs no
+mocks, while these drive the real handler through the router with `mock.module` stubs
+over Salesforce and Supabase, the same pattern as `sundial-comment-notify/test.js`.
+Salesforce writes are *recorded*, not swallowed, because every assertion is about the
+exact field map that reaches Salesforce.
+
+They cover what reading the code could only assert: that an `accessLevel` PATCH writes
+both fields in one patch, that a PATCH without `accessLevel` leaves
+`Hierarchy_Level__c` alone, that all four spellings of the super-admin key are caught
+on create, that a non-sales role still succeeds *without* `Super_Admin__c` being
+written, and the new PATCH refusal.
+
+Checked they aren't vacuous by mutation: removing the PATCH re-derive fails 5 tests;
+neutering the PATCH refusal fails 1; dropping `Super_Admin__c` from the ownership SOQL
+fails 1 — that last one only because a test asserts on the SOQL string directly, since
+the mock returns the field whether or not the query asked for it. Without that
+assertion the field could have been dropped and every refusal test would still pass.
+
+**Still not deployed.**
 
 The audit (`docs/access-model-phase0-user-audit.md`, 24 active users) says the blast
 radius was small: exactly **one** user is wrongly restricted today, and it is a test

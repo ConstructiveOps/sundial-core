@@ -273,9 +273,11 @@ async function handleCreate(identity, event, cors) {
   // is rejected rather than partially honoured, so the caller has to choose which of
   // the two they actually meant.
   //
-  // This does NOT stop the combination arriving by the other door: PATCHing an
-  // existing Salesforce-set super admin down to a sales access level. That path is
-  // deliberately left alone in Phase 0 -- see the note on the PATCH handler.
+  // The other door -- PATCHing an existing Salesforce-set super admin DOWN to a sales
+  // access level -- is closed too, in handleUpdate, with this same code. That one is
+  // the door that actually mattered: this endpoint never writes Super_Admin__c, so a
+  // create request asking for it was always a misunderstanding, whereas the PATCH
+  // path could genuinely produce the combination out of two individually-sane edits.
   const requestedSuperAdmin =
     b.superAdmin === true || b.superAdmin === "true" ||
     b.Super_Admin__c === true || b.Super_Admin__c === "true";
@@ -494,10 +496,11 @@ async function handleUpdate(identity, event, cors) {
     });
   }
 
-  // Tenant pre-check FIRST (also fetch the auth user id for the ban step). A record
+  // Tenant pre-check FIRST (also fetch the auth user id for the ban step, and the
+  // target's Super_Admin__c for the role-combination refusal below). A record
   // outside the caller's tenant is indistinguishable from missing -> 404.
   const owned = await sfQuery(
-    `SELECT Id, Supabase_User_Id__c FROM ${SF_OBJECT} ` +
+    `SELECT Id, Supabase_User_Id__c, Super_Admin__c FROM ${SF_OBJECT} ` +
       `WHERE Id = '${soqlEscapeString(id)}' ` +
       `AND Client__c = '${soqlEscapeString(identity.tenantId)}' LIMIT 1`
   );
@@ -506,6 +509,34 @@ async function handleUpdate(identity, event, cors) {
   }
   const recordId = owned[0].Id;
   const uid = trimStr(owned[0].Supabase_User_Id__c);
+
+  // The OTHER door into the combination handleCreate refuses. Create can only reject
+  // a request that ASKS for super admin, and since this endpoint never writes
+  // Super_Admin__c that request could only ever have been a misunderstanding. The
+  // real way to reach a row-scoped user who can manage users is from the other side:
+  // take an existing Salesforce-set super admin and PATCH their access level DOWN to
+  // a sales role. Nothing about that request looks wrong in isolation.
+  //
+  // Refused here with the same code as create, for the same §1.2 reason: `own`/
+  // `dealer` scope plus Manage Users is an account that can provision its way out of
+  // its own scope. The fix is to clear Super_Admin__c in Salesforce first (it is
+  // Salesforce-set only, D-043) and then re-level the user.
+  //
+  // Read from the RECORD, not from request input -- `superAdmin` is in DISALLOWED and
+  // a caller cannot assert it either way.
+  const targetIsSuperAdmin = owned[0].Super_Admin__c === true;
+  if (targetIsSuperAdmin && hasOwn(fields, "Access_Level__c") &&
+      SALES_ACCESS_LEVELS.has(fields.Access_Level__c)) {
+    return jsonResponse(400, cors, {
+      error: "invalid_role_combination",
+      code: "SUPER_ADMIN_WITH_SALES_ROLE",
+      message:
+        `This user is a super admin and cannot be moved to the sales access level ` +
+        `"${fields.Access_Level__c}": it would be a record-scoped user who can manage ` +
+        `users. Clear Super_Admin__c in Salesforce first, then change the access level. ` +
+        `Note that Super_Admin__c is set in Salesforce only and is never written by this endpoint.`,
+    });
+  }
 
   if (activeChange !== null) fields.Active__c = activeChange;
 

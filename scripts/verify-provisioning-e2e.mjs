@@ -37,11 +37,13 @@ const admin = await getSupabaseClient();
 const cfg = await getSupabaseConfig();
 const apikey = cfg.anonKey || cfg.serviceRoleKey;
 
-const login = async (password) => {
+// `email` defaults to the throwaway e2e user so every existing caller is unchanged;
+// the derived-hierarchy step passes the ZZ super admin's address explicitly.
+const login = async (password, email = EMAIL) => {
   const r = await fetch(`${cfg.url}/auth/v1/token?grant_type=password`, {
     method: 'POST',
     headers: { apikey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: EMAIL, password }),
+    body: JSON.stringify({ email, password }),
   });
   return { status: r.status, body: await r.json() };
 };
@@ -66,6 +68,107 @@ const prior = (l0.users || []).find((u) => (u.email || '').toLowerCase() === EMA
 if (prior) await admin.auth.admin.deleteUser(prior.id);
 const priorSf = await sfQuery(`SELECT Id FROM Sundial_User__c WHERE Email__c = '${soqlEscapeString(EMAIL)}'`);
 // (leave SF cleanup to the end; we recreate below)
+
+const ZZ_ADMIN_EMAIL = 'tim+zz-admin@constructiveoperations.com';
+
+// The three mappings sundial-user-admin must produce. Kept short deliberately: the
+// exhaustive cases live in lambdas/sundial-user-admin/test.js as pure unit tests.
+// What THIS proves is different and cannot be unit-tested -- that the value survives
+// the round trip through the real endpoint into a real Salesforce record, against a
+// RESTRICTED picklist that would reject an invalid one.
+const DERIVATION_CASES = [
+  { accessLevel: 'Sales Dealer', expect: 'Sales Manager' },
+  { accessLevel: 'Manager', expect: 'Client' },
+  { accessLevel: 'Sales Rep', expect: 'Sales Rep' },
+];
+
+async function verifyDerivedHierarchy() {
+  const { getSecret } = await import('../lib/secrets.js');
+  const passwords = await getSecret('sundial/test-users').catch(() => null);
+  if (!passwords?.[ZZ_ADMIN_EMAIL]) {
+    console.log(`
+  SKIP derived-hierarchy checks: no password for ${ZZ_ADMIN_EMAIL}.`);
+    console.log(`       Run: node scripts/seed-access-test-fixtures.mjs --apply`);
+    return;
+  }
+
+  const adminLogin = await login(passwords[ZZ_ADMIN_EMAIL], ZZ_ADMIN_EMAIL);
+  const adminToken = adminLogin.body?.access_token;
+  if (!adminToken) {
+    console.log(`
+  SKIP derived-hierarchy checks: could not log in as ${ZZ_ADMIN_EMAIL} ` +
+      `(HTTP ${adminLogin.status}).`);
+    return;
+  }
+
+  // Probe whether the token actually carries Super_Admin__c before asserting.
+  const probe = await fetch(`${API_BASE}/admin/users`, {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+  if (probe.status === 403) {
+    console.log(`
+  SKIP derived-hierarchy checks: ${ZZ_ADMIN_EMAIL} is not a Super Admin yet.`);
+    console.log(`       Tick Super_Admin__c on that Sundial_User__c in Salesforce (D-043:`);
+    console.log(`       Salesforce-set only, never writable through an endpoint), then re-run.`);
+    return;
+  }
+  if (probe.status !== 200) {
+    check('GET /admin/users as the ZZ super admin', false, `HTTP ${probe.status}`);
+    return;
+  }
+
+  for (const c of DERIVATION_CASES) {
+    const email = `tim+zz-derive-${c.accessLevel.toLowerCase().replace(/\s+/g, '-')}@constructiveoperations.com`;
+    let createdId = null;
+    try {
+      const res = await fetch(`${API_BASE}/admin/users`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email, firstName: 'ZZ Derive', lastName: c.accessLevel,
+          accessLevel: c.accessLevel, credentialMode: 'password',
+          tempPassword: 'TempDerive123!',
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      createdId = body?.id ?? null;
+      if (res.status !== 201 || !createdId) {
+        check(`POST /admin/users (${c.accessLevel})`, false, `HTTP ${res.status} ${JSON.stringify(body).slice(0, 160)}`);
+        continue;
+      }
+      // Read the field back from Salesforce. The endpoint does not return it, and
+      // asserting on the response would only test the response.
+      const rows = await sfQuery(
+        `SELECT Id, Access_Level__c, Hierarchy_Level__c FROM Sundial_User__c ` +
+        `WHERE Id = '${soqlEscapeString(createdId)}' LIMIT 1`
+      );
+      const got = rows?.[0]?.Hierarchy_Level__c;
+      check(`${c.accessLevel} -> Hierarchy_Level__c "${c.expect}"`, got === c.expect, `got "${got}"`);
+    } finally {
+      // Clean up both sides regardless of outcome; a leftover ZZ user would show up
+      // in the next audit run as a real user.
+      if (createdId) await sfDeleteRecord('Sundial_User__c', createdId).catch(() => {});
+      const { data: list } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      const found = list?.users?.find((x) => x.email?.toLowerCase() === email);
+      if (found) await admin.auth.admin.deleteUser(found.id).catch(() => {});
+    }
+  }
+
+  // The refusal added in the same change: a super admin cannot also be a sales role.
+  const refusal = await fetch(`${API_BASE}/admin/users`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: 'tim+zz-derive-refuse@constructiveoperations.com',
+      firstName: 'ZZ', lastName: 'Refuse', accessLevel: 'Sales Rep',
+      credentialMode: 'password', tempPassword: 'TempDerive123!', superAdmin: true,
+    }),
+  });
+  const rBody = await refusal.json().catch(() => ({}));
+  check('super admin + sales role is refused',
+    refusal.status === 400 && rBody?.code === 'SUPER_ADMIN_WITH_SALES_ROLE',
+    `HTTP ${refusal.status} ${rBody?.code || ''}`);
+}
 
 let authUserId = null;
 let sfUserId = priorSf?.[0]?.Id || null;
@@ -148,6 +251,20 @@ try {
     second.body?.user?.user_metadata?.must_change_password === false);
   const oldTry = await login(TEMP_PW);
   check('old temp password now rejected', oldTry.status !== 200, `HTTP ${oldTry.status}`);
+
+  // 8. Hierarchy_Level__c is DERIVED by the real endpoint (Phase 0 deliverable C').
+  //
+  // Steps 1-7 create the Sundial_User__c DIRECTLY, so they prove nothing about
+  // sundial-user-admin's own behaviour -- they set both fields themselves. The
+  // derivation only exists inside POST /admin/users, so the only way to assert it
+  // is to call that endpoint, which needs a Super_Admin__c bearer token.
+  //
+  // That token comes from the ZZ TEST super admin, never from a real person's
+  // account: logging in as a live super admin to test provisioning is the thing
+  // CLAUDE.md's test-user rule forbids. Super_Admin__c is Salesforce-set only
+  // (D-043), so the checkbox is ticked by hand once; until then this SKIPS rather
+  // than failing, because an un-ticked box is a setup step, not a regression.
+  await verifyDerivedHierarchy();
 } finally {
   // 7. cleanup.
   if (authUserId) await admin.auth.admin.deleteUser(authUserId).catch(() => {});

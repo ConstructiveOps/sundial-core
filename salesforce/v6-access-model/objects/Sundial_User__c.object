@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_User__c — ONE new lookup field, Dealer__c -> Sundial_Dealer__c. D-064 (docs/access-model.md §2.2).
+
+  ADDITIVE: this file declares only the new field. Nothing existing on Sundial_User__c is
+  touched, and the Metadata API leaves unlisted fields alone.
+
+  Which dealer this user sells for. Blank on Harmon staff. Blank on a sales user means they see nothing.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Dealer__c</fullName>
+        <description>The dealer this user sells for. THE ONLY SOURCE OF A SALES USER'S DEALER SCOPE (docs/access-model.md §1.2): a `Sales Dealer` sees their dealer's records, a `Sales Rep` sees their own. A NULL Dealer__c on a sales-role user resolves to scope `none` - NOT to 'all dealers'. Tenant-wide roles (Executive/Admin/Manager) do not read it, so it is correctly left null on Harmon staff. Written by sundial-user-admin only; never writable by the user themselves. A person selling for two dealers gets two Sundial_User__c records, so this is single-valued by design.</description>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <externalId>false</externalId>
+        <inlineHelpText>Which dealer this user sells for. Blank on Harmon staff. Blank on a sales user means they see nothing.</inlineHelpText>
+        <label>Dealer</label>
+        <referenceTo>Sundial_Dealer__c</referenceTo>
+        <relationshipLabel>Sundial Users</relationshipLabel>
+        <relationshipName>Sundial_Users</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Commercial__c — ONE new lookup field, Dealer__c -> Sundial_Dealer__c. D-064 (docs/access-model.md §2.2).
+
+  ADDITIVE: this file declares only the new field. Nothing existing on Sundial_Commercial__c is
+  touched, and the Metadata API leaves unlisted fields alone.
+
+  The dealer that owns this project. Placeholder - the Commercial module is not built yet.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Dealer__c</fullName>
+        <description>SERVER-OWNED. Written by the Sundial Lambda layer and by the one-time backfill (scripts/backfill-deal-ownership.mjs). A sales-role user can never write it: it is on the protected-field list in docs/access-model.md §3.4, so a PATCH naming it is rejected outright rather than ignored. Added for consistency. NOT LOAD-BEARING: the Commercial module is denied to every sales scope (docs/access-model.md §3.1), and as of 2026-08-27 this object is a 14-field Phase 3 stub holding ZERO records and carrying no Client__c tenant key at all. Adding Dealer__c here changes nothing and costs nothing; the missing tenant key is a separate gap, recorded in TASKS.md.</description>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <externalId>false</externalId>
+        <inlineHelpText>The dealer that owns this project. Placeholder - the Commercial module is not built yet.</inlineHelpText>
+        <label>Dealer</label>
+        <referenceTo>Sundial_Dealer__c</referenceTo>
+        <relationshipLabel>Sundial Commercial Projects</relationshipLabel>
+        <relationshipName>Sundial_Commercial_Projects</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

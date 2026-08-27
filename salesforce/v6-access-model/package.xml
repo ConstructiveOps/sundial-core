@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Workbench deploy: the D-064 access-model data model.
+  1 new custom object + 5 new lookup fields + 1 permission set. ADDITIVE ONLY.
+
+  Build the zip with the builder, never by hand:
+      node scripts/zip-package.mjs salesforce/v6-access-model
+
+  Then Workbench -> Migration -> Deploy -> Single Package, CHECK ONLY FIRST.
+  See README.md for the full steps and what to verify afterwards.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Dealer__c</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>Sundial_Dealer__c.Client__c</members>
+        <members>Sundial_Dealer__c.Is_Internal__c</members>
+        <members>Sundial_Dealer__c.Active__c</members>
+        <members>Sundial_User__c.Dealer__c</members>
+        <members>Sundial_Customer__c.Dealer__c</members>
+        <members>Sundial_Solar__c.Dealer__c</members>
+        <members>Sundial_Roofing__c.Dealer__c</members>
+        <members>Sundial_Commercial__c.Dealer__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Access_Model</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

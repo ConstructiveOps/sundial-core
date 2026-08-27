@@ -629,6 +629,14 @@ lands only after its server change is verified in prod. Branch per repo per phas
         `docs/integrations/dealer-aliases.csv`, used only by the Solar backfill.
   - [x] ~~**AMENDED BY PHASE 0:** derive a customer's dealer from `Sales_Rep__r.Dealer__c`~~
         **DECIDED as A1**, for both objects, with a server re-stamp on every rep change.
+  - [ ] **FOUND 2026-08-27 by `scripts/probe-access-model-fields.mjs`:
+        `Sundial_Commercial__c` HAS NO `Client__c` AT ALL.** Every other Sundial object
+        carries the tenant isolation key (required on User/Customer/Solar, optional on
+        Roofing); Commercial has none. It holds **zero** records and is a 14-field Phase 3
+        stub, so nothing is exposed today and the v6 package adds `Dealer__c` there
+        harmlessly. **Not fixed in Phase 1 on purpose** — putting an isolation key on an
+        empty object is a Commercial-build decision, not an access-model one. Fix it
+        before the first Commercial record exists, or the backfill becomes a migration.
   - [ ] Stamp `Dealer__c` on the ZZ TEST users — `seed-access-test-fixtures.mjs` carries
         the intended dealer per user and marks the spot with a TODO. Item 3 fills it.
 

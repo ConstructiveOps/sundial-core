@@ -33,6 +33,50 @@ Examples:
 
 ---
 
+### `Sundial_Dealer__c`
+
+**Status:** package ready (`salesforce/v6-access-model/`), **deploy pending** as of 2026-08-27.
+**Purpose:** A selling organization *within* a tenant — the dealers Harmon sells through, plus Harmon Solar itself as the internal one. This is the object that lets row visibility be an **id equality on an indexed column** instead of a name match against a picklist string. Companion: **D-064** and [`access-model.md`](access-model.md) §2.1.
+
+**Key Fields:**
+- `Name` — the display name ("Heavenly Power", "Harmon Solar"). The **only** string anything matches on, and only once, in the one-time backfill. No read path resolves a dealer by name.
+- `Client__c` — Lookup → `Sundial_Tenant__c`, **required**, delete constraint Restrict. Tenant isolation key, same role as on every other Sundial object (D-034/D-035).
+- `Is_Internal__c` — Checkbox, default false. True for Harmon Solar. **Informational only — it grants nothing.** Scope comes from `Access_Level__c` alone, so an internal dealer's rep is an `own`-scope user exactly like an external dealer's rep.
+- `Active__c` — Checkbox, **default false**. An inactive dealer's users resolve to scope `none` and see **nothing** — the same answer as a null dealer, deliberately (fail closed). Defaults to false so a dealer created by hand starts with no access and is switched on as a decision.
+
+**Relationships:**
+- `Dealer__c` on `Sundial_User__c`, `Sundial_Customer__c`, `Sundial_Solar__c`, `Sundial_Roofing__c`, `Sundial_Commercial__c` — all optional lookups, all `deleteConstraint = Restrict`.
+
+**Why Restrict everywhere:** `SetNull` would let deleting a dealer silently unshare every deal it owned. The records would stay, look normal, and quietly become invisible to the people selling them. `Restrict` makes that an error at the moment of deletion. The integration user's permission set grants create and edit but **not delete**, for the same reason.
+
+**`Sales_Company_Value__c` is deliberately absent.** The approved design specified it as a unique per-tenant join key onto the sales-company picklist. Phase 0 proved it cannot exist — the two dealer picklists carry 110 and 56 values with only 36 exact matches, plus near-miss spellings an exact join drops *silently*. D-064 **A1** then removed the need for it by deriving a deal's dealer from its rep. Do not add it back; the residue is a reviewed CSV, [`integrations/dealer-aliases.csv`](integrations/dealer-aliases.csv), used only by the one-time Solar backfill.
+
+---
+
+### `Dealer__c` — the lookup on users and deals
+
+Added by the same package to five objects. Two distinct jobs, worth not confusing:
+
+| Object | What it means | Written by |
+|---|---|---|
+| `Sundial_User__c` | The dealer this user **sells for**. The only source of a sales user's dealer scope. Null on Harmon staff (tenant scope does not read it); **null on a sales-role user means they see nothing**, not "all dealers". | `sundial-user-admin` only |
+| `Sundial_Customer__c`, `Sundial_Solar__c` | The dealer that **owns the deal**. | Server only |
+| `Sundial_Roofing__c`, `Sundial_Commercial__c` | Same, but not load-bearing — those modules are denied to every sales scope (§3.1). | Server only |
+
+**On a deal it is derived from the rep, and from nothing else (D-064 A1):**
+
+```
+Dealer__c := Sales_Rep__r.Dealer__c
+```
+
+stamped by the server on create and **re-stamped on any `Sales_Rep__c` change**. The re-stamp is the half that is easy to omit: stamping only on create leaves a reassigned deal carrying the *old* rep's dealer — shared with an organization that no longer sells it — and nothing surfaces it, because the record looks correct to everyone except the people who should no longer see it.
+
+**The sales-company picklists are not an ownership source.** `Sundial_Customer__c.Dealer_Name__c`, `Sundial_Customer__c.Sales_Company__c` and `Sundial_Solar__c.Sales_Company_Harmon_Solar_or_Third__c` stay exactly what D19 made them — the commission discriminator — and nothing on a read path consults them. `Dealer_Name__c` is populated on **13 of 31,637** customers and does not contain "Harmon Solar" at all; deriving ownership from it would leave essentially every customer invisible to dealer scope.
+
+**A sales role can never write either field.** `Sales_Rep__c` and `Dealer__c` are on the protected list (§3.4): a PATCH naming one is rejected outright, not ignored.
+
+---
+
 ### `Sundial_User__c`
 
 **Purpose:** Represents portal users (Harmon employees, dealers, sales reps) and their organizational hierarchy. Does NOT represent Salesforce login users; Harmon users authenticate via Supabase.

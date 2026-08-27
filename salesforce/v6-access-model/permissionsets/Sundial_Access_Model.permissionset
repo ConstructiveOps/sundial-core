@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Object + field permissions on everything v6-access-model creates, so the Sundial
+  integration user can read and write it. Assign this to the integration user, OR merge
+  its entries into the existing Sundial integration permission set.
+
+  WHY CREATE BUT NOT DELETE on Sundial_Dealer__c: scripts/backfill-dealers.mjs creates the rows and
+  sundial-user-admin will create them from a future Dealers tab. NOTHING deletes a dealer -
+  a dealer with deals attached must not be removable, which is also why every Dealer__c
+  lookup carries deleteConstraint Restrict. Leaving allowDelete false means a mistake in a
+  future script fails rather than unshares records.
+
+  viewAllRecords / modifyAllRecords are false: the integration user owns the rows it
+  creates and the org-wide default is ReadWrite, so it needs neither, and "View All" on an
+  object is exactly the blanket grant this whole design exists to avoid.
+
+  Client__c is absent from fieldPermissions ON PURPOSE - see generate.mjs.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Sundial Access Model</label>
+    <description>D-064 Phase 1: object and field access for Sundial_Dealer__c and the Dealer__c lookups, for the Sundial integration user.</description>
+    <objectPermissions>
+        <allowCreate>true</allowCreate>
+        <allowDelete>false</allowDelete>
+        <allowEdit>true</allowEdit>
+        <allowRead>true</allowRead>
+        <modifyAllRecords>false</modifyAllRecords>
+        <object>Sundial_Dealer__c</object>
+        <viewAllRecords>false</viewAllRecords>
+    </objectPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Is_Internal__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Active__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_User__c.Dealer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Customer__c.Dealer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Solar__c.Dealer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Roofing__c.Dealer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Commercial__c.Dealer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+</PermissionSet>

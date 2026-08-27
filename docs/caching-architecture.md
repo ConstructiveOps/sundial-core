@@ -232,6 +232,61 @@ Display columns (names match `sfFieldToColumn()` so `sundial-sf-query`/`sundial-
 
 ---
 
+## Who may read a cache table — nobody with a browser
+
+**`sql/sundial_access_p1_cache_hardening.sql` (D-064 A4, 2026-08-27).** Every
+`sundial_*_cache` table has **ALL privileges revoked from `anon` and `authenticated`**.
+The cache is service-role-only, and now structurally so rather than by convention.
+
+Before that file was applied, `anon` and `authenticated` held `arwdDxtm` — the full
+privilege set, INSERT/UPDATE/DELETE included — on all six tables. That was never a
+decision; it is the Supabase default for a table created through the dashboard, and
+nothing had ever narrowed it. The only thing standing between a logged-in browser session
+and 31,640 customer rows was one RLS policy per table:
+
+```sql
+USING (tenant_id = current_user_tenant_id())
+```
+
+**and that policy denied by accident.** `current_user_tenant_id()` reads
+`public.portal_users`, which holds zero rows, so it returns NULL for every session and
+nothing matches. Three independent accidents were stacked, all failing closed, none
+designed: the table was never populated, the grants were never narrowed, and
+`profiles.tenant_id` holds the Salesforce record id while the cache tables' `tenant_id`
+holds the slug — so even repointing the helper at `profiles` would have compared an id to
+a slug and still denied, for a reason nobody had written down.
+
+> ⚠️ **`public.portal_users` and `current_user_tenant_id()` were load-bearing accidents.**
+> Populating that table, or repointing that helper at `profiles`, would have exposed the
+> entire cache to any authenticated session with no per-rep scoping. Both edits read as
+> obvious housekeeping — an abandoned empty table, and a helper whose near-namesake
+> `current_user_tenant()` reads a different table, which looks exactly like a copy-paste
+> bug someone should tidy. After the revoke both are harmless, because the grant they
+> depended on is gone. **If the revoke has not been applied in some environment, apply it
+> before tidying anything in that area.**
+
+The revoke costs the portal nothing: no browser code reads a cache table. The single
+browser Supabase client (`harmon-crm/src/lib/supabase.ts`, anon key) issues `.from()`
+against exactly `comments`, `comment_mentions` and `user_preferences`. Every backend
+reader — `sundial-sf-query`, `sundial-cache-sync`, `sundial-sf-update`,
+`sundial-comment-notify`, the welcome-call writeback — sends the service-role key, and the
+service role bypasses RLS. Verified file-by-file, 2026-08-27 (`access-model.md` §5.1c).
+
+**The RLS policies were deliberately left in place.** The six `*_cache_select_tenant`
+policies still exist and RLS is still enabled; the file changes grants only. Dropping the
+policies is Phase 6, kept separate so its diff shows one thing. The order matters:
+revoking while the policy still stands is belt *and* braces, whereas dropping the policy
+while the grant stands would be neither.
+
+**When a new cache table is created** — `sundial_commercial_cache`,
+`sundial_service_cache`, `sundial_service_visit_cache` are all named above and do not
+exist yet — it arrives with the same wide-open default. The hardening file also revokes
+the schema's `default privileges` for `anon` and `authenticated`, which covers the next
+table automatically, but add the explicit `revoke` line for each new table anyway so the
+file stays a complete statement of what is closed.
+
+---
+
 ## Operational Concerns
 
 ### Cache Storage Growth

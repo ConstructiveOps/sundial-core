@@ -528,7 +528,9 @@ lands only after its server change is verified in prod. Branch per repo per phas
         `pg_class.relacl`: **anon and authenticated hold `arwdDxtm` (full privileges,
         writes included) on all six cache tables.** Rewrite the block before the next
         snapshot or Phase 6 verifies its revoke against a query that passes either way.
-  - [!] **Pull the §3.3 cache-table `revoke` + policy drop forward into Phase 1.**
+  - [x] **Pull the §3.3 cache-table `revoke` forward into Phase 1.** DECIDED as **A4**
+        (D-064, 2026-08-27) and scheduled as Phase 1 item 1. The *policy drop* stays in
+        Phase 6 so its diff is reviewable alone; the revoke is what carries the safety.
         Three independent accidents currently fail closed (empty `portal_users`;
         never-narrowed grants; `profiles.tenant_id` = record id vs cache `tenant_id` =
         slug). Populating `portal_users` or repointing the helper at `profiles` —
@@ -570,17 +572,72 @@ lands only after its server change is verified in prod. Branch per repo per phas
         Phase 0 wrote only `Sales_Rep__c` / `Linked_Solar_Project__c` to it. Fix is
         `node scripts/create-portal-test-record.mjs --apply` when convenient.
 
-- [ ] **Phase 1 — Data model and cache.** `Sundial_Dealer__c` + `Dealer__c` lookups
-      (`salesforce/v6-access-model/`), backfill scripts (canary-first, report-only by
-      default), `sql/sundial_access_cache_columns.sql` + full resync, `lib/access.js`
-      with unit tests, `access` block on `/auth/me`.
-  - [ ] **AMENDED BY PHASE 0:** `Sales_Company_Value__c` cannot be one unique string —
-        the two dealer picklists share only 36 of 110/56 values and carry near-miss
-        spellings. Needs a value-per-object or an alias child, plus normalize-and-match.
-  - [ ] **AMENDED BY PHASE 0:** derive a customer's dealer from `Sales_Rep__r.Dealer__c`,
-        not from `Dealer_Name__c` (populated on 13 of 31,637 rows).
-  - [ ] Stamp `Dealer__c` on the ZZ TEST users — `seed-access-test-fixtures.mjs`
-        carries the intended dealer per user and has a TODO where it goes.
+- [~] **Phase 1 — Data model and cache.** Branch `feature/access-model-p1`. **Amended
+      2026-08-27 by A1–A6 (D-064 "Amended 2026-08-27"; `docs/access-model.md` §Amendments).**
+      Nothing on Dennis's read path is touched this phase — `sundial-sf-query`,
+      `repRestrictFor` and `sundial-list-files` are unchanged.
+  - [ ] **1. `sql/sundial_access_p1_cache_hardening.sql` (A4)** — revoke ALL on every
+        `sundial_*_cache` table from `anon` and `authenticated`. RLS stays on, **no
+        policy change**. **TIM applies** in the Supabase SQL editor; verification query
+        in the file. Ships first: pure reduction in exposure, no dependencies.
+  - [ ] **2. `salesforce/v6-access-model/`** — `Sundial_Dealer__c` (`Name`, `Client__c`,
+        `Is_Internal__c`, `Active__c`) + `Dealer__c` lookup on User / Customer / Solar /
+        Roofing / Commercial + permission-set entries for the integration user.
+        **TIM deploys** from Workbench. Everything below blocks on it being live.
+  - [ ] **3. `scripts/backfill-dealers.mjs`** — one dealer row per distinct picklist value
+        across BOTH picklists (union, 110 + 56); `Active__c` only on Harmon Solar,
+        Heavenly Power, Property Upgrades LLC; `Is_Internal__c` on Harmon Solar; plus the
+        three §9 ZZ TEST dealers. Stamps `Dealer__c` on the ten ZZ TEST users and on
+        Dennis (Harmon Solar). No other live user. Report-only, `--apply`, canary-first.
+        **TIM approves the report.**
+  - [ ] **4. `scripts/backfill-deal-ownership.mjs`** — `Dealer__c` on Customer and Solar
+        from the rep (A1), then the Solar-only alias pass for rep-less records (A2), with
+        the A3 abort check. Report shows counts by outcome and the FULL near-miss list.
+        **TIM approves the report before `--apply`.**
+  - [ ] **5. `sql/sundial_access_p1_cache_columns.sql`** — `sales_rep_sf_id` +
+        `dealer_sf_id` on customer/solar/roofing caches (add-if-missing), `dealer_sf_id` +
+        `access_level` on `sundial_user_cache`, `(client_sf_id, <col>)` indexes.
+        **TIM applies**; then `sundial-cache-sync {"mode":"full"}` per object and counts
+        by `sales_rep_sf_id` reconciled against SOQL. No Lambda change needed —
+        `sfFieldToColumn()` already maps both references to `*_sf_id`.
+  - [ ] **6. `lib/access.js`** — `resolveScope`, `rowFilter`, `canReadObject`, `canAction`,
+        `assertVisibleRecord` + unit tests: every access level × every object × null
+        dealer × inactive dealer × unknown level, all fail-closed cases asserted. **Not
+        wired into any Lambda this phase.**
+  - [ ] **7. `lib/identity.js` + `sundial-auth-proxy`** — `Dealer__c`,
+        `Dealer__r.Active__c`, `Dealer__r.Is_Internal__c` in the identity SOQL; `access`
+        block on `/auth/me`; `access_scope` / `access_level` / `dealer_sf_id` upserted into
+        `profiles` (columns via a small SQL file **TIM applies** — no policy change, no
+        client grant). **Deployed LAST**, after the columns exist, on TIM's diff approval.
+  - [ ] **8. `scripts/access-shadow-report.mjs`** — per user, per object: old visible id
+        set (TEMP rule) vs new (`rowFilter` over the cache), `onlyInOld` / `onlyInNew`.
+        **TIM reviews Dennis's row and every user whose `Access_Level__c` is Technician,
+        null, or not in the list** — those are the users who lose access at Phase 3.
+  - [ ] **9. `scripts/repair-mis-stamped-users.mjs` (A6)** — re-PATCH each mis-stamped
+        user's CURRENT `accessLevel` through the live `/admin/users` endpoint as
+        `tim+zz-admin` so the derivation runs. Skips Dennis and anyone whose
+        `Access_Level__c` IS `Sales Rep`. Exactly **one** live user qualifies
+        (`Temp Passtwo`); the 13 "derivation differs" users are NOT in scope.
+        Report-only. **TIM approves before `--apply`.**
+  - **Gate:** Dennis `onlyInOld = ∅` on customer and solar; cache counts by
+    `sales_rep_sf_id` match SOQL; unit tests green; `/auth/me` per ZZ TEST user returns
+    the expected scope + `dealerId` (§9 matrix); `zz-rep-nodealer` and `zz-tech` → `none`;
+    `verify-access-matrix.mjs` still passes against the unchanged TEMP behaviour.
+  - [x] ~~**AMENDED BY PHASE 0:** `Sales_Company_Value__c` cannot be one unique string~~
+        **RESOLVED by A1 + A2:** the field is dropped. The dealer comes from the rep, so
+        no read path resolves a picklist string; the residue is a reviewed CSV,
+        `docs/integrations/dealer-aliases.csv`, used only by the Solar backfill.
+  - [x] ~~**AMENDED BY PHASE 0:** derive a customer's dealer from `Sales_Rep__r.Dealer__c`~~
+        **DECIDED as A1**, for both objects, with a server re-stamp on every rep change.
+  - [ ] Stamp `Dealer__c` on the ZZ TEST users — `seed-access-test-fixtures.mjs` carries
+        the intended dealer per user and marks the spot with a TODO. Item 3 fills it.
+
+- [ ] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
+      measured a Sales Rep reading **all 485 comments in the tenant**, none of them their
+      own, on records they cannot open. `sql/sundial_access_p1b_comments_rls.sql`: the
+      `security definer` helpers (`current_profile`, `record_visible`,
+      `record_visible_for`, `user_visible`) and the §5.3 policies. Depends on Phase 1's
+      cache columns and nothing else. **TIM applies** in the dashboard.
 - [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
       of logs with zero `onlyInNew` for Dennis; every other user reconciled and
       re-levelled before the flip.
@@ -592,9 +649,11 @@ lands only after its server change is verified in prod. Branch per repo per phas
       `temp-role-tab-visibility.ts`.
 - [ ] **Phase 5 — Actions and files.** `canAction` in budget / acumatica-push /
       aurora-push / all four file Lambdas; `assertVisibleRecord` on customer files.
-- [ ] **Phase 6 — Supabase RLS.** `sql/sundial_access_rls.sql`: definer helpers,
-      comments/mentions policies, cache-table RLS deny **and revoke** (Phase 0 proved
-      the grant is live).
+- [ ] **Phase 6 — Supabase RLS (reduced by A4 + A5).** The cache-table revoke shipped in
+      Phase 1; the comments/mentions policies shipped in Phase 1b. What is left:
+      `sql/sundial_access_rls.sql` **drops** the six accidental cache-table SELECT
+      policies (inert after the revoke — removing a misleading artefact, not a control)
+      and `public.portal_users`, plus the `profiles` policy review.
 - [ ] **Phase 7 — Cleanup and docs.** `profiles.role` dropped from the upsert;
       `Hierarchy_Level__c` deprecated; `Roles__c` documented unused; api-endpoints and
       caching-architecture corrected.

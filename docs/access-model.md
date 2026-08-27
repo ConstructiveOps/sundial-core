@@ -1,7 +1,10 @@
 # Sundial Access Model — sales reps and dealers
 
-**Status:** BUILDING. Phase 0 shipped 2026-08-27 (discovery + the `user-admin` fix; no behaviour
-change for any user). Phase 1 in progress on `feature/access-model-p1`. Companion ADR: D-064 in
+**Status:** BUILDING. Phase 0 and **Phase 1 shipped 2026-08-27** on `feature/access-model-p1`
+(data model, backfills, cache columns, `lib/access.js`, the `access` block on `/auth/me`). All six
+Phase 1 gates pass — evidence table in §8. **Nothing any live user sees has changed**, measured
+twice. **Phase 1b (comments/mentions RLS) is next.** Nothing is enforced yet: `sundial-sf-query`
+still runs the TEMP guard untouched. Companion ADR: D-064 in
 `DECISIONS.md` (§11 here is its text). Supersedes the enforcement sections of D-043 and retires the
 TEMP restrict (`sundial-sf-query` "TEMP — Sales Rep hard-restrict", 2026-08-03) and the cosmetic tab
 hiding (harmon-crm D-048).
@@ -1030,6 +1033,35 @@ unchanged this phase, which is what makes "nothing changes for Dennis" a fact ra
 `sales_rep_sf_id` match SOQL; unit tests green; `/auth/me` for each ZZ TEST user returns the expected
 scope and `dealerId` (§9 matrix); `zz-rep-nodealer` and `zz-tech` resolve to scope `none`;
 `verify-access-matrix.mjs` still passes against the unchanged TEMP behaviour.
+
+#### Phase 1 gate — evidence, 2026-08-27
+
+Every gate below is a command anyone can re-run, not a claim. Counts are from a live org
+and drift; the invariants do not.
+
+| Gate (§8) | Evidence | Result |
+|---|---|---|
+| Dennis `onlyInOld = ∅` on customer and solar | `scripts/access-shadow-report.mjs` | customer 3,535 = 3,535, solar 779 = 779, `onlyInOld` **0**, `onlyInNew` **0** |
+| Cache counts by `sales_rep_sf_id` match SOQL | `scripts/verify-cache-access-columns.mjs` | **every rep checked individually** — 106 on customer, 70 on solar, 1 on roofing — all agree |
+| Unit tests green | `npm test` | **641 pass, 0 fail** (was 503 before Phase 0, 628 before this phase) |
+| `/auth/me` returns the expected scope + `dealerId` per §9 | `scripts/verify-auth-me-access.mjs` | all ten fixtures match: `own`×4, `dealer`×1, `tenant`×2, `none`×3 |
+| `zz-rep-nodealer` and `zz-tech` resolve to `none` | same | both `scope=none`, **0 modules, 0 actions**; `zz-rep-inactive-dealer` likewise |
+| `verify-access-matrix.mjs` passes against unchanged TEMP behaviour | `scripts/verify-access-matrix.mjs` | exit 0. `rep-a1` still served Dennis's 3,535 customers and still 404s on its own record; `tech` still sees all 31,651. 51 rows differ from the NEW-model expectation and are **pending**, which is what "not built yet" looks like |
+
+**The gate that is not in the list, and matters most.** Nothing in Phase 1 changes what any
+live user sees. That is not asserted, it is measured twice: the shadow report shows **20 of
+34 active users with `no change` on both objects**, and the access matrix shows the TEMP
+guard behaving exactly as it did before the deploy. The only live user whose access moved is
+`Temp Passtwo`, deliberately, via A6 — and that was a *narrowing* being undone.
+
+Additional evidence not required by §8 but worth recording:
+
+- **`Dealer__c` never disagrees with the rep's dealer** (§2.3.5) — 0 of 4,312 on customer,
+  0 of 1,188 on solar. Checked client-side, because SOQL cannot compare two fields.
+- **Cache totals equal Salesforce** on every object, and reconcile reports **0 ghosts**
+  across all five tables (one was found and removed — see PROGRESS).
+- **Widenings: 4, all classified EXPECTED**, each a ZZ fixture gaining its own record from
+  a guard that filtered on a hardcoded name. None is a leak.
 
 ### Phase 1b — Comments and mentions RLS (A5)
 sundial-core `sql/sundial_access_p1b_comments_rls.sql`: the `security definer` helpers

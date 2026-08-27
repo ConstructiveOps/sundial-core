@@ -1,5 +1,172 @@
 # Sundial — Progress Log
 
+## 2026-08-27 — Access model Phase 1: built, applied, and measured
+
+D-064 Phase 1 on `feature/access-model-p1`. The data model exists, the backfills
+have run, `/auth/me` carries the resolved scope, and **nothing any live user sees
+has changed** — which is measured rather than asserted (§8 gate evidence table in
+`docs/access-model.md`).
+
+Six amendments (A1–A6) were recorded before any code; that entry is below.
+
+### What shipped
+
+| | |
+|---|---|
+| `sql/sundial_access_p1_cache_hardening.sql` | REVOKE all on six `sundial_*_cache` tables from `anon`/`authenticated` |
+| `salesforce/v6-access-model/` | `Sundial_Dealer__c` + `Dealer__c` on five objects + permission set |
+| `scripts/backfill-dealers.mjs` | 57 dealer rows, 5 active, 7 user stamps |
+| `scripts/stamp-dealer-named-users.mjs` | 37 dealer-named users stamped |
+| `scripts/backfill-deal-ownership.mjs` | 4,312 customer + 1,203 solar `Dealer__c` |
+| `sql/sundial_access_p1_cache_columns.sql` | `sales_rep_sf_id` / `dealer_sf_id` / `access_level` + 8 indexes |
+| `lib/access.js` | the single authority — 112 unit tests |
+| `lib/identity.js` + `sundial-auth-proxy` | the `access` block, deployed |
+| `sql/sundial_access_p1_profiles_*.sql` | scope columns, and the revoke that should have gone with them |
+| `scripts/access-shadow-report.mjs` | what Phase 3 would change, per user |
+| `scripts/repair-mis-stamped-users.mjs` | A6 — one user repaired |
+
+Suite **503 → 641** green across Phase 0 and Phase 1.
+
+### The revoke that was nearly missed twice
+
+Phase 0 found `anon` and `authenticated` holding `arwdDxtm` on all six cache tables,
+with the only protection an RLS policy that denies **by accident** — it filters on
+`public.portal_users`, which holds zero rows. A4 pulled the revoke forward into Phase 1
+and it is applied: those tables now show `postgres | service_role` only.
+
+Then the same shape turned up on `profiles`, and this time in a file I wrote. The
+columns SQL printed the profiles grants and called them "a baseline, recorded so the
+next snapshot has something to diff against". They came back `true/true/true` and that
+is not a baseline — it is the finding. `authenticated` held INSERT, UPDATE and DELETE
+on `profiles`, protected only by the absence of an update policy.
+
+That mattered more the moment the file ran, because it is the file that put
+`access_scope` in that table. Before it, a hypothetical update policy would have let
+somebody edit their display name. After it, the same policy would let a session set its
+own scope to `tenant` — the column Phase 1b's `record_visible()` reads. And the policy
+that does it is one a careful person would ship without blinking:
+
+    create policy "users can edit their own profile" on public.profiles
+      for update using (auth.uid() = id);
+
+`sql/sundial_access_p1_profiles_revoke.sql` closes it. **Only `profiles`**: `comments`,
+`comment_mentions` and `user_preferences` carry the identical wide grant and are
+deliberately untouched, because unlike `profiles` their write grants are actually used
+by the browser and constrained by real policies. Revoking theirs would break the portal.
+
+The lesson is not "check the grants". It is that a verification query whose result I had
+already decided the meaning of is not a verification query.
+
+### Three canaries fired. All three were mine.
+
+The canary rule exists because the integration user cannot read `FlowDefinitionView` or
+`ApexTrigger`, so a canary write is the only empirical way to ask the org what
+automation is live. It fired three times this phase and **not once was the org at
+fault** — which is worth writing down, because a canary that only ever cries wolf gets
+switched off, and the fix each time was to make it *more* specific rather than quieter.
+
+1. **`sfCreateRecord` returns `{ ok, id }`, not a bare id.** The re-read queried
+   `Id = '[object Object]'`, got nothing back, and the script reported **"AUTOMATION
+   DETECTED — every field came back null"** over a record that had been written
+   perfectly. "Re-read returned no row" and "automation rewrote everything" produce
+   identical all-null diffs and need opposite responses. They are now separate branches
+   with separate messages, and the wrong one accuses nobody.
+
+2. **The canary detected itself.** Stamping the dealer-named users stopped on
+   `LastViewedDate` and `LastReferencedDate` moving — because Salesforce's
+   recently-viewed tracking fires on the script's own verification `SELECT`. Both are
+   now excluded, with the reasoning recorded rather than just the exclusion: they are
+   platform-written, not API-settable, and read by nothing, so excluding them does not
+   blunt the check the way excluding a writable field would.
+
+3. **SOQL cannot compare two fields.** The §2.3.5 invariant check was written as
+   `WHERE Dealer__c != Sales_Rep__r.Dealer__c` and returned `MALFORMED_QUERY` — not an
+   empty result. It now fetches the paired rows and compares in JS: 0 of 4,312
+   disagree on customer, 0 of 1,188 on solar. Cheap only because SOQL failed loudly; a
+   silently empty result would have read as "invariant holds" indefinitely. The nightly
+   reconcile §2.3.5 specifies will hit the same wall.
+
+### The 37 users who are not people
+
+The Sunbase migration created a `Sundial_User__c` per selling entity, so 37 "users" are
+dealers — every one inactive, every one with a blank `Access_Level__c`, together holding
+774 customers and 407 solar projects that A1 could not attribute because a deal's dealer
+comes from its rep and these reps had none.
+
+Stamping them lifted attribution from 3,538 to 4,312 customers and 796 to 1,203 solar.
+
+The script writes **exactly one field** and proves it rather than claiming it: the
+comparison set is derived from `describe` rather than hand-listed, and all 37 were
+re-read and diffed across 22 fields with zero drift. That matters because `Active__c`
+and `Access_Level__c` on those records are precisely the fields that decide what someone
+can see — a stamping script that "tidied" a blank access level would be handing out
+scope, and an inactive user flipped active is an account that can log in.
+
+### What the shadow report says, and two bugs in how it said it
+
+Dennis: **3,535 = 3,535 on customer, 779 = 779 on solar, `onlyInOld` and `onlyInNew`
+both zero.** The gate passes. 20 of 34 active users show `no change` on both objects.
+
+The report models the TEMP guard honestly rather than sensibly — keyed on a hardcoded
+*name*, defaulting *open* — because a report that assumed the guard did something
+reasonable would understate what Phase 3 changes. A Technician sees all 31,651 customers
+today and would see none.
+
+Reading its own first output found two defects in the reporting, not the data:
+
+- **The change column printed `GAINS 2` and hid a loss of 4,314.** A ZZ rep loses
+  Dennis's 3,535 records and gains its own 1; the column showed only the gain. A column
+  that reports one direction is worse than one that reports neither, because it looks
+  complete. It now reads `-4,314 / +2`.
+- **WIDENINGS listed 5 with no way to tell a leak from a corrected bug.** Now
+  classified: *mis-stamped* (A6 repairs it) and *rep gains own record* are EXPECTED, and
+  anything else is flagged as unexplained with an instruction not to enforce Phase 3
+  until it is understood. All were explained; none was a leak.
+
+### A6: one user, and the twelve that are not in scope
+
+Exactly **one** live user qualified — `Temp Passtwo`, a `Manager` stored as `Sales Rep`,
+served Dennis's book. Repaired through the endpoint so the server re-derives, canary
+read back **from Salesforce, not from the endpoint's response** (asserting on the
+response would test the response), with `Access_Level__c`, `Active__c` and
+`Super_Admin__c` all asserted unmoved. `"Sales Rep"` → `"Client"`, nothing else changed,
+and the shadow report now reads `no change` for them.
+
+The twelve "derivation differs" users are listed in the report and deliberately
+untouched: they store `Manager`/`Client`, values the old default never wrote, so they
+were never mis-stamped. PATCHing them would rewrite `Manager → Client` for no
+behavioural gain, because nothing reads `Hierarchy_Level__c` except the guard and the
+guard cares about one value only.
+
+### A ghost in the user cache
+
+`verify-cache-access-columns.mjs` found `sundial_user_cache` holding 133 rows against
+Salesforce's 132. The extra was Julie King under an old id — her user record had been
+deleted and recreated, and the upsert-only sync cannot remove the old row. The
+documented deletion blind spot, found because the check compared the cache against
+Salesforce rather than against itself.
+
+Worth more than a stale row: `sundial_user_cache` feeds `/sf/users` and the @-mention
+picker, so it was two Julie Kings in the picker, one of whom could receive nothing —
+and after Phase 1b, a `user_visible()` question about a user who does not exist.
+`mode: "reconcile"` removed it; all five tables now report 0 ghosts and 0 unverified.
+
+### Still open
+
+- **`lib/salesforce.js` has no retry on any write path.** Three bulk scripts have now hit
+  transient failures (this one at ~600 in a burst that recovered on its own; the
+  burden-rate script's header records the same on 2026-08-24). The retry added here is
+  local to one script. A shared fix belongs in `lib/`, which is bundled into every
+  Lambda deploy, so it wants a reviewed diff of its own.
+- **65 reps still carry records with no dealer** — 9,816 customers, 2,078 solar.
+  `docs/access-model-phase1-unattributed-reps.md` lists every one for Harmon. All six
+  active ones hold tenant-wide levels, so none is affected today; the exposure is
+  conditional and recorded.
+- **`Sundial_Commercial__c` has no `Client__c` at all.** Zero records, a Phase 3 stub, so
+  nothing is exposed — but the tenant key needs to exist before the first record does.
+
+
+
 ## 2026-08-27 — Access model Phase 1: six amendments recorded before anything was built
 
 Phase 1 of D-064 opens on `feature/access-model-p1`. Before any code, six design

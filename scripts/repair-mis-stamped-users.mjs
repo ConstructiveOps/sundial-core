@@ -60,8 +60,7 @@
 //      of them is affected by it.
 
 import { sfQuery, soqlEscapeString } from "../lib/salesforce.js";
-import { getSecret } from "../lib/secrets.js";
-import { EMAIL } from "./seed-access-test-fixtures.mjs";
+import { loginAsTestUser } from "./portal-login.mjs";
 
 const APPLY = process.argv.includes("--apply");
 const TENANT_ID = "a1W7y000007AszBEAS";
@@ -69,8 +68,6 @@ const DENNIS_ID = "a1O7y00000s5sK1EAI";
 const TEMP_GUARD_VALUE = "Sales Rep";
 const API_BASE = (process.env.API_BASE_URL ||
   "https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod").replace(/\/+$/, "");
-const ZZ_ADMIN_EMAIL = EMAIL("admin");
-const SUPABASE_URL_DEFAULT = "https://qfsdpkwxahakegjnyijj.supabase.co";
 
 const log = (...a) => console.log(...a);
 const rule = (c = "=") => log(c.repeat(94));
@@ -184,25 +181,12 @@ if (misStamped.length === 0) {
 // --- log in as the ZZ super admin -------------------------------------------
 // CLAUDE.md: never a live account. Harmon's real super admins are working accounts, and
 // logging in as one to run a repair is the exact thing that rule forbids.
-const passwords = await getSecret("sundial/test-users");
-const anonKey =
-  process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || null;
-const supabaseUrl = process.env.SUPABASE_URL || SUPABASE_URL_DEFAULT;
-if (!anonKey) {
-  log("\n  ** SUPABASE_ANON_KEY not set. Export it (it is a publishable key) and re-run. **\n");
-  process.exit(2);
-}
-const tokenResp = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-  method: "POST",
-  headers: { apikey: anonKey, "Content-Type": "application/json" },
-  body: JSON.stringify({ email: ZZ_ADMIN_EMAIL, password: passwords[ZZ_ADMIN_EMAIL] }),
-});
-const token = (await tokenResp.json())?.access_token;
+const { email: adminEmail, token, status: loginStatus } = await loginAsTestUser("admin");
 if (!token) {
-  log(`\n  ** could not log in as ${ZZ_ADMIN_EMAIL} (HTTP ${tokenResp.status}). **\n`);
+  log(`\n  ** could not log in as ${adminEmail} (HTTP ${loginStatus}). **\n`);
   process.exit(1);
 }
-log(`\n  authenticated as ${ZZ_ADMIN_EMAIL} (ZZ TEST super admin, never a live account)`);
+log(`\n  authenticated as ${adminEmail} (ZZ TEST super admin, never a live account)`);
 
 // --- CANARY: one user, then re-read from Salesforce -------------------------
 // The PATCH goes through the endpoint, so what has to be verified is not "did the write

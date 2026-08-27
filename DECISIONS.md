@@ -2498,7 +2498,7 @@ something a person is expected to notice, that thing should be an assertion inst
 
 ## D-064: Sales-rep and dealer access model (row + field security in the Lambda layer and RLS)
 
-**Date:** 2026-08-26 · **Status:** **Accepted** — Phase 0 shipped 2026-08-27; **amended 2026-08-27 (A1-A6, below)**; Phase 1 in build
+**Date:** 2026-08-26 · **Status:** **Accepted** — Phase 0 and **Phase 1 shipped 2026-08-27**; **amended 2026-08-27 (A1-A6, below)**; Phase 1b next
 **Supersedes:** enforcement scope of D-043; the TEMP restrict (TASKS "Sales Rep visibility", shipped 2026-08-03); harmon-crm D-048
 **Refines:** D-015 (dealer modeled as an object, not a `Parent_User__c` tree), D-035 (rowFilter composes like tenant scope), D-056 (scope materialized into server-owned `profiles` columns; no client update grant)
 **Full design:** [`docs/access-model.md`](docs/access-model.md) — this entry is the ADR; the document is the spec.
@@ -2550,6 +2550,16 @@ The findings above are measurements. These are the **decisions** taken in respon
 **A6 — the mis-stamped users are repaired through the endpoint, not by direct field writes.** `scripts/repair-mis-stamped-users.mjs` re-PATCHes each affected user's **current** `accessLevel` through the live `/admin/users` endpoint as `tim+zz-admin`, so the server's own derivation runs and produces the value. Writing `Hierarchy_Level__c` directly would fix the data while leaving the derivation untested against the live restricted picklist — the failure mode Phase 0's e2e assertion was built to catch. Report-only by default, `--apply` to run, canary-first, and it **skips Dennis and any user whose `Access_Level__c` is `Sales Rep`**. The scope is small and worth stating so nobody looks for a bigger list: exactly **one** live user qualifies (`Temp Passtwo`, a test account, `Manager` stored as `Sales Rep`). The 13 users the Phase 0 audit calls "derivation differs" are **not** in scope — they store `Manager`/`Client`, which the old default never wrote, and PATCHing them would rewrite `Manager → Client` for no behavioural gain.
 
 **Consequences of the amendments.** One fewer field on `Sundial_Dealer__c`. One new reviewed CSV. The `Sales_Rep__c` name-resolution backfill is **not built** — records with no rep and no alias match stay visibly unowned in the report, which is a better input to a human decision than a guessed rep. Phase 6 shrinks to a policy drop. Phase 1 grows by one SQL file, applied first.
+
+### Phase 1 outcome (2026-08-27) — and one thing the amendments missed
+
+Phase 1 shipped: `Sundial_Dealer__c` with 57 rows (5 active), `Dealer__c` on 4,312 customers and 1,203 solar projects, the cache filter columns populated and reconciled against SOQL rep-by-rep, `lib/access.js` behind 112 unit tests, and the `access` block live on `/auth/me`. All six §8 gates pass; the evidence table is in `docs/access-model.md` §8. Nothing any live user sees changed, measured twice — the shadow report shows 20 of 34 active users with `no change`, and `verify-access-matrix.mjs` shows the TEMP guard behaving identically after the deploy.
+
+**A4 was right about the pattern and wrong about its extent.** It pulled the cache-table REVOKE forward because `anon`/`authenticated` held full privileges there, protected only by a policy that denies by accident. Applying it exposed the same shape one table over: `public.profiles` also held `arwdDxtm` for both roles, with a single SELECT policy — and Phase 1 is what put `access_scope` in that table. So the wide grant that had been guarding a display name became the wide grant guarding an authorization decision, and the only thing between them was the absence of an UPDATE policy that a reasonable person might add without a second thought.
+
+`sql/sundial_access_p1_profiles_revoke.sql` closes it, on `profiles` alone: `comments`, `comment_mentions` and `user_preferences` carry the identical grant and are deliberately left, because unlike `profiles` their write grants are used by the browser and constrained by real policies.
+
+The generalisation worth carrying into Phase 1b and Phase 6: **in this project a wide grant is the default and a narrow one is the exception, so "RLS denies it" is never a complete answer to "who can write this".** Ask what the grant is, then ask what the policy is. Every table this design newly depends on needs both questions answered before it is depended on, not after.
 
 ---
 

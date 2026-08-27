@@ -672,12 +672,31 @@ lands only after its server change is verified in prod. Branch per repo per phas
       into EVERY Lambda deploy, so it wants its own reviewed diff rather than a drive-by
       during a backfill.
 
-- [ ] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
-      measured a Sales Rep reading **all 485 comments in the tenant**, none of them their
-      own, on records they cannot open. `sql/sundial_access_p1b_comments_rls.sql`: the
-      `security definer` helpers (`current_profile`, `record_visible`,
-      `record_visible_for`, `user_visible`) and the §5.3 policies. Depends on Phase 1's
-      cache columns and nothing else. **TIM applies** in the dashboard.
+- [~] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
+      measured a Sales Rep reading **all 485 comments in the tenant** (510 by the time
+      1b was built), none of them their own, on records they cannot open.
+      `sql/sundial_access_p1b_comment_rls.sql`: the `security definer` helpers
+      (`current_profile`, `record_visible`, `record_visible_for`, `user_visible`) and
+      the §5.3 policies. Depends on Phase 1's cache columns and nothing else.
+      **TIM applies** in the dashboard, in two parts — see the file's RUN ORDER.
+  - [ ] Part A: `supabase_user_id` on `sundial_user_cache` (**TIM**), then a full user
+        cache-sync (**Claude**), then Part B: helpers + policies (**TIM**).
+  - [ ] V1–V13 verification; V10–V12 are TIM-only (`set role` is denied to the
+        read-only MCP user).
+  - [ ] `node scripts/verify-comment-rls.mjs` as the ZZ TEST users.
+  - [ ] Deploy `sundial-comment-notify` with the §3.7 `record_visible_for` re-check
+        (diff approved 2026-08-27; 644 unit tests green).
+  - [ ] **Follow-up from the Phase 1b impact measurement — three accounts read every
+        comment in the tenant today and go to zero under the new policies. That is
+        correct, and two of them are a hole worth closing at the source:**
+    - [ ] Ban `bradtest@harmonelectric.net` and `tim+uatest@constructiveoperations.com`
+          through the deactivate path. Both are `Active__c = false` in Salesforce and
+          **still have working Supabase logins** — deactivating a `Sundial_User__c` does
+          not ban the auth user, so they authenticate and, until Phase 1b, read all 510
+          comments. RLS now scopes them to `none`, but the login itself should go.
+    - [ ] Deactivate **or** attribute `tmurphy5213+inviteuser1@gmail.com` — an *active*
+          Sales Rep with a null `Dealer__c`, so §1.2 resolves it to `none`. Either give
+          it a dealer (if it is still a useful invite fixture) or deactivate it.
 - [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
       of logs with zero `onlyInNew` for Dennis; every other user reconciled and
       re-levelled before the flip.

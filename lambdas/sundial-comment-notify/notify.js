@@ -217,6 +217,40 @@ export async function handleMention(payload, cfg, { now = new Date() } = {}) {
     return skip("cross_tenant", { mentionId: mention.id });
   }
 
+  // --- 6b) Record-visibility re-check (access-model.md §3.7, D-064) --------
+  // The mention row was written by a browser under RLS, and `mentions_insert_scoped`
+  // (sql/sundial_access_p1b_comment_rls.sql) already refuses a mention of a user who
+  // cannot see the record. THIS IS THE SECOND LOCK ON THE SAME DOOR, and it is here
+  // rather than in the policy because this path is the one that actually MOVES the
+  // data: it emails the comment BODY to an address the recipient controls. A policy
+  // regression would be silent; an email is not recallable.
+  //
+  // FAILS OPEN ON AN ERROR, CLOSED ON A `false`. The distinction matters and is the
+  // same one step 5 draws for preferences: a transient RPC fault is not evidence of
+  // a scope violation, and the primary control (the insert policy) has already
+  // passed by the time we are called. Only an explicit "no" stops the send.
+  //
+  // NOT STAMPED. Like every other skip, `notified_at` stays NULL, so if the record
+  // is later reassigned TO this person a replay still reaches them.
+  const { data: visible, error: visErr } = await supabase.rpc("record_visible_for", {
+    p_profile_id: mention.mentioned_user_id,
+    p_object: comment.record_object,
+    p_id: comment.record_id,
+  });
+  if (visErr) {
+    console.warn(
+      `comment-notify: record_visible_for failed for mention ${mention.id} ` +
+        `(${visErr.message}) — proceeding; the RLS insert policy is the primary control.`
+    );
+  } else if (visible === false) {
+    console.warn(
+      `comment-notify: REFUSING mention ${mention.id} — ${mention.mentioned_user_id} ` +
+        `cannot see ${comment.record_object}/${comment.record_id}. Not stamped, so a ` +
+        `replay will reach them if their access changes.`
+    );
+    return skip("record_not_visible", { mentionId: mention.id });
+  }
+
   // --- 7) Recipient address ------------------------------------------------
   const recipient = await lookupRecipientEmail(supabase, mention.mentioned_user_id);
   if (!recipient.ok) {

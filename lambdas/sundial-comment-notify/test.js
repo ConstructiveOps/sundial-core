@@ -34,6 +34,12 @@ const ctx = {
   sent: [], // messages handed to sendEmail
   sendResult: { ok: true, messageId: "ses-1" },
   emailConfigured: true,
+  // The §3.7 record-visibility re-check. `true` is the default because the RLS
+  // insert policy has already refused the invisible case by the time we run — the
+  // interesting values here are `false` (a policy regression) and an error.
+  recordVisible: true,
+  rpcError: null,
+  rpcCalls: [], // { fn, args }
 };
 
 function baseMention(over = {}) {
@@ -78,6 +84,9 @@ function resetCtx() {
   ctx.sent = [];
   ctx.sendResult = { ok: true, messageId: "ses-1" };
   ctx.emailConfigured = true;
+  ctx.recordVisible = true;
+  ctx.rpcError = null;
+  ctx.rpcCalls = [];
   delete process.env.COMMENT_NOTIFY_SECRET;
   delete process.env.PORTAL_BASE_URL;
 }
@@ -147,6 +156,14 @@ function supabaseStub() {
         then: (resolve, reject) => run().then(resolve, reject),
       };
       return chain;
+    },
+    // The definer helper from sql/sundial_access_p1b_comment_rls.sql, called
+    // through the service role. Records its arguments so a test can assert we
+    // asked about the MENTIONED user and the COMMENT'S record, not our own.
+    async rpc(fn, args) {
+      ctx.rpcCalls.push({ fn, args });
+      if (ctx.rpcError) return { data: null, error: { message: ctx.rpcError } };
+      return { data: ctx.recordVisible, error: null };
     },
     auth: {
       admin: {
@@ -523,5 +540,44 @@ test("a stamp failure after a successful send still reports success", async () =
   assert.equal(res.statusCode, 200);
   assert.equal(parse(res).sent, true);
   assert.equal(parse(res).stamped, false);
+  assert.equal(ctx.sent.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// §3.7 record-visibility re-check (D-064 Phase 1b)
+// ---------------------------------------------------------------------------
+
+test("a mention of a user who cannot see the record is refused, and NOT stamped", async () => {
+  fresh();
+  ctx.recordVisible = false;
+  const res = await handler(hookEvent());
+  // A skip, not a failure: pg_net must not retry, and the row stays replayable in
+  // case the record is later reassigned TO this person.
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).sent, false);
+  assert.equal(parse(res).reason, "record_not_visible");
+  assert.equal(ctx.sent.length, 0);
+  assert.equal(ctx.rows.comment_mentions[0].notified_at, null);
+});
+
+test("the visibility check asks about the MENTIONED user and the COMMENT'S record", async () => {
+  fresh();
+  await handler(hookEvent());
+  const call = ctx.rpcCalls.find((c) => c.fn === "record_visible_for");
+  assert.ok(call, "record_visible_for was never called");
+  // Asking about the author, or about a record id taken from the request body,
+  // would make the whole check decorative — these three assertions are the point.
+  assert.equal(call.args.p_profile_id, RECIPIENT);
+  assert.equal(call.args.p_object, ctx.rows.comments[0].record_object);
+  assert.equal(call.args.p_id, ctx.rows.comments[0].record_id);
+});
+
+test("a visibility check that ERRORS fails open — the insert policy is the primary control", async () => {
+  fresh();
+  ctx.rpcError = "function does not exist";
+  const res = await handler(hookEvent());
+  // Deliberately the same call the preferences read makes: a transient fault is not
+  // evidence of a scope violation, and RLS already refused the real one.
+  assert.equal(parse(res).sent, true);
   assert.equal(ctx.sent.length, 1);
 });

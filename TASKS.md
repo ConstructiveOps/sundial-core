@@ -516,13 +516,33 @@ lands only after its server change is verified in prod. Branch per repo per phas
       user, verified. Branch `feature/access-model-p0`.
   - [x] `sql/snapshot-supabase.sql` — committed, re-runnable catalog introspection
         (DDL, policies, grants, definer functions, PostgREST schemas, triggers).
-  - [!] **`sql/live-snapshot-2026-08-27.sql` NOT PRODUCED** — the Supabase MCP server
-        was added to `.mcp.json` after the session started, and MCP connects at
-        startup. Re-run the query set after a restart and commit the output.
-  - [x] `scripts/probe-cache-reachability.mjs` — anon half done. **All five
-        `sundial_*_cache` tables are ROUTABLE (200, grant exists); RLS is the only
-        thing returning zero rows.** The Phase 6 `revoke` is load-bearing, not
-        belt-and-braces. Authenticated half needs a test-user login (below).
+  - [x] **`sql/live-snapshot-2026-08-27.sql` — PRODUCED (2026-08-27).** All twelve
+        blocks run through the read-only Supabase MCP server. It **corrects** §5.1:
+        there are TWO tenant helpers, not one — `current_user_tenant()` reads
+        `profiles` (comments/mentions) and `current_user_tenant_id()` reads
+        `public.portal_users` (all six cache tables), **which holds zero rows**. The
+        cache tables deny by accident, not design.
+  - [!] **Block 6 of `sql/snapshot-supabase.sql` is defective** —
+        `information_schema.role_table_grants` is member-filtered and returns zero
+        rows for the MCP user regardless of the real grants. Re-read via
+        `pg_class.relacl`: **anon and authenticated hold `arwdDxtm` (full privileges,
+        writes included) on all six cache tables.** Rewrite the block before the next
+        snapshot or Phase 6 verifies its revoke against a query that passes either way.
+  - [!] **Pull the §3.3 cache-table `revoke` + policy drop forward into Phase 1.**
+        Three independent accidents currently fail closed (empty `portal_users`;
+        never-narrowed grants; `profiles.tenant_id` = record id vs cache `tenant_id` =
+        slug). Populating `portal_users` or repointing the helper at `profiles` —
+        either reads as an obvious bug fix — exposes 31,640 customer + 4,481 solar rows
+        to any authenticated session with no per-rep scoping. Verified free of cost:
+        nothing reads a cache table from a browser (§5.1c).
+  - [x] `scripts/probe-cache-reachability.mjs` — **both halves done.** anon
+        (2026-08-26): all five `sundial_*_cache` tables ROUTABLE (200, grant exists),
+        zero rows. authenticated (2026-08-27, `tim+zz-rep-a1`): cache tables 0 rows,
+        but **`comments` returned 485 of 485 with none authored by the rep** and
+        **`comment_mentions` 14 of 14 with none mentioning them** — a cross-user leak
+        within the tenant, which is what §5.3 closes. No cross-tenant row anywhere
+        (weak result: Harmon is the only tenant). Recorded in `docs/access-model.md`
+        §5.1a.
   - [x] `scripts/describe-access-fields.mjs` + `docs/access-model.md` §2.4a — field
         types, lookup targets, populated/blank counts, dealer picklist comparison,
         and the Dennis backfill gate measured as SET equality.

@@ -1,0 +1,721 @@
+-- =============================================================================
+-- live-snapshot-2026-08-27.sql — captured output of sql/snapshot-supabase.sql
+-- =============================================================================
+--
+-- Date captured      : 2026-08-27 (UTC 05:07-05:13)
+-- Supabase project   : qfsdpkwxahakegjnyijj  (https://qfsdpkwxahakegjnyijj.supabase.co)
+-- Server             : PostgreSQL 17.6 on aarch64-unknown-linux-gnu
+-- Produced through   : the project's Supabase MCP server (.mcp.json, read_only=true),
+--                      via execute_sql, connected as `supabase_read_only_user`.
+--                      Every statement was a SELECT. No database object was created,
+--                      altered or dropped, and no row was written.
+--
+-- This is the Phase 0 deliverable (A) that docs/access-model.md 5.1 requires: the
+-- BEFORE picture of the browser-direct tables and the cache tables, committed so the
+-- Phase 5/6 policy rewrite is reviewable as a diff rather than asserted.
+--
+-- Deliverable A was left open by the 2026-08-26 session — the MCP server was added to
+-- .mcp.json after that session started, and MCP connects at startup, so no
+-- mcp__supabase__* tool was reachable. This run closes it.
+--
+-- BLOCK -> SECTION MAPPING
+-- (block numbers are the numbered query blocks in sql/snapshot-supabase.sql)
+--
+--   Block 1   -> Section 1.  The target set — RLS on/off, policy counts
+--   Block 2   -> Section 2.  Columns — the reconstructed table definition
+--   Block 3   -> Section 3.  Constraints (PK / FK / UNIQUE / CHECK)
+--   Block 4   -> Section 4.  Indexes
+--   Block 5   -> Section 5.  RLS policies (USING / WITH CHECK, in full)
+--   Block 6   -> Section 6.  Table grants to anon / authenticated / service_role
+--   Block 6b  -> Section 6b. Schema-level USAGE / CREATE grants
+--   Block 7   -> Section 7.  Functions in public / private, SECURITY DEFINER flag
+--   Block 8   -> Section 8.  Which schemas PostgREST exposes (pg_db_role_setting)
+--   Block 8b  -> Section 8b. The same settings as the current session sees them
+--   Block 9   -> Section 9.  Triggers on the target tables
+--   Block 10  -> Section 10. Row counts (planner estimate) and total size
+--
+--   (appendix) -> Section A. Operator notes — NOT part of the query set. Three
+--                            supplementary read-only SELECTs run to resolve
+--                            ambiguities that blocks 6, 5 and 10 left open. Kept
+--                            below the numbered sections so the block-for-block
+--                            diff against the next snapshot stays clean.
+--
+-- READING NOTE — block 6 returned zero rows, and that is a QUERY artifact, not a
+-- finding. information_schema.role_table_grants only shows grants involving a role
+-- the CURRENT user is a member of, and `supabase_read_only_user` is a member of none
+-- of anon/authenticated/service_role. Section A.1 re-asks the same question through
+-- pg_class.relacl + has_table_privilege(), which are not member-filtered, and the
+-- real answer is the opposite of what an empty block 6 suggests: anon and
+-- authenticated hold FULL privileges (arwdDxtm) on every table here except
+-- private.app_config. Block 6 should be rewritten before the next snapshot.
+--
+-- =============================================================================
+
+
+-- =============================================================================
+-- SECTION 1  (block 1) — THE TARGET SET
+-- =============================================================================
+-- 10 rows.
+--
+-- schema   table                     rls_enabled  rls_forced  policy_count
+-- -------  ------------------------  -----------  ----------  ------------
+-- private  app_config                true         false       0
+-- public   comment_mentions          true         false       2
+-- public   comments                  true         false       3
+-- public   profiles                  true         false       1
+-- public   sundial_customer_cache    true         false       1
+-- public   sundial_po_cache          true         false       1
+-- public   sundial_po_credit_cache   true         false       1
+-- public   sundial_roofing_cache     true         false       1
+-- public   sundial_solar_cache       true         false       1
+-- public   sundial_user_cache        true         false       1
+--
+-- table_comment (only one table carries one):
+--   private.app_config:
+--     "Server-side configuration read by SECURITY DEFINER functions. NOT exposed
+--      via PostgREST - `private` must never be added to the API exposed-schema
+--      list. Rows: comment_notify_url, comment_notify_secret."
+--   (all others: null)
+--
+-- FINDING vs the 3.3 target state. The six cache tables are NOT in the target
+-- state. 3.3 wants rls_enabled = true AND policy_count = 0 (plus the revoke), which
+-- denies every non-service role unconditionally. Each cache table instead carries
+-- ONE permissive SELECT policy (section 5), so today's deny is conditional on that
+-- policy's expression rather than absolute. See section A.2 for what that
+-- expression actually evaluates to.
+
+
+-- =============================================================================
+-- SECTION 2  (block 2) — COLUMNS, the reconstructed table definition
+-- =============================================================================
+-- 130 rows. Format: ordinal | column_name | data_type | not_null | default
+--
+-- ---- private.app_config -----------------------------------------------------
+--   1 | key         | text                     | NOT NULL |
+--   2 | value       | text                     | NOT NULL |
+--   3 | updated_at  | timestamp with time zone | NOT NULL | now()
+--
+-- ---- public.comment_mentions ------------------------------------------------
+--   1 | id                 | uuid                     | NOT NULL | gen_random_uuid()
+--   2 | comment_id         | uuid                     | NOT NULL |
+--   3 | mentioned_user_id  | uuid                     | NOT NULL |
+--   4 | created_at         | timestamp with time zone |          | now()
+--   5 | notified_at        | timestamp with time zone |          |
+--       comment: "Set by sundial-comment-notify after a mention email is
+--                 successfully sent. NULL = not yet notified. Idempotency marker
+--                 for pg_net redelivery."
+--
+-- ---- public.comments ---------------------------------------------------------
+--   1 | id             | uuid                     | NOT NULL | gen_random_uuid()
+--   2 | tenant_id      | text                     | NOT NULL |
+--   3 | record_id      | text                     | NOT NULL |
+--   4 | record_object  | text                     | NOT NULL |
+--   5 | author_id      | uuid                     | NOT NULL |
+--   6 | author_name    | text                     |          |
+--   7 | body           | text                     | NOT NULL |
+--   8 | created_at     | timestamp with time zone |          | now()
+--
+-- ---- public.profiles ---------------------------------------------------------
+--   1 | id               | uuid                     | NOT NULL |
+--   2 | tenant_id        | text                     | NOT NULL |
+--   3 | sundial_user_id  | text                     |          |
+--   4 | role             | text                     |          |
+--   5 | email            | text                     |          |
+--   6 | full_name        | text                     |          |
+--   7 | updated_at       | timestamp with time zone |          | now()
+--
+--   NOTE for 5.2: access_scope, access_level and dealer_sf_id are NOT present.
+--   The Phase 5 ALTER adds them at ordinals 8, 9, 10 and the next snapshot's diff
+--   should show exactly that and nothing else.
+--
+-- ---- public.sundial_customer_cache -------------------------------------------
+--   1 | sf_id                    | text                     | NOT NULL |
+--   2 | tenant_id                | text                     | NOT NULL |
+--   3 | customer_name            | text                     |          |
+--   4 | street                   | text                     |          |
+--   5 | city                     | text                     |          |
+--   6 | state                    | text                     |          |
+--   7 | postal_code              | text                     |          |
+--   8 | primary_phone            | text                     |          |
+--   9 | primary_email            | text                     |          |
+--  10 | alternate_contact_name   | text                     |          |
+--  11 | alternate_contact_phone  | text                     |          |
+--  12 | alternate_contact_email  | text                     |          |
+--  13 | status                   | text                     |          |
+--  14 | lead_source              | text                     |          |
+--  15 | lead_date                | date                     |          |
+--  16 | first_contact_date       | date                     |          |
+--  17 | active                   | boolean                  |          |
+--  18 | client_sf_id             | text                     |          |
+--  19 | notes                    | text                     |          |
+--  20 | last_synced_at           | timestamp with time zone | NOT NULL | now()
+--  21 | cache_version            | integer                  | NOT NULL | 1
+--  22 | is_stale                 | boolean                  | NOT NULL | false
+--  23 | first_name               | text                     |          |
+--  24 | last_name                | text                     |          |
+--  25 | name                     | text                     |          |
+--  26 | requested_project_types  | text                     |          |
+--  27 | stage                    | text                     |          |
+--  28 | sales_rep_name           | text                     |          |
+--  29 | created_date             | timestamp with time zone |          |
+--  30 | call_attempts            | numeric                  |          |
+--
+--   NOTE for 3.3: there is NO sales_rep_sf_id and NO dealer_sf_id column here.
+--   Only `sales_rep_name` (a text display name) exists. record_visible()'s 'own'
+--   and 'dealer' branches have nothing to match on for CUSTOMER until Phase 1
+--   adds those columns.
+--
+-- ---- public.sundial_po_cache --------------------------------------------------
+--   1 | sf_id                            | text                     | NOT NULL |
+--   2 | tenant_id                        | text                     | NOT NULL |
+--   3 | po_number                        | text                     |          |
+--   4 | vendor_account_sf_id             | text                     |          |
+--   5 | linked_solar_project_sf_id       | text                     |          |
+--   6 | linked_roofing_project_sf_id     | text                     |          |
+--   7 | linked_commercial_project_sf_id  | text                     |          |
+--   8 | linked_service_ticket_sf_id      | text                     |          |
+--   9 | acumatica_po_id                  | text                     |          |
+--  10 | po_date                          | date                     |          |
+--  11 | total_amount                     | numeric                  |          |
+--  12 | status                           | text                     |          |
+--  13 | custom_acumatica_field           | text                     |          |
+--  14 | created_by_user_sf_id            | text                     |          |
+--  15 | total_credits_amount             | numeric                  |          |
+--  16 | net_amount                       | numeric                  |          |
+--  17 | client_sf_id                     | text                     |          |
+--  18 | notes                            | text                     |          |
+--  19 | last_synced_at                   | timestamp with time zone | NOT NULL | now()
+--  20 | cache_version                    | integer                  | NOT NULL | 1
+--  21 | is_stale                         | boolean                  | NOT NULL | false
+--
+-- ---- public.sundial_po_credit_cache -------------------------------------------
+--   1 | sf_id                     | text                     | NOT NULL |
+--   2 | tenant_id                 | text                     | NOT NULL |
+--   3 | sundial_po_sf_id          | text                     | NOT NULL |
+--   4 | credit_date               | date                     |          |
+--   5 | credit_amount             | numeric                  |          |
+--   6 | credit_reason             | text                     |          |
+--   7 | description               | text                     |          |
+--   8 | vendor_credit_reference   | text                     |          |
+--   9 | acumatica_reference       | text                     |          |
+--  10 | status                    | text                     |          |
+--  11 | logged_by_user_sf_id      | text                     |          |
+--  12 | last_synced_at            | timestamp with time zone | NOT NULL | now()
+--  13 | cache_version             | integer                  | NOT NULL | 1
+--  14 | is_stale                  | boolean                  | NOT NULL | false
+--
+--   NOTE: sundial_po_credit_cache has NO client_sf_id column — the only cache
+--   table without one. It is tenant-scoped only through its parent PO.
+--
+-- ---- public.sundial_roofing_cache ---------------------------------------------
+--   1 | sf_id                            | text                     | NOT NULL |
+--   2 | tenant_id                        | text                     | NOT NULL |
+--   3 | project_name                     | text                     |          |
+--   4 | sundial_customer_sf_id           | text                     |          |
+--   5 | customer_name_at_creation        | text                     |          |
+--   6 | address_at_creation              | text                     |          |
+--   7 | primary_phone_at_creation        | text                     |          |
+--   8 | primary_email_at_creation        | text                     |          |
+--   9 | project_type                     | text                     |          |
+--  10 | stage                            | text                     |          |
+--  11 | sales_rep_sf_id                  | text                     |          |
+--  12 | project_manager_sf_id            | text                     |          |
+--  13 | roof_type                        | text                     |          |
+--  14 | square_footage                   | integer                  |          |
+--  15 | layers_to_remove                 | integer                  |          |
+--  16 | decking_replacement_needed       | boolean                  |          |
+--  17 | linked_solar_project_sf_id       | text                     |          |
+--  18 | linked_commercial_project_sf_id  | text                     |          |
+--  19 | acumatica_project_id             | text                     |          |
+--  20 | client_sf_id                     | text                     |          |
+--  21 | notes                            | text                     |          |
+--  22 | last_synced_at                   | timestamp with time zone | NOT NULL | now()
+--  23 | cache_version                    | integer                  | NOT NULL | 1
+--  24 | is_stale                         | boolean                  | NOT NULL | false
+--  25 | created_date                     | timestamp with time zone |          |
+--
+-- ---- public.sundial_solar_cache -----------------------------------------------
+--   1 | sf_id                          | text                     | NOT NULL |
+--   2 | tenant_id                      | text                     | NOT NULL |
+--   3 | project_name                   | text                     |          |
+--   4 | sundial_customer_sf_id         | text                     |          |
+--   5 | customer_name_at_creation      | text                     |          |
+--   6 | address_at_creation            | text                     |          |
+--   7 | primary_phone_at_creation      | text                     |          |
+--   8 | primary_email_at_creation      | text                     |          |
+--   9 | stage                          | text                     |          |
+--  10 | sales_rep_sf_id                | text                     |          |
+--  11 | project_manager_sf_id          | text                     |          |
+--  12 | system_size_kw                 | numeric                  |          |
+--  13 | number_of_panels               | integer                  |          |
+--  14 | battery_included               | boolean                  |          |
+--  15 | battery_capacity_kwh           | numeric                  |          |
+--  16 | project_budget                 | numeric                  |          |
+--  17 | send_to_constructive_ops       | boolean                  |          |
+--  18 | solar_project_sf_id            | text                     |          |
+--  19 | synced_to_solar_project        | boolean                  |          |
+--  20 | last_sync_date                 | timestamp with time zone |          |
+--  21 | linked_roofing_project_sf_id   | text                     |          |
+--  22 | acumatica_project_id           | text                     |          |
+--  23 | client_sf_id                   | text                     |          |
+--  24 | notes                          | text                     |          |
+--  25 | last_synced_at                 | timestamp with time zone | NOT NULL | now()
+--  26 | cache_version                  | integer                  | NOT NULL | 1
+--  27 | is_stale                       | boolean                  | NOT NULL | false
+--  28 | address                        | text                     |          |
+--  29 | first_name                     | text                     |          |
+--  30 | last_name                      | text                     |          |
+--  31 | system_size                    | numeric                  |          |
+--  32 | contract_amount                | numeric                  |          |
+--  33 | contract_amount_2              | numeric                  |          |
+--  34 | harmon_job_number              | text                     |          |
+--  35 | authority_having_jurisdiction  | text                     |          |
+--  36 | utility_company                | text                     |          |
+--  37 | contract_type                  | text                     |          |
+--  38 | project_manager_name           | text                     |          |
+--  39 | sales_rep_name                 | text                     |          |
+--  40 | created_date                   | timestamp with time zone |          |
+--  41 | project_manager                | text                     |          |
+--  42 | sales_representative           | text                     |          |
+--
+--   NOTE: solar and roofing DO already carry sales_rep_sf_id (ordinals 10 and 11
+--   respectively). Customer does not. Phase 1's column add is therefore narrower
+--   than 3.3 assumes for two of the four objects, and wider for customer.
+--
+-- ---- public.sundial_user_cache ------------------------------------------------
+--   1 | sf_id               | text                     | NOT NULL |
+--   2 | tenant_id           | text                     | NOT NULL |
+--   3 | first_name          | text                     |          |
+--   4 | last_name           | text                     |          |
+--   5 | email               | text                     |          |
+--   6 | phone               | text                     |          |
+--   7 | hierarchy_level     | text                     |          |
+--   8 | default_department  | text                     |          |
+--   9 | parent_user_sf_id   | text                     |          |
+--  10 | client_sf_id        | text                     |          |
+--  11 | active              | boolean                  |          |
+--  12 | last_synced_at      | timestamp with time zone | NOT NULL | now()
+--  13 | cache_version       | integer                  | NOT NULL | 1
+--  14 | is_stale            | boolean                  | NOT NULL | false
+--
+-- No column outside comment_mentions.notified_at carries a column comment.
+
+
+-- =============================================================================
+-- SECTION 3  (block 3) — CONSTRAINTS
+-- =============================================================================
+-- 14 rows.
+--
+-- private.app_config
+--   app_config_pkey                          PRIMARY KEY  PRIMARY KEY (key)
+--
+-- public.comment_mentions
+--   comment_mentions_pkey                    PRIMARY KEY  PRIMARY KEY (id)
+--   comment_mentions_comment_id_fkey         FOREIGN KEY  FOREIGN KEY (comment_id)
+--                                                         REFERENCES comments(id) ON DELETE CASCADE
+--   comment_mentions_mentioned_user_id_fkey  FOREIGN KEY  FOREIGN KEY (mentioned_user_id)
+--                                                         REFERENCES auth.users(id)
+--
+-- public.comments
+--   comments_pkey                            PRIMARY KEY  PRIMARY KEY (id)
+--   comments_author_id_fkey                  FOREIGN KEY  FOREIGN KEY (author_id)
+--                                                         REFERENCES auth.users(id)
+--
+-- public.profiles
+--   profiles_pkey                            PRIMARY KEY  PRIMARY KEY (id)
+--   profiles_id_fkey                         FOREIGN KEY  FOREIGN KEY (id)
+--                                                         REFERENCES auth.users(id) ON DELETE CASCADE
+--
+-- public.sundial_customer_cache
+--   sundial_customer_cache_pkey              PRIMARY KEY  PRIMARY KEY (sf_id)
+-- public.sundial_po_cache
+--   sundial_po_cache_pkey                    PRIMARY KEY  PRIMARY KEY (sf_id)
+-- public.sundial_po_credit_cache
+--   sundial_po_credit_cache_pkey             PRIMARY KEY  PRIMARY KEY (sf_id)
+-- public.sundial_roofing_cache
+--   sundial_roofing_cache_pkey               PRIMARY KEY  PRIMARY KEY (sf_id)
+-- public.sundial_solar_cache
+--   sundial_solar_cache_pkey                 PRIMARY KEY  PRIMARY KEY (sf_id)
+-- public.sundial_user_cache
+--   sundial_user_cache_pkey                  PRIMARY KEY  PRIMARY KEY (sf_id)
+--
+-- NOTE: no CHECK constraint and no UNIQUE constraint exists on any table in scope,
+-- and the cache tables carry no foreign keys at all (they mirror Salesforce, whose
+-- referential integrity is not reproduced here).
+
+
+-- =============================================================================
+-- SECTION 4  (block 4) — INDEXES
+-- =============================================================================
+-- 30 rows.
+--
+-- private.app_config
+--   app_config_pkey                    CREATE UNIQUE INDEX app_config_pkey ON private.app_config USING btree (key)
+--
+-- public.comment_mentions
+--   comment_mentions_pkey              CREATE UNIQUE INDEX comment_mentions_pkey ON public.comment_mentions USING btree (id)
+--   idx_comment_mentions_unnotified    CREATE INDEX idx_comment_mentions_unnotified ON public.comment_mentions USING btree (created_at) WHERE (notified_at IS NULL)
+--
+-- public.comments
+--   comments_pkey                      CREATE UNIQUE INDEX comments_pkey ON public.comments USING btree (id)
+--
+--   NOTE: comments has NO index on (tenant_id, record_object, record_id) — the
+--   exact tuple every thread read filters on, and the tuple 5.3's new SELECT
+--   policy will filter on through record_visible(). 485 rows makes that free
+--   today and not free later.
+--
+-- public.profiles
+--   profiles_pkey                      CREATE UNIQUE INDEX profiles_pkey ON public.profiles USING btree (id)
+--
+-- public.sundial_customer_cache
+--   sundial_customer_cache_pkey        CREATE UNIQUE INDEX sundial_customer_cache_pkey ON public.sundial_customer_cache USING btree (sf_id)
+--   idx_customer_cache_client_created  CREATE INDEX idx_customer_cache_client_created ON public.sundial_customer_cache USING btree (client_sf_id, created_date DESC NULLS LAST, sf_id)
+--   idx_customer_cache_stale           CREATE INDEX idx_customer_cache_stale ON public.sundial_customer_cache USING btree (tenant_id, is_stale) WHERE (is_stale = true)
+--   idx_customer_cache_status          CREATE INDEX idx_customer_cache_status ON public.sundial_customer_cache USING btree (tenant_id, status)
+--   idx_customer_cache_tenant          CREATE INDEX idx_customer_cache_tenant ON public.sundial_customer_cache USING btree (tenant_id)
+--
+-- public.sundial_po_cache
+--   sundial_po_cache_pkey              CREATE UNIQUE INDEX sundial_po_cache_pkey ON public.sundial_po_cache USING btree (sf_id)
+--   idx_po_cache_solar                 CREATE INDEX idx_po_cache_solar ON public.sundial_po_cache USING btree (tenant_id, linked_solar_project_sf_id)
+--   idx_po_cache_status                CREATE INDEX idx_po_cache_status ON public.sundial_po_cache USING btree (tenant_id, status)
+--   idx_po_cache_tenant                CREATE INDEX idx_po_cache_tenant ON public.sundial_po_cache USING btree (tenant_id)
+--
+-- public.sundial_po_credit_cache
+--   sundial_po_credit_cache_pkey       CREATE UNIQUE INDEX sundial_po_credit_cache_pkey ON public.sundial_po_credit_cache USING btree (sf_id)
+--   idx_po_credit_cache_po             CREATE INDEX idx_po_credit_cache_po ON public.sundial_po_credit_cache USING btree (tenant_id, sundial_po_sf_id)
+--
+-- public.sundial_roofing_cache
+--   sundial_roofing_cache_pkey         CREATE UNIQUE INDEX sundial_roofing_cache_pkey ON public.sundial_roofing_cache USING btree (sf_id)
+--   idx_roofing_cache_client_created   CREATE INDEX idx_roofing_cache_client_created ON public.sundial_roofing_cache USING btree (client_sf_id, created_date DESC NULLS LAST, sf_id)
+--   idx_roofing_cache_customer         CREATE INDEX idx_roofing_cache_customer ON public.sundial_roofing_cache USING btree (tenant_id, sundial_customer_sf_id)
+--   idx_roofing_cache_stage            CREATE INDEX idx_roofing_cache_stage ON public.sundial_roofing_cache USING btree (tenant_id, stage)
+--   idx_roofing_cache_tenant           CREATE INDEX idx_roofing_cache_tenant ON public.sundial_roofing_cache USING btree (tenant_id)
+--
+-- public.sundial_solar_cache
+--   sundial_solar_cache_pkey           CREATE UNIQUE INDEX sundial_solar_cache_pkey ON public.sundial_solar_cache USING btree (sf_id)
+--   idx_solar_cache_client_created     CREATE INDEX idx_solar_cache_client_created ON public.sundial_solar_cache USING btree (client_sf_id, created_date DESC NULLS LAST, sf_id)
+--   idx_solar_cache_customer           CREATE INDEX idx_solar_cache_customer ON public.sundial_solar_cache USING btree (tenant_id, sundial_customer_sf_id)
+--   idx_solar_cache_stage              CREATE INDEX idx_solar_cache_stage ON public.sundial_solar_cache USING btree (tenant_id, stage)
+--   idx_solar_cache_stale              CREATE INDEX idx_solar_cache_stale ON public.sundial_solar_cache USING btree (tenant_id, is_stale) WHERE (is_stale = true)
+--   idx_solar_cache_tenant             CREATE INDEX idx_solar_cache_tenant ON public.sundial_solar_cache USING btree (tenant_id)
+--
+-- public.sundial_user_cache
+--   sundial_user_cache_pkey            CREATE UNIQUE INDEX sundial_user_cache_pkey ON public.sundial_user_cache USING btree (sf_id)
+--   idx_user_cache_parent              CREATE INDEX idx_user_cache_parent ON public.sundial_user_cache USING btree (tenant_id, parent_user_sf_id)
+--   idx_user_cache_tenant              CREATE INDEX idx_user_cache_tenant ON public.sundial_user_cache USING btree (tenant_id)
+--
+-- BEFORE-PICTURE CONFIRMED (block 4's stated purpose): no (client_sf_id,
+-- sales_rep_sf_id) index and no (client_sf_id, dealer_sf_id) index exists on any
+-- cache table. 3.3's index adds are genuinely new.
+
+
+-- =============================================================================
+-- SECTION 5  (block 5) — RLS POLICIES
+-- =============================================================================
+-- 12 rows. Every policy is PERMISSIVE and every one applies to roles {public},
+-- i.e. no policy is restricted to `authenticated` — anon is in scope for all of
+-- them and is held off only by the expression evaluating false/NULL.
+--
+-- ---- public.comment_mentions (2 policies) ------------------------------------
+--
+-- mentions_insert_own_tenant          INSERT
+--   USING      : (null)
+--   WITH CHECK : (EXISTS ( SELECT 1
+--                    FROM comments c
+--                   WHERE ((c.id = comment_mentions.comment_id) AND (c.tenant_id = current_user_tenant()))))
+--
+-- mentions_select_visible_comment     SELECT
+--   USING      : (EXISTS ( SELECT 1
+--                    FROM comments c
+--                   WHERE ((c.id = comment_mentions.comment_id) AND (c.tenant_id = current_user_tenant()))))
+--   WITH CHECK : (null)
+--
+-- ---- public.comments (3 policies) --------------------------------------------
+--
+-- comments_delete_own                 DELETE
+--   USING      : ((author_id = auth.uid()) AND (tenant_id = current_user_tenant()))
+--   WITH CHECK : (null)
+--
+-- comments_insert_own_tenant          INSERT
+--   USING      : (null)
+--   WITH CHECK : ((tenant_id = current_user_tenant()) AND (author_id = auth.uid()))
+--
+-- comments_select_own_tenant          SELECT
+--   USING      : (tenant_id = current_user_tenant())
+--   WITH CHECK : (null)
+--
+-- ---- public.profiles (1 policy) ----------------------------------------------
+--
+-- own_profile_select                  SELECT
+--   USING      : (auth.uid() = id)
+--   WITH CHECK : (null)
+--
+-- ---- the six cache tables (1 policy each) ------------------------------------
+--
+-- customer_cache_select_tenant    on sundial_customer_cache    SELECT
+-- po_cache_select_tenant          on sundial_po_cache          SELECT
+-- po_credit_cache_select_tenant   on sundial_po_credit_cache   SELECT
+-- roofing_cache_select_tenant     on sundial_roofing_cache     SELECT
+-- solar_cache_select_tenant       on sundial_solar_cache       SELECT
+-- user_cache_select_tenant        on sundial_user_cache        SELECT
+--   USING      : (tenant_id = current_user_tenant_id())      [identical on all six]
+--   WITH CHECK : (null)
+--
+-- ---- private.app_config -------------------------------------------------------
+-- No policies. RLS enabled with zero policies = denied to every non-superuser,
+-- non-owner role. This is the shape 3.3 wants for the cache tables.
+--
+-- 5.1's ASSUMPTION IS HALF RIGHT, AND THE OTHER HALF MATTERS.
+--
+-- 5.1 says: "The design below assumes the current policies are tenant-scoped via a
+-- current_user_tenant_id() helper reading profiles; the snapshot confirms or
+-- corrects that." The snapshot CORRECTS it. There are TWO different helpers:
+--
+--   current_user_tenant()     reads public.profiles      <- comments, mentions
+--   current_user_tenant_id()  reads public.portal_users  <- all six cache tables
+--
+-- They are not aliases and they do not read the same table. See section A.2 —
+-- portal_users is empty, which is the only reason the cache policies deny anything.
+
+
+-- =============================================================================
+-- SECTION 6  (block 6) — TABLE GRANTS to anon / authenticated / service_role
+-- =============================================================================
+-- 0 rows returned.
+--
+-- THIS IS A QUERY DEFECT, NOT A FINDING. See the READING NOTE in the header and
+-- section A.1 for the real grants. information_schema.role_table_grants restricts
+-- its output to grants where the grantor or grantee is a role the current user is
+-- a member of; `supabase_read_only_user` is a member of none of the three, so the
+-- view is empty for it regardless of what is actually granted.
+--
+-- Block 6 must be rewritten (against pg_class.relacl / has_table_privilege, as
+-- A.1 does) before the next snapshot, or Phase 6 will "verify" its revoke against
+-- a query that returns zero rows either way.
+
+
+-- =============================================================================
+-- SECTION 6b  (block 6b) — SCHEMA-LEVEL USAGE / CREATE GRANTS
+-- =============================================================================
+-- 6 rows.
+--
+-- schema   grantee         has_usage  has_create
+-- -------  --------------  ---------  ----------
+-- private  anon            false      false
+-- private  authenticated   false      false
+-- private  service_role    false      false
+-- public   anon            true       false
+-- public   authenticated   true       false
+-- public   service_role    true       false
+--
+-- CLEAN. `private` is closed to all three API roles, which is what D-056's
+-- app_config comment asserts and what block 6b exists to check. Note that even
+-- service_role has no USAGE on `private` — the definer functions reach app_config
+-- through their OWNER (postgres), not through the calling role.
+
+
+-- =============================================================================
+-- SECTION 7  (block 7) — FUNCTIONS in public / private
+-- =============================================================================
+-- 4 rows. All four live in `public`; `private` contains no functions.
+--
+-- current_user_tenant()            returns text     SECURITY DEFINER  stable
+--   owner postgres | config: search_path=public
+--   anon EXECUTE: true | authenticated EXECUTE: true
+--   body: select tenant_id from public.profiles where id = auth.uid()
+--
+-- current_user_tenant_id()         returns text     SECURITY DEFINER  stable
+--   owner postgres | config: search_path=public
+--   anon EXECUTE: true | authenticated EXECUTE: true
+--   body: select tenant_id from public.portal_users where id = auth.uid()
+--
+-- notify_comment_mention()         returns trigger  SECURITY DEFINER  volatile
+--   owner postgres | config: search_path=public, net, pg_catalog
+--   anon EXECUTE: true | authenticated EXECUTE: true
+--
+-- set_user_preferences_updated_at() returns trigger  SECURITY INVOKER volatile
+--   owner postgres | config: (null)
+--   anon EXECUTE: true | authenticated EXECUTE: true
+--
+-- All three definer functions DO pin search_path, so none has the known
+-- privilege-escalation shape 5.2 warns about. The four helpers 5.2 adds
+-- (current_profile, record_visible, record_visible_for, user_visible) do not exist
+-- yet; the next snapshot should show exactly four new rows here.
+--
+-- The two tenant helpers reading DIFFERENT tables is the material finding of this
+-- whole snapshot. See section A.2.
+
+
+-- =============================================================================
+-- SECTION 8  (block 8) — WHICH SCHEMAS POSTGREST EXPOSES (pg_db_role_setting)
+-- =============================================================================
+-- 0 rows.
+--
+-- No pgrst.* setting is stored at the role or database level in pg_db_role_setting.
+-- As block 8's own comment anticipates, this means the exposed-schema list was
+-- never set via ALTER ROLE and is carried in the platform's API configuration
+-- instead. Block 8 cannot answer the question on this project; sections 8b and the
+-- empirical probe (scripts/probe-cache-reachability.mjs, recorded in
+-- docs/access-model.md 5.1) are the operative answer.
+
+
+-- =============================================================================
+-- SECTION 8b  (block 8b) — THE SAME SETTINGS AS THE CURRENT SESSION SEES THEM
+-- =============================================================================
+-- 1 row.
+--
+-- db_schemas  db_anon_role  db_extra_search_path
+-- ----------  ------------  --------------------
+-- (null)      (null)        (null)
+--
+-- Consistent with section 8: not set at the role level, so not visible to this
+-- session either. The empirical probe is authoritative here, and it shows PostgREST
+-- DOES route public.* to both anon and authenticated (200, not 404).
+
+
+-- =============================================================================
+-- SECTION 9  (block 9) — TRIGGERS on the target tables
+-- =============================================================================
+-- 1 row.
+--
+-- public.comment_mentions
+--   trg_comment_mention_notify   enabled_flag: O (enabled, origin)
+--   CREATE TRIGGER trg_comment_mention_notify AFTER INSERT ON public.comment_mentions
+--     FOR EACH ROW EXECUTE FUNCTION notify_comment_mention()
+--
+-- This is the D-056 @-mention notify. No trigger exists on comments, profiles,
+-- private.app_config, or any cache table. The Phase 5/6 policy rewrite must leave
+-- this trigger intact — it is behaviour, not access control.
+
+
+-- =============================================================================
+-- SECTION 10  (block 10) — ROW COUNTS (planner estimate) AND SIZE
+-- =============================================================================
+-- 10 rows. reltuples = -1 means the table has never been analyzed (not "empty").
+--
+-- schema   table                     estimated_rows  total_size
+-- -------  ------------------------  --------------  ----------
+-- private  app_config                            -1  32 kB
+-- public   comment_mentions                       5  40 kB
+-- public   comments                             416  344 kB
+-- public   profiles                              35  32 kB
+-- public   sundial_customer_cache            31,640  51 MB
+-- public   sundial_po_cache                      -1  40 kB
+-- public   sundial_po_credit_cache               -1  24 kB
+-- public   sundial_roofing_cache                  1  96 kB
+-- public   sundial_solar_cache                4,481  7,328 kB
+-- public   sundial_user_cache                   115  128 kB
+--
+-- Estimates only, by design. Where an exact count mattered for the reachability
+-- work it was taken separately through the service role; those are in section A.3
+-- and they differ from the estimates above (comments is 485, not 416).
+
+
+-- =============================================================================
+-- SECTION A — OPERATOR NOTES (not part of the query set)
+-- =============================================================================
+-- Three supplementary read-only SELECTs, run through the same MCP server in the
+-- same session, to resolve ambiguities the numbered blocks left open. They are
+-- NOT added to sql/snapshot-supabase.sql by this commit — that file's contract is
+-- that its blocks stay stable so snapshots diff cleanly, and changing it is a
+-- decision for the Phase 6 review, not a side effect of running it once.
+
+
+-- ---- A.1  The real table grants (what block 6 could not see) -----------------
+--
+-- select n.nspname, c.relname, array_to_string(c.relacl, E'\n'),
+--        has_table_privilege('anon', c.oid, 'SELECT'),
+--        has_table_privilege('authenticated', c.oid, 'SELECT'),
+--        has_table_privilege('service_role', c.oid, 'SELECT')
+-- from pg_class c join pg_namespace n on n.oid = c.relnamespace where ...;
+--
+-- schema   table                     anon_sel  auth_sel  svc_sel  relacl
+-- -------  ------------------------  --------  --------  -------  ------------------------
+-- private  app_config                false     false     false    postgres=arwdDxtm/postgres
+-- public   comment_mentions          true      true      true     postgres + anon + authenticated + service_role, each =arwdDxtm/postgres
+-- public   comments                  true      true      true     (same)
+-- public   profiles                  true      true      true     (same)
+-- public   sundial_customer_cache    true      true      true     (same)
+-- public   sundial_po_cache          true      true      true     (same)
+-- public   sundial_po_credit_cache   true      true      true     (same)
+-- public   sundial_roofing_cache     true      true      true     (same)
+-- public   sundial_solar_cache       true      true      true     (same)
+-- public   sundial_user_cache        true      true      true     (same)
+--
+-- `arwdDxtm` is the FULL privilege set: INSERT, SELECT, UPDATE, DELETE, TRUNCATE,
+-- REFERENCES, TRIGGER, MAINTAIN. anon and authenticated hold all of it on all six
+-- cache tables. Nothing has been revoked. This is the Supabase default for tables
+-- created in `public` and it has never been narrowed on this project.
+--
+-- So 3.3's revoke is load-bearing in the strongest sense: RLS is the ONLY thing
+-- between a browser session and these tables, at every one of INSERT / UPDATE /
+-- DELETE as well as SELECT. Note the cache tables have a SELECT policy only — with
+-- RLS on and no INSERT/UPDATE/DELETE policy those three are already denied, so the
+-- exposure is confined to reads. But the grant behind them is wide open, and a
+-- future "add a write policy" would land on a grant nobody has to re-issue.
+
+
+-- ---- A.2  What the cache policy expression actually evaluates to -------------
+--
+-- select (select count(*) from public.portal_users) as portal_users_rows,
+--        (select count(*) from public.profiles)     as profiles_rows, ...;
+--
+--   public.portal_users  EXISTS as a table, and holds  0 rows  (0 distinct tenants)
+--   public.profiles      EXISTS as a table, and holds 35 rows  (1 distinct tenant)
+--
+-- Therefore, for EVERY session including every real Harmon user:
+--
+--   current_user_tenant_id()  ->  NULL          (no matching row in portal_users)
+--   tenant_id = NULL          ->  NULL          (not TRUE)
+--   RLS verdict               ->  deny all rows
+--
+-- The six cache tables are closed today. They are closed BY ACCIDENT — the policy
+-- names its filter against a table that was never populated. Two independent things
+-- would each open all 31,640 customer rows and 4,481 solar rows to any authenticated
+-- session in the tenant, with no per-rep or per-dealer scoping whatsoever:
+--
+--   (1) anyone populating public.portal_users, or
+--   (2) anyone "fixing" current_user_tenant_id() to read profiles, which reads like
+--       an obvious correctness fix and is exactly what 5.1 assumed was already true.
+--
+-- A second, independent accident happens to block (2) as well — the two sides do not
+-- even use the same tenant vocabulary:
+--
+--   select tenant_id, client_sf_id, count(*) ... group by 1,2;
+--
+--   table                   tenant_id             client_sf_id          rows
+--   ----------------------  --------------------  --------------------  ------
+--   profiles                a1W7y000007AszBEAS    —                         35
+--   comments                a1W7y000007AszBEAS    —                        485
+--   sundial_customer_cache  harmon                a1W7y000007AszBEAS    31,640
+--   sundial_solar_cache     harmon                a1W7y000007AszBEAS     4,481
+--   sundial_user_cache      harmon                a1W7y000007AszBEAS       133
+--   sundial_roofing_cache   harmon                a1W7y000007AszBEAS         2
+--
+-- profiles.tenant_id holds the Sundial_Tenant__c RECORD ID; the cache tables'
+-- tenant_id holds the SLUG, and park the record id in client_sf_id. So repointing
+-- the helper at profiles would compare 'a1W7y000007AszBEAS' to 'harmon' and still
+-- deny. Two accidents, both failing closed, neither designed. Phase 1 should not
+-- rely on either.
+
+
+-- ---- A.3  Exact row counts (service role, bypasses RLS) ----------------------
+--
+-- Taken by scripts/probe-cache-reachability.mjs at 2026-08-27T05:12:30Z so that a
+-- 200-with-zero-rows probe result could be told apart from an empty table. Recorded
+-- here because section 10's planner estimates disagree with them.
+--
+--   profiles                     35
+--   comments                    485      (section 10 estimated 416)
+--   comment_mentions             14      (section 10 estimated 5)
+--   user_preferences              4
+--   sundial_customer_cache   31,640
+--   sundial_solar_cache       4,481
+--   sundial_user_cache          133      (section 10 estimated 115)
+--   sundial_roofing_cache         2      (section 10 estimated 1)
+--   sundial_po_cache              0      (genuinely empty — a 0-row probe here
+--                                         proves nothing about access)
+--
+-- =============================================================================
+-- END OF SNAPSHOT
+-- =============================================================================

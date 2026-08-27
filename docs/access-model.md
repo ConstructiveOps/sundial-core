@@ -550,6 +550,110 @@ change, `pg_dump --schema-only` of those tables plus `pg_policies` output is com
 current policies are tenant-scoped via a `current_user_tenant_id()` helper reading `profiles`; the
 snapshot confirms or corrects that.
 
+**DONE, 2026-08-27 — and it CORRECTS the assumption.** The snapshot is
+`sql/live-snapshot-2026-08-27.sql`, produced through the read-only Supabase MCP server against
+project `qfsdpkwxahakegjnyijj`. There are **two** helpers, not one, and they read different tables:
+
+| helper | reads | used by |
+|---|---|---|
+| `current_user_tenant()` | `public.profiles` | `comments`, `comment_mentions` |
+| `current_user_tenant_id()` | `public.portal_users` | **all six** `sundial_*_cache` tables |
+
+`public.portal_users` exists and holds **0 rows**, so `current_user_tenant_id()` returns NULL for
+every session and `tenant_id = NULL` denies every row. The cache tables are closed today **by
+accident, not by design** — see §5.1b.
+
+#### 5.1a Reachability — measured, both halves
+
+`scripts/probe-cache-reachability.mjs`. One `GET …?select=*&limit=1` per table over PostgREST.
+Exact row counts taken separately through the service role (which bypasses RLS) so that a
+200-with-zero-rows answer can be told apart from an empty table.
+
+- **anon half** — 2026-08-26, publishable key only (a logged-out browser).
+- **authenticated half** — 2026-08-27, `tim+zz-rep-a1@constructiveoperations.com`
+  (ZZ TEST user, `Access_Level__c` = Sales Rep; password from Secrets Manager
+  `sundial/test-users`, never written to a file). `auth.uid()` =
+  `12ba1387-7b7a-48c8-9d07-b2578f4cbddf`, `profiles.tenant_id` = `a1W7y000007AszBEAS`,
+  `sundial_user_id` = `a1O7y00000sfEzBEAU`.
+
+| table | true rows | anon | authenticated (zz-rep-a1) | rows returned | other user's / other tenant's? |
+|---|---:|---|---|---:|---|
+| `profiles` | 35 | 200, 0 rows | **200, 1 row** | 1 | **No** — own row only (`auth.uid() = id`) |
+| `comments` | 485 | 200, 0 rows | **200, 485 rows** | 485 | **YES — other users.** 0 of 485 authored by this rep; 10 distinct authors. Same tenant only. |
+| `comment_mentions` | 14 | 200, 0 rows | **200, 14 rows** | 14 | **YES — other users.** 0 of 14 mention this rep; 8 distinct `mentioned_user_id`. Same tenant only. |
+| `user_preferences` | 4 | 200, 0 rows | 200, 0 rows | 0 | No |
+| `sundial_customer_cache` | 31,640 | 200, 0 rows | 200, 0 rows | 0 | No |
+| `sundial_solar_cache` | 4,481 | 200, 0 rows | 200, 0 rows | 0 | No |
+| `sundial_roofing_cache` | 2 | 200, 0 rows | 200, 0 rows | 0 | No |
+| `sundial_user_cache` | 133 | 200, 0 rows | 200, 0 rows | 0 | No |
+| `sundial_po_cache` | 0 | 200, 0 rows | 200, 0 rows | 0 | n/a — genuinely empty, proves nothing |
+
+No cross-**tenant** row was returned anywhere: every row read carried
+`tenant_id = a1W7y000007AszBEAS`, the rep's own tenant. Harmon is the only tenant in this project
+today, so that is a weak result — it demonstrates the tenant filter is not *inverted*, not that it
+would hold against a second tenant's data.
+
+The cross-**user** result is the strong one, and it is a finding:
+
+> A Sales Rep with no elevated access reads **every comment in the tenant** — all 485, on `solar`
+> and `customer` records alike, none of them their own, including threads on records the rep cannot
+> open in the portal. Same for all 14 mention rows, none of which mention them. `comments`'
+> `SELECT` policy is `tenant_id = current_user_tenant()` and nothing more; `comment_mentions`
+> inherits that through its parent comment. This is exactly the gap §5.3 closes by ANDing
+> `record_visible(record_object, record_id)` into the comments policy and narrowing mentions to
+> `mentioned_user_id = auth.uid()`.
+
+Status is **200 on every row of the table above**, for both anon and authenticated. 200 is the
+finding: a missing grant answers 401 and a missing route 404, so PostgREST routes all of these and
+a SELECT grant exists. RLS is the only thing returning empty.
+
+#### 5.1b The cache-table `revoke` is more urgent than §3.3 assumed
+
+The snapshot's grant block (block 6) is **defective** — `information_schema.role_table_grants` only
+shows grants involving a role the querying user belongs to, and the read-only MCP user belongs to
+none of `anon`/`authenticated`/`service_role`, so it returned zero rows. Re-asked through
+`pg_class.relacl`, the real answer inverts:
+
+**`anon` and `authenticated` hold `arwdDxtm` — the full privilege set, including INSERT, UPDATE and
+DELETE — on all six cache tables.** Nothing has ever been revoked. Only the RLS deny stands between
+a browser session and 31,640 customer rows, and that deny rests on a policy filtering against an
+empty table.
+
+Two edits, each of which reads as an obvious bug fix, would open the whole cache to any
+authenticated session in the tenant with no per-rep scoping at all:
+
+1. populating `public.portal_users`, or
+2. repointing `current_user_tenant_id()` at `profiles` — which is precisely what this section
+   previously assumed had already been done.
+
+A third accident currently blocks (2): `profiles.tenant_id` holds the `Sundial_Tenant__c` record id
+(`a1W7y000007AszBEAS`) while the cache tables' `tenant_id` holds the slug (`harmon`) and keep the
+record id in `client_sf_id`. So the comparison would still fail — for a reason nobody wrote down.
+
+Three independent accidents, all failing closed, none designed. **Pull the §3.3 `revoke` + policy
+drop forward into Phase 1** rather than leaving it in Phase 6. Blocking prerequisite: nothing reads
+these tables from a browser today (verified — §5.1c), so the revoke is a no-op for the portal.
+
+Fix block 6 of `sql/snapshot-supabase.sql` before the next snapshot, or Phase 6 will "verify" its
+revoke against a query that returns zero rows whether or not the revoke happened.
+
+#### 5.1c Who reads the cache tables from a browser — nobody
+
+Grepped `harmon-crm/src` and `sundial-core/{lambdas,lib}` for any read of a `sundial_*_cache` table
+from the browser or through a non-service-role client. **Zero hits.**
+
+- `harmon-crm/src` — the only two occurrences of a cache-table name are prose comments
+  (`src/config/customer-status-columns.ts:11`, `src/pages/RoofingProjectsPage.tsx:7`), both saying
+  the data arrives via the Lambda API.
+- The single browser Supabase client (`src/lib/supabase.ts:19`, anon key, `createClient` called
+  nowhere else) issues `.from()` against exactly three tables: `comments`, `comment_mentions`,
+  `user_preferences`.
+- Backend cache access is service-role only: `lib/supabase.js` reads
+  `sundial/supabase/service-role`, and the four raw-PostgREST call sites all send
+  `apikey: cfg.serviceRoleKey`. No anon or publishable key appears anywhere in `lambdas/` or `lib/`.
+
+Full file:line list in PROGRESS.md, 2026-08-27.
+
 ### 5.2 `profiles` gains server-owned scope columns
 
 ```sql

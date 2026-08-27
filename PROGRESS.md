@@ -115,12 +115,105 @@ access cannot be un-broken while they are mid-sale. harmon-crm did not carry the
 existing test-*record* rule at all, so that was ported across too and both repos now
 hold the same pair.
 
+### The snapshot ran, and it corrected the thing §5.1 assumed
+
+`sql/live-snapshot-2026-08-27.sql` now exists — all twelve blocks of
+`sql/snapshot-supabase.sql` executed through the read-only Supabase MCP server
+(`supabase_read_only_user`, project `qfsdpkwxahakegjnyijj`, PG 17.6). Read-only
+throughout; nothing was created, altered, dropped or written.
+
+§5.1 assumed one helper, `current_user_tenant_id()`, reading `profiles`. There are **two**,
+and they read different tables:
+
+| helper | reads | used by |
+|---|---|---|
+| `current_user_tenant()` | `public.profiles` | `comments`, `comment_mentions` |
+| `current_user_tenant_id()` | `public.portal_users` | **all six** `sundial_*_cache` tables |
+
+`public.portal_users` exists and holds **zero rows**. So `current_user_tenant_id()` returns
+NULL for every session, `tenant_id = NULL` is NULL, and the cache tables deny everything —
+**by accident, not by design.**
+
+Two more accidents sit behind it. The grants were never narrowed: `anon` and `authenticated`
+hold `arwdDxtm` — the full set, INSERT/UPDATE/DELETE included — on all six cache tables. And
+`profiles.tenant_id` holds the tenant record id (`a1W7y000007AszBEAS`) while the cache tables'
+`tenant_id` holds the slug (`harmon`), so even repointing the helper at `profiles` would
+compare an id to a slug and still deny.
+
+Three independent accidents, all failing closed, none written down. Populating `portal_users`
+or "fixing" the helper — either one reads as an obvious correctness fix — opens 31,640
+customer rows and 4,481 solar rows to any authenticated session with no per-rep scoping.
+**The §3.3 revoke should move into Phase 1.** Nothing reads these tables from a browser
+today, so it costs nothing (below).
+
+Block 6 of the query set is **defective and was not silently patched**:
+`information_schema.role_table_grants` only shows grants involving a role the querying user
+belongs to, and the MCP user belongs to none of the three, so it returns zero rows whether or
+not anything is granted. The real grants were re-read through `pg_class.relacl` and recorded
+in the snapshot's appendix. Fix the block before the next snapshot, or Phase 6 will "verify"
+its revoke against a query that passes either way. Editing `snapshot-supabase.sql` is a
+Phase 6 review decision, not a side effect of running it once.
+
+### A Sales Rep reads every comment in the tenant
+
+The authenticated half of `probe-cache-reachability.mjs` ran for the first time, as
+`tim+zz-rep-a1` (ZZ TEST user, password from Secrets Manager `sundial/test-users`, never
+written to a file). Full table in `docs/access-model.md` §5.1a. The finding:
+
+- `comments` — **485 of 485 returned. Zero authored by this rep**, 10 distinct authors,
+  threads on `solar` and `customer` records the rep cannot open in the portal.
+- `comment_mentions` — **14 of 14 returned, none of them mentioning this rep**, 8 distinct
+  `mentioned_user_id`.
+- `profiles` — 1 of 35, own row only. Correct.
+- Every cache table — 0 rows, for the accidental reason above.
+
+No cross-**tenant** row appeared anywhere, but Harmon is the only tenant in the project, so
+that proves the filter isn't inverted and nothing more. The cross-**user** leak is real and is
+exactly what §5.3 closes.
+
+### Nobody reads the cache tables from a browser
+
+Grepped both repos for any cache-table read from the browser or a non-service-role client.
+**Zero hits.** Every occurrence, with file:line:
+
+Prose only, in `harmon-crm/src` — neither is code:
+- `src/config/customer-status-columns.ts:11` — `/** Cache column name on sundial_customer_cache. */`
+- `src/pages/RoofingProjectsPage.tsx:7` — `// NOTE: list/board read from the roofing cache (sundial_roofing_cache) via the …`
+
+The one browser Supabase client is `src/lib/supabase.ts:19` (anon key; `createClient` is
+called nowhere else, by comment and in fact). Its eight importers touch exactly three tables,
+none of them a cache table:
+- `src/components/comments/CommentThread.tsx:129,255,309` — `comments`
+- `src/components/comments/CommentThread.tsx:292` — `comment_mentions`
+- `src/components/comments/MentionsFeed.tsx:79,105` — `comment_mentions`
+- `src/components/comments/MentionsFeed.tsx:122` — `comments`
+- `src/contexts/UserPreferencesContext.tsx:200,267` — `.from(TABLE)`, and
+  `UserPreferencesContext.tsx:85` pins `const TABLE = 'user_preferences'`
+- `src/lib/api.ts:11`, `src/contexts/AuthContext.tsx:21`, `src/pages/LoginPage.tsx:13`,
+  `src/pages/ResetPasswordPage.tsx:31`, `src/components/settings/ChangePasswordModal.tsx:20`
+  — import it for the session JWT / auth calls, no `.from()` at all
+
+Backend (`sundial-core/lambdas`, `sundial-core/lib`) is service-role only. `lib/supabase.js`
+reads `sundial/supabase/service-role` and says so in its header; the four raw-PostgREST call
+sites all send `apikey: cfg.serviceRoleKey`:
+- `lambdas/sundial-cache-sync/index.js:150`
+- `lambdas/sundial-sf-query/index.js:437`
+- `lambdas/sundial-welcome-call/writeback.js:134`
+- `lib/realtime.js:70`
+
+The cache-table names appear in these backend files as the `cacheTable` registry and in
+tests — all behind the service role: `sundial-cache-sync/index.js:53,56,58,59,60`,
+`sundial-sf-query/index.js:39,42,44,45,46`, `sundial-sf-update/index.js:45,48,50,51,52`,
+`sundial-comment-notify/notify.js:39,41,45`, `sundial-welcome-call/writeback.js:24`, plus
+test fixtures in the matching `test.js` files. No anon or publishable key exists anywhere in
+`lambdas/` or `lib/`.
+
+So the revoke is a no-op for the portal, which is what makes pulling it into Phase 1 cheap.
+
 ### Open, and deliberately not closed here
 
-- **`sql/live-snapshot-2026-08-27.sql` was not produced.** The Supabase MCP server was
-  added to `.mcp.json` after this session started, and MCP connects at startup, so no
-  `mcp__supabase__*` tool was reachable. `sql/snapshot-supabase.sql` holds the ten
-  read-only query blocks; running them after a restart produces the artifact.
+- **Block 6 of `sql/snapshot-supabase.sql` is wrong** (above). Left unedited on purpose —
+  the file's contract is that its blocks stay stable so snapshots diff cleanly.
 - **`Super_Admin__c` on `tim+zz-admin`** needs ticking by hand (D-043: Salesforce-set
   only). The derived-hierarchy assertion in `verify-provisioning-e2e.mjs` SKIPs with
   that exact instruction until then, rather than failing — an un-ticked box is a setup

@@ -741,11 +741,20 @@ lands only after its server change is verified in prod. Branch per repo per phas
         Suite **652 → 683** green. Pinned: mode off logs nothing and queries nothing; a
         throwing `lib/access` cannot fail a request; the widening detector fires on a
         404-today/served-tomorrow single read; the search term never reaches the log.
-  - [ ] **DEPLOY (needs Tim's approval of the diff).** `sundial-sf-query` with
-        `ACCESS_MODEL_MODE` UNSET first → run `verify-access-matrix.mjs` (must be
-        identical) → set `ACCESS_MODEL_MODE=shadow` → re-run the matrix (must STILL be
-        identical) → first `access-shadow-summary.mjs` over the ZZ matrix traffic to
-        prove the pipeline end to end.
+  - [x] **DEPLOYED 2026-08-28.** Env map was `null` before the change and is exactly
+        `{ACCESS_MODEL_MODE: shadow}` after it, re-read to confirm nothing was dropped.
+        Matrix identical at all three points (pre-deploy baseline, mode off, shadow);
+        mode off emitted zero shadow lines over 150 requests. First summary green:
+        8 classified widenings (the four ZZ reps gaining their own records on
+        `single.soql`/`single.full`), 0 unexplained, 0 shadow errors. Added latency
+        p50 **0 ms**, p95 74 ms.
+  - [x] **Defect found by the first live run and fixed:** every `none`-scope caller
+        logged `user: null` (`accessBlock()` nulls `userId` for scope `none`), so
+        ZZ Tech One, ZZ Rep No Dealer and ZZ Rep Inactive Dealer collapsed into one
+        `(unknown)` row — the exact population §8 says must be identified and
+        re-levelled. The line now takes `user` from the identity and carries
+        `dealer`/`dealerActive`, so each route to `none` is self-diagnosing. Redeployed;
+        matrix re-verified identical. Suite **683 → 686**.
   - [ ] **≥3 business days of shadow logs** while Harmon uses the portal normally, then
         the §8 gate: zero unexplained widenings in the summary AND zero `onlyInNew` for
         Dennis in `access-shadow-report.mjs`. Equal counts are not an equal set — both

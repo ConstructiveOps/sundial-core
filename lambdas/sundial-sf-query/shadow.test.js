@@ -857,6 +857,80 @@ test("no token, secret, email or record id reaches the log", async () => {
   assert.ok(raw.includes(REP_A), "the CALLER's user id is logged, and is the join key");
 });
 
+
+// ---------------------------------------------------------------------------
+// 5. `none` scope must be IDENTIFIABLE, not just denied
+// ---------------------------------------------------------------------------
+// Found by the first live shadow run, not by these tests, which is why they exist now:
+// accessBlock() nulls userId/dealerId for scope `none`, so taking the log's join key from
+// there collapsed every unattributed rep, inactive-dealer rep and Technician into one
+// "(unknown)" row. §8's gate requires those users be identified and re-levelled before
+// Phase 3 — a bucket cannot be re-levelled.
+
+test("a `none` user is still IDENTIFIED in the line", async () => {
+  process.env.ACCESS_MODEL_MODE = "shadow";
+  ctx.identity = identityFor("Technician", { userId: REP_B });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+
+  await handler(listEvent("customer"));
+  const line = oneLine();
+  assert.equal(line.scope, "none");
+  assert.equal(line.user, REP_B, "the caller must be nameable even with no scope");
+  assert.equal(line.level, "Technician");
+  assert.equal(line.newOutcome, "forbidden");
+});
+
+test("the THREE ways to reach `none` are told apart by the line alone", async () => {
+  // Technician / unattributed rep / switched-off dealer all resolve to the same scope and
+  // the same denial. They need completely different fixes, so the line has to distinguish
+  // them without a second lookup.
+  process.env.ACCESS_MODEL_MODE = "shadow";
+  const cases = [
+    [
+      "Technician",
+      { userId: "a1O7y00000TECHAAAAA" },
+      { level: "Technician", dealer: DEALER, dealerActive: true },
+    ],
+    [
+      "Sales Rep",
+      { userId: "a1O7y00000NODEALERA", dealer: null },
+      { level: "Sales Rep", dealer: null, dealerActive: null },
+    ],
+    [
+      "Sales Rep",
+      { userId: "a1O7y00000INACTIVED", dealer: { id: DEALER, active: false, isInternal: false } },
+      { level: "Sales Rep", dealer: DEALER, dealerActive: false },
+    ],
+  ];
+  const seen = new Set();
+  for (const [level, over, expected] of cases) {
+    ctx.logs = [];
+    ctx.identity = identityFor(level, over);
+    ctx.cacheRows = [];
+    await handler(listEvent("customer"));
+    const line = oneLine();
+    assert.equal(line.scope, "none", `${level} ${over.userId}`);
+    assert.equal(line.user, over.userId, "each is a distinct, nameable user");
+    assert.equal(line.level, expected.level);
+    assert.equal(line.dealer, expected.dealer);
+    assert.equal(line.dealerActive, expected.dealerActive);
+    seen.add(`${line.user}|${line.level}|${line.dealer}|${line.dealerActive}`);
+  }
+  assert.equal(seen.size, 3, "three users must produce three distinguishable signatures");
+});
+
+test("a scoped user's dealer is the RESOLVED one, not the raw fallback", async () => {
+  // The fallback must not quietly change what a working line reports.
+  process.env.ACCESS_MODEL_MODE = "shadow";
+  ctx.identity = identityFor("Sales Dealer", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+  await handler(listEvent("customer"));
+  const line = oneLine();
+  assert.equal(line.scope, "dealer");
+  assert.equal(line.dealer, DEALER);
+  assert.equal(line.dealerActive, true);
+});
+
 // Restore the console for any downstream reporter.
 test.after(() => {
   console.log = realLog;

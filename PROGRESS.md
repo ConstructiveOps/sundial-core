@@ -125,9 +125,55 @@ the describe and is safe; the value is caller data and is not. The caller's
 `Sundial_User__c` id **is** logged — it is the join key the summary needs, and it is an
 internal record id rather than a personal identifier.
 
+### Deployed 2026-08-28, and the first run found a defect in the log line
+
+Sequence, as agreed, with a verification between every step:
+
+| Step | Result |
+|---|---|
+| Read the live env map | `null` — no variables at all, so "unset" was already the state |
+| Matrix, PRE-deploy (old code) | baseline captured, 150 comparison points |
+| Deploy code, env still unset | matrix **IDENTICAL** to baseline; **zero shadow lines** over 150 requests |
+| `ACCESS_MODEL_MODE=shadow` (read-merge-write, re-read) | map is exactly `{ACCESS_MODEL_MODE: shadow}`, nothing dropped |
+| Matrix under shadow | **IDENTICAL** to both the baseline and the mode-off run |
+| First summary | pipeline green end to end — and one real defect, below |
+
+Measured added latency: **p50 0 ms**, p95 74 ms, max 1,136 ms (a cold start). The p50 is
+zero because tenant scope issues no second query at all, which is the design working.
+
+**The defect: every `none`-scope caller logged `user: null`.** `accessBlock()` deliberately
+nulls `userId` and `dealerId` for scope `none` — correct for the block the CLIENT
+reflects, since such a user has no scope-relevant ids to render. Taking the log's join key
+from there collapsed **three different people** — two unattributed Sales Reps and a
+Technician — into a single `(unknown)` row carrying whichever level landed first.
+
+That is not cosmetic. §8's gate requires Technician and unknown-level users be "identified
+and re-levelled" before Phase 3, and **a bucket cannot be re-levelled**. The fix takes
+`user` from `identity.user.id` and falls back to the raw dealer id, so each of the three
+ways to reach `none` is now self-diagnosing from the line alone: the level is the reason
+(Technician), no dealer at all (unattributed), or a dealer that is switched off. The
+summary prints that reason beside each user. Three new tests pin it — including one that
+asserts the three produce three distinguishable signatures.
+
+Worth naming how it was found: **the unit tests all passed, and they passed because they
+asserted the field was populated for scoped users**, which it was. Only a real run with a
+`none`-scope fixture in it showed the collapse. That is the argument for the shadow phase
+in miniature.
+
+Also fixed: two stray NUL bytes in `access-shadow-summary.mjs`'s group-key template. Node
+parses them (a NUL is a legal string character) but they made the file binary to `grep`
+and `diff` — a landmine for the next edit. Replaced with an explicit `join("|")`.
+
+### The two paths with no traffic, and why that is fine
+
+`list.live.parent_uncached` and `search.live.parent_uncached` show zero. They only fire
+when a cache table is missing the `?parentId=` column — a transient schema state that does
+not exist today. They may well show zero for the whole window; that is the schema being
+correct, not a coverage gap. Every other path was exercised.
+
 ### Not done, deliberately
 
-Nothing is deployed. `repRestrictFor`, its four guarded call sites and every response body
+Nothing is enforced. `repRestrictFor`, its four guarded call sites and every response body
 are untouched — the diff shows added `await shadow.x()` calls and nothing else on any
 serving line. Phase 3 is what makes the new decision matter.
 

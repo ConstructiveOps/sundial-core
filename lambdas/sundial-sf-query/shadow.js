@@ -280,10 +280,27 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase }) {
     mode: MODES.SHADOW,
     // The Sundial_User__c id, not an email — enough to join to the user list in the
     // summary, and not a personal identifier sprayed across CloudWatch.
-    user: access?.userId ?? null,
+    //
+    // ⚠️ TAKEN FROM THE IDENTITY, NOT FROM access.userId, AND THAT IS THE WHOLE POINT.
+    // accessBlock() deliberately nulls userId and dealerId for scope `none` — correct for
+    // the block the CLIENT reflects, because a `none` user has no scope-relevant ids to
+    // render. As a LOG JOIN KEY it is wrong, and the first shadow run proved it: every
+    // `none`-scope caller logged `user: null`, so three different test users (two
+    // unattributed Sales Reps and a Technician) collapsed into one "(unknown)" row in the
+    // summary, with whichever level happened to land first.
+    //
+    // That is precisely the population §8's gate says must be "identified and
+    // re-levelled" before Phase 3 — and you cannot re-level a user the log cannot name.
+    // The scope-resolved values stay below; the raw identity is what identifies WHO.
+    user: identity?.user?.id ?? access?.userId ?? null,
     level: access?.level ?? null,
     scope: access?.scope ?? "none",
-    dealer: access?.dealerId ?? null,
+    // Same reasoning: fall back to the RAW dealer id so a `none` line still says whether
+    // there was a dealer at all. With `level`, that makes each way of reaching `none`
+    // self-diagnosing from the line — Technician (the level is the reason), a Sales Rep
+    // with no dealer (unattributed), or a Sales Rep whose dealer is switched off.
+    dealer: access?.dealerId ?? identity?.user?.dealer?.id ?? null,
+    dealerActive: identity?.user?.dealer ? identity.user.dealer.active === true : null,
     // Whether the TEMP guard is filtering this request. The most useful column in the
     // summary: it separates "the old answer is the whole tenant" from "the old answer is
     // Dennis's book".

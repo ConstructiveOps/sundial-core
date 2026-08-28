@@ -184,7 +184,7 @@ const nameOf = (id) => userInfo.get(id)?.name ?? id ?? "(unknown)";
 // wildly different total is the interesting one, and a mean hides it behind the hundreds
 // of identical page loads around it.
 const groups = new Map();
-const key = (r) => `${r.user} ${r.object} ${r.path}`;
+const key = (r) => [r.user, r.object, r.path].join("|");
 
 for (const r of rows) {
   const k = key(r);
@@ -195,6 +195,8 @@ for (const r of rows) {
       path: r.path,
       scope: r.scope,
       level: r.level,
+      dealer: r.dealer ?? null,
+      dealerActive: r.dealerActive ?? null,
       temp: false,
       requests: 0,
       disagreements: 0,
@@ -376,7 +378,7 @@ for (const g of all.sort(
   const span = (s) => (s ? `${fmt(s.min)}..${fmt(s.max)}` : "-");
   const flag = g.wider > 0 ? " <-- WIDER" : g.errors > 0 ? " <-- errors" : "";
   log(
-    `  ${nameOf(g.user).slice(0, 23).padEnd(24)} ${String(g.object).padEnd(9)} ${g.path.padEnd(26)} ` +
+    `  ${nameOf(g.user).slice(0, 23).padEnd(24)} ${String(g.object ?? "-").padEnd(9)} ${g.path.padEnd(26)} ` +
       `${String(g.scope).padEnd(7)} ${fmt(g.requests).padStart(6)} ${fmt(g.disagreements).padStart(8)} ` +
       `${span(o).padStart(18)} ${span(n).padStart(18)}${flag}`
   );
@@ -391,12 +393,28 @@ rule("-");
 const byUser = new Map();
 for (const g of all) {
   if (!byUser.has(g.user)) {
-    byUser.set(g.user, { user: g.user, scope: g.scope, level: g.level, requests: 0, narrower: 0, denied: new Set(), worst: null });
+    byUser.set(g.user, { user: g.user, scope: g.scope, level: g.level, requests: 0, narrower: 0, denied: new Set(), worst: null, why: null });
   }
   const u = byUser.get(g.user);
   u.requests += g.requests;
   u.narrower += g.narrower;
   for (const d of g.newDeny) u.denied.add(`${g.object}:${d}`);
+  // WHY this user resolves to none. The three causes need three different fixes -- set
+  // a level, attribute the rep, or switch the dealer back on -- and they are
+  // indistinguishable from the scope alone, which is what made the first run's single
+  // "(unknown)" row useless for the re-levelling the §8 gate asks for.
+  if (g.scope === "none" && !u.why) {
+    u.why =
+      g.level == null
+        ? "no Access_Level__c set"
+        : g.level === "Technician"
+          ? "Technician (Phase II defines it)"
+          : g.dealer == null
+            ? `${g.level} with NO dealer (unattributed)`
+            : g.dealerActive === false
+              ? `${g.level} whose dealer is INACTIVE`
+              : `level "${g.level}" is not in the scope table`;
+  }
   const o = stats(g.oldCounts);
   const n = stats(g.newCounts);
   if (o && n && o.max - n.max > (u.worst?.delta ?? -1)) {
@@ -414,6 +432,7 @@ if (narrowing.length === 0) {
       `  ${nameOf(u.user).slice(0, 23).padEnd(24)} ${String(u.level ?? "(blank)").padEnd(14)} ` +
         `${String(u.scope).padEnd(7)} ${fmt(u.narrower).padStart(9)} ${w.padStart(26)}`
     );
+    if (u.why) log(`       resolves to none: ${u.why}`);
     if (u.denied.size > 0) log(`       modules that would close: ${[...u.denied].join(", ")}`);
   }
 }

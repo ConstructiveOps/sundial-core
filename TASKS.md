@@ -826,6 +826,18 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [ ] **Deferred:** dropping the `profiles.role` COLUMN is a schema change for Tim.
         Un-written is safe; un-dropped is tidy-up.
 
+- [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
+      and byte-identical. sundial-core's copy is the source of truth — the manifest that
+      gates real access is generated from it — and `generate-field-configs.mjs` warns on
+      every run if the harmon-crm copy drifts.
+      **They are not deleted from harmon-crm yet, deliberately:** its two client-config
+      generators (`npm run generate:configs`) still read `docs/*.xlsx` by path, so
+      deleting the sheets alone breaks them the NEXT time somebody regenerates a detail
+      config — not now, which is the bad kind of breakage.
+      The close-out is all three together: teach `generate-field-configs.mjs` to emit the
+      client configs (§4.2 output 2, with `--confirm-target`), then delete harmon-crm's
+      two generators, its two sheet copies, and the `generate:configs` script.
+
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:
   - `sundial-sf-query`: `customer`/`solar` list + single + `?full=true` reads are filtered to `Sunbase_Sales_Rep__c`/`Sales_Representative__c` = `Dennis Alessandro`. **Rep reads BYPASS the cache and go live to Salesforce** (the authoritative field isn't cached; `sales_rep_name` is a different formula field). **Known jank:** SOQL `OFFSET` caps at 2000, so on the customer list a rep can page the first ~2000 of Dennis's 3,511 (SAFE — never another rep's records — but incomplete on deep pages). **Roofing NOT gated** (no rep field in scope; ~1 record; revisit with the real feature).

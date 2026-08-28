@@ -47,6 +47,54 @@
 -- protected only by a policy that is about to disappear.
 --
 -- ============================================================================
+-- ⚠️ AND `portal_users` IS NOT DROPPED. IT IS NOT AN ABANDONED TABLE.
+-- ============================================================================
+--
+-- The first run of this file failed here, and the error is the finding:
+--
+--   ERROR: cannot drop table portal_users because other objects depend on it
+--   DETAIL: constraint chat_messages_author_user_id_fkey ...
+--           constraint notifications_recipient_user_id_fkey ...
+--           constraint audit_log_actor_user_id_fkey ...
+--           constraint sundial_file_metadata_uploaded_by_user_id_fkey ...
+--           constraint sundial_file_metadata_deleted_by_user_id_fkey ...
+--
+-- FIVE foreign keys across FOUR tables point at it. It holds zero ROWS, but it is a
+-- referenced parent in the schema — which is a different thing from abandoned, and the
+-- whole transaction rolled back rather than half-applying. That is the `begin`/`commit`
+-- doing its job.
+--
+-- DROPPING IT IS NOT NECESSARY TO REMOVE THE TRAP, and that is the deciding argument.
+-- The hazard was never the empty table by itself; it was that the table plus the
+-- function made ten policies LOOK like tenant isolation while denying by accident, so
+-- that "populate portal_users" or "fix current_user_tenant_id() to read profiles" would
+-- silently open 31,600+ customer rows. After steps 1-3 below, the policies are gone and
+-- the function does not exist. Populating portal_users then does nothing at all.
+--
+-- What dropping it WOULD cost: five FK constraints removed from four tables, one of
+-- which (`sundial_file_metadata`) is live with 35 rows. That is a schema change with its
+-- own review, not an 11pm CASCADE — which is exactly what step 3's own comment says
+-- about bulldozing dependencies nobody looked at.
+--
+-- MEASURED WHILE DECIDING (2026-08-28), because "it is empty so nothing uses it" is the
+-- kind of claim that deserves a query:
+--
+--   portal_users                                    0 rows
+--   chat_messages / notifications / audit_log       0 rows  (features not built)
+--   sundial_file_metadata                          35 rows
+--     uploaded_by_user_id  (uuid, FK -> portal_users)   0 non-null
+--     uploaded_by_user_name (text)                     35 non-null
+--
+-- So file uploads ARE attributed — via the text column, which is what the Lambdas
+-- write. The uuid column is vestigial and CANNOT be populated while its parent is
+-- empty: any non-null value would violate the constraint. Not a live bug (nothing reads
+-- it), but it means `uploaded_by_user_id` is dead weight, and the tidy-up below should
+-- decide its fate together with the table's.
+--
+-- An OPTIONAL follow-up block at the end of this file drops the table properly, with the
+-- five constraints named. It is commented out and is Tim's call, another day.
+--
+-- ============================================================================
 -- WHY THE POLICIES ARE INERT IN THE FIRST PLACE
 -- ============================================================================
 -- Every one of them filters `tenant_id = current_user_tenant_id()`, and that function
@@ -119,13 +167,19 @@ drop policy if exists portal_users_select_tenant    on public.portal_users;
 drop policy if exists chat_messages_insert_own on public.chat_messages;
 
 -- ============================================================================
--- STEP 3 — the function, then the table it read.
+-- STEP 3 — the function. (The table stays; see the header.)
 -- ============================================================================
--- NOT CASCADE, on either. Every known dependent was dropped in step 2, so a failure
--- here means something ELSE references them — which is a finding to investigate, not
--- something to bulldoze.
+-- NOT CASCADE. Every policy that referenced it was dropped in step 2, so a failure here
+-- means something ELSE references it — a finding to investigate, not something to
+-- bulldoze.
+--
+-- This is the step that actually disarms the trap: with the function gone, no future
+-- edit to `portal_users` can turn a policy back on, because there are no policies and
+-- nothing to read it.
 drop function if exists public.current_user_tenant_id();
-drop table if exists public.portal_users;
+
+-- portal_users is deliberately LEFT IN PLACE. It is now: empty, un-granted (step 1),
+-- policy-free (step 2), and referenced only by five FK constraints. Inert.
 
 commit;
 
@@ -165,12 +219,20 @@ where n.nspname = 'public'
   and pg_get_userbyid(acl.grantee) in ('anon','authenticated')
 order by c.relname, grantee, acl.privilege_type;
 
--- 3. The function and the table are gone. ZERO ROWS is the pass.
-select 'function' as kind, p.proname as name
+-- 3. The FUNCTION is gone. ZERO ROWS is the pass.
+--    (portal_users is expected to REMAIN — see the header. Its own state is checked by
+--    query 3b.)
+select p.proname as name
 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-where n.nspname = 'public' and p.proname = 'current_user_tenant_id'
-union all
-select 'table', c.relname
+where n.nspname = 'public' and p.proname = 'current_user_tenant_id';
+
+-- 3b. portal_users is inert: RLS on, zero policies, zero anon/authenticated privileges.
+--     EXPECT one row: rls_enabled = true, policies = 0, anon_auth_privs = 0.
+select c.relname as table_name,
+       c.relrowsecurity as rls_enabled,
+       (select count(*) from pg_policy p where p.polrelid = c.oid) as policies,
+       (select count(*) from aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+         where pg_get_userbyid(acl.grantee) in ('anon','authenticated')) as anon_auth_privs
 from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public' and c.relname = 'portal_users';
 
@@ -198,3 +260,34 @@ where n.nspname = 'public'
   and p.proname in ('current_profile','current_user_tenant','record_visible',
                     'record_visible_for','user_visible')
 order by kind, on_object, name;
+
+
+-- ============================================================================
+-- OPTIONAL FOLLOW-UP — dropping portal_users properly. NOT PART OF PHASE 6.
+-- ============================================================================
+-- Commented out deliberately. Nothing above depends on this, and after the block above
+-- the table is inert. Run it only as a considered schema tidy-up, and decide the fate of
+-- the two dead `sundial_file_metadata` columns in the same pass rather than leaving a
+-- uuid column whose parent no longer exists.
+--
+-- ⚠️ Before running it, confirm the FK columns are still all-null. If a future Lambda
+-- has started writing `uploaded_by_user_id`, dropping the constraint silently removes
+-- the guarantee that the value points at a real user:
+--
+--   select count(uploaded_by_user_id) + count(deleted_by_user_id) from public.sundial_file_metadata;
+--   -- must be 0
+--
+-- begin;
+--   alter table public.chat_messages          drop constraint chat_messages_author_user_id_fkey;
+--   alter table public.notifications          drop constraint notifications_recipient_user_id_fkey;
+--   alter table public.audit_log              drop constraint audit_log_actor_user_id_fkey;
+--   alter table public.sundial_file_metadata  drop constraint sundial_file_metadata_uploaded_by_user_id_fkey;
+--   alter table public.sundial_file_metadata  drop constraint sundial_file_metadata_deleted_by_user_id_fkey;
+--
+--   -- The two dead columns. `uploaded_by_user_name` is the one the Lambdas actually
+--   -- write and MUST be kept.
+--   -- alter table public.sundial_file_metadata drop column uploaded_by_user_id;
+--   -- alter table public.sundial_file_metadata drop column deleted_by_user_id;
+--
+--   drop table public.portal_users;
+-- commit;

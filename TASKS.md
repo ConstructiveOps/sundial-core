@@ -802,7 +802,20 @@ lands only after its server change is verified in prod. Branch per repo per phas
       carry ALL 16 anon/authenticated privileges, so their inert policy is the only thing
       in the way — a CASCADE drop would have opened three live tables. The file revokes
       those four FIRST, then drops, in one transaction.
-  - [ ] **TIM: paste and run it**, then the five verification queries.
+  - [ ] **TIM: paste and run it**, then the six verification queries.
+  - [!] **`portal_users` is NOT dropped, and that changed after the first run failed.**
+        Five FK constraints across four tables point at it
+        (`chat_messages`, `notifications`, `audit_log`, and `sundial_file_metadata`
+        twice) — it is an empty table but a REFERENCED PARENT. Dropping it is not needed
+        to disarm the trap: once the policies and the function are gone, populating it
+        does nothing. An OPTIONAL commented block at the end of the SQL file drops it
+        properly, another day.
+  - [ ] **Dead columns found while deciding that:** `sundial_file_metadata`
+        `uploaded_by_user_id` and `deleted_by_user_id` are uuid FKs to the empty
+        `portal_users`, so they are 0-of-35 populated and CANNOT be written — any value
+        would violate the constraint. Attribution works via `uploaded_by_user_name`
+        (35 of 35), which is what the Lambdas write. Decide the columns' fate with the
+        table's.
   - [ ] `profiles` policy review (not in the file; still outstanding).
 - [x] **Phase 7 — Cleanup and docs (2026-08-28).** `profiles.role` no longer written
       (auth-proxy deployed); `salesforce-schema.md` gains the access-model objects with

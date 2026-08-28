@@ -672,12 +672,47 @@ lands only after its server change is verified in prod. Branch per repo per phas
       into EVERY Lambda deploy, so it wants its own reviewed diff rather than a drive-by
       during a backfill.
 
-- [ ] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
-      measured a Sales Rep reading **all 485 comments in the tenant**, none of them their
-      own, on records they cannot open. `sql/sundial_access_p1b_comments_rls.sql`: the
-      `security definer` helpers (`current_profile`, `record_visible`,
-      `record_visible_for`, `user_visible`) and the §5.3 policies. Depends on Phase 1's
-      cache columns and nothing else. **TIM applies** in the dashboard.
+- [x] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
+      measured a Sales Rep reading **all 485 comments in the tenant** (510 by the time
+      1b was built), none of them their own, on records they cannot open.
+      `sql/sundial_access_p1b_comment_rls.sql`: the `security definer` helpers
+      (`current_profile`, `record_visible`, `record_visible_for`, `user_visible`) and
+      the §5.3 policies. Depends on Phase 1's cache columns and nothing else.
+      **TIM applies** in the dashboard, in two parts — see the file's RUN ORDER.
+  - [x] Part A: `supabase_user_id` on `sundial_user_cache` (**TIM**), then a full user
+        cache-sync (**Claude**), then Part B: helpers + policies (**TIM**).
+  - [x] V1–V14 verification. Two defects found by running them: V2's `anon` grant
+        (fixed by Part C, applied 2026-08-28 — V2b and V14 green) and V10–V12's
+        post-`set role` uuid subquery returning a FALSE GREEN (`uid null / 0 / 0`).
+        Both written up in PROGRESS + D-064.
+  - [x] Part C: `anon` EXECUTE revoked on `record_visible_for` / `user_visible` /
+        `current_profile`. `record_visible` keeps its anon grant on purpose (the
+        comments policies call it and policies run as the invoking role).
+  - [x] `node scripts/verify-comment-rls.mjs` — **44/44**. Sends 2 real emails to ZZ
+        mailboxes per green run (the trigger fires; EMAIL_FROM is set).
+  - [x] Deployed `sundial-comment-notify` with the §3.7 re-check. `scripts/verify-
+        mention-notify-e2e.mjs` **11/11**: happy path stamped, out-of-scope mention
+        refused `record_not_visible` and NOT stamped, replay idempotent.
+  - [ ] **Follow-up from the Phase 1b impact measurement — three accounts read every
+        comment in the tenant today and go to zero under the new policies. That is
+        correct, and two of them are a hole worth closing at the source:**
+    - [ ] Ban `bradtest@harmonelectric.net` and `tim+uatest@constructiveoperations.com`
+          through the deactivate path. Both are `Active__c = false` in Salesforce and
+          **still have working Supabase logins** — deactivating a `Sundial_User__c` does
+          not ban the auth user, so they authenticate and, until Phase 1b, read all 510
+          comments. RLS now scopes them to `none`, but the login itself should go.
+    - [ ] Deactivate **or** attribute `tmurphy5213+inviteuser1@gmail.com` — an *active*
+          Sales Rep with a null `Dealer__c`, so §1.2 resolves it to `none`. Either give
+          it a dealer (if it is still a useful invite fixture) or deactivate it.
+- [ ] **Paige King's email address is misspelled in Salesforce** — `Sundial_User__c`
+      `a1O7y00000sTY2PEAW` carries `paigeking@harmonelec` **`e`** `tric.net`
+      ("harmonelecetric"). Found while verifying Phase 1b's Part A: she is the ONE
+      active user with a Supabase login and no `profiles` row, i.e. the only person
+      who has never signed in — and a bounced invite is the obvious reason. Not an
+      access-model bug and Phase 1b handles her correctly either way (the
+      `sundial_user_cache` fallback resolves her to `tenant`), but she has been
+      unable to reach the portal since she was provisioned. Fix the address, then
+      re-invite through the `/admin/users` path.
 - [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
       of logs with zero `onlyInNew` for Dennis; every other user reconciled and
       re-levelled before the flip.

@@ -1,10 +1,13 @@
 # Sundial Access Model — sales reps and dealers
 
-**Status:** BUILDING. Phase 0 and **Phase 1 shipped 2026-08-27** on `feature/access-model-p1`
-(data model, backfills, cache columns, `lib/access.js`, the `access` block on `/auth/me`). All six
-Phase 1 gates pass — evidence table in §8. **Nothing any live user sees has changed**, measured
-twice. **Phase 1b (comments/mentions RLS) is next.** Nothing is enforced yet: `sundial-sf-query`
-still runs the TEMP guard untouched. Companion ADR: D-064 in
+**Status:** BUILDING. Phase 0, **Phase 1 and Phase 1b shipped 2026-08-27** (`feature/access-model-p1`,
+`feature/access-model-p1b`). Phase 1: data model, backfills, cache columns, `lib/access.js`, the
+`access` block on `/auth/me` — all six gates pass, evidence in §8, **nothing any live user saw
+changed**, measured twice. **Phase 1b: the comments/mentions RLS is LIVE and is the first thing in
+this design that changes what a live user sees** — the measured cross-user leak is closed, and one
+restricted rep went from reading all 511 tenant comments to the 79 on his own records (§8, "Phase 1b
+gate"). Amendments **A7** (§5.2) and **A8** (§5.3) were taken while building it. Reads are still
+unenforced: `sundial-sf-query` runs the TEMP guard untouched, so Phase 2 is next. Companion ADR: D-064 in
 `DECISIONS.md` (§11 here is its text). Supersedes the enforcement sections of D-043 and retires the
 TEMP restrict (`sundial-sf-query` "TEMP — Sales Rep hard-restrict", 2026-08-03) and the cosmetic tab
 hiding (harmon-crm D-048).
@@ -846,7 +849,7 @@ user_visible(p_profile_id uuid)                        -- same-dealer or tenant-
 
 ```sql
 select case p.access_scope
-  when 'tenant' then exists(select 1 from <cache> c where c.sf_id = p_id and c.client_sf_id = p.tenant_id)
+  when 'tenant' then true                                    -- A7, see below
   when 'dealer' then exists(… and c.dealer_sf_id = p.dealer_sf_id)
   when 'own'    then exists(… and c.sales_rep_sf_id = p.sundial_user_id)
   else false end
@@ -856,6 +859,47 @@ select case p.access_scope
 scopes (module gate). A record absent from the cache is invisible to sales scopes (fail closed; the cache
 is populated read-through, so the record's detail page — which a rep must have loaded to comment — has
 already put it there).
+
+#### A7 — the `tenant` branch does not consult the cache, and the scope comes from two sources
+
+**Applied 2026-08-27, in Phase 1b, on three measurements taken while building it. Shipped as
+`sql/sundial_access_p1b_comment_rls.sql`.**
+
+**A7.1 — `tenant` returns `true` unconditionally.** The pseudocode above originally wrote all three
+branches as `exists(select 1 from <cache> …)`. Applied literally that hides comments on any record
+missing from the cache from **everyone, admins included** — and **18 commented records (28 comments)
+were missing**: 15 solar of 187 commented, 3 customer of 29, all from July 2026, the records
+themselves long since deleted in Salesforce and swept by the cache reconcile. The prose immediately
+below the block already said "invisible **to sales scopes**"; the prose was right and the pseudocode
+was stricter than it meant. For `tenant`, the caller's own `tenant_id` match is the whole control,
+which is what §3.1's "tenant | all" row says. A module shipping later therefore cannot silently hide
+its comments from staff by not yet being in the object map.
+
+**A7.2 — scope is the NARROWER of `profiles.access_scope` and a `sundial_user_cache` derivation,
+nulls ignored** (`none < own < dealer < tenant`). §5.2 named `profiles.access_scope` as the only
+source. **That column was NULL on 21 of 35 rows when Phase 1b was built**, because it is written only
+on a `/auth/me` since the Phase 1 deploy — so "read profiles, deny NULL" would have hidden every
+comment from **17 real Harmon staff, including 11 of 14 Executives and 6 of 8 Managers**, until each
+happened to log in again. `profiles` stays the authority (it is the only source that knows
+`Sundial_Dealer__c.Active__c`); the cache derivation covers everyone regardless of login. `least()`
+is safe in both directions — a stale profile cannot widen past a demotion Salesforce already knows
+about, and the cache cannot widen past a narrowing only `lib/access.js` can compute. Verified on the
+two rows that need it: 17 staff (profile NULL, cache `tenant`) → `tenant`; `zz-rep-inactive-dealer`
+(profile `none`, cache `own`) → `none`.
+
+**A7.3 — `sundial_user_cache` gains `supabase_user_id`,** so a mentioned user with no `profiles` row
+still resolves. `Sundial_User__c.Supabase_User_Id__c` is written by `user-admin` at user-**create**
+time, before first login, and `cache-sync` picks the column up with no code change. **Not
+hypothetical:** after the sync, 34 of 34 active users carry a uuid and exactly one — an active
+Executive, provisioned, never signed in (her Salesforce email is misspelled) — has no `profiles`
+row. She resolves to `tenant` from the cache alone. Without this column she would have been
+permanently unmentionable, with no symptom but a mention row that silently failed to insert.
+
+**Residual, accepted:** the cache derivation cannot see `Dealer__c.Active__c` (there is no
+`sundial_dealer_cache`). A sales user whose dealer was deactivated *and* who has no `profiles` row is
+scoped by their access level rather than to `none`. It can only affect whether they can be
+*mentioned* — `record_visible_for` still requires the record to carry their rep or dealer id — and it
+self-corrects at their first login. Zero users today.
 
 ### 5.3 Policies
 
@@ -869,26 +913,54 @@ already put it there).
 > The cache-table half of Phase 6 came forward too, as A4. What is left in Phase 6 is the policy drop
 > on the cache tables and the `profiles` policy work.
 >
-> **Not built in the Phase 1 session.** Re-sequenced in §8 and TASKS.md only.
+> **SHIPPED 2026-08-27** as `sql/sundial_access_p1b_comment_rls.sql` (Parts A/B/C). Gate evidence in §8.
 
 ```sql
 -- comments
 select : tenant_id = current tenant AND record_visible(record_object, record_id)
 insert : tenant_id = current tenant AND author_id = auth.uid() AND record_visible(record_object, record_id)
-delete : author_id = auth.uid()
+delete : author_id = auth.uid() AND tenant_id = current tenant     -- unchanged from the old policy
 update : none
 -- comment_mentions
-select : mentioned_user_id = auth.uid()           -- feed
-       OR (author is me)                          -- own outgoing, if the UI needs it
+select : mentioned_user_id = auth.uid()           -- feed. NOTHING ELSE (see below)
 insert : created by me on a comment I can see
        AND user_visible(mentioned_user_id)
        AND record_visible_for(mentioned_user_id, record_object, record_id)
-update : mentioned_user_id = auth.uid() (read/ack columns only — separate table if it grows)
+update : NONE (see below)
+delete : none — the comments cascade is the only path
 ```
 
 Reps read Harmon staff comments on their own deals (shared thread, per your answer); they cannot mention
 a user they cannot see, and nobody can mention a user onto a record that user cannot see, so the
 notify email never carries data past its scope. `user_preferences` is unchanged (already per-user).
+
+**Two things this section originally sketched were deliberately NOT built, both under D-064's "a wide
+grant is the default and a narrow one is the exception":**
+
+- **No `OR (author is me)` branch on the mentions SELECT.** It was hedged here as "if the UI needs
+  it". It does not: `MentionsFeed.tsx` filters on `mentioned_user_id` alone, and `CommentThread.tsx`
+  inserts mention rows **without** `.select()`, so nothing reads one back.
+- **No mentions UPDATE policy.** There is no read/ack column; the only nullable one is `notified_at`,
+  which `sundial-comment-notify` stamps through the service role as its idempotency marker. `anon`
+  and `authenticated` hold `arwdDxtm` on this table (Phase 1 revoked the cache tables and `profiles`
+  and deliberately left this one), so **the absence of the policy is what makes that UPDATE grant
+  inert.** Adding one would let a user stamp their own pending mention and suppress their own alert
+  email, and the send path would report a clean skip. Do not "complete" the policy set.
+
+**A8 — the EXECUTE grant on the definer helpers.** `revoke ... from public` is **not** enough on this
+project: Supabase ships `alter default privileges in schema public grant all on functions to anon,
+authenticated, service_role`, so each new function gets a **direct** grant to each role and the
+PUBLIC revoke removes an entry that was not doing the work. V2 caught it after Part B was applied
+(`private.resolve_access` was correctly locked down — those defaults are scoped `in schema public`,
+which is the tell). Part C revokes `record_visible_for`, `user_visible` and `current_profile` from
+`anon`. Only `record_visible_for` was materially exposed: it takes its subject as an **argument**, so
+it never consults `auth.uid()` and was an unauthenticated boolean oracle over "does this record exist
+and can this user see it". The other two are inert for anon (their `me` side resolves through
+`auth.uid()`, which is NULL). **`record_visible` keeps its `anon` grant on purpose** — the
+`comments` policies call it and policies evaluate as the invoking role, so revoking it would turn an
+anonymous read from "200, 0 rows" into a 42501, changing the anon surface Phase 0 baselined for no
+gain. `create or replace` preserves an ACL; a `drop` + `create` re-applies the defaults and silently
+re-opens anon, so re-run Part C after any drop.
 
 ### 5.4 Realtime
 
@@ -1075,6 +1147,45 @@ leaving it at Phase 6 would mean carrying a known leak through four phases of un
 **Gate:** as each ZZ TEST user via supabase-js: comments on a visible record → rows; on an invisible
 record → 0 rows; insert on an invisible record → `42501`; mention an other-dealer rep → `42501`;
 mention Harmon staff → ok; the mentions feed still returns the user's own rows.
+
+#### Phase 1b gate — evidence, 2026-08-27
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Every ZZ user × every read/write/mention surface | `scripts/verify-comment-rls.mjs` | **44 checks, 44 pass, 0 fail, 0 skip** |
+| Rep reads own record's thread / another rep's / another dealer's / roofing | same | 1 / **0** / **0** / **0** |
+| Dealer scope sees both its reps, never the other dealer | same | a1 1, a2 1, **B1 0**, roofing **0** |
+| Tenant scope reads every seeded thread incl. roofing | same | 7 of 7 for admin **and** exec |
+| `none` scope (nodealer, inactive-dealer, tech) reads nothing anywhere | same | **0** for all three |
+| Insert refusals (other rep, other dealer, roofing, forged author) | same | **42501** on all four |
+| Mention refusals (other dealer's rep, same-dealer rep onto an invisible record, `none` user, admin→rep onto another dealer's record) | same | **42501** on all four |
+| Mentions allowed (rep→staff, admin→rep on the rep's own record) | same | both ok |
+| A rep sees only mentions of themselves (was: all 14) | same | **0** foreign rows |
+| Delete own only | same | own 1 row, another's **0 rows, no error** |
+| Realtime honours the policies | same | no event on another rep's record; **event delivered** on own |
+| Live impact, per user, before vs after | V6 | 23 tenant `unchanged`; **Dennis 511 → 79**; 6 `none` → 0; **no `WIDENED` row** |
+| Dennis keeps every comment he authored | V7 | **26 of 26** |
+| Mentions feed loses nothing | V8 | **14 of 14** still readable by their recipient |
+| Policy set is exactly the intended five | V3 | 5 rows, correct expressions, no old names, no UPDATE row |
+| Cache tables still revoked from `authenticated` | V10 | `42501 permission denied for table sundial_customer_cache` |
+| Tenant-scope reader is untouched under the real policies | V11 | `comments_visible_as_exec` = `tenant_total` = 511 |
+| Write refusals under the real policies, as a real session | V12 (a)–(d) | all four as specified |
+| §3.7 re-check, end to end through pg_net and SES | `scripts/verify-mention-notify-e2e.mjs` | **11 pass, 0 fail** — happy path stamped `notified_at`; out-of-scope mention refused `record_not_visible`, nothing sent, **not stamped**; replay idempotent |
+| `anon` EXECUTE narrowed after Part C | V2b | `record_visible_for` / `user_visible` / `current_profile` **false** for anon; `record_visible` deliberately **true**; `authenticated` + `service_role` true on all four |
+| Part C did not break the anon surface | V14 | comments **0 rows, no error**; mentions **0 rows** — the SECURITY DEFINER inner call runs as the owner, as designed |
+| Unit tests | `npm test` | **644 pass, 0 fail** (was 641) |
+
+**Two defects were found by running the gate rather than by reading it** — both after Part B was
+already applied — and both are recorded because each would have passed a review:
+
+1. **V2 expected `anon_exec = false` and got `true`** on all four helpers — the default-privileges
+   re-grant described in A8 above. `revoke ... from public` looked like it had worked. Closed by
+   Part C, applied 2026-08-28; V2b and V14 confirm both the narrowing and that it cost nothing.
+2. **V10–V12 resolved the test user's uuid AFTER `set local role authenticated`**, so
+   `own_profile_select` hid the row, `sub` was NULL, and the whole block measured a session that was
+   nobody. **It returned `uid null / 0 / 0`, which is indistinguishable from a correctly-scoped rep
+   with no seeded comments** — a false green. Fixed by setting the claims before the role switch;
+   the file now says to assert `uid` is non-null before believing any count beside it.
 
 ### Phase 2 — Shadow
 sundial-core: `sf-query` wired to `lib/access` behind `ACCESS_MODEL_MODE=shadow`; module gate,

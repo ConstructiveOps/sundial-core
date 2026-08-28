@@ -1171,13 +1171,16 @@ mention Harmon staff → ok; the mentions feed still returns the user's own rows
 | Tenant-scope reader is untouched under the real policies | V11 | `comments_visible_as_exec` = `tenant_total` = 511 |
 | Write refusals under the real policies, as a real session | V12 (a)–(d) | all four as specified |
 | §3.7 re-check, end to end through pg_net and SES | `scripts/verify-mention-notify-e2e.mjs` | **11 pass, 0 fail** — happy path stamped `notified_at`; out-of-scope mention refused `record_not_visible`, nothing sent, **not stamped**; replay idempotent |
+| `anon` EXECUTE narrowed after Part C | V2b | `record_visible_for` / `user_visible` / `current_profile` **false** for anon; `record_visible` deliberately **true**; `authenticated` + `service_role` true on all four |
+| Part C did not break the anon surface | V14 | comments **0 rows, no error**; mentions **0 rows** — the SECURITY DEFINER inner call runs as the owner, as designed |
 | Unit tests | `npm test` | **644 pass, 0 fail** (was 641) |
 
-**Two defects were found by running the gate rather than by reading it**, and both are recorded
-because each would have passed a review:
+**Two defects were found by running the gate rather than by reading it** — both after Part B was
+already applied — and both are recorded because each would have passed a review:
 
 1. **V2 expected `anon_exec = false` and got `true`** on all four helpers — the default-privileges
-   re-grant described in A8 above. `revoke ... from public` looked like it had worked.
+   re-grant described in A8 above. `revoke ... from public` looked like it had worked. Closed by
+   Part C, applied 2026-08-28; V2b and V14 confirm both the narrowing and that it cost nothing.
 2. **V10–V12 resolved the test user's uuid AFTER `set local role authenticated`**, so
    `own_profile_select` hid the row, `sub` was NULL, and the whole block measured a session that was
    nobody. **It returned `uid null / 0 / 0`, which is indistinguishable from a correctly-scoped rep

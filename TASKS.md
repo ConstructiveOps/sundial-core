@@ -682,8 +682,12 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [x] Part A: `supabase_user_id` on `sundial_user_cache` (**TIM**), then a full user
         cache-sync (**Claude**), then Part B: helpers + policies (**TIM**).
   - [x] V1–V14 verification. Two defects found by running them: V2's `anon` grant
-        (fixed by Part C) and V10–V12's post-`set role` uuid subquery returning a
-        FALSE GREEN (`uid null / 0 / 0`). Both written up in PROGRESS + D-064.
+        (fixed by Part C, applied 2026-08-28 — V2b and V14 green) and V10–V12's
+        post-`set role` uuid subquery returning a FALSE GREEN (`uid null / 0 / 0`).
+        Both written up in PROGRESS + D-064.
+  - [x] Part C: `anon` EXECUTE revoked on `record_visible_for` / `user_visible` /
+        `current_profile`. `record_visible` keeps its anon grant on purpose (the
+        comments policies call it and policies run as the invoking role).
   - [x] `node scripts/verify-comment-rls.mjs` — **44/44**. Sends 2 real emails to ZZ
         mailboxes per green run (the trigger fires; EMAIL_FROM is set).
   - [x] Deployed `sundial-comment-notify` with the §3.7 re-check. `scripts/verify-

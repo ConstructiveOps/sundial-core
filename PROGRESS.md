@@ -12,7 +12,7 @@ they cannot open, none of them their own.
 
 | | |
 |---|---|
-| `sql/sundial_access_p1b_comment_rls.sql` | Part A `sundial_user_cache.supabase_user_id`; Part B `private.resolve_access()` + the four §5.2 definer helpers + the five policies in one transaction; Part C the `anon` EXECUTE revoke; V1–V14 verification |
+| `sql/sundial_access_p1b_comment_rls.sql` | Part A `sundial_user_cache.supabase_user_id`; Part B `private.resolve_access()` + the four §5.2 definer helpers + the five policies in one transaction; Part C the `anon` EXECUTE revoke (applied 2026-08-28); V1–V14 verification, all green |
 | `lambdas/sundial-comment-notify/notify.js` | step 6b — the §3.7 `record_visible_for` re-check before sending. **Deployed.** |
 | `scripts/verify-comment-rls.mjs` | 44-check gate as the ZZ TEST users over supabase-js |
 | `scripts/verify-mention-notify-e2e.mjs` | 11-check gate for the notify chain incl. the re-check |

@@ -7,7 +7,8 @@
 -- helper below reads the rep/dealer columns Phase 1 added to the cache tables.
 --
 -- APPLY THIS IN THE SUPABASE SQL EDITOR (project qfsdpkwxahakegjnyijj), as Tim.
--- It is in TWO PARTS with a hard stop between them — see RUN ORDER.
+-- It is in THREE PARTS with a hard stop after Part A — see RUN ORDER. Part C was
+-- added AFTER Part B was applied, because V2 caught something Part B missed.
 --
 --
 -- =============================================================================
@@ -56,10 +57,16 @@
 --              supabase_user_id on ~132 rows. Seconds. No Lambda change (why: §2).
 --   3. TIM   — run PART B below (one BEGIN..COMMIT: helpers + policies).
 --   4. TIM   — run the VERIFICATION queries, one at a time. V1–V9 run as anyone;
---              V10–V13 are marked TIM ONLY because they need `set role`, which the
---              read-only MCP user cannot do (it answers 42501).
---   5. CLAUDE— `node scripts/verify-comment-rls.mjs` as the ZZ TEST users.
---   6. TIM   — approve the sundial-comment-notify diff; then Claude deploys it.
+--              V10–V12 and V14 are marked TIM ONLY because they need `set role`,
+--              which the read-only MCP user cannot do (it answers 42501).
+--   5. TIM   — run PART C (the anon EXECUTE revoke V2 exposed), then V2b and V14.
+--   6. CLAUDE— `node scripts/verify-comment-rls.mjs` as the ZZ TEST users.
+--   7. TIM   — approve the sundial-comment-notify diff; then Claude deploys it,
+--              and runs `node scripts/verify-mention-notify-e2e.mjs`.
+--
+-- ALL SEVEN STEPS WERE COMPLETED 2026-08-27/28. Every gate is green; the evidence
+-- table is docs/access-model.md §8, "Phase 1b gate". This file is kept as the
+-- re-runnable definition of what is live, not as a to-do list.
 --
 -- PART A MUST PRECEDE PART B. A `language sql` function body is parsed and
 -- validated at CREATE time, so `create function` in Part B fails outright if
@@ -1100,7 +1107,7 @@ select 'cache tables still revoked from authenticated (A4 intact)',
 
 -- #############################################################################
 -- ##  PART C — the anon EXECUTE revoke that Part B's `from public` missed.    ##
--- ##  Found by V2 on 2026-08-27, AFTER Part B was applied. Run this.          ##
+-- ##  Found by V2 on 2026-08-27, AFTER Part B was applied. APPLIED 2026-08-28.##
 -- #############################################################################
 --
 -- V2 was written expecting `anon_exec = false` on the four public helpers. It came
@@ -1173,7 +1180,8 @@ revoke execute on function public.current_profile()                    from anon
 
 -- ---------------------------------------------------------------------------
 -- V2b — re-run V2 after Part C.
--- EXPECT: private.resolve_access      false / false / false
+-- EXPECT / CONFIRMED 2026-08-28 (these are the values it actually returned):
+--         private.resolve_access      false / false / false
 --         public.current_profile      false / true  / true
 --         public.record_visible       TRUE  / true  / true   <-- deliberate, see above
 --         public.record_visible_for   false / true  / true
@@ -1198,6 +1206,9 @@ select n.nspname || '.' || p.proname                                as function,
 -- broken, so it is checked rather than assumed.
 -- EXPECT: comments_readable = 0 with NO error raised. An error here means an
 --         anonymous visitor now gets a 500 where they used to get an empty list.
+-- CONFIRMED 2026-08-28: 0 rows, no error. The SECURITY DEFINER inner call does run
+-- as the owner, so revoking record_visible_for from anon did not break the comments
+-- policy for an anonymous session. The anon surface is unchanged from Phase 0.
 -- ---------------------------------------------------------------------------
 begin;
   set local role anon;

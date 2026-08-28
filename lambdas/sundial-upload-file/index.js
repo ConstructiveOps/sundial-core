@@ -13,6 +13,10 @@
 
 import { resolveIdentity } from "../../lib/identity.js";
 import {
+  alwaysEnforcedAccess,
+  assertActionOnRecord,
+} from "../../lib/access-enforce.js";
+import {
   corsHeaders,
   normalizeHeaders,
   jsonResponse,
@@ -103,6 +107,17 @@ export const handler = async (event) => {
     }
 
     // Tenant-ownership gate before signing anything.
+    // ACCESS MODEL (D-064 §3.6): a sales role may upload to a CUSTOMER record it can
+    // see, and to no Solar record at all.
+    const access = alwaysEnforcedAccess(identity);
+    const denied = await assertActionOnRecord(
+      `files.${objectKey}.upload`,
+      objectKey,
+      recordId,
+      access
+    );
+    if (denied) return jsonResponse(denied.status, cors, denied.body);
+
     const owned = await assertTenantOwnsRecord(recordId, objectKey, tenantId);
     if (!owned) {
       return jsonResponse(404, cors, {

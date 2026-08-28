@@ -160,7 +160,20 @@ const SURFACES = [
     label: "GET /files/by-record/{ownRecord}",
     // The route requires an explicit ?object= (fail-closed allowlist in lib/file-access.js).
     path: (ctx) => (ctx.ownCustomerId ? `/files/by-record/${ctx.ownCustomerId}?object=customer` : null),
-    pending: (u, ctx) => recordVisible(u, ctx, ctx.ownRecord),
+    // `none` scope gets 403, not 404, and that is deliberate (measured 2026-08-28).
+    //
+    // The file gate asks the ACTION question first — "may this role list customer files
+    // at all" — and `none` fails it before any record is considered. 404 would be the
+    // rule if the refusal depended on WHICH record was asked for, because then the
+    // status code would distinguish a record that exists from one that does not. It does
+    // not: a `none`-scope caller gets 403 for every id, real or invented, so there is no
+    // oracle to protect against and 403 is the more honest answer — the same one the
+    // list endpoints give them.
+    //
+    // A SALES role is different and still 404s: they CAN list customer files, so the
+    // refusal does depend on the record, and the code must not reveal which.
+    pending: (u, ctx) =>
+      u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.ownRecord),
   },
   {
     key: "files.solar.list",

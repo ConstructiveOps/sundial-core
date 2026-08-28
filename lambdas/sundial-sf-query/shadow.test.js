@@ -374,9 +374,11 @@ test("an UNRECOGNIZED mode falls back to off, loudly", async () => {
   );
 });
 
-test("mode ENFORCE is recognized, warns, and behaves as shadow", async () => {
-  // Phase 3 gives it meaning. Until then an early flip must not crash the Lambda and must
-  // not silently mean off — either would waste the shadow window.
+test("mode ENFORCE now SERVES the filtered answer (Phase 3)", async () => {
+  // Phase 2's version of this test asserted the opposite -- that enforce served the OLD
+  // answer -- because enforce was recognized but unimplemented. Phase 3 gives it meaning,
+  // and the assertion flips with it. Left as a named change rather than a quiet edit:
+  // this single test is the difference between "measuring" and "enforcing".
   process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Sales Rep", { userId: REP_A });
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
@@ -385,10 +387,166 @@ test("mode ENFORCE is recognized, warns, and behaves as shadow", async () => {
   const body = JSON.parse(res.body);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(body.records.length, 2, "enforce must still SERVE the old answer");
+  assert.equal(body.records.length, 1, "a rep is served their OWN record and no other");
+  assert.equal(body.records[0].sf_id, CUST_1);
+  assert.equal(body.total, 1, "the COUNT is scoped too, not just the page");
+});
+
+test("under ENFORCE the log still runs, and now agrees with what was served", async () => {
+  // Shadow logging stays on after the cutover as the post-launch watch. Under enforce the
+  // served answer and the computed answer are the SAME answer, so a disagreement line is
+  // the signal that enforcement and the model have drifted -- the one failure nobody
+  // would otherwise notice, because the portal would look fine.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
+
+  await handler(listEvent("customer"));
   const line = oneLine();
-  assert.equal(line.mode, "shadow");
-  assert.equal(line.newTotal, 1, "and log the new one");
+  assert.equal(line.mode, "enforce");
+  assert.equal(line.oldTotal, 1, "what was served");
+  assert.equal(line.newTotal, 1, "what the model says");
+  assert.equal(line.verdict, "same_count");
+  assert.equal(line.wider, false);
+  assert.equal(line.narrower, false);
+});
+
+test("ENFORCE: a denied module is 403 on a LIST and 404 on a SINGLE read (§3.1)", async () => {
+  // Not a style choice. A 403 on a record id confirms the record exists, which turns any
+  // detail endpoint into an enumeration oracle for a rep counting the tenant. A closed
+  // MODULE leaks nothing about any particular record, so that one is an honest 403.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [];
+
+  const list = await handler(listEvent("po"));
+  assert.equal(list.statusCode, 403);
+  assert.equal(JSON.parse(list.body).code, "MODULE_FORBIDDEN");
+
+  const single = await handler(singleEvent("po", "a2X000000000001AAA"));
+  assert.equal(single.statusCode, 404);
+  assert.equal(JSON.parse(single.body).code, "RECORD_NOT_FOUND");
+});
+
+test("ENFORCE: roofing closes for a sales scope, stays open for tenant", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.cacheRows = [];
+
+  ctx.identity = identityFor("Sales Dealer", { userId: REP_A });
+  assert.equal((await handler(listEvent("roofing"))).statusCode, 403);
+
+  ctx.logs = [];
+  ctx.identity = identityFor("Admin", { dealer: null });
+  assert.equal((await handler(listEvent("roofing"))).statusCode, 200);
+});
+
+test("ENFORCE: the cache SHORTCUT refuses another rep's row", async () => {
+  // The row is fresh and in the cache, so the shortcut would have served it. It must fall
+  // through to the SOQL path, which carries the same clause, and 404.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_2, REP_B)];
+  ctx.sfRows = []; // the SOQL clause finds nothing either
+
+  const res = await handler(singleEvent("customer", CUST_2));
+  assert.equal(res.statusCode, 404);
+});
+
+test("ENFORCE: a rep's OWN row is still served from the cache shortcut", async () => {
+  // The narrowing must not become "reps get nothing" -- that is the failure mode a
+  // fail-closed change is most likely to ship.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+
+  const res = await handler(singleEvent("customer", CUST_1));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).source, "cache", "served from the cache, not live SOQL");
+});
+
+test("ENFORCE: ?q= search narrows WITHIN the role's scope, never outside it", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [
+    customerRow(CUST_1, REP_A, { name: "ZZ Alpha" }),
+    customerRow(CUST_2, REP_B, { name: "ZZ Beta" }),
+  ];
+
+  const res = await handler(listEvent("customer", { q: "ZZ" }));
+  const body = JSON.parse(res.body);
+  assert.equal(body.records.length, 1);
+  assert.equal(body.records[0].sf_id, CUST_1);
+  assert.equal(body.total, 1);
+});
+
+test("ENFORCE: TENANT scope is untouched on every surface", async () => {
+  // The rule that does not compress: enforcement may only narrow a SALES role. If a
+  // tenant-scope user loses a single row, the change is wrong regardless of what else
+  // passes.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  const list = await handler(listEvent("customer"));
+  assert.equal(JSON.parse(list.body).records.length, 2, "every row, as today");
+  assert.equal(JSON.parse(list.body).total, 2);
+
+  const single = await handler(singleEvent("customer", CUST_2));
+  assert.equal(single.statusCode, 200, "including another rep's record");
+
+  const full = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  assert.equal(full.statusCode, 200);
+
+  const meta = await handler(event("/sf/meta/roofing/picklists", { object: "roofing" }));
+  assert.equal(meta.statusCode, 200, "and the meta routes of a module sales roles cannot reach");
+});
+
+test("ENFORCE: scope none reaches nothing, on every route", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Technician", { userId: REP_B });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT }];
+
+  assert.equal((await handler(listEvent("customer"))).statusCode, 403);
+  assert.equal((await handler(singleEvent("customer", CUST_1))).statusCode, 404);
+  assert.equal((await handler(singleEvent("customer", CUST_1, { full: "true" }))).statusCode, 404);
+  assert.equal((await handler(event("/sf/users", null))).statusCode, 403);
+  assert.equal(
+    (await handler(event("/sf/meta/customer/picklists", { object: "customer" }))).statusCode,
+    403
+  );
+});
+
+test("ENFORCE: GET /sf/users returns the §3.5 union for a dealer", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Dealer", { userId: REP_A });
+  ctx.sfRows = [
+    { Id: REP_A, First_Name__c: "Rep", Last_Name__c: "A" },
+    { Id: "a1O7y00000ADMINAAAA", First_Name__c: "An", Last_Name__c: "Admin" },
+  ];
+
+  const res = await handler(event("/sf/users", null));
+  assert.equal(res.statusCode, 200);
+  const soql = ctx.soqlSeen.find((q) => q.includes("Supabase_User_Id__c"));
+  assert.match(soql, /Dealer__c = '/, "the dealer half");
+  assert.match(soql, /Access_Level__c IN \('Executive', 'Admin', 'Manager'\)/, "the staff half");
+  assert.match(soql, /Active__c = true/, "and the endpoint's own active rule survives");
+});
+
+test("ENFORCE: the picklist MODULE gate closes, values stay org-wide", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const denied = await handler(
+    event("/sf/meta/roofing/picklist/Stage__c", { object: "roofing", field: "Stage__c" })
+  );
+  assert.equal(denied.statusCode, 403, "roofing is closed to sales roles");
+
+  const allowed = await handler(
+    event("/sf/meta/customer/picklist/Stage__c", { object: "customer", field: "Stage__c" })
+  );
+  assert.equal(allowed.statusCode, 200, "customer is reachable; §4.4 field filtering is Phase 4");
 });
 
 // ---------------------------------------------------------------------------

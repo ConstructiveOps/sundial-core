@@ -35,7 +35,17 @@ import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
 // createShadow() returns a no-op whose methods do nothing, so every call site below is
 // inert and this file behaves exactly as it did before Phase 2. See shadow.js for why it
 // can never change a response and never throw.
-import { createShadow } from "./shadow.js";
+import { createShadow, resolveMode, MODES } from "./shadow.js";
+// ACCESS MODEL ENFORCEMENT (D-064 Phase 3, §7.3). Under ACCESS_MODEL_MODE=enforce these
+// decide what is SERVED. Under off/shadow they are not consulted by any serving line.
+import {
+  rowFilter,
+  userFilter,
+  rowVisible,
+  canReadObject,
+  OBJECT_ACCESS,
+  DENY,
+} from "../../lib/access.js";
 
 // --- Object allowlist (the security spine) ---------------------------------
 // The {object} path param is one of these short keys. Anything else => 400.
@@ -103,6 +113,43 @@ function repRestrictFor(objectKey, identity) {
   const sfField = TEMP_SALES_REP_FIELD[objectKey];
   if (!sfField) return null; // roofing/po/user not gated by this temp guard
   return { sfField, value: TEMP_SALES_REP_NAME };
+}
+
+// --- ACCESS MODEL ENFORCEMENT (D-064 §3.1, §3.2, §7.3) ----------------------
+//
+// `enforce` is null unless ACCESS_MODEL_MODE=enforce. When it is null NOTHING below
+// changes a query, which is what keeps off/shadow byte-identical.
+//
+// When it is set it is the resolved filter for THIS object and THIS caller:
+//   { deny: true, code }                      -> the module is closed to this scope
+//   { deny: false, cache: [{column,value}],   -> AND-ed equalities for the cache query
+//     cacheOr: string|null,                   -> the §3.5 union's OR group (`user` only)
+//     soql: string }                          -> the same predicate as a SOQL fragment
+//
+// ⚠️ APPLIED FIRST, EVERY CALLER FILTER AND-ED AFTER IT (§1.3). No request input --
+// ?q=, ?parentId=, ?field/value, ?limit -- can widen it, because none of them can reach
+// inside a conjunction. That is not a convention here, it is the reason the composition
+// is safe to reason about at all.
+//
+// ⚠️ THE TENANT CLAUSE IS DUPLICATED ON PURPOSE. Every query already filters
+// client_sf_id / Client__c from the token, and rowFilter's first clause is the same
+// equality. Applying it twice is a no-op to Postgres and to SOQL, and removing either
+// copy would make one of them load-bearing. They are both load-bearing.
+function resolveEnforceFilter(objectKey, access) {
+  // `user` is a union, not an equality (§3.5) -- the object's own shape picks the filter
+  // so no call site has to remember which function answers for it.
+  return OBJECT_ACCESS[objectKey]?.unionFilter
+    ? userFilter(access)
+    : rowFilter(objectKey, access);
+}
+
+// Apply the row filter to a PostgREST query builder. Both halves, always: dropping the
+// or-group would hand a dealer their own people and hide every Harmon employee.
+function applyEnforceToQuery(q, enforce) {
+  if (!enforce || enforce.deny) return q;
+  for (const { column, value } of enforce.cache) q = q.eq(column, value);
+  if (enforce.cacheOr) q = q.or(enforce.cacheOr);
+  return q;
 }
 
 // --- Related-records parent filter (?parentId=) -----------------------------
@@ -759,7 +806,15 @@ async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
 // Id = '<id>' AND Client__c = '<tenantId>', with tenantId derived ONLY from the
 // verified token. A record owned by another tenant returns 404, never data.
 async function handleSingleReadFull(ctx) {
-  const { sfObject, id, tenantId, repRestrict, cors } = ctx;
+  const { sfObject, id, tenantId, repRestrict, cors, enforce } = ctx;
+
+  // §3.1: a module denial on a SINGLE read is 404, never 403. A record you may not see
+  // must be indistinguishable from one that does not exist -- a 403 on a record id
+  // confirms the record exists, which turns this endpoint into an enumeration oracle.
+  if (enforce?.deny) {
+    await ctx.shadow.single({ path: "single.full", served: false, id, cacheTable: ctx.cacheTable });
+    return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
 
   // Every queryable field (compound/base64 already excluded by getQueryableFields).
   // We do NOT narrow to cache-backed columns — returning the fields the cache
@@ -773,10 +828,15 @@ async function handleSingleReadFull(ctx) {
   const repClause = repRestrict
     ? ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`
     : "";
+  // §7.3 BELT AND BRACES: the new clause AND the TEMP clause, both. Access can only
+  // tighten at this step -- the TEMP guard is still narrowing whoever it narrowed
+  // yesterday, and the row filter narrows on top. Step 7.4 removes the TEMP half.
+  const accessClause = enforce ? ` AND ${enforce.soql}` : "";
   const soql =
     `SELECT ${selectList} FROM ${sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
     `AND Client__c = '${soqlEscapeString(tenantId)}'` +
+    accessClause +
     repClause +
     ` LIMIT 1`;
   const records = await sfQuery(soql);
@@ -816,11 +876,17 @@ async function handleSingleReadFull(ctx) {
 
 // --- SINGLE-RECORD read ----------------------------------------------------
 async function handleSingleRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, repRestrict, cors, full, shadow } =
+  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, repRestrict, cors, full, shadow, enforce, access } =
     ctx;
 
   // ?full=true -> all-fields, cache-bypassing detail read (see handleSingleReadFull).
   if (full) return await handleSingleReadFull(ctx);
+
+  // Module denial -> 404, not 403 (§3.1). See handleSingleReadFull for why.
+  if (enforce?.deny) {
+    await shadow.single({ path: "single.soql", served: false, id, cacheTable });
+    return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
 
   // a. Cache-first. TENANT FILTER: .eq("client_sf_id", tenantId).
   //    Do NOT filter is_stale in the query — fetch the row and decide freshness
@@ -830,6 +896,7 @@ async function handleSingleRead(ctx) {
   //    cache row cannot prove rep ownership (the rep field isn't cached), so we
   //    always verify against Salesforce with the rep field in the WHERE below.
   if (!repRestrict) {
+    const objectKey = ctx.objectKey;
     const { data: cached, error: cacheErr } = await supabase
       .from(cacheTable)
       .select("*")
@@ -838,7 +905,13 @@ async function handleSingleRead(ctx) {
       .limit(1)
       .maybeSingle();
     if (cacheErr) console.error("cache read error (single):", cacheErr.message);
-    if (cached && isRowFresh(cached, Date.now())) {
+    // ENFORCE: the cache row carries the filter columns since Phase 1, so the shortcut
+    // can check them on the row it already has. A row that does not match is NOT served
+    // and is not treated as a miss to be papered over -- it falls through to the SOQL
+    // path below, which carries the same clause and returns 0 rows -> 404. Two chances
+    // to deny, none to leak.
+    const visible = !enforce || rowVisible(objectKey, access, cached);
+    if (cached && visible && isRowFresh(cached, Date.now())) {
       // SHADOW: the cache row already carries sales_rep_sf_id / dealer_sf_id (Phase 1),
       // which is exactly what the TEMP guard could not do and why it skipped this
       // shortcut. Evaluating the row in hand costs nothing.
@@ -855,10 +928,12 @@ async function handleSingleRead(ctx) {
   const repClause = repRestrict
     ? ` AND ${repRestrict.sfField} = '${soqlEscapeString(repRestrict.value)}'`
     : "";
+  const accessClause = enforce ? ` AND ${enforce.soql}` : "";
   const soql =
     `SELECT ${selectList} FROM ${sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
     `AND Client__c = '${soqlEscapeString(tenantId)}'` +
+    accessClause +
     repClause +
     ` LIMIT 1`;
   const records = await sfQuery(soql);
@@ -909,7 +984,7 @@ async function handleSingleRead(ctx) {
 // count:"exact" returns the full match total even though only SEARCH_CAP rows come
 // back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
 // double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
-async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId, shadow, objectKey }) {
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId, shadow, objectKey, enforce }) {
   const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
   if (cols.length === 0) {
     // No searchable columns: the served answer is an empty set for everyone, so the new
@@ -932,8 +1007,12 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
   let cq = supabase
     .from(cacheTable)
     .select(buildListSelect(columnSet), { count: "exact" })
-    .eq("client_sf_id", tenantId)
-    .or(orExpr);
+    .eq("client_sf_id", tenantId);
+  // ENFORCE FIRST, then the caller's search group. Two .or() calls are AND-ed by
+  // PostgREST, so the name search narrows WITHIN what the role may see and can never
+  // reach outside it. Order is cosmetic here; the conjunction is what matters.
+  cq = applyEnforceToQuery(cq, enforce);
+  cq = cq.or(orExpr);
   // Related-list scope: search WITHIN one parent's children. ANDed with the tenant
   // filter and the name OR-group, so it can only narrow the result set.
   if (parentId && parentColumn && columnSet.has(parentColumn)) {
@@ -987,8 +1066,17 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, parentFilter, qs, cors, shadow, objectKey } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, parentFilter, qs, cors, shadow, objectKey, enforce } =
     ctx;
+
+  // §3.1: a module closed to this scope is 403 MODULE_FORBIDDEN on a LIST (unlike a
+  // single read's 404). "This module is closed to you" leaks nothing about any particular
+  // record, so there is no enumeration oracle to protect against here -- and a 403 is the
+  // answer the client can render honestly.
+  if (enforce?.deny) {
+    await shadow.list({ path: "list.cache", cacheTable, oldCount: 0, oldTotal: 0 });
+    return jsonResponse(403, cors, { error: "forbidden", code: enforce.code || DENY.MODULE_FORBIDDEN });
+  }
 
   // Related-list parent filter (?parentId=). Validated before anything else so a
   // bad request never reaches Salesforce or the cache.
@@ -1076,7 +1164,7 @@ async function handleListRead(ctx) {
       searchSfFields: searchTerm ? searchFields.sf : null,
       // SHADOW: the TEMP guard's own path — the old answer here is Dennis's name-matched
       // set, whoever is calling.
-      shadow, objectKey,
+      shadow, objectKey, enforce,
       shadowPath: searchTerm ? "search.live.rep" : "list.live.rep",
       shadowFilters: parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
@@ -1103,7 +1191,7 @@ async function handleListRead(ctx) {
       parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
-      shadow, objectKey,
+      shadow, objectKey, enforce,
       shadowPath: searchTerm ? "search.live.parent_uncached" : "list.live.parent_uncached",
       // The parent COLUMN is missing from this cache table, which is why we are on the
       // live path at all — so the shadow count cannot apply it either. Without a way to
@@ -1125,7 +1213,7 @@ async function handleListRead(ctx) {
       searchCacheCols: searchFields.cache, term: searchTerm, cors,
       parentColumn: parentId ? parentFilter.cacheColumn : null,
       parentId,
-      shadow, objectKey,
+      shadow, objectKey, enforce,
     });
   }
 
@@ -1155,6 +1243,10 @@ async function handleListRead(ctx) {
       .from(cacheTable)
       .select(listSelect, withCount ? { count: "exact" } : {})
       .eq("client_sf_id", tenantId);
+    // ENFORCE FIRST. Applied before every caller filter below, and to the COUNT as well
+    // as the page -- the same builder produces both, so `total` is scoped by
+    // construction rather than by a second thing somebody has to remember.
+    q = applyEnforceToQuery(q, enforce);
     // Related-list scope, ANDed with the tenant filter. Column existence was
     // checked above (parentColumnMissing), so this is always enforceable here.
     if (parentId) {
@@ -1203,7 +1295,7 @@ async function handleListRead(ctx) {
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
-      shadow, objectKey,
+      shadow, objectKey, enforce,
       shadowPath: "list.live.cold",
       shadowFilters: parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
@@ -1325,10 +1417,13 @@ async function listColdCacheFallback(ctx) {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, limit, offset, repRestrict,
     parentSfField, parentId, searchTerm, searchSfFields,
-    shadow, objectKey, shadowPath, shadowFilters,
+    shadow, objectKey, shadowPath, shadowFilters, enforce,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
+  // ENFORCE FIRST on the live path too, and on BOTH the COUNT and the paged SELECT below
+  // (they share this `where`), so a cold cache cannot serve a wider set than a warm one.
+  if (enforce && !enforce.deny) where += ` AND ${enforce.soql}`;
   // TEMP Sales Rep guard: AND the authoritative rep field (applies to both the
   // COUNT and the paged SELECT below, so total + rows are rep-scoped). The search
   // clause is ANDed AFTER this, so a rep's search can only NARROW their own set —
@@ -1462,7 +1557,14 @@ function decodeValidForIndices(validFor) {
 // is no Client__c / tenant filter here — that absence is intentional, not an
 // oversight. A valid token is still required (enforced by the caller).
 async function handlePicklistRead(ctx) {
-  const { sfObject, objectKey, field, cors, shadow } = ctx;
+  const { sfObject, objectKey, field, cors, shadow, enforceMeta } = ctx;
+
+  // §3.1's meta row: a sales scope reaches picklists only for objects it can read. The
+  // VALUES stay org-wide (§4.4's deliberate exception); this is the module gate only.
+  // §4.4's field-level narrowing arrives with the Phase 4 manifest.
+  if (enforceMeta === false) {
+    return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+  }
 
   const meta = await getRawDescribe(sfObject);
 
@@ -1631,7 +1733,12 @@ function buildPicklistEntry(fieldDef, meta) {
 // no Client__c / tenant filter here — that absence is intentional, not an
 // oversight. A valid token is still required (enforced by the caller).
 async function handlePicklistsRead(ctx) {
-  const { sfObject, objectKey, cors, shadow } = ctx;
+  const { sfObject, objectKey, cors, shadow, enforceMeta } = ctx;
+
+  // Module gate -- see handlePicklistRead.
+  if (enforceMeta === false) {
+    return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+  }
 
   // One describe fetch for the whole object (cached across warm invocations).
   const meta = await getRawDescribe(sfObject);
@@ -1671,18 +1778,28 @@ async function handlePicklistsRead(ctx) {
 // object's fields; a bespoke display-name projection isn't worth a cache round-trip
 // here.)
 async function handleUsersRead(ctx) {
-  const { tenantId, cors, shadow } = ctx;
+  const { tenantId, cors, shadow, enforce } = ctx;
   const sfObject = OBJECT_ALLOWLIST.user.sfObject; // "Sundial_User__c"
+
+  // §3.5. `none` is 403; a sales scope gets the union, not the tenant.
+  if (enforce?.deny) {
+    return jsonResponse(403, cors, { error: "forbidden", code: enforce.code || DENY.MODULE_FORBIDDEN });
+  }
 
   // REQUIRED tenant filter: Client__c = '<esc tenantId>'. Active users only.
   // Supabase_User_Id__c is the field identity resolution maps a login to a
   // Sundial_User__c on (see lib/identity.js) — the caller needs it to @-mention
   // users against the Supabase-auth-id-keyed comment_mentions feed.
+  // ENFORCE: the §3.5 union AND-ed into the existing tenant + active clauses. For
+  // tenant scope userFilter returns the tenant clause alone, so this is a no-op there and
+  // the query is character-for-character what it was.
+  const accessClause = enforce ? ` AND (${enforce.soql})` : "";
   const soql =
     `SELECT Id, First_Name__c, Last_Name__c, Email__c, Supabase_User_Id__c FROM ${sfObject} ` +
     `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-    `AND Active__c = true ` +
-    `ORDER BY Last_Name__c, First_Name__c`;
+    `AND Active__c = true` +
+    accessClause +
+    ` ORDER BY Last_Name__c, First_Name__c`;
   const records = await sfQuery(soql);
 
   // Compact projection: id + display name + Supabase auth id. Name falls back to
@@ -1769,6 +1886,22 @@ export const handler = async (event) => {
     // The Supabase client is passed as a FACTORY, not a client: the picklist and
     // /sf/users routes below return before the handler builds one, and shadow must not
     // be the reason a metadata request opens a database connection.
+    // ACCESS MODEL ENFORCEMENT. `enforce` is null unless the mode is enforce, and every
+    // site above treats null as "changed nothing" -- which is what keeps off and shadow
+    // byte-identical to Phase 2.
+    const accessMode = resolveMode();
+    const enforcing = accessMode === MODES.ENFORCE;
+    const access = identity.access;
+    const enforce = enforcing
+      ? objectKey
+        ? resolveEnforceFilter(objectKey, access)
+        : userFilter(access) // the literal /sf/users route carries no {object}
+      : null;
+    // The meta routes take the module gate only, not a row filter -- picklist metadata
+    // has no rows. `undefined` (not false) when not enforcing, so the handlers can tell
+    // "denied" from "not asked".
+    const enforceMeta = enforcing && objectKey ? canReadObject(objectKey, access) : undefined;
+
     const shadow = createShadow({
       identity,
       objectKey,
@@ -1787,6 +1920,7 @@ export const handler = async (event) => {
         field: route.field,
         cors,
         shadow,
+        enforceMeta,
       });
     }
 
@@ -1799,13 +1933,14 @@ export const handler = async (event) => {
         objectKey,
         cors,
         shadow,
+        enforceMeta,
       });
     }
 
     // Tenant users lookup: /sf/users. Tenant-scoped (tenantId from the token,
     // already NO_TENANT-checked above). Needs no cache client / column set.
     if (route.kind === "users") {
-      return await handleUsersRead({ tenantId, cors, shadow });
+      return await handleUsersRead({ tenantId, cors, shadow, enforce });
     }
 
     const supabase = await getSupabaseClient();
@@ -1814,6 +1949,8 @@ export const handler = async (event) => {
     const shared = {
       supabase,
       shadow,
+      enforce,
+      access,
       // The short allowlist key, carried through so the shadow lines and lib/access agree
       // on what "object" means (both use the key, never the Salesforce object name).
       objectKey,

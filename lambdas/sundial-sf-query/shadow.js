@@ -69,11 +69,13 @@ import {
 //                     query, no log line. This is what ships first, and the access
 //                     matrix must be byte-identical under it.
 // shadow            — compute and log; serve the old answer unchanged.
-// enforce           — RECOGNIZED BUT NOT YET IMPLEMENTED (Phase 3). Warns and behaves as
-//                     shadow. It exists as a valid value NOW so that an early or
-//                     accidental env flip degrades to "measure" rather than crashing the
-//                     Lambda or — worse — silently meaning "off", quietly producing no
-//                     data for three days while everyone believes it is enforcing.
+// enforce           — LIVE as of Phase 3: rowFilter/userFilter decide what is SERVED,
+//                     and the comparison is still logged. The logging is not vestigial —
+//                     it is the post-launch watch, and under enforce it should show zero
+//                     disagreements, because the served answer and the computed answer are
+//                     now the same answer. A disagreement line after the cutover means the
+//                     enforcement and the model have drifted apart, which is the one thing
+//                     nobody would otherwise notice.
 export const MODES = Object.freeze({ OFF: "off", SHADOW: "shadow", ENFORCE: "enforce" });
 
 const warned = new Set();
@@ -94,14 +96,10 @@ export function resolveMode(env = process.env) {
   const raw = (env.ACCESS_MODEL_MODE ?? "").trim().toLowerCase();
   if (raw === "" || raw === MODES.OFF) return MODES.OFF;
   if (raw === MODES.SHADOW) return MODES.SHADOW;
-  if (raw === MODES.ENFORCE) {
-    warnOnce(
-      "enforce",
-      "ACCESS_MODEL_MODE=enforce is not implemented yet (Phase 3). Behaving as shadow: " +
-        "the new access decision is computed and logged, and the OLD answer is served."
-    );
-    return MODES.SHADOW;
-  }
+  // Reported VERBATIM. Folding it into shadow was right while enforce was unimplemented
+  // and is wrong now: index.js reads this value to decide whether to actually filter, and
+  // a mode that lies about itself would enforce nothing while the logs claimed otherwise.
+  if (raw === MODES.ENFORCE) return MODES.ENFORCE;
   warnOnce(
     `bad:${raw}`,
     `ACCESS_MODEL_MODE="${raw}" is not a recognized mode (off|shadow|enforce). ` +
@@ -247,10 +245,11 @@ export function createShadow(args) {
   } catch {
     return NOOP; // reading an env var cannot realistically throw; fail to off anyway.
   }
-  if (mode !== MODES.SHADOW) return NOOP;
+  // Both shadow and enforce log. Under enforce the line is the post-launch watch.
+  if (mode !== MODES.SHADOW && mode !== MODES.ENFORCE) return NOOP;
 
   try {
-    return makeRecorder(args);
+    return makeRecorder({ ...args, mode });
   } catch (e) {
     // A recorder that cannot be built must not take the request down with it.
     logShadowError("create", e);
@@ -258,7 +257,7 @@ export function createShadow(args) {
   }
 }
 
-function makeRecorder({ identity, objectKey, qs, repRestrict, supabase }) {
+function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = MODES.SHADOW }) {
   // Accepts a client OR a zero-arg factory. The meta and /sf/users routes run BEFORE the
   // handler creates a Supabase client, and shadow must not be the reason a picklist
   // request opens a database connection it would otherwise never need.
@@ -277,7 +276,7 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase }) {
 
   const base = {
     shadow: true,
-    mode: MODES.SHADOW,
+    mode,
     // The Sundial_User__c id, not an email — enough to join to the user list in the
     // summary, and not a personal identifier sprayed across CloudWatch.
     //
@@ -347,7 +346,7 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase }) {
   }
 
   const recorder = {
-    mode: MODES.SHADOW,
+    mode,
     enabled: true,
 
     /**

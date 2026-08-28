@@ -1,5 +1,182 @@
 # Sundial — Progress Log
 
+## 2026-08-28 — Access model Phase 2: shadow mode, built and not yet deployed
+
+D-064 (`docs/access-model.md` §7 step 1, §8 Phase 2), on `feature/access-model-p2`.
+`sundial-sf-query` now computes the NEW access decision on every read and logs the
+comparison, while the TEMP guard keeps serving every response byte-for-byte unchanged.
+**Nothing is deployed and nothing any user sees changes** — that is the contract of the
+phase, and it is asserted in tests rather than promised in prose.
+
+### What shipped
+
+| | |
+|---|---|
+| `lambdas/sundial-sf-query/shadow.js` | the recorder — modes, the decision per path, one JSON line per request |
+| `lambdas/sundial-sf-query/index.js` | 13 instrumented read paths, one `await shadow.x()` each |
+| `lib/access.js` | `userFilter()` + `TENANT_ACCESS_LEVELS` — §3.5's union, which `rowFilter` refuses by design |
+| `scripts/access-shadow-summary.mjs` | CloudWatch Insights aggregation, per user × object × path |
+| `scripts/verify-access-matrix.mjs` | two surfaces added: `GET /sf/users`, `GET /sf/meta/customer/picklists` |
+| tests | 31 new in `shadow.test.js`, 8 new in `access.test.js`; suite **652 → 683** green |
+
+### The mode is off by default, and "off" means the old code path
+
+`ACCESS_MODEL_MODE` unset resolves to `off`, and `createShadow()` then returns a frozen
+no-op whose methods do nothing. No computation, no query, no log line, and every call
+site in `index.js` is inert. That is what gets deployed first, and it is what the access
+matrix is run against — the deploy and the behaviour change are two separate events with a
+verification between them.
+
+`enforce` is **recognized but not implemented**: it warns and behaves as `shadow`. Phase 3
+gives it meaning. It exists as a valid value now so that an early or fat-fingered env flip
+degrades to "measure" rather than crashing the Lambda or, worse, silently meaning `off` —
+which would quietly produce no data for three days while everyone believed it was
+enforcing. An **unrecognized** value warns loudly and falls back to `off`.
+
+### Shadow cannot break a request, and that is tested rather than asserted
+
+Every method on the recorder is try/caught in its entirety. A test mocks `lib/access.js`
+into a landmine that throws on every call and asserts the request still returns 200 with
+the same rows and the same `source`; another breaks only the shadow's own count query and
+asserts the same. A shadow that can 500 a request has turned a measurement into an outage
+and would be switched off before it produced the data the §8 gate needs.
+
+### Most traffic pays nothing, and the exception is the point
+
+For `tenant` scope, `rowFilter` returns the tenant clause **and nothing else** — precisely
+the predicate the request already ran. The new answer is therefore identical by
+construction and no second query is issued at all. Almost all live Harmon traffic is
+tenant scope, so almost all of it adds zero latency.
+
+The shortcut requires tenant scope **AND** no TEMP guard on the request, and the second
+half is not caution — it is the finding. A tenant-scope user carrying
+`Hierarchy_Level__c = "Sales Rep"` (the Phase 0 user-admin default bug) is served Dennis's
+name-matched set today and would get the whole tenant under the new model. That is a
+WIDENING, it is exactly what §7 says to watch for, and taking the shortcut there would
+have logged it as "identical" and hidden the single most important line in the phase.
+There is a test named after it.
+
+### The 404 branch is where a widening hides
+
+Single reads and `?full=true` compare outcomes from the record already in hand — the cache
+row carries `sales_rep_sf_id` since Phase 1, and `buildCacheSelect`/full mode both select
+`Sales_Rep__c` — so the served case costs nothing. The **404** case has nothing in hand,
+and it is the one that matters: the TEMP guard filters on a hardcoded *name*, so a rep who
+is not Dennis is served Dennis's records and 404s on their own. Old 404 / new served is a
+widening on a served path and there is no other way to see it. One indexed cache probe
+answers it. No second Salesforce fetch anywhere, on any path.
+
+### Two findings that contradicted the design, both resolved before writing code
+
+**`userFilter()` did not exist, and `rowFilter` refuses `user` on purpose.** §3.5 is a
+UNION — my dealer's people ∪ Harmon staff — and a single column equality cannot express it,
+so `rowFilter` returns `MODULE_FORBIDDEN` for `user` rather than a filter that is wrong in
+a way the caller cannot see. Shadowing that as-is would have logged every sales-role hit on
+`/sf/users` and `/sf/user` as a denial, and the three-day gate would have been measuring a
+blackout that is not the design. So `userFilter()` is added in this phase: pure,
+unit-tested, additive, enforcing nothing. `TENANT_ACCESS_LEVELS` is **derived** from
+`SCOPE_BY_ACCESS_LEVEL` rather than written out again, so a level added to the scope table
+cannot drift out of the union.
+
+Its PostgREST or-expression **refuses** rather than escapes: values outside
+`[A-Za-z0-9 _-]` deny, because Salesforce ids are alphanumeric and the access levels are
+our own constants, so a value that fails that test is not one we recognize.
+
+**The picklist FIELD filter cannot be built until Phase 4.** §4.4 scopes picklist metadata
+to the role's `read ∪ edit` set, which comes from the field manifest: the workbooks have
+not moved into sundial-core, they carry no role columns, and `fieldsFor()` does not exist.
+Phase 2 shadows §3.1's module gate on those two routes and stamps every line
+`fieldFilter: "deferred_phase4"`. Logging "served" and saying nothing would have read as
+"Phase 3 changes nothing here", which is false — a sales role loses fields from those
+responses in Phase 4.
+
+### Counts per request, id sets offline — §7 step 1 amended
+
+§7.1 as written specified `onlyInOld: [...ids], onlyInNew: [...ids]` in the per-request
+line. On Dennis's customer list that is 3,534 record ids into CloudWatch on every page
+load: expensive, and a record-id dump in a log with no business holding one. The
+per-request line carries counts and outcome flags; the id-set diff stays in
+`access-shadow-report.mjs`, offline. The doc is amended in place rather than left
+disagreeing with the build.
+
+**The two scripts are not redundant and both run before Phase 3.** The report is
+hypothetical and complete: every user, both id sets, whether or not they have ever opened
+the portal. The summary is real and partial: actual users, actual paths, actual query
+strings. The report can prove Dennis's sets match and still never model the `?parentId=`
+related-list path; the summary sees that path and cannot see the id sets. And **equal
+counts are not an equal set** — two disjoint sets of 3,534 rows compare equal in the
+summary, which is the exact mistake §7's gate calls out.
+
+### Two read paths the matrix could not see
+
+`verify-access-matrix.mjs` covered `/sf/user` (the object list) but never `GET /sf/users`
+(the literal route, a different code path with its own SOQL) or either picklist meta route.
+Shadow instruments all three, so "behaviour is identical before and after the deploy" could
+not have been checked on them. Both are added as surfaces. Test-script only; no production
+behaviour changes.
+
+### What the log line does not contain
+
+No token, no secret, no email address, no record id, and **never the `?q=` search term** —
+that is whatever somebody typed into a search box: names, addresses, phone fragments. Its
+LENGTH is logged, which is enough to correlate a line with a search and carries none of it.
+Same rule for `?field=`/`?value=`: the field name is a canonical Salesforce API name from
+the describe and is safe; the value is caller data and is not. The caller's
+`Sundial_User__c` id **is** logged — it is the join key the summary needs, and it is an
+internal record id rather than a personal identifier.
+
+### Deployed 2026-08-28, and the first run found a defect in the log line
+
+Sequence, as agreed, with a verification between every step:
+
+| Step | Result |
+|---|---|
+| Read the live env map | `null` — no variables at all, so "unset" was already the state |
+| Matrix, PRE-deploy (old code) | baseline captured, 150 comparison points |
+| Deploy code, env still unset | matrix **IDENTICAL** to baseline; **zero shadow lines** over 150 requests |
+| `ACCESS_MODEL_MODE=shadow` (read-merge-write, re-read) | map is exactly `{ACCESS_MODEL_MODE: shadow}`, nothing dropped |
+| Matrix under shadow | **IDENTICAL** to both the baseline and the mode-off run |
+| First summary | pipeline green end to end — and one real defect, below |
+
+Measured added latency: **p50 0 ms**, p95 74 ms, max 1,136 ms (a cold start). The p50 is
+zero because tenant scope issues no second query at all, which is the design working.
+
+**The defect: every `none`-scope caller logged `user: null`.** `accessBlock()` deliberately
+nulls `userId` and `dealerId` for scope `none` — correct for the block the CLIENT
+reflects, since such a user has no scope-relevant ids to render. Taking the log's join key
+from there collapsed **three different people** — two unattributed Sales Reps and a
+Technician — into a single `(unknown)` row carrying whichever level landed first.
+
+That is not cosmetic. §8's gate requires Technician and unknown-level users be "identified
+and re-levelled" before Phase 3, and **a bucket cannot be re-levelled**. The fix takes
+`user` from `identity.user.id` and falls back to the raw dealer id, so each of the three
+ways to reach `none` is now self-diagnosing from the line alone: the level is the reason
+(Technician), no dealer at all (unattributed), or a dealer that is switched off. The
+summary prints that reason beside each user. Three new tests pin it — including one that
+asserts the three produce three distinguishable signatures.
+
+Worth naming how it was found: **the unit tests all passed, and they passed because they
+asserted the field was populated for scoped users**, which it was. Only a real run with a
+`none`-scope fixture in it showed the collapse. That is the argument for the shadow phase
+in miniature.
+
+Also fixed: two stray NUL bytes in `access-shadow-summary.mjs`'s group-key template. Node
+parses them (a NUL is a legal string character) but they made the file binary to `grep`
+and `diff` — a landmine for the next edit. Replaced with an explicit `join("|")`.
+
+### The two paths with no traffic, and why that is fine
+
+`list.live.parent_uncached` and `search.live.parent_uncached` show zero. They only fire
+when a cache table is missing the `?parentId=` column — a transient schema state that does
+not exist today. They may well show zero for the whole window; that is the schema being
+correct, not a coverage gap. Every other path was exercised.
+
+### Not done, deliberately
+
+Nothing is enforced. `repRestrictFor`, its four guarded call sites and every response body
+are untouched — the diff shows added `await shadow.x()` calls and nothing else on any
+serving line. Phase 3 is what makes the new decision matter.
+
 ## 2026-08-27 — Access model Phase 1b: the comments/mentions RLS is live
 
 D-064 amendment A5, on `feature/access-model-p1b`. **This is the first thing in the

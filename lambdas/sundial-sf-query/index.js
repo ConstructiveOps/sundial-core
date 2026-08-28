@@ -31,6 +31,11 @@ import {
 } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
 import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
+// ACCESS MODEL SHADOW (D-064 Phase 2). Off by default: with ACCESS_MODEL_MODE unset,
+// createShadow() returns a no-op whose methods do nothing, so every call site below is
+// inert and this file behaves exactly as it did before Phase 2. See shadow.js for why it
+// can never change a response and never throw.
+import { createShadow } from "./shadow.js";
 
 // --- Object allowlist (the security spine) ---------------------------------
 // The {object} path param is one of these short keys. Anything else => 400.
@@ -778,6 +783,15 @@ async function handleSingleReadFull(ctx) {
 
   // Missing or cross-tenant -> 404.
   if (!records || records.length === 0) {
+    // SHADOW: nothing in hand to evaluate, so this is the one branch that probes the
+    // cache — a record the TEMP guard hides but the new model would serve is a widening,
+    // and 404-vs-404 is the only place it could hide.
+    await ctx.shadow.single({
+      path: "single.full",
+      served: false,
+      id,
+      cacheTable: ctx.cacheTable,
+    });
     return jsonResponse(404, cors, {
       error: "not_found",
       code: "RECORD_NOT_FOUND",
@@ -789,6 +803,10 @@ async function handleSingleReadFull(ctx) {
   // to the authenticated, tenant-matched caller. Strip the Salesforce `attributes`
   // envelope (object type + internal record URL) so `record` is pure field data.
   const { attributes, ...record } = records[0];
+  // SHADOW: full mode selects EVERY queryable field, so Sales_Rep__c / Dealer__c /
+  // Client__c are already on the record — the new decision is an in-memory check with no
+  // second fetch of any kind.
+  await ctx.shadow.single({ path: "single.full", served: true, record });
   return jsonResponse(200, cors, {
     source: "salesforce",
     full: true,
@@ -798,7 +816,7 @@ async function handleSingleReadFull(ctx) {
 
 // --- SINGLE-RECORD read ----------------------------------------------------
 async function handleSingleRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, repRestrict, cors, full } =
+  const { supabase, sfObject, cacheTable, columnSet, id, tenantId, tenantSlug, createdDateSources, repRestrict, cors, full, shadow } =
     ctx;
 
   // ?full=true -> all-fields, cache-bypassing detail read (see handleSingleReadFull).
@@ -821,6 +839,10 @@ async function handleSingleRead(ctx) {
       .maybeSingle();
     if (cacheErr) console.error("cache read error (single):", cacheErr.message);
     if (cached && isRowFresh(cached, Date.now())) {
+      // SHADOW: the cache row already carries sales_rep_sf_id / dealer_sf_id (Phase 1),
+      // which is exactly what the TEMP guard could not do and why it skipped this
+      // shortcut. Evaluating the row in hand costs nothing.
+      await shadow.single({ path: "single.cache", served: true, row: cached });
       return jsonResponse(200, cors, { source: "cache", record: cached });
     }
   }
@@ -843,6 +865,8 @@ async function handleSingleRead(ctx) {
 
   // c. Missing or cross-tenant -> 404.
   if (!records || records.length === 0) {
+    // SHADOW: see the same branch in handleSingleReadFull — one cache probe, only here.
+    await shadow.single({ path: "single.soql", served: false, id, cacheTable });
     return jsonResponse(404, cors, {
       error: "not_found",
       code: "RECORD_NOT_FOUND",
@@ -851,6 +875,10 @@ async function handleSingleRead(ctx) {
 
   // d. Upsert into cache (bump version), then return. Cache failure != read failure.
   const sfRecord = records[0];
+  // SHADOW: buildCacheSelect selects every field with a cache column, and Sales_Rep__c /
+  // Dealer__c both have one since Phase 1 — so the filter fields are on this record and
+  // no extra query is needed.
+  await shadow.single({ path: "single.soql", served: true, record: sfRecord });
   const existingVersion = await getExistingCacheVersion(
     supabase,
     cacheTable,
@@ -881,9 +909,19 @@ async function handleSingleRead(ctx) {
 // count:"exact" returns the full match total even though only SEARCH_CAP rows come
 // back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
 // double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
-async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId }) {
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId, shadow, objectKey }) {
   const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
   if (cols.length === 0) {
+    // No searchable columns: the served answer is an empty set for everyone, so the new
+    // model cannot differ. Logged anyway — a path that emits nothing is indistinguishable
+    // from a path nobody exercised, and the §8 gate counts requests per path.
+    await shadow.list({
+      path: "search.cache",
+      cacheTable,
+      oldCount: 0,
+      oldTotal: 0,
+      filters: parentId && parentColumn ? [{ column: parentColumn, value: parentId }] : [],
+    });
     return jsonResponse(200, cors, {
       source: "cache", count: 0, total: 0, limit: SEARCH_CAP, offset: 0, hasMore: false, records: [],
     });
@@ -919,6 +957,17 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
   // shape stays identical to the list path so callers see one row shape.
   const records = (data || []).map(projectListRow);
   const total = count ?? records.length;
+  // SHADOW: the same ILIKE or-group and the same parent filter are applied to the new
+  // count, so what is compared is "this search under the old scope" vs "this search under
+  // the new scope" — not "this search" vs "the whole object".
+  await shadow.list({
+    path: "search.cache",
+    cacheTable,
+    oldCount: records.length,
+    oldTotal: total,
+    or: orExpr,
+    filters: parentId && parentColumn ? [{ column: parentColumn, value: parentId }] : [],
+  });
   return jsonResponse(200, cors, {
     source: "cache",
     count: records.length,
@@ -938,7 +987,7 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, parentFilter, qs, cors } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, repRestrict, searchFields, parentFilter, qs, cors, shadow, objectKey } =
     ctx;
 
   // Related-list parent filter (?parentId=). Validated before anything else so a
@@ -1025,6 +1074,11 @@ async function handleListRead(ctx) {
       parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
+      // SHADOW: the TEMP guard's own path — the old answer here is Dennis's name-matched
+      // set, whoever is calling.
+      shadow, objectKey,
+      shadowPath: searchTerm ? "search.live.rep" : "list.live.rep",
+      shadowFilters: parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
   }
 
@@ -1049,6 +1103,14 @@ async function handleListRead(ctx) {
       parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
+      shadow, objectKey,
+      shadowPath: searchTerm ? "search.live.parent_uncached" : "list.live.parent_uncached",
+      // The parent COLUMN is missing from this cache table, which is why we are on the
+      // live path at all — so the shadow count cannot apply it either. Without a way to
+      // narrow to the parent, the new count would be the role's WHOLE object and would
+      // read as a wild widening. Flag it as uncomparable instead of reporting a number
+      // that means something else.
+      shadowFilters: null,
     });
   }
 
@@ -1063,6 +1125,7 @@ async function handleListRead(ctx) {
       searchCacheCols: searchFields.cache, term: searchTerm, cors,
       parentColumn: parentId ? parentFilter.cacheColumn : null,
       parentId,
+      shadow, objectKey,
     });
   }
 
@@ -1140,6 +1203,9 @@ async function handleListRead(ctx) {
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
+      shadow, objectKey,
+      shadowPath: "list.live.cold",
+      shadowFilters: parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
   }
 
@@ -1223,6 +1289,21 @@ async function handleListRead(ctx) {
 
   const adjustedTotal = Math.max(0, (total ?? records.length) - deletedIds.length);
   const source = staleRows.length === 0 ? "cache" : "cache+salesforce";
+  // SHADOW: the main path, and the cheap one — for tenant scope the new filter IS this
+  // query's filter, so no second query is issued at all (see shadow.js). Every caller
+  // filter this query applied is handed over so the comparison is like-for-like.
+  await shadow.list({
+    path: "list.cache",
+    cacheTable,
+    oldCount: records.length,
+    oldTotal: adjustedTotal,
+    filters: [
+      ...(parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : []),
+      ...(filterColumn && columnSet.has(filterColumn)
+        ? [{ column: filterColumn, value: filterValue }]
+        : []),
+    ],
+  });
   return jsonResponse(200, cors, {
     source,
     count: records.length, // rows in THIS page (backward compatible)
@@ -1244,6 +1325,7 @@ async function listColdCacheFallback(ctx) {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, limit, offset, repRestrict,
     parentSfField, parentId, searchTerm, searchSfFields,
+    shadow, objectKey, shadowPath, shadowFilters,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
@@ -1312,6 +1394,24 @@ async function listColdCacheFallback(ctx) {
     }
   }
 
+  // SHADOW: every live-Salesforce list path lands here — the TEMP rep restrict, the
+  // cold cache, and the missing-parent-column fallback — so this is the one emission
+  // point for all three. `liveOld` marks that the old total is a SOQL COUNT while the
+  // new one is a cache count, which is a real source of small differences and must not
+  // be read as a widening.
+  //
+  // shadowFilters === null means the served query applied a narrowing the cache count
+  // cannot reproduce; skip rather than log a number that answers a different question.
+  if (shadow && shadowFilters !== null) {
+    await shadow.list({
+      path: shadowPath || "list.live.cold",
+      liveOld: true,
+      cacheTable,
+      oldCount: mappedRows.length,
+      oldTotal: total,
+      filters: shadowFilters || [],
+    });
+  }
   return jsonResponse(200, cors, {
     source: "salesforce",
     count: mappedRows.length,
@@ -1362,7 +1462,7 @@ function decodeValidForIndices(validFor) {
 // is no Client__c / tenant filter here — that absence is intentional, not an
 // oversight. A valid token is still required (enforced by the caller).
 async function handlePicklistRead(ctx) {
-  const { sfObject, objectKey, field, cors } = ctx;
+  const { sfObject, objectKey, field, cors, shadow } = ctx;
 
   const meta = await getRawDescribe(sfObject);
 
@@ -1450,6 +1550,10 @@ async function handlePicklistRead(ctx) {
     }
   }
 
+  // SHADOW: the MODULE gate only (§3.1's meta row). §4.4's field-level narrowing needs
+  // the Phase 4 field manifest, which does not exist yet — the line says so rather than
+  // implying this route is settled.
+  await shadow.meta({ path: "meta.picklist" });
   return jsonResponse(200, cors, body);
 }
 
@@ -1527,7 +1631,7 @@ function buildPicklistEntry(fieldDef, meta) {
 // no Client__c / tenant filter here — that absence is intentional, not an
 // oversight. A valid token is still required (enforced by the caller).
 async function handlePicklistsRead(ctx) {
-  const { sfObject, objectKey, cors } = ctx;
+  const { sfObject, objectKey, cors, shadow } = ctx;
 
   // One describe fetch for the whole object (cached across warm invocations).
   const meta = await getRawDescribe(sfObject);
@@ -1543,6 +1647,8 @@ async function handlePicklistsRead(ctx) {
     picklists[fieldDef.name] = buildPicklistEntry(fieldDef, meta);
   }
 
+  // SHADOW: module gate only — see handlePicklistRead.
+  await shadow.meta({ path: "meta.picklists" });
   return jsonResponse(200, cors, {
     object: objectKey, // the short allowlist key the caller used (e.g. "solar")
     picklists,
@@ -1565,7 +1671,7 @@ async function handlePicklistsRead(ctx) {
 // object's fields; a bespoke display-name projection isn't worth a cache round-trip
 // here.)
 async function handleUsersRead(ctx) {
-  const { tenantId, cors } = ctx;
+  const { tenantId, cors, shadow } = ctx;
   const sfObject = OBJECT_ALLOWLIST.user.sfObject; // "Sundial_User__c"
 
   // REQUIRED tenant filter: Client__c = '<esc tenantId>'. Active users only.
@@ -1591,6 +1697,11 @@ async function handleUsersRead(ctx) {
     return { id: r.Id, name, supabaseUserId: r.Supabase_User_Id__c ?? null };
   });
 
+  // SHADOW: the §3.5 union. The served SOQL is left EXACTLY as it was — the new count
+  // comes from sundial_user_cache (which carries dealer_sf_id and access_level since
+  // Phase 1) rather than from widening this query, so not one byte of the Salesforce
+  // request changes.
+  await shadow.users({ oldCount: users.length });
   return jsonResponse(200, cors, { users });
 }
 
@@ -1650,6 +1761,22 @@ export const handler = async (event) => {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
     }
 
+    // ACCESS MODEL SHADOW (D-064 Phase 2). Built once per request, AFTER identity is
+    // resolved (it needs the AccessContext) and BEFORE the routes run. With
+    // ACCESS_MODEL_MODE unset this is a frozen no-op object: no computation, no query,
+    // no log line, and every call site below is inert.
+    //
+    // The Supabase client is passed as a FACTORY, not a client: the picklist and
+    // /sf/users routes below return before the handler builds one, and shadow must not
+    // be the reason a metadata request opens a database connection.
+    const shadow = createShadow({
+      identity,
+      objectKey,
+      qs: event.queryStringParameters || {},
+      repRestrict: objectKey ? repRestrictFor(objectKey, identity) : null,
+      supabase: getSupabaseClient,
+    });
+
     // META picklist route: org-wide metadata, NOT tenant-scoped (see
     // handlePicklistRead). Handled before Supabase/cache setup since it needs
     // neither the cache client nor the cache column set.
@@ -1659,6 +1786,7 @@ export const handler = async (event) => {
         objectKey,
         field: route.field,
         cors,
+        shadow,
       });
     }
 
@@ -1670,13 +1798,14 @@ export const handler = async (event) => {
         sfObject: entry.sfObject,
         objectKey,
         cors,
+        shadow,
       });
     }
 
     // Tenant users lookup: /sf/users. Tenant-scoped (tenantId from the token,
     // already NO_TENANT-checked above). Needs no cache client / column set.
     if (route.kind === "users") {
-      return await handleUsersRead({ tenantId, cors });
+      return await handleUsersRead({ tenantId, cors, shadow });
     }
 
     const supabase = await getSupabaseClient();
@@ -1684,6 +1813,10 @@ export const handler = async (event) => {
 
     const shared = {
       supabase,
+      shadow,
+      // The short allowlist key, carried through so the shadow lines and lib/access agree
+      // on what "object" means (both use the key, never the Salesforce object name).
+      objectKey,
       sfObject: entry.sfObject,
       cacheTable: entry.cacheTable,
       columnSet,

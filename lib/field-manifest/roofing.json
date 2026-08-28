@@ -1,0 +1,34 @@
+{
+  "version": "sha256:492c928e832dcfb6acbaf2a219c145f0",
+  "object": "Sundial_Roofing__c",
+  "roles": {
+    "Sales Rep": {
+      "read": [],
+      "edit": []
+    },
+    "Sales Dealer": {
+      "read": [],
+      "edit": []
+    }
+  },
+  "listColumns": {
+    "Sales Rep": [
+      "cache_version",
+      "client_sf_id",
+      "created_date",
+      "is_stale",
+      "last_synced_at",
+      "sf_id",
+      "tenant_id"
+    ],
+    "Sales Dealer": [
+      "cache_version",
+      "client_sf_id",
+      "created_date",
+      "is_stale",
+      "last_synced_at",
+      "sf_id",
+      "tenant_id"
+    ]
+  }
+}

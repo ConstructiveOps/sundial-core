@@ -25,6 +25,9 @@ import { mock } from "node:test";
 
 // The real module, captured BEFORE the mock is installed, so the mock can delegate to it.
 import * as realAccess from "../../lib/access.js";
+// The REAL generated manifest — Phase 4 assertions read from it rather than a fixture,
+// so they fail if the workbook stops saying what they assume.
+import customerManifest from "../../lib/field-manifest/customer.json" with { type: "json" };
 
 const TENANT = "a1W7y000007AszBEAS";
 const REP_A = "a1O7y00000REPAAAAA";
@@ -1092,6 +1095,168 @@ test("a scoped user's dealer is the RESOLVED one, not the raw fallback", async (
   assert.equal(line.scope, "dealer");
   assert.equal(line.dealer, DEALER);
   assert.equal(line.dealerActive, true);
+});
+
+
+// ---------------------------------------------------------------------------
+// 6. Phase 4 — the field manifest (§4.3, §4.4)
+// ---------------------------------------------------------------------------
+// These run against the REAL generated manifest, not a fixture, so they fail if the
+// workbook stops saying what the assertions assume. That is the intent: the sheet is the
+// source of truth and a test that mocked it would be testing itself.
+
+test("?full=true: a hidden field is ABSENT from the response for a rep", async () => {
+  // Commission and burden fields are `hidden` for Sales Rep in the customer workbook.
+  // "Absent", not "null": a null would tell the rep the field exists and is empty.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{
+    Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A,
+    First_Name__c: "Zed", Commission_Total__c: 3834.5, Burden_Rate__c: 0.21,
+  }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(!("Commission_Total__c" in body.record), "commission must not be present");
+  assert.ok(!("Burden_Rate__c" in body.record), "burden rate must not be present");
+  assert.equal(body.record.First_Name__c, "Zed", "a readable field still comes through");
+});
+
+test("?full=true: the hidden fields are NEVER FETCHED, not fetched-then-stripped", async () => {
+  // §4.3 is explicit about this and it is the stronger property: data a role may not see
+  // should not leave Salesforce at all. A strip-after-fetch would hold the values in
+  // Lambda memory and in any log line that dumped the record.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  await handler(singleEvent("customer", CUST_1, { full: "true" }));
+
+  const soql = ctx.soqlSeen.find((q) => /FROM Sundial_Customer__c/.test(q));
+  assert.ok(soql, "expected the full-mode query");
+  assert.doesNotMatch(soql, /Commission_Total__c/, "hidden field must not be SELECTed");
+  assert.doesNotMatch(soql, /Burden_Rate__c/, "nor this one");
+  assert.match(soql, /First_Name__c/, "readable fields are still selected");
+});
+
+test("?full=true: access.editable matches the manifest, and excludes protected fields", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.ok(Array.isArray(body.access.editable), "the client needs a list to reflect");
+  assert.deepEqual(
+    body.access.editable,
+    [...customerManifest.roles["Sales Rep"].edit].sort(),
+    "editable is the manifest's edit set, verbatim"
+  );
+  for (const protectedField of ["Sales_Rep__c", "Dealer__c", "Client__c", "Stage__c"]) {
+    assert.ok(
+      !body.access.editable.includes(protectedField),
+      `${protectedField} must never be editable by a sales role`
+    );
+  }
+  assert.match(body.access.manifestVersion, /^customer:[0-9a-f]{8}/);
+});
+
+test("?full=true: TENANT scope is unprojected and unchanged", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.sfRows = [{
+    Id: CUST_1, Client__c: TENANT, First_Name__c: "Zed", Commission_Total__c: 3834.5,
+  }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.record.Commission_Total__c, 3834.5, "staff still see commissions");
+  assert.equal(body.access.editable, null, "null means: apply your existing describe rules");
+});
+
+test("list rows are projected too — the hidden columns do not ride along", async () => {
+  // The detail view is not the only way a field reaches the browser. A list row carries
+  // the same columns, and projecting only the detail read would have left every hidden
+  // number sitting in the list payload.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [
+    customerRow(CUST_1, REP_A, { commission_total: 3834.5, burden_rate: 0.21, stage: "Sold" }),
+  ];
+
+  const res = await handler(listEvent("customer"));
+  const [row] = JSON.parse(res.body).records;
+
+  assert.ok(!("commission_total" in row), "hidden column must not reach a list row");
+  assert.ok(!("burden_rate" in row), "nor this one");
+  assert.equal(row.sf_id, CUST_1, "control columns survive — a row needs to be a row");
+  assert.equal(row.client_sf_id, TENANT);
+});
+
+test("search rows are projected on the same rule as list rows", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { name: "ZZ Alpha", commission_total: 99 })];
+
+  const res = await handler(listEvent("customer", { q: "ZZ" }));
+  const [row] = JSON.parse(res.body).records;
+  assert.ok(row, "the row is still served");
+  assert.ok(!("commission_total" in row), "and still projected");
+});
+
+test("§4.4: picklist metadata is filtered to the role's fields", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const res = await handler(
+    event("/sf/meta/customer/picklists", { object: "customer" })
+  );
+  const body = JSON.parse(res.body);
+  assert.equal(res.statusCode, 200);
+  const rep = new Set(customerManifest.roles["Sales Rep"].read);
+  for (const name of Object.keys(body.picklists)) {
+    assert.ok(rep.has(name), `${name} is not readable by this role and must not appear`);
+  }
+});
+
+test("§4.4: a single picklist for a hidden field 404s — not 403", async () => {
+  // Same reasoning as a record: a 403 confirms the field exists, which turns the
+  // describe into an enumeration oracle. It must be indistinguishable from a typo.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const res = await handler(
+    event("/sf/meta/customer/picklist/Hidden_Picklist__c", {
+      object: "customer",
+      field: "Hidden_Picklist__c",
+    })
+  );
+  assert.equal(res.statusCode, 404);
+  assert.equal(JSON.parse(res.body).code, "FIELD_NOT_FOUND");
+});
+
+test("THE PHASE 4 SWITCH: with the mode OFF, nothing is projected", async () => {
+  // The same property Phases 2 and 3 shipped under, and the one that makes the env var a
+  // real rollback: field projection is bound to enforce, not to the deploy.
+  delete process.env.ACCESS_MODEL_MODE;
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { commission_total: 3834.5 })];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Commission_Total__c: 3834.5 }];
+
+  const list = await handler(listEvent("customer"));
+  assert.equal(
+    JSON.parse(list.body).records[0].commission_total,
+    3834.5,
+    "mode off must not project"
+  );
+
+  const full = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  assert.equal(JSON.parse(full.body).record.Commission_Total__c, 3834.5);
+  assert.equal(JSON.parse(full.body).access.editable, null);
 });
 
 // Restore the console for any downstream reporter.

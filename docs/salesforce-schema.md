@@ -604,3 +604,94 @@ These are still pending:
   field is derived and unread; `Access_Level__c` is what a new tenant configures. The live
   picklist is Client, Dealer, Manager, Sales Rep, Sales Manager, Technician.
 - **Aurora Solar data references.** Out of Phase 1 scope; revisit when Aurora integration is in scope.
+
+---
+
+## Access model objects and fields (D-064, live 2026-08-28)
+
+### `Sundial_Dealer__c` (custom object)
+
+The organization a sales user sells for, and the anchor for `dealer` scope. One record
+per dealer per tenant; 57 exist for Harmon, 5 active.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `Name` | Text | Dealer name, shown in the user form's Dealer dropdown |
+| `Active__c` | Checkbox | **The off switch.** A sales user whose dealer is inactive resolves to scope `none` — they authenticate and see nothing (§2.1). Deactivating a dealer is how their people's access is turned off, so it must apply to EXISTING users, not only new ones |
+| `Is_Internal__c` | Checkbox | Marks Harmon's own dealer. Carried on the AccessContext and **grants nothing** — an internal rep is still `own` scope |
+| `Client__c` | Lookup(`Sundial_Tenant__c`) | Tenant isolation, as on every object |
+
+### `Dealer__c` — the lookup, on five objects
+
+`Lookup(Sundial_Dealer__c)` on `Sundial_User__c`, `Sundial_Customer__c`,
+`Sundial_Solar__c`, `Sundial_Roofing__c` and `Sundial_Commercial__c`.
+
+**On a USER** it is the attribution: which dealer this person sells for. Required for
+`Sales Rep` and `Sales Dealer` (`sundial-user-admin` refuses the create/PATCH without
+it); null and unread on tenant-wide roles.
+
+**On a RECORD** it is the sharing key that `dealer` scope filters on, and it is
+**always derived from the rep, never set independently** (Amendment A1):
+
+- **Create** stamps it from the creating rep's own dealer (§2.3 invariant 1).
+- **Reassignment** re-derives it from the NEW rep in the same PATCH (§2.3 invariant 2).
+  Stamping only on create would leave a reassigned deal pointing at the old rep's
+  dealer — visible to a dealer that no longer sells it, invisible to the one that does,
+  and nothing about the record would look wrong.
+- A body that names `Dealer__c` on a create is **refused**; on a reassignment the
+  derived value **wins** and the override is logged.
+
+### `Access_Level__c` — the ONLY input to scope
+
+Picklist on `Sundial_User__c`. Maps to a row-visibility scope in `lib/access.js`, and
+nothing else feeds that decision:
+
+| Value | Scope | Sees |
+|---|---|---|
+| `Executive`, `Admin`, `Manager` | `tenant` | every record in the tenant |
+| `Sales Dealer` | `dealer` | records whose `Dealer__c` = their dealer |
+| `Sales Rep` | `own` | records whose `Sales_Rep__c` = them |
+| `Technician` | `none` | nothing (defined in Phase II) |
+| null / unmapped | `none` | nothing — **fail closed** |
+
+`Manager` here is an OFFICE manager (Harmon staff). A dealer's sales manager is
+`Sales Dealer`. That distinction is the difference between seeing the whole tenant and
+seeing one dealer's book.
+
+### `Super_Admin__c`
+
+Checkbox on `Sundial_User__c`. Gates Manage Users **only** and implies nothing about
+scope. **Salesforce-set only** — no endpoint writes it (D-043). The combination
+"super admin + sales access level" is refused on both doors of `sundial-user-admin`: it
+would be a record-scoped account that can provision its way out of its own scope.
+
+### `Hierarchy_Level__c` — DEPRECATED (kept, derived, unread)
+
+Was the input to the TEMP Sales-Rep guard, which is **deleted** (§7.4, 2026-08-28).
+Nothing on any read or write path consults it now.
+
+It is still WRITTEN, derived server-side from `Access_Level__c` by
+`sundial-user-admin` (`Sales Rep` → `Sales Rep`, `Sales Dealer` → `Sales Manager`,
+everything else → `Client`), so the field stays internally consistent for reports and
+for anyone reading it in Salesforce. It is never accepted from a request.
+
+⚠️ **Do not reintroduce it as an authorization input.** Its failure mode is on record:
+the guard keyed on the literal string `"Sales Rep"`, so a user mis-stamped by an old
+`user-admin` default was served a different rep's entire book, and any value the guard
+did not recognise got no restriction at all.
+
+### `Roles__c` — UNUSED
+
+Zero code references in either repo. Not read, not written, not part of the access
+model. Left in place; a schema deletion is its own decision.
+
+### `Sales_Rep__c` vs the legacy name fields
+
+`Sales_Rep__c` (Lookup to `Sundial_User__c`) is the authoritative rep on
+`Sundial_Customer__c` and `Sundial_Solar__c`, and the only one `own` scope filters on.
+
+The legacy TEXT fields — `Sunbase_Sales_Rep__c` (Customer) and
+`Sales_Representative__c` (Solar) — are migration artefacts. The TEMP guard filtered on
+them by NAME; nothing does now. Phase 0 measured the id match and the name match as
+returning identical sets for the one live restricted rep (3,534 Customer / 777 Solar,
+zero difference either way), which is why no backfill was needed.

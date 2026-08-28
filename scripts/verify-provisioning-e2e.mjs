@@ -76,9 +76,11 @@ const ZZ_ADMIN_EMAIL = 'tim+zz-admin@constructiveoperations.com';
 // What THIS proves is different and cannot be unit-tested -- that the value survives
 // the round trip through the real endpoint into a real Salesforce record, against a
 // RESTRICTED picklist that would reject an invalid one.
+// D-064: the two SALES cases need a dealer, because a sales role without one is now
+// refused outright -- it would create an account that signs in and sees nothing.
 const DERIVATION_CASES = [
-  { accessLevel: 'Sales Dealer', expect: 'Sales Manager' },
-  { accessLevel: 'Sales Rep', expect: 'Sales Rep' },
+  { accessLevel: 'Sales Dealer', expect: 'Sales Manager', needsDealer: true },
+  { accessLevel: 'Sales Rep', expect: 'Sales Rep', needsDealer: true },
   // Admin and Manager both collapse to `Client` -- the point of asserting BOTH is that
   // neither may come back as the literal "Sales Rep" the TEMP guard in sundial-sf-query
   // keys on. That string on a non-rep is exactly the bug this endpoint change fixes.
@@ -121,6 +123,18 @@ async function verifyDerivedHierarchy() {
     return;
   }
 
+  // The ZZ dealer the sales cases are provisioned into. Resolved by NAME from
+  // Salesforce rather than hardcoded by id, so a re-seeded fixture does not silently
+  // turn these into DEALER_NOT_FOUND failures.
+  const dealerRows = await sfQuery(
+    `SELECT Id, Name, Active__c FROM Sundial_Dealer__c ` +
+    `WHERE Client__c = '${soqlEscapeString(HARMON)}' AND Name = 'ZZ TEST DEALER A' LIMIT 1`
+  );
+  const dealerAId = dealerRows?.[0]?.Id ?? null;
+  const dealerAActive = dealerRows?.[0]?.Active__c === true;
+  check('ZZ TEST DEALER A exists and is ACTIVE', !!dealerAId && dealerAActive,
+    dealerAId ? `active=${dealerAActive}` : 'not found -- run seed-access-test-fixtures.mjs');
+
   for (const c of DERIVATION_CASES) {
     const email = `tim+zz-derive-${c.accessLevel.toLowerCase().replace(/\s+/g, '-')}@constructiveoperations.com`;
     let createdId = null;
@@ -132,6 +146,7 @@ async function verifyDerivedHierarchy() {
           email, firstName: 'ZZ Derive', lastName: c.accessLevel,
           accessLevel: c.accessLevel, credentialMode: 'password',
           tempPassword: 'TempDerive123!',
+          ...(c.needsDealer && dealerAId ? { dealerId: dealerAId } : {}),
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -172,6 +187,112 @@ async function verifyDerivedHierarchy() {
   check('super admin + sales role is refused',
     refusal.status === 400 && rBody?.code === 'SUPER_ADMIN_WITH_SALES_ROLE',
     `HTTP ${refusal.status} ${rBody?.code || ''}`);
+
+  await verifyDealerProvisioning(adminToken, dealerAId);
+}
+
+// ---------------------------------------------------------------------------
+// D-064 — dealer provisioning, end to end through the LIVE endpoint
+// ---------------------------------------------------------------------------
+// The unit tests pin the rules against mocks. This pins the thing they cannot: that a
+// rep created through the real API actually ends up with Dealer__c set AND that the
+// resulting login resolves to `own` scope on /auth/me. Those are two different systems
+// agreeing -- user-admin writes the field, identity.js reads it back through
+// Dealer__r.Active__c and turns it into a scope. A test of either alone would pass
+// while the pair was broken.
+async function verifyDealerProvisioning(adminToken, dealerAId) {
+  if (!dealerAId) {
+    console.log('\n  SKIP dealer provisioning: ZZ TEST DEALER A not found.');
+    return;
+  }
+  const email = 'tim+zz-dealer-e2e@constructiveoperations.com';
+  const pw = 'TempDealer123!';
+  let createdId = null;
+
+  const post = (body) =>
+    fetch(`${API_BASE}/admin/users`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  const base = {
+    email, firstName: 'ZZ Dealer', lastName: 'E2E',
+    accessLevel: 'Sales Rep', credentialMode: 'password', tempPassword: pw,
+  };
+
+  try {
+    // 1. No dealer -> refused. Asserted FIRST so a later success cannot be mistaken
+    //    for the rule being absent.
+    const noDealer = await post(base);
+    const nBody = await noDealer.json().catch(() => ({}));
+    check('POST rep with NO dealer -> 400 DEALER_REQUIRED_FOR_SALES_ROLE',
+      noDealer.status === 400 && nBody?.code === 'DEALER_REQUIRED_FOR_SALES_ROLE',
+      `HTTP ${noDealer.status} ${nBody?.code || ''}`);
+
+    // 2. A dealer that is not a dealer in this tenant -> refused.
+    const bogus = await post({ ...base, dealerId: 'a1X000000000BOGUS' });
+    const bBody = await bogus.json().catch(() => ({}));
+    check('POST rep with an unknown dealer -> 400 DEALER_NOT_FOUND',
+      bogus.status === 400 && bBody?.code === 'DEALER_NOT_FOUND',
+      `HTTP ${bogus.status} ${bBody?.code || ''}`);
+
+    // 3. The real thing.
+    const res = await post({ ...base, dealerId: dealerAId });
+    const body = await res.json().catch(() => ({}));
+    createdId = body?.id ?? null;
+    check('POST rep under ZZ TEST DEALER A -> 201', res.status === 201 && !!createdId,
+      `HTTP ${res.status} ${JSON.stringify(body).slice(0, 160)}`);
+    if (!createdId) return;
+    check('the response echoes the dealer', body?.dealerId === dealerAId,
+      `${body?.dealerId} / ${body?.dealerName}`);
+
+    // 4. Read Dealer__c back FROM SALESFORCE. Asserting on the response would only
+    //    test the response.
+    const rows = await sfQuery(
+      `SELECT Id, Access_Level__c, Dealer__c, Dealer__r.Name FROM Sundial_User__c ` +
+      `WHERE Id = '${soqlEscapeString(createdId)}' LIMIT 1`
+    );
+    check('Dealer__c is written to Salesforce', rows?.[0]?.Dealer__c === dealerAId,
+      `got ${rows?.[0]?.Dealer__c} (${rows?.[0]?.Dealer__r?.Name})`);
+
+    // 5. THE PAIR: log in as the new rep and read the scope /auth/me resolves. This is
+    //    what makes the field mean something -- Dealer__c set but scope `none` would be
+    //    a user who looks provisioned and cannot work.
+    const repLogin = await login(pw, email);
+    const repToken = repLogin.body?.access_token;
+    check('the new rep can sign in', repLogin.status === 200 && !!repToken,
+      `HTTP ${repLogin.status}`);
+    if (repToken) {
+      const me = await apiGet('/auth/me', repToken);
+      const access = me.body?.user?.access;
+      check('/auth/me resolves scope "own"', access?.scope === 'own',
+        `scope=${access?.scope} level=${access?.level}`);
+      check('/auth/me carries the dealer', access?.dealerId === dealerAId,
+        `dealerId=${access?.dealerId}`);
+      check('/auth/me reports the dealer ACTIVE', access?.dealerActive === true,
+        `dealerActive=${access?.dealerActive}`);
+      check('modules are the sales set (customer, solar, user)',
+        JSON.stringify(access?.modules) === JSON.stringify(['customer', 'solar', 'user']),
+        JSON.stringify(access?.modules));
+    }
+
+    // 6. PATCH the rep to a tenant-wide role WITH a dealerId -> refused.
+    const patchBad = await fetch(`${API_BASE}/admin/users/${createdId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accessLevel: 'Manager', dealerId: dealerAId }),
+    });
+    const pBody = await patchBad.json().catch(() => ({}));
+    check('PATCH to a tenant role WITH a dealer -> 400 DEALER_NOT_APPLICABLE',
+      patchBad.status === 400 && pBody?.code === 'DEALER_NOT_APPLICABLE',
+      `HTTP ${patchBad.status} ${pBody?.code || ''}`);
+  } finally {
+    // Clean up BOTH sides. A leftover tim+zz- user shows up in the next audit as real.
+    if (createdId) await sfDeleteRecord('Sundial_User__c', createdId).catch(() => {});
+    const { data: list } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+    const found = list?.users?.find((x) => x.email?.toLowerCase() === email);
+    if (found) await admin.auth.admin.deleteUser(found.id).catch(() => {});
+  }
 }
 
 // The ten users scripts/seed-access-test-fixtures.mjs owns. Anything else answering to
@@ -226,9 +347,19 @@ try {
   check('create auth user', !cErr && !!authUserId, cErr?.message);
 
   if (!sfUserId && authUserId) {
+    // D-064: this throwaway user is a MANAGER, not a Sales Rep, and the change is
+    // deliberate. It was created as a dealerless "Sales Rep", which under the access
+    // model resolves to scope `none` -- so the two checks below ("the Sales list
+    // loads", "the list is tenant-scoped and non-empty") started failing with 403 and
+    // total=0. Both were CORRECT refusals, but they broke what this block is actually
+    // for: proving that provisioning -> login -> /auth/me -> a tenant-scoped read works
+    // end to end. A tenant-wide level keeps that assertion meaningful.
+    //
+    // The sales-scope path is not lost -- verifyDealerProvisioning() below covers it
+    // properly, with a real dealer and an assertion on the resolved scope.
     const created = await sfCreateRecord('Sundial_User__c', {
       First_Name__c: 'E2E', Last_Name__c: 'Verify', Email__c: EMAIL,
-      Access_Level__c: 'Sales Rep', Hierarchy_Level__c: 'Sales Rep',
+      Access_Level__c: 'Manager', Hierarchy_Level__c: 'Client',
       Active__c: true, Supabase_User_Id__c: authUserId, Client__c: HARMON,
     });
     sfUserId = created.id;

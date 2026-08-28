@@ -178,8 +178,28 @@ function createBody(over = {}) {
 }
 
 // PATCH reaches sfQuery once (the tenant/ownership pre-check). This is that row.
+//
+// D-064: it now also carries Access_Level__c and Dealer__c, because the dealer rule is
+// evaluated against the state the PATCH RESULTS IN — which may come from the record
+// rather than from the body.
 function ownedRow(over = {}) {
-  return [{ Id: TARGET_ID, Supabase_User_Id__c: TARGET_UID, Super_Admin__c: false, ...over }];
+  return [
+    {
+      Id: TARGET_ID,
+      Supabase_User_Id__c: TARGET_UID,
+      Super_Admin__c: false,
+      Access_Level__c: "Manager",
+      Dealer__c: null,
+      ...over,
+    },
+  ];
+}
+
+const DEALER_ID = "a1X7y00001ASRILEA5";
+const DEALER_NAME = "ZZ TEST DEALER A";
+/** What the dealer validation lookup returns for an ACTIVE dealer in this tenant. */
+function dealerRow(over = {}) {
+  return [{ Id: DEALER_ID, Name: DEALER_NAME, Active__c: true, ...over }];
 }
 
 beforeEach(() => resetCtx());
@@ -225,18 +245,20 @@ test("PATCH re-levelling a rep UP does not leave the TEMP guard's value behind",
 });
 
 test("PATCH to an actual Sales Rep still derives Sales Rep", async () => {
-  ctx.queryRows = [ownedRow()];
+  // D-064: moving INTO a sales role now requires a dealer, so the request carries one
+  // and the lookup answers it. The hierarchy derivation under test is unchanged.
+  ctx.queryRows = [ownedRow(), dealerRow()];
 
-  await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep" }));
+  await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep", dealerId: DEALER_ID }));
 
   assert.equal(ctx.updated[0].fields.Access_Level__c, "Sales Rep");
   assert.equal(ctx.updated[0].fields.Hierarchy_Level__c, "Sales Rep");
 });
 
 test("PATCH to Sales Dealer derives Sales Manager", async () => {
-  ctx.queryRows = [ownedRow()];
+  ctx.queryRows = [ownedRow(), dealerRow()];
 
-  await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Dealer" }));
+  await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Dealer", dealerId: DEALER_ID }));
 
   assert.equal(ctx.updated[0].fields.Access_Level__c, "Sales Dealer");
   assert.equal(ctx.updated[0].fields.Hierarchy_Level__c, "Sales Manager");
@@ -365,13 +387,20 @@ test("POST with Admin and no superAdmin key is unaffected", async () => {
 test("POST with a sales role and NO superAdmin key still succeeds", async () => {
   // The refusal must key on the COMBINATION, not on the access level alone —
   // otherwise it would have quietly banned creating sales reps.
-  ctx.queryRows = [[]];
+  //
+  // D-064: a sales role also needs a dealer now. queryRows order is
+  // [dealer validation, duplicate guard] — the dealer is resolved during validation,
+  // before the duplicate check, so an invalid dealer is refused without a Supabase call.
+  ctx.queryRows = [dealerRow(), []];
 
-  const res = await handler(postEvent(createBody({ accessLevel: "Sales Rep" })));
+  const res = await handler(
+    postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID }))
+  );
 
   assert.equal(res.statusCode, 201);
   assert.equal(ctx.created[0].fields.Access_Level__c, "Sales Rep");
   assert.equal(ctx.created[0].fields.Hierarchy_Level__c, "Sales Rep");
+  assert.equal(ctx.created[0].fields.Dealer__c, DEALER_ID, "and the dealer is stamped");
 });
 
 // ===========================================================================
@@ -402,9 +431,11 @@ test("PATCH reads Super_Admin__c from the RECORD, not from the request", async (
   // A caller cannot assert their way past this: `superAdmin` is in DISALLOWED, so the
   // only source is the ownership query. Target is NOT a super admin in Salesforce, so
   // the same re-level that was refused above is allowed here.
-  ctx.queryRows = [ownedRow({ Super_Admin__c: false })];
+  ctx.queryRows = [ownedRow({ Super_Admin__c: false }), dealerRow()];
 
-  const res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep" }));
+  const res = await handler(
+    patchEvent(TARGET_ID, { accessLevel: "Sales Rep", dealerId: DEALER_ID })
+  );
 
   assert.equal(res.statusCode, 200);
   assert.equal(ctx.updated.length, 1);
@@ -455,4 +486,188 @@ test("a non-super-admin caller is refused before any of the above runs", async (
     assert.equal(parse(res).code, "NOT_SUPER_ADMIN");
     assert.equal(ctx.created.length + ctx.updated.length, 0);
   }
+});
+
+// ===========================================================================
+// (d) D-064 — the dealer, on both doors
+// ===========================================================================
+// A sales user with no dealer, or an inactive one, resolves to scope `none`
+// (access-model.md §1.2, §2.1). Provisioning one is not a validation slip: it creates
+// an account that authenticates successfully and then sees nothing, and whose problem
+// is invisible from the admin screen that created it.
+
+test("CREATE: a sales role with NO dealer is refused", async () => {
+  for (const accessLevel of ["Sales Rep", "Sales Dealer"]) {
+    resetCtx();
+    ctx.queryRows = [[]];
+    const res = await handler(postEvent(createBody({ accessLevel })));
+    assert.equal(res.statusCode, 400, accessLevel);
+    assert.equal(parse(res).code, "DEALER_REQUIRED_FOR_SALES_ROLE", accessLevel);
+    assert.equal(ctx.created.length, 0, "nothing is written");
+    assert.equal(ctx.authCalls.length, 0, "and no Supabase auth user is created");
+  }
+});
+
+test("CREATE: an INACTIVE dealer is refused", async () => {
+  // §2.1 makes deactivating a dealer the switch that turns off their people. A rep
+  // provisioned into one would sign in and see nothing.
+  ctx.queryRows = [dealerRow({ Active__c: false })];
+  const res = await handler(
+    postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID }))
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_NOT_FOUND");
+  assert.match(parse(res).message, /INACTIVE/);
+  assert.equal(ctx.created.length, 0);
+});
+
+test("CREATE: an unknown or cross-tenant dealer is refused, indistinguishably", async () => {
+  // Unknown, wrong tenant and inactive all answer the same. A distinct "exists but is
+  // not yours" would confirm another tenant's record ids to anyone willing to guess.
+  ctx.queryRows = [[]];
+  const res = await handler(
+    postEvent(createBody({ accessLevel: "Sales Rep", dealerId: "a1X000000000BOGUS" }))
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_NOT_FOUND");
+});
+
+test("CREATE: the dealer lookup is TENANT-SCOPED", async () => {
+  ctx.queryRows = [dealerRow(), []];
+  await handler(postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID })));
+  const lookup = ctx.queries.find((q) => /FROM Sundial_Dealer__c/.test(q));
+  assert.ok(lookup, "the dealer was validated against Salesforce");
+  assert.match(lookup, new RegExp(`Client__c = '${TENANT}'`));
+  assert.match(lookup, new RegExp(`Id = '${DEALER_ID}'`));
+});
+
+test("CREATE: a dealerId on a TENANT-WIDE level is a 400, not a silent drop", async () => {
+  // Silently ignoring it would leave the admin believing an Executive had been
+  // attributed to a dealer, with nothing in the UI to contradict them.
+  const res = await handler(
+    postEvent(createBody({ accessLevel: "Executive", dealerId: DEALER_ID }))
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_NOT_APPLICABLE");
+  assert.equal(ctx.created.length, 0);
+});
+
+test("PATCH: moving to a sales role with NO dealer, on a user who has none, is refused", async () => {
+  // THE CARRIED-FORWARD RULE. This body mentions neither dealers nor visibility, and
+  // would silently create an account that can sign in and see nothing.
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Manager", Dealer__c: null })];
+  const res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_REQUIRED_FOR_SALES_ROLE");
+  assert.equal(ctx.updated.length, 0);
+});
+
+test("PATCH: moving to a sales role is ALLOWED when the record already has a dealer", async () => {
+  // The rule is about where the user ENDS UP, not about what the body happens to say.
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Manager", Dealer__c: DEALER_ID })];
+  const res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep" }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(ctx.updated[0].fields.Access_Level__c, "Sales Rep");
+});
+
+test("PATCH: clearing the dealer of someone who STAYS a sales rep is refused", async () => {
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  const res = await handler(patchEvent(TARGET_ID, { dealerId: "" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_REQUIRED_FOR_SALES_ROLE");
+  assert.equal(ctx.updated.length, 0);
+});
+
+test("PATCH: changing the dealer of a rep validates the new one", async () => {
+  ctx.queryRows = [
+    ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: "a1X000000000OLDAA" }),
+    dealerRow({ Active__c: false }),
+  ];
+  const res = await handler(patchEvent(TARGET_ID, { dealerId: DEALER_ID }));
+  assert.equal(res.statusCode, 400, "an inactive target dealer is refused on PATCH too");
+  assert.equal(parse(res).code, "DEALER_NOT_FOUND");
+  assert.equal(ctx.updated.length, 0);
+});
+
+test("PATCH: a valid dealer change is written", async () => {
+  ctx.queryRows = [
+    ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: "a1X000000000OLDAA" }),
+    dealerRow(),
+  ];
+  const res = await handler(patchEvent(TARGET_ID, { dealerId: DEALER_ID }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(ctx.updated[0].fields.Dealer__c, DEALER_ID);
+});
+
+test("PATCH: a dealerId on a user who ends up TENANT-WIDE is refused", async () => {
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  const res = await handler(
+    patchEvent(TARGET_ID, { accessLevel: "Manager", dealerId: DEALER_ID })
+  );
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DEALER_NOT_APPLICABLE");
+});
+
+test("PATCH: moving OUT of a sales role leaves Dealer__c alone", async () => {
+  // Unread for tenant scopes (§1.2), so clearing it would change nothing about access
+  // while discarding the attribution — and would silently un-attribute someone who is
+  // later moved back into a sales role.
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  const res = await handler(patchEvent(TARGET_ID, { accessLevel: "Manager" }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(!("Dealer__c" in ctx.updated[0].fields), "not touched");
+});
+
+test("the SUPER-ADMIN refusal wins over the dealer refusal", async () => {
+  // Both apply to this request. The combination is the more consequential problem and
+  // its message tells the admin what to actually do (clear Super_Admin__c first); a
+  // DEALER_REQUIRED answer would send them to pick a dealer for a change that must not
+  // happen at all.
+  ctx.queryRows = [ownedRow({ Super_Admin__c: true, Access_Level__c: "Admin", Dealer__c: null })];
+  const res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "SUPER_ADMIN_WITH_SALES_ROLE");
+});
+
+test("GET returns dealerId and dealerName, plus the dealer options", async () => {
+  ctx.queryRows = [
+    [
+      {
+        Id: TARGET_ID,
+        First_Name__c: "ZZ",
+        Last_Name__c: "Rep",
+        Email__c: "zz@example.com",
+        Access_Level__c: "Sales Rep",
+        Active__c: true,
+        Super_Admin__c: false,
+        Dealer__c: DEALER_ID,
+        Dealer__r: { Name: DEALER_NAME },
+      },
+    ],
+    [{ Id: DEALER_ID, Name: DEALER_NAME }],
+  ];
+  const res = await handler({
+    requestContext: { http: { method: "GET" } },
+    headers: { authorization: "Bearer test", origin: "http://localhost:5173" },
+    rawPath: "/admin/users",
+  });
+  const body = parse(res);
+  assert.equal(body.users[0].dealerId, DEALER_ID);
+  assert.equal(body.users[0].dealerName, DEALER_NAME);
+  assert.deepEqual(body.dealers, [{ id: DEALER_ID, name: DEALER_NAME }]);
+});
+
+test("GET /admin/dealers returns ACTIVE dealers only, tenant-scoped", async () => {
+  ctx.queryRows = [[{ Id: DEALER_ID, Name: DEALER_NAME }]];
+  const res = await handler({
+    requestContext: { http: { method: "GET" } },
+    headers: { authorization: "Bearer test", origin: "http://localhost:5173" },
+    rawPath: "/admin/dealers",
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(parse(res).dealers, [{ id: DEALER_ID, name: DEALER_NAME }]);
+  const q = ctx.queries[0];
+  assert.match(q, /Active__c = true/);
+  assert.match(q, new RegExp(`Client__c = '${TENANT}'`));
+  assert.ok(!/Sundial_User__c/.test(q), "the dealers route must not query users");
 });

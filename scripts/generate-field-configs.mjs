@@ -119,6 +119,41 @@ const OBJECTS = [
   },
 ];
 
+// --- The harmon-crm copies, which must not drift ----------------------------
+//
+// The workbooks live HERE (§4.2): this is where the manifest that gates real access
+// is generated from. harmon-crm keeps a copy only because its two client-config
+// generators still read it for LAYOUT (sections, labels, field order) -- which is not
+// authorization, but is the same file.
+//
+// Two committed copies of a source-of-truth file is exactly the fork §4.2 warns about,
+// so the generator compares them on every run and says so. It WARNS rather than fails:
+// a sibling checkout may be absent or on another branch, and refusing to generate the
+// server manifest because a client repo is missing would be the wrong dependency.
+//
+// The close-out is to teach this generator to emit the client configs too (§4.2 output
+// 2), then delete harmon-crm's two generators, its sheet copies AND its
+// generate:configs npm script together -- all three, or the deletion breaks whatever
+// is left behind.
+function warnIfClientCopyDrifted(spec) {
+  const sibling = path.join(ROOT, "..", "harmon-crm", "docs", spec.workbook);
+  if (!fs.existsSync(sibling)) return null;
+  const sha = (p) =>
+    crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+  const here = sha(path.join(DOCS, spec.workbook));
+  const there = sha(sibling);
+  if (here === there) return null;
+  return (
+    spec.workbook +
+    ": harmon-crm copy DIFFERS from this one (" +
+    here.slice(0, 12) +
+    " vs " +
+    there.slice(0, 12) +
+    "). This file is the source of truth; copy it over, or the client layout and the " +
+    "server field rules describe different sheets."
+  );
+}
+
 // --- Salesforce describe ----------------------------------------------------
 async function describe(sfObject) {
   const { access_token, instance_url } = await getSalesforceToken();
@@ -273,6 +308,12 @@ async function buildManifest(spec) {
   const payload = { object: spec.sfObject, roles, listColumns };
   const version =
     "sha256:" + crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 32);
+
+  // The two committed copies must stay identical until the client generator moves
+  // here; a silent divergence would mean the layout and the field rules describe
+  // different sheets.
+  const drift = warnIfClientCopyDrifted(spec);
+  if (drift) warnings.push(drift);
 
   return { key: spec.key, manifest: { version, ...payload }, errors, warnings, rowCount: rows.length };
 }

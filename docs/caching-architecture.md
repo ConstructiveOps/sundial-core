@@ -366,3 +366,60 @@ Phase 2 and beyond can add:
 - EventBridge scheduled refresh jobs
 - More sophisticated cache warming for predictable access patterns
 - Per-user cache personalization (if needed)
+
+---
+
+## Corrections and additions — D-064 (2026-08-28)
+
+This document predates the access model. Three things it says, or omits, are now wrong.
+
+### 1. The isolation key is `client_sf_id`, not `tenant_id`
+
+Both columns exist on every cache table and they are NOT interchangeable:
+
+- **`client_sf_id`** — the Salesforce `Client__c` record id. **This is the isolation
+  key.** Every cache query filters on it, and `rowFilter()` puts it in every branch.
+- **`tenant_id`** — the human-readable slug (`harmon`). A label. Never used for
+  isolation.
+
+⚠️ Confusing them is a live hazard, not a style point: the inert RLS policies retired in
+Phase 6 filtered `tenant_id = current_user_tenant_id()` where the function returned a
+`client_sf_id`-shaped value from an empty table — which is exactly why they denied
+everything by accident.
+
+### 2. The TTL is a flat 10 minutes
+
+`CACHE_TTL_MS` in `sundial-sf-query`. A row is trustworthy on read only if BOTH
+`is_stale` is false/null AND it was synced inside that window; failing either sends it
+back to Salesforce on read. There is no per-object tuning.
+
+### 3. The row-filter columns, and what they replaced
+
+Phase 1 added, per `sfFieldToColumn()`:
+
+| Table | Columns |
+|---|---|
+| `sundial_customer_cache` | `sales_rep_sf_id`, `dealer_sf_id` |
+| `sundial_solar_cache` | `sales_rep_sf_id`, `dealer_sf_id` |
+| `sundial_roofing_cache` | `sales_rep_sf_id`, `dealer_sf_id` |
+| `sundial_user_cache` | `dealer_sf_id`, `access_level`, `supabase_user_id` |
+
+with `(client_sf_id, <column>)` indexes — tenant key first, because it leads every
+predicate `rowFilter()` builds.
+
+**This is what killed the live-SOQL bypass.** The TEMP guard filtered on a field that was
+not cached, so a restricted rep's reads went live to Salesforce — where SOQL's OFFSET cap
+of 2000 left roughly 1,500 of Dennis's 3,536 customers unreachable on deep pages. An id
+equality on an indexed cache column has no such cap: his whole book is ONE request inside
+the 5,000-row page (D-050).
+
+### 4. Reads are now access-filtered before anything else
+
+Under `ACCESS_MODEL_MODE=enforce`, `rowFilter()` is ANDed into the cache query **first**,
+and every caller filter (`?q=`, `?parentId=`, `?field/value`) is ANDed after it. The
+COUNT comes from the same builder as the page, so `total` is scoped by construction
+rather than by a second thing somebody has to remember. No request input can widen it.
+
+Cache rows are additionally **projected** to the caller's manifest columns before they
+leave the Lambda (§4.3), so a column a role may not read never reaches the browser even
+though it is stored.

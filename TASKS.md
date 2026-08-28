@@ -795,14 +795,48 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [!] **Phase 5 gates deliberately IGNORE ACCESS_MODEL_MODE.** They replaced an
         existing control, so an env rollback would make the system looser than before.
         Rolling Phase 5 back is a previous-zip redeploy.
-- [ ] **Phase 6 — Supabase RLS (reduced by A4 + A5).** The cache-table revoke shipped in
-      Phase 1; the comments/mentions policies shipped in Phase 1b. What is left:
-      `sql/sundial_access_rls.sql` **drops** the six accidental cache-table SELECT
-      policies (inert after the revoke — removing a misleading artefact, not a control)
-      and `public.portal_users`, plus the `profiles` policy review.
-- [ ] **Phase 7 — Cleanup and docs.** `profiles.role` dropped from the upsert;
-      `Hierarchy_Level__c` deprecated; `Roles__c` documented unused; api-endpoints and
-      caching-architecture corrected.
+- [~] **Phase 6 — Supabase RLS.** `sql/sundial_access_p6_drop_inert.sql` WRITTEN and
+      ready for Tim to paste. **Bigger than the plan, because the plan was not safe:**
+      `current_user_tenant_id()` is referenced by TEN policies, not six. The four extra
+      (`asset_cache`, `chat_messages`, `sundial_file_metadata`, `portal_users`) still
+      carry ALL 16 anon/authenticated privileges, so their inert policy is the only thing
+      in the way — a CASCADE drop would have opened three live tables. The file revokes
+      those four FIRST, then drops, in one transaction.
+  - [ ] **TIM: paste and run it**, then the six verification queries.
+  - [!] **`portal_users` is NOT dropped, and that changed after the first run failed.**
+        Five FK constraints across four tables point at it
+        (`chat_messages`, `notifications`, `audit_log`, and `sundial_file_metadata`
+        twice) — it is an empty table but a REFERENCED PARENT. Dropping it is not needed
+        to disarm the trap: once the policies and the function are gone, populating it
+        does nothing. An OPTIONAL commented block at the end of the SQL file drops it
+        properly, another day.
+  - [ ] **Dead columns found while deciding that:** `sundial_file_metadata`
+        `uploaded_by_user_id` and `deleted_by_user_id` are uuid FKs to the empty
+        `portal_users`, so they are 0-of-35 populated and CANNOT be written — any value
+        would violate the constraint. Attribution works via `uploaded_by_user_name`
+        (35 of 35), which is what the Lambdas write. Decide the columns' fate with the
+        table's.
+  - [ ] `profiles` policy review (not in the file; still outstanding).
+- [x] **Phase 7 — Cleanup and docs (2026-08-28).** `profiles.role` no longer written
+      (auth-proxy deployed); `salesforce-schema.md` gains the access-model objects with
+      `Hierarchy_Level__c` deprecated and `Roles__c` unused; `caching-architecture.md`
+      corrected (`client_sf_id` vs `tenant_id`, flat 10-min TTL, the row-filter columns);
+      `api-endpoints.md` gains the dealer routes and the refusal-code table;
+      `harmon-crm/CLAUDE.md` re-synced.
+  - [ ] **Deferred:** dropping the `profiles.role` COLUMN is a schema change for Tim.
+        Un-written is safe; un-dropped is tidy-up.
+
+- [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
+      and byte-identical. sundial-core's copy is the source of truth — the manifest that
+      gates real access is generated from it — and `generate-field-configs.mjs` warns on
+      every run if the harmon-crm copy drifts.
+      **They are not deleted from harmon-crm yet, deliberately:** its two client-config
+      generators (`npm run generate:configs`) still read `docs/*.xlsx` by path, so
+      deleting the sheets alone breaks them the NEXT time somebody regenerates a detail
+      config — not now, which is the bad kind of breakage.
+      The close-out is all three together: teach `generate-field-configs.mjs` to emit the
+      client configs (§4.2 output 2, with `--confirm-target`), then delete harmon-crm's
+      two generators, its two sheet copies, and the `generate:configs` script.
 
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:

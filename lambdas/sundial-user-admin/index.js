@@ -92,6 +92,111 @@ export function deriveHierarchyLevel(accessLevel) {
 // the combination §1.2 says must not exist.
 export const SALES_ACCESS_LEVELS = new Set(["Sales Rep", "Sales Dealer"]);
 
+const DEALER_OBJECT = "Sundial_Dealer__c";
+
+/**
+ * Resolve a caller-supplied dealerId to an ACTIVE dealer in the caller's tenant.
+ *
+ * @returns {{ok:true, id, name} | {ok:false, code, message}}
+ *
+ * Validated BY ID against Salesforce, never trusted from the request. Three separate
+ * refusals, and they are deliberately indistinguishable to the caller — unknown id,
+ * wrong tenant, and inactive all return the same code. A distinct "that dealer exists
+ * but belongs to someone else" would confirm the existence of another tenant's records
+ * to anyone willing to guess ids.
+ *
+ * ⚠️ INACTIVE IS A REFUSAL, NOT A WARNING. access-model.md §2.1 makes deactivating a
+ * dealer the switch that turns off their people's access: resolveScope() sends a sales
+ * user with an inactive dealer to scope `none`. Provisioning a rep INTO an inactive
+ * dealer would therefore create an account that authenticates and then sees nothing —
+ * a user who looks provisioned, cannot work, and whose problem is invisible from the
+ * admin screen that created them.
+ */
+async function resolveDealer(dealerId, tenantId) {
+  const id = trimStr(dealerId);
+  if (!id) return { ok: false, code: "DEALER_NOT_FOUND", message: "dealerId is empty" };
+
+  // SHAPE-CHECK BEFORE QUERYING. Salesforce rejects a malformed value in an `Id =`
+  // filter with MALFORMED_ID rather than returning zero rows, so sfQuery THROWS and the
+  // handler's catch turns it into a 500. Found by the provisioning e2e sending a
+  // deliberately bogus id and getting 500 where 400 was specified: a caller mistake
+  // must not read as a server fault. 15 or 18 case-sensitive alphanumerics, the same
+  // shape check sundial-sf-query applies to ?parentId=.
+  if (!/^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(id)) {
+    return {
+      ok: false,
+      code: "DEALER_NOT_FOUND",
+      message: "dealerId is not a Salesforce record id.",
+    };
+  }
+
+  // A query FAILURE denies too. "Could not establish which dealer this is" is not
+  // "any dealer will do" -- the same fail-closed rule the read gates use.
+  let rows;
+  try {
+    rows = await sfQuery(
+      `SELECT Id, Name, Active__c FROM ${DEALER_OBJECT} ` +
+        `WHERE Id = '${soqlEscapeString(id)}' ` +
+        `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+    );
+  } catch (e) {
+    console.error("dealer lookup failed:", e?.message || String(e));
+    return {
+      ok: false,
+      code: "DEALER_NOT_FOUND",
+      message: "dealerId could not be validated.",
+    };
+  }
+  if (!rows || rows.length === 0) {
+    return {
+      ok: false,
+      code: "DEALER_NOT_FOUND",
+      message: "dealerId is not a dealer in this tenant.",
+    };
+  }
+  if (rows[0].Active__c !== true) {
+    return {
+      ok: false,
+      code: "DEALER_NOT_FOUND",
+      message:
+        `Dealer "${rows[0].Name}" is INACTIVE. A sales user in an inactive dealer ` +
+        `resolves to no access at all (access-model.md §2.1), so they would be able to ` +
+        `sign in and see nothing. Reactivate the dealer first, or choose another.`,
+    };
+  }
+  return { ok: true, id: rows[0].Id, name: rows[0].Name ?? null };
+}
+
+/**
+ * ⚠️ A dealerId on a NON-SALES level is a 400, not a silent drop.
+ *
+ * The same reasoning as the SUPER_ADMIN_WITH_SALES_ROLE refusal below: an admin who
+ * sends a field and is not told it was ignored believes it was applied. Here they would
+ * believe an Executive had been attributed to a dealer. Nothing in the UI would
+ * contradict them, because the field simply would not be there on the next read.
+ *
+ * Only `dealer` and `own` scopes read Dealer__c at all (§1.2), so attributing a
+ * tenant-wide role to a dealer is not merely useless — it is a statement about the
+ * access model that is not true.
+ */
+const DEALER_NOT_APPLICABLE = {
+  error: "dealer_not_applicable",
+  code: "DEALER_NOT_APPLICABLE",
+  message:
+    "dealerId applies only to the sales access levels (Sales Rep, Sales Dealer). " +
+    "Tenant-wide roles see every record in the tenant and are never scoped by dealer.",
+};
+
+/** The refusal when a sales role would end up with no dealer. */
+const DEALER_REQUIRED = {
+  error: "dealer_required",
+  code: "DEALER_REQUIRED_FOR_SALES_ROLE",
+  message:
+    "A Sales Rep or Sales Dealer must belong to a dealer: their record visibility is " +
+    "defined by it. A sales user with no dealer resolves to no access at all " +
+    "(access-model.md §1.2), so they could sign in and see nothing.",
+};
+
 // Base URL of the portal. Invited users are redirected here to set their password.
 // Env-configurable so a domain change is a Lambda config update, not a code edit.
 // The default tracks the live portal domain (cutover from harmon-crm.vercel.app,
@@ -165,7 +270,8 @@ async function requireSuperAdmin(headers, cors) {
 async function handleList(identity, cors) {
   const soql =
     `SELECT Id, First_Name__c, Last_Name__c, Email__c, Phone__c, Access_Level__c, ` +
-    `Default_Department__c, Active__c, Super_Admin__c, Hierarchy_Level__c, Supabase_User_Id__c ` +
+    `Default_Department__c, Active__c, Super_Admin__c, Hierarchy_Level__c, Supabase_User_Id__c, ` +
+    `Dealer__c, Dealer__r.Name ` +
     `FROM ${SF_OBJECT} ` +
     `WHERE Client__c = '${soqlEscapeString(identity.tenantId)}' ` +
     `ORDER BY Last_Name__c, First_Name__c`;
@@ -181,10 +287,48 @@ async function handleList(identity, cors) {
     active: r.Active__c === true,
     superAdmin: r.Super_Admin__c === true,
     hierarchyLevel: r.Hierarchy_Level__c ?? null,
+    // D-064: the dealer this user sells for. Null on Harmon staff, who are never
+    // scoped by one. The NAME travels with the id so the list can render without a
+    // second lookup per row.
+    dealerId: r.Dealer__c ?? null,
+    dealerName: r.Dealer__r?.Name ?? null,
     // Boolean only — the actual Supabase_User_Id__c value is NEVER returned.
     hasLogin: trimStr(r.Supabase_User_Id__c) !== "",
   }));
-  return jsonResponse(200, cors, { users });
+
+  // The dealer options, alongside the users.
+  //
+  // ⚠️ ALSO available as GET /admin/dealers — this copy exists so the create/edit modal
+  // works with NO API Gateway change. A new route is a manual console step (Actions →
+  // Deploy API), and dealer onboarding is blocked until reps can be created with a
+  // dealer. The modal already fetches this list when it opens, so riding along costs one
+  // extra SOQL on a low-frequency admin screen and removes a deployment dependency from
+  // the critical path. Both sources are the same function; they cannot disagree.
+  const dealers = await listActiveDealers(identity.tenantId);
+  return jsonResponse(200, cors, { users, dealers });
+}
+
+/** Active dealers in a tenant, as {id, name}, alphabetical. */
+async function listActiveDealers(tenantId) {
+  const rows = await sfQuery(
+    `SELECT Id, Name FROM ${DEALER_OBJECT} ` +
+      `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Active__c = true ` +
+      `ORDER BY Name`
+  );
+  return (rows || []).map((d) => ({ id: d.Id, name: d.Name ?? null }));
+}
+
+// === GET /admin/dealers ====================================================
+// Super-admin gated like every other route on this Lambda (requireSuperAdmin runs
+// first). Active dealers only: the dropdown must not offer a dealer that would leave
+// the new user with no access (§2.1).
+//
+// ⚠️ DELIBERATELY NOT IN sundial-sf-query's OBJECT_ALLOWLIST. That allowlist is the
+// read surface every portal user reaches; dealers are an ADMIN lookup, and putting them
+// there would expose the tenant's full dealer roster to every authenticated caller for
+// the sake of one dropdown on one screen.
+async function handleDealers(identity, cors) {
+  return jsonResponse(200, cors, { dealers: await listActiveDealers(identity.tenantId) });
 }
 
 // Apply (or clear) a Supabase auth ban, with a small retry. A TRANSIENT failure
@@ -301,6 +445,25 @@ async function handleCreate(identity, event, cors) {
     });
   }
 
+  // --- D-064: the dealer, required for sales roles and refused for the rest ---
+  const isSalesRole = SALES_ACCESS_LEVELS.has(accessLevel);
+  const dealerIdRaw = trimStr(b.dealerId);
+  let dealer = null;
+  if (isSalesRole) {
+    if (!dealerIdRaw) return jsonResponse(400, cors, DEALER_REQUIRED);
+    const resolved = await resolveDealer(dealerIdRaw, identity.tenantId);
+    if (!resolved.ok) {
+      return jsonResponse(400, cors, {
+        error: "invalid_dealer",
+        code: resolved.code,
+        message: resolved.message,
+      });
+    }
+    dealer = resolved;
+  } else if (dealerIdRaw) {
+    return jsonResponse(400, cors, DEALER_NOT_APPLICABLE);
+  }
+
   // a. Duplicate guard within THIS tenant.
   const dupe = await sfQuery(
     `SELECT Id FROM ${SF_OBJECT} WHERE Email__c = '${soqlEscapeString(email)}' ` +
@@ -376,10 +539,17 @@ async function handleCreate(identity, event, cors) {
   };
   if (phone) fields.Phone__c = phone;
   if (defaultDepartment) fields.Default_Department__c = defaultDepartment;
+  // Validated by id against an ACTIVE dealer in this tenant above — never the raw
+  // request value, and never present for a tenant-wide role.
+  if (dealer) fields.Dealer__c = dealer.id;
 
   try {
     const created = await sfCreateRecord(SF_OBJECT, fields);
     const resp = { id: created.id, email, credentialMode };
+    if (dealer) {
+      resp.dealerId = dealer.id;
+      resp.dealerName = dealer.name;
+    }
     if (inviteSent) resp.inviteSent = true;
     return jsonResponse(201, cors, resp);
   } catch (sfErr) {
@@ -471,6 +641,12 @@ async function handleUpdate(identity, event, cors) {
     if (v && !DEPARTMENTS.has(v)) errors.defaultDepartment = "invalid defaultDepartment";
     else fields.Default_Department__c = v || null;
   }
+  // D-064: dealerId is accepted here, but WHETHER it is required depends on the
+  // access level this PATCH leaves the user at — which may come from the body or may
+  // already be on the record. Resolved after the record is read, below.
+  const dealerIdProvided = hasOwn(b, "dealerId");
+  const dealerIdRaw = dealerIdProvided ? trimStr(b.dealerId) : null;
+
   let activeChange = null;
   if (hasOwn(b, "active")) {
     if (typeof b.active !== "boolean") errors.active = "active must be a boolean";
@@ -484,7 +660,7 @@ async function handleUpdate(identity, event, cors) {
       fields: errors,
     });
   }
-  if (Object.keys(fields).length === 0 && activeChange === null) {
+  if (Object.keys(fields).length === 0 && activeChange === null && !dealerIdProvided) {
     return jsonResponse(400, cors, { error: "no_fields", code: "NO_FIELDS" });
   }
 
@@ -500,7 +676,7 @@ async function handleUpdate(identity, event, cors) {
   // target's Super_Admin__c for the role-combination refusal below). A record
   // outside the caller's tenant is indistinguishable from missing -> 404.
   const owned = await sfQuery(
-    `SELECT Id, Supabase_User_Id__c, Super_Admin__c FROM ${SF_OBJECT} ` +
+    `SELECT Id, Supabase_User_Id__c, Super_Admin__c, Access_Level__c, Dealer__c FROM ${SF_OBJECT} ` +
       `WHERE Id = '${soqlEscapeString(id)}' ` +
       `AND Client__c = '${soqlEscapeString(identity.tenantId)}' LIMIT 1`
   );
@@ -537,6 +713,56 @@ async function handleUpdate(identity, event, cors) {
         `Note that Super_Admin__c is set in Salesforce only and is never written by this endpoint.`,
     });
   }
+
+  // --- D-064: the dealer rule, evaluated against the RESULTING state ----------
+  //
+  // ⚠️ ORDERED AFTER the super-admin refusal, deliberately. Both can fire on the same
+  // request — re-levelling a super admin to Sales Rep is BOTH a forbidden combination
+  // and (usually) missing a dealer. The combination is the more specific and more
+  // consequential problem: it describes an account that could provision its way out of
+  // its own scope, and its message tells the admin to clear Super_Admin__c in Salesforce
+  // first. A DEALER_REQUIRED_FOR_SALES_ROLE answer would send them off to pick a dealer
+  // for a change that must not happen at all.
+  //
+  // ⚠️ THE QUESTION IS "WHERE DOES THIS USER END UP", NOT "WHAT DOES THIS BODY SAY".
+  // A PATCH that sets only `accessLevel: "Sales Rep"` carries no dealer and looks
+  // harmless; whether it is depends entirely on whether the record already has one.
+  // Checking the body alone would let a Manager become a Sales Rep with no dealer —
+  // an account that signs in and sees nothing, created by a request that mentioned
+  // neither dealers nor access.
+  const resultingLevel = hasOwn(fields, "Access_Level__c")
+    ? fields.Access_Level__c
+    : trimStr(owned[0].Access_Level__c);
+  const resultingIsSales = SALES_ACCESS_LEVELS.has(resultingLevel);
+  const existingDealerId = trimStr(owned[0].Dealer__c);
+
+  if (dealerIdProvided && !resultingIsSales) {
+    // Same reasoning as create: silently dropping it would leave the admin believing
+    // a tenant-wide user had been attributed to a dealer.
+    return jsonResponse(400, cors, DEALER_NOT_APPLICABLE);
+  }
+
+  if (resultingIsSales) {
+    // Explicitly clearing the dealer of someone who stays in a sales role is the same
+    // refusal as never giving them one.
+    const willHaveDealer = dealerIdProvided ? dealerIdRaw : existingDealerId;
+    if (!willHaveDealer) return jsonResponse(400, cors, DEALER_REQUIRED);
+    if (dealerIdProvided) {
+      const resolved = await resolveDealer(dealerIdRaw, identity.tenantId);
+      if (!resolved.ok) {
+        return jsonResponse(400, cors, {
+          error: "invalid_dealer",
+          code: resolved.code,
+          message: resolved.message,
+        });
+      }
+      fields.Dealer__c = resolved.id;
+    }
+  }
+  // Moving to a tenant-wide role LEAVES Dealer__c as it is, deliberately. It is unread
+  // for those scopes (§1.2), so it changes nothing about access; clearing it would
+  // discard the attribution history, and would silently un-attribute someone who is
+  // later moved back into a sales role.
 
   if (activeChange !== null) fields.Active__c = activeChange;
 
@@ -577,6 +803,13 @@ export const handler = async (event) => {
     if (gate.error) return gate.error;
     const { identity } = gate;
 
+    // GET /admin/dealers — the dropdown's source. Matched on the PATH, because this
+    // Lambda serves several routes and they are otherwise distinguished by method
+    // alone. (A GET that is not /admin/dealers is the user list, as before.)
+    const path = event?.rawPath || event?.path || "";
+    if (method === "GET" && /\/admin\/dealers\/?$/.test(path)) {
+      return await handleDealers(identity, cors);
+    }
     if (method === "GET") return await handleList(identity, cors);
     if (method === "POST") return await handleCreate(identity, event, cors);
     if (method === "PATCH") return await handleUpdate(identity, event, cors);

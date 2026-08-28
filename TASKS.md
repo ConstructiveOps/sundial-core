@@ -672,20 +672,23 @@ lands only after its server change is verified in prod. Branch per repo per phas
       into EVERY Lambda deploy, so it wants its own reviewed diff rather than a drive-by
       during a backfill.
 
-- [~] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
+- [x] **Phase 1b — Comments and mentions RLS (A5, moved up from Phase 6).** Phase 0
       measured a Sales Rep reading **all 485 comments in the tenant** (510 by the time
       1b was built), none of them their own, on records they cannot open.
       `sql/sundial_access_p1b_comment_rls.sql`: the `security definer` helpers
       (`current_profile`, `record_visible`, `record_visible_for`, `user_visible`) and
       the §5.3 policies. Depends on Phase 1's cache columns and nothing else.
       **TIM applies** in the dashboard, in two parts — see the file's RUN ORDER.
-  - [ ] Part A: `supabase_user_id` on `sundial_user_cache` (**TIM**), then a full user
+  - [x] Part A: `supabase_user_id` on `sundial_user_cache` (**TIM**), then a full user
         cache-sync (**Claude**), then Part B: helpers + policies (**TIM**).
-  - [ ] V1–V13 verification; V10–V12 are TIM-only (`set role` is denied to the
-        read-only MCP user).
-  - [ ] `node scripts/verify-comment-rls.mjs` as the ZZ TEST users.
-  - [ ] Deploy `sundial-comment-notify` with the §3.7 `record_visible_for` re-check
-        (diff approved 2026-08-27; 644 unit tests green).
+  - [x] V1–V14 verification. Two defects found by running them: V2's `anon` grant
+        (fixed by Part C) and V10–V12's post-`set role` uuid subquery returning a
+        FALSE GREEN (`uid null / 0 / 0`). Both written up in PROGRESS + D-064.
+  - [x] `node scripts/verify-comment-rls.mjs` — **44/44**. Sends 2 real emails to ZZ
+        mailboxes per green run (the trigger fires; EMAIL_FROM is set).
+  - [x] Deployed `sundial-comment-notify` with the §3.7 re-check. `scripts/verify-
+        mention-notify-e2e.mjs` **11/11**: happy path stamped, out-of-scope mention
+        refused `record_not_visible` and NOT stamped, replay idempotent.
   - [ ] **Follow-up from the Phase 1b impact measurement — three accounts read every
         comment in the tenant today and go to zero under the new policies. That is
         correct, and two of them are a hole worth closing at the source:**

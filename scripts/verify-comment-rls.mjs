@@ -26,6 +26,14 @@
 // A run that dies half way leaves rows tagged with its RUN_ID; re-running cleans
 // them (cleanup deletes by body prefix, not just by this run's ids).
 //
+// IT ALSO SENDS REAL EMAIL. Every mention this script succeeds in creating fires the
+// AFTER INSERT trigger, which posts to sundial-comment-notify, which has EMAIL_FROM
+// set — so the two allowed mentions below each deliver a message. Both go to ZZ TEST
+// mailboxes (tim+zz-admin@ and tim+zz-rep-a1@), never to a live user, and that is a
+// property of the ZZ fixtures rather than of any check here. Deleting the comment
+// afterwards cascades the mention away but does not un-send the mail. Expect two
+// messages per green run.
+//
 // Usage:
 //   node scripts/verify-comment-rls.mjs
 //   node scripts/verify-comment-rls.mjs --json

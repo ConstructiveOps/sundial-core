@@ -918,6 +918,25 @@ select split_part(p.email,'@',1)                                   as target,
 
 
 -- ---------------------------------------------------------------------------
+-- ⚠️ V10–V12: SET THE CLAIMS BEFORE SWITCHING ROLE, NEVER AFTER.
+--
+-- The first draft of these blocks did `set local role authenticated` FIRST and then
+-- resolved the test user's uuid with `(select id from public.profiles where email
+-- = ...)`. That subquery then runs AS `authenticated`, where `own_profile_select`
+-- (`auth.uid() = id`) hides every row — and `auth.uid()` is still NULL at that
+-- point, so it hides ALL of them. The subquery returns NULL, the claims carry a
+-- NULL `sub`, and every subsequent count is measured for a session that is nobody.
+--
+-- V10 THEN RETURNS `uid null / 0 / 0` AND LOOKS LIKE A PASS. That is the danger: a
+-- zero is exactly what a correctly-scoped rep with no seeded comments also returns,
+-- so the broken query and the working one are indistinguishable by their output.
+-- Caught by Tim on 2026-08-27, running Part B's verification for real.
+--
+-- The fix below is an ordering swap only: `set_config` runs as `postgres` (RLS
+-- bypassed, the profile is visible), and `set local role` comes after. Both are
+-- transaction-local and switching role does not reset a GUC, so the claims survive.
+-- ALWAYS ASSERT THE `uid` COLUMN IS NON-NULL BEFORE BELIEVING ANY COUNT BESIDE IT.
+--
 -- V10 — **TIM ONLY** (needs `set role`). THE POLICY, not the arithmetic.
 -- Impersonates zz-rep-a1's real session. Read-only, wrapped in a rollback.
 -- EXPECT: uid = zz-rep-a1's uuid; comments_visible = only their own records'
@@ -928,12 +947,14 @@ select split_part(p.email,'@',1)                                   as target,
 -- are reading a table the browser can read too.
 -- ---------------------------------------------------------------------------
 begin;
-  set local role authenticated;
+  -- ORDER IS LOAD-BEARING: resolve the uuid and set the claims FIRST, as postgres,
+  -- then switch role. See the warning above V10.
   select set_config('request.jwt.claims',
     json_build_object(
       'sub', (select id from public.profiles
                where email = 'tim+zz-rep-a1@constructiveoperations.com'),
       'role','authenticated')::text, true);
+  set local role authenticated;
 
   select auth.uid()                                       as uid,
          (select count(*) from public.comments)           as comments_visible,
@@ -949,12 +970,14 @@ rollback;
 -- tenant total has drifted to. Staff are untouched.
 -- ---------------------------------------------------------------------------
 begin;
-  set local role authenticated;
+  -- ORDER IS LOAD-BEARING: resolve the uuid and set the claims FIRST, as postgres,
+  -- then switch role. See the warning above V10.
   select set_config('request.jwt.claims',
     json_build_object(
       'sub', (select id from public.profiles
                where email = 'tim+zz-exec@constructiveoperations.com'),
       'role','authenticated')::text, true);
+  set local role authenticated;
 
   select (select count(*) from public.comments)             as comments_visible_as_exec,
          (select count(*) from public.comments
@@ -979,12 +1002,14 @@ rollback;
 --                  single most important refusal in this file.
 -- ---------------------------------------------------------------------------
 begin;
-  set local role authenticated;
+  -- ORDER IS LOAD-BEARING: resolve the uuid and set the claims FIRST, as postgres,
+  -- then switch role. See the warning above V10.
   select set_config('request.jwt.claims',
     json_build_object(
       'sub', (select id from public.profiles
                where email = 'tim+zz-rep-a1@constructiveoperations.com'),
       'role','authenticated')::text, true);
+  set local role authenticated;
 
   -- (a) own record — EXPECT SUCCESS
   insert into public.comments (tenant_id, record_id, record_object, author_id, author_name, body)
@@ -1000,12 +1025,14 @@ rollback;
 
 -- (c) and (d): the mention refusals. Comment out (c) to reach (d), or run twice.
 begin;
-  set local role authenticated;
+  -- ORDER IS LOAD-BEARING: resolve the uuid and set the claims FIRST, as postgres,
+  -- then switch role. See the warning above V10.
   select set_config('request.jwt.claims',
     json_build_object(
       'sub', (select id from public.profiles
                where email = 'tim+zz-rep-a1@constructiveoperations.com'),
       'role','authenticated')::text, true);
+  set local role authenticated;
 
   insert into public.comments (tenant_id, record_id, record_object, author_id, author_name, body)
   values ('a1W7y000007AszBEAS','a1P7y00000AmyXCEAZ','customer',
@@ -1069,3 +1096,111 @@ select 'cache tables still revoked from authenticated (A4 intact)',
 -- END. Next: scripts/verify-comment-rls.mjs as the ZZ TEST users (step 5), then
 -- the sundial-comment-notify §3.7 re-check (step 6).
 -- =============================================================================
+
+
+-- #############################################################################
+-- ##  PART C — the anon EXECUTE revoke that Part B's `from public` missed.    ##
+-- ##  Found by V2 on 2026-08-27, AFTER Part B was applied. Run this.          ##
+-- #############################################################################
+--
+-- V2 was written expecting `anon_exec = false` on the four public helpers. It came
+-- back TRUE on all four, and the reason is the same shape of accident A4 documented
+-- on the cache tables — a default that re-grants what you just revoked.
+--
+--   select proacl from pg_proc ... ->  public.record_visible_for:
+--     postgres=X/postgres
+--     anon=X/postgres            <-- a DIRECT grant, not one held via PUBLIC
+--     authenticated=X/postgres
+--     service_role=X/postgres
+--
+-- Supabase ships `alter default privileges in schema public grant all on functions
+-- to anon, authenticated, service_role`. So at CREATE time each function got a
+-- direct grant to each of the three roles. Part B's `revoke all ... from public`
+-- removed the PUBLIC entry — which was not the entry doing the work. The tell is
+-- `private.resolve_access`, which came back correctly locked down: those default
+-- privileges are scoped `in schema public`, so nothing re-granted it.
+--
+-- THIS IS THE D-064 LESSON REPEATING, ONE LAYER DOWN. "Ask what the grant is, then
+-- ask what the policy is" — and then ask what re-grants it. A revoke from PUBLIC is
+-- not a revoke from a role that holds the privilege directly.
+--
+-- WHAT WAS ACTUALLY EXPOSED, AND WHAT WAS NOT
+-- -------------------------------------------
+-- Three of the four are inert for anon, because they resolve the CALLER through
+-- auth.uid(), which is NULL for an anonymous session:
+--   current_profile()            -> no rows
+--   user_visible(uuid)           -> false always (the `me` side is empty)
+--   record_visible(text,text)    -> false always
+--
+-- `record_visible_for(uuid, text, text)` is the exception and the reason this part
+-- exists: it takes the subject as an ARGUMENT, so it never consults auth.uid(). Any
+-- holder of the publishable key — which ships in the browser bundle by design —
+-- could POST /rest/v1/rpc/record_visible_for with an arbitrary uuid and an
+-- arbitrary Salesforce id and get back a boolean. That is an oracle over "does this
+-- record exist in the cache" and "can this user see it", unauthenticated. It is a
+-- weak oracle (both arguments have to be guessed) and it leaks no field values, but
+-- it is free to close and it should never have been open.
+--
+-- WHY `record_visible` KEEPS ITS anon GRANT
+-- -----------------------------------------
+-- An RLS policy expression executes as the INVOKING role. `comments_select_visible`
+-- and `comments_insert_visible` both call `record_visible()`, and policies apply to
+-- role {public}, anon included. Revoke it from anon and an anonymous SELECT on
+-- `comments` raises `42501: permission denied for function record_visible` instead
+-- of returning an empty set — a behaviour change on the anon surface, and one that
+-- would make scripts/probe-cache-reachability.mjs report an error where Phase 0
+-- recorded "200, 0 rows". It is also pointless: the function takes no uuid, so for
+-- an anonymous caller it answers `false` and nothing else. Keep it, deliberately.
+--
+-- Revoking the other three does NOT break policy evaluation for anon:
+--   * mentions_select_own calls no function at all — anon still gets 200 / 0 rows.
+--   * mentions_insert_scoped calls the two revoked ones, so an anon INSERT now
+--     raises 42501 rather than being denied by the policy. Both are a refusal, and
+--     anon could never satisfy the EXISTS on `comments` regardless.
+--   * record_visible() calls record_visible_for() INTERNALLY, and that inner call
+--     is unaffected: record_visible is SECURITY DEFINER owned by postgres, so its
+--     body runs as postgres, which keeps EXECUTE. Verify this with V14.
+
+revoke execute on function public.record_visible_for(uuid, text, text) from anon;
+revoke execute on function public.user_visible(uuid)                   from anon;
+revoke execute on function public.current_profile()                    from anon;
+
+-- NOTE FOR ANY FUTURE EDIT OF THESE FUNCTIONS: `create or replace function`
+-- PRESERVES the existing ACL, so re-running Part B will not undo Part C. A `drop`
+-- followed by a `create` WILL re-apply the default privileges and silently re-open
+-- anon. If you ever drop one of these, re-run Part C afterwards and re-check V2.
+
+
+-- ---------------------------------------------------------------------------
+-- V2b — re-run V2 after Part C.
+-- EXPECT: private.resolve_access      false / false / false
+--         public.current_profile      false / true  / true
+--         public.record_visible       TRUE  / true  / true   <-- deliberate, see above
+--         public.record_visible_for   false / true  / true
+--         public.user_visible         false / true  / true
+-- ---------------------------------------------------------------------------
+select n.nspname || '.' || p.proname                                as function,
+       has_function_privilege('anon',          p.oid, 'EXECUTE')    as anon_exec,
+       has_function_privilege('authenticated', p.oid, 'EXECUTE')    as auth_exec,
+       has_function_privilege('service_role',  p.oid, 'EXECUTE')    as svc_exec
+  from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where (n.nspname, p.proname) in (
+         ('private','resolve_access'), ('public','current_profile'),
+         ('public','record_visible'),  ('public','record_visible_for'),
+         ('public','user_visible'))
+ order by 1;
+
+
+-- ---------------------------------------------------------------------------
+-- V14 — **TIM ONLY**. Proof that revoking record_visible_for from anon did not
+-- break record_visible() for anon, i.e. that the SECURITY DEFINER inner call runs
+-- as the owner rather than the caller. This is the one thing Part C could have
+-- broken, so it is checked rather than assumed.
+-- EXPECT: comments_readable = 0 with NO error raised. An error here means an
+--         anonymous visitor now gets a 500 where they used to get an empty list.
+-- ---------------------------------------------------------------------------
+begin;
+  set local role anon;
+  select count(*) as comments_readable_as_anon from public.comments;
+  select count(*) as mentions_readable_as_anon from public.comment_mentions;
+rollback;

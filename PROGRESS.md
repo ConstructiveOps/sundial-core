@@ -1,5 +1,93 @@
 # Sundial — Progress Log
 
+## 2026-08-27 — Access model Phase 1b: the comments/mentions RLS is live
+
+D-064 amendment A5, on `feature/access-model-p1b`. **This is the first thing in the
+access model that changes what a live user sees**, and it closes a measured
+cross-user leak: every portal user, including a Sales Rep with no elevated access,
+could read **every comment in the tenant** through the browser client — on records
+they cannot open, none of them their own.
+
+### What shipped
+
+| | |
+|---|---|
+| `sql/sundial_access_p1b_comment_rls.sql` | Part A `sundial_user_cache.supabase_user_id`; Part B `private.resolve_access()` + the four §5.2 definer helpers + the five policies in one transaction; Part C the `anon` EXECUTE revoke; V1–V14 verification |
+| `lambdas/sundial-comment-notify/notify.js` | step 6b — the §3.7 `record_visible_for` re-check before sending. **Deployed.** |
+| `scripts/verify-comment-rls.mjs` | 44-check gate as the ZZ TEST users over supabase-js |
+| `scripts/verify-mention-notify-e2e.mjs` | 11-check gate for the notify chain incl. the re-check |
+
+Applied by Tim in the SQL editor, in the file's stated run order. All gates green —
+the evidence table is `docs/access-model.md` §8, "Phase 1b gate".
+
+### The measured effect
+
+**One intended change:** Dennis Alessandro, the one live restricted user, goes from
+**511 comments to 79** — the threads on records where he is the `Sales_Rep__c`. All
+**26 comments he authored himself remain visible**. All 23 tenant-scope users are
+unchanged, and all **14 of 14** existing mention rows stay readable by the person
+they mention, so no "For You" feed lost a row.
+
+**Three test accounts correctly went to zero,** and two of them are a hole closing:
+`bradtest@` and `tim+uatest@` are `Active__c = false` in Salesforce and **still had
+working Supabase logins** — deactivating a `Sundial_User__c` does not ban the auth
+user, so they authenticated and read all 511 comments. `inviteuser1@` is an active
+Sales Rep with a null `Dealer__c`, which §1.2 resolves to `none`. Follow-ups in
+TASKS.md to ban the first two and deactivate-or-attribute the third.
+
+### Three measurements changed the design as written
+
+1. **`profiles.access_scope` was NULL on 21 of 35 rows.** §5.2 named it as the only
+   scope source, and it is written only on a `/auth/me` since the Phase 1 deploy —
+   so "read profiles, deny NULL" would have hidden every comment from **17 real
+   Harmon staff, 11 of 14 Executives and 6 of 8 Managers among them**, until each
+   next logged in. Scope is now the **narrower** of `profiles.access_scope` and a
+   `sundial_user_cache` derivation, nulls ignored (A7.2).
+2. **`sundial_user_cache` carried no Supabase uuid,** so a mentioned user with no
+   `profiles` row was unresolvable. Added `supabase_user_id`; `cache-sync` populated
+   it with no code change. **One live user needed it**: an active Executive,
+   provisioned, never signed in — she resolves to `tenant` from the cache alone, and
+   without the column would have been permanently unmentionable with no symptom but
+   a mention insert that silently failed (A7.3).
+3. **18 commented records (28 comments) are absent from the cache,** so §5.2's
+   pseudocode — which tested `exists(<cache>)` on the `tenant` branch too — would
+   have hidden them from admins. The `tenant` branch now returns true on the tenant
+   match alone (A7.1).
+
+### Two defects the gate caught that a reading would not have
+
+- **V2 expected `anon_exec = false` and got `true`.** Supabase's `alter default
+  privileges in schema public grant all on functions to anon, authenticated,
+  service_role` gives every new function a **direct** grant per role, so Part B's
+  `revoke ... from public` removed an entry that was not doing the work.
+  `private.resolve_access` came back correctly locked down, which is the tell —
+  those defaults are scoped `in schema public`. Part C revokes the three helpers
+  that anon has no business calling; `record_visible_for` was the materially exposed
+  one, an unauthenticated boolean oracle, because it takes its subject as an
+  argument and never consults `auth.uid()`. **This is the D-064 "wide grant is the
+  default" lesson repeating one layer down: a revoke from PUBLIC is not a revoke
+  from a role holding the privilege directly.**
+- **V10–V12 resolved the test user's uuid AFTER `set local role authenticated`**
+  (found by Tim running them). `own_profile_select` then hid the row, `sub` was
+  NULL, and the block measured a session that was nobody — returning `uid null / 0
+  / 0`, **which is exactly what a correctly-scoped rep with no seeded comments also
+  returns.** A false green that looks like a pass. Fixed by setting the claims
+  before the role switch; the file now says to assert `uid` is non-null before
+  believing any count beside it.
+
+### Notes for whoever runs these next
+
+`scripts/verify-comment-rls.mjs` **sends two real emails per green run** (to ZZ TEST
+mailboxes) — every mention it successfully creates fires the trigger, and
+`EMAIL_FROM` is set on the deployed function. Deleting the comment cascades the
+mention away but does not un-send the mail.
+
+`scripts/verify-mention-notify-e2e.mjs` needs the **service role**, deliberately:
+the case it tests — a mention of a user who cannot see the record — is unreachable
+from a browser because the policy correctly refuses it. The only way to put one in
+front of the Lambda is to write it the way a policy regression would.
+
+
 ## 2026-08-27 — Access model Phase 1: built, applied, and measured
 
 D-064 Phase 1 on `feature/access-model-p1`. The data model exists, the backfills

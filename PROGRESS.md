@@ -1,5 +1,96 @@
 # Sundial — Progress Log
 
+## 2026-08-28 — Access model Phases 3, 4 and 5: D-064 is LIVE and ACCEPTED
+
+The whole access model shipped tonight, in one evening, replacing the planned
+three-business-day shadow cook with the offline gate run before any enforcement. Nine
+Lambdas enforce; the full matrix is green with **every row asserted and zero pending**
+for the first time since it was written.
+
+### The gate that replaced the cook
+
+- `access-shadow-report.mjs`: **Dennis zero-diff** — customer 3,536 vs 3,536, solar 781
+  vs 781, `onlyInOld` and `onlyInNew` both zero. 23 real users, every one "no change".
+  The only user resolving to `none` was ZZ Tech One, a fixture.
+- `access-shadow-summary.mjs`: 302 lines of real traffic, 8 widenings, **all classified**
+  (the four ZZ reps gaining their own records), 0 unexplained.
+
+### What is live
+
+| Phase | Shipped |
+|---|---|
+| 3 | `rowFilter`/`userFilter` decide every read; the TEMP guard is **deleted** |
+| 4 | Field manifest from the workbooks; `?full=true` projection, `access.editable`, list/search projection, picklist filter; sf-update's four write gates; §2.3 invariants 1 and 2 |
+| 5 | `canAction` + `assertVisibleRecord` across four file Lambdas and three action Lambdas |
+
+**Final state, measured:** 4 ZZ reps see exactly their own record on every path; zz-mgr-a
+sees Dealer A's two; tech/nodealer/inactive-dealer see nothing; admin/exec are unchanged
+on every surface. Dennis: 3,536 / 781, cache and Salesforce agreeing, **one page** — the
+OFFSET clamp died with the live-SOQL bypass. rep-a1 gets 234 fields where admin gets 398;
+11 list columns vs 20; 50 picklists vs 65.
+
+**Verification suites, all green:** full matrix (140 surfaces, 0 pending) · field manifest
+live (24/24) · write probes (24/24) · shadow summary under enforce (0 disagreements,
+0 unexplained widenings) · unit tests **652 → 743**.
+
+### Six things that were wrong, and how each was found
+
+Worth listing because none was found by reading the code, and three were in the
+instruments rather than the system.
+
+1. **The matrix had a false red.** Its spec modelled only *rep* ownership, so a
+   `dealer`-scope user "owned" nothing and the spec demanded 404 on their own dealer's
+   records — which §3.1 says they should see. It would have failed the Phase 3 gate
+   against correct server behaviour.
+2. **The diff tool conflated data drift with regression.** `SOL-10043` was created
+   through the portal mid-run, moving tenant solar totals 4,487 → 4,488 and reading as
+   "4 DIFFERENCES". A tool that cries wolf when somebody sells a system trains you to
+   skim past the one that matters.
+3. **§4.4's field filter was active under `shadow`.** The meta routes are handled before
+   the shared context is built and were handed the raw access block — breaking the
+   "shadow changes nothing" contract the entire rollout rests on.
+4. **`sundial-sf-update` had no environment variables at all**, so the write gates would
+   have enforced NOTHING while looking perfectly deployed. Then the same trap on seven
+   more: `scripts/set-access-mode.mjs` now sets and verifies all nine in one pass.
+5. **Phase 5's gates could be switched off, and must not be.** The mode switch exists so
+   code ships inert — right when a gate replaces nothing, wrong here, because Phase 5
+   *removed* the TEMP 403. "Mode off" stopped meaning "yesterday" and started meaning
+   "looser": for four minutes between deploy and flag, list-files had no rep restriction
+   (CloudWatch: zero invocations, so nothing was exposed). Worse, `ACCESS_MODEL_MODE=off`
+   is the documented incident rollback, which would have re-opened Solar files at exactly
+   the wrong moment. Phase 5 gates are now always on; their rollback is a zip redeploy.
+6. **The post-launch watch cried wolf on every rep page view.** Under enforce, shadow
+   re-derived the row decision from the returned record — but `?full=true` now selects
+   only the role's readable fields, and `Sales_Rep__c` is not one for a Sales Rep. It saw
+   a null rep, concluded the record was invisible, and logged a narrowing on a record the
+   server had just correctly served. Under enforce the comparison is tautological and now
+   says so.
+
+### The one probe expectation that was wrong, and kept anyway
+
+`Commission_Total__c` is a FORMULA, so staff get 400 `FIELD_NOT_WRITABLE` on it too. Kept
+as a probe precisely for that: a rep gets **403 FIELD_FORBIDDEN** and an admin **400** on
+the same field, which is the clearest evidence the access gate runs *before* the describe
+check, as §3.4 step 3 specifies.
+
+### Consciously deferred to next week
+
+- **Phase 7 cleanup** in full (`profiles.role`, `Hierarchy_Level__c` deprecation notes,
+  `caching-architecture.md` corrections).
+- **Phase 6** — dropping the six inert cache-table SELECT policies and `portal_users`.
+  The REVOKE that made them inert shipped in Phase 1; this removes a misleading artefact,
+  not a control.
+- **The generator's client-config output** (§4.2 output 2). Not needed: §4.5's section
+  auto-hide works off the server's stripped payload, so the committed client configs are
+  still correct for layout. The generator emits the server manifests only.
+- **The D7 solar mirror tabs** on the Customer page render empty rather than hidden for a
+  sales role. The panel fetches the linked Solar record itself, so the same
+  "no visible fields → hide" rule has to be applied where that data lands. Cosmetic: the
+  values are absent, not hidden-but-present.
+- **`sundial-sf-update` has no test for the cache stale-flag path** under the new gates.
+- **A rep-facing 403 has no friendly client rendering** — they should not meet one in
+  normal use now that nav and buttons reflect `access`, but nothing catches it if they do.
+
 ## 2026-08-28 — Access model Phase 3: reads ENFORCED, the TEMP guard is gone
 
 D-064 §7.3 + §7.4, on `feature/access-model-p3`. **What a sales role can see is now

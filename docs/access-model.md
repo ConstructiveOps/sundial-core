@@ -1,6 +1,13 @@
 # Sundial Access Model — sales reps and dealers
 
-**Status:** BUILDING. Phase 0, **Phase 1 and Phase 1b shipped 2026-08-27** (`feature/access-model-p1`,
+**Status:** ✅ **LIVE — D-064 ACCEPTED 2026-08-28.** Phases 0–5 shipped; nine Lambdas
+enforce; the access matrix is green with every row asserted and zero pending. Phase 6
+(dropping the inert cache policies) and Phase 7 (cleanup) remain, both non-blocking.
+Shadow logging stays ON under enforce as the post-launch watch — a disagreement line now
+means enforcement and the model have drifted, which is the one failure nobody would
+otherwise notice. Historical status follows.
+
+**Was:** BUILDING. Phase 0, **Phase 1 and Phase 1b shipped 2026-08-27** (`feature/access-model-p1`,
 `feature/access-model-p1b`). Phase 1: data model, backfills, cache columns, `lib/access.js`, the
 `access` block on `/auth/me` — all six gates pass, evidence in §8, **nothing any live user saw
 changed**, measured twice. **Phase 1b: the comments/mentions RLS is LIVE and is the first thing in

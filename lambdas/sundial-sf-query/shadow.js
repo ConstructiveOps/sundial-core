@@ -364,7 +364,21 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = M
      *                           field/value), so the comparison is like-for-like.
      * @param {string|null} or   the served query's PostgREST or-group (the ?q= ILIKE).
      */
-    async list({ path, liveOld = false, cacheTable, oldCount, oldTotal, filters = [], or = null }) {
+    async list({
+      path,
+      liveOld = false,
+      cacheTable,
+      oldCount,
+      oldTotal,
+      filters = [],
+      or = null,
+      // What the request ACTUALLY returned. Defaulted to "served" because that was the
+      // only possibility while the TEMP guard did the serving; under enforce a denied
+      // module returns 403, and reporting it as "served -> forbidden" made every such
+      // request look like a narrowing the model had just discovered. It had not: the
+      // request and the model agreed, and the log was describing a world that ended.
+      oldOutcome = OUT.SERVED,
+    }) {
       const t0 = Date.now();
       try {
         // `user` is a UNION, not an equality — rowFilter refuses it on purpose (§3.5),
@@ -377,15 +391,15 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = M
         if (f.deny) {
           return emit({
             path,
-            oldOutcome: OUT.SERVED,
+            oldOutcome,
             oldCount,
             oldTotal,
             newOutcome: OUT.FORBIDDEN,
             newDeny: f.code,
             newTotal: 0,
             newCountSource: SRC.STRUCTURAL,
-            verdict: "narrower",
-            narrower: true,
+            verdict: verdictFor(oldOutcome, OUT.FORBIDDEN),
+            narrower: oldOutcome === OUT.SERVED,
             wider: false,
             shadowMs: Date.now() - t0,
           });
@@ -394,7 +408,7 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = M
         if (access.scope === "tenant" && !repRestrict) {
           return emit({
             path,
-            oldOutcome: OUT.SERVED,
+            oldOutcome,
             oldCount,
             oldTotal,
             newOutcome: OUT.SERVED,
@@ -414,7 +428,7 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = M
         });
         emit({
           path,
-          oldOutcome: OUT.SERVED,
+          oldOutcome,
           oldCount,
           oldTotal,
           newOutcome: OUT.SERVED,
@@ -451,10 +465,33 @@ function makeRecorder({ identity, objectKey, qs, repRestrict, supabase, mode = M
      * record the new rule would serve" is a WIDENING on a served path, and it is
      * invisible any other way.
      */
-    async single({ path, served, row, record, id, cacheTable }) {
+    async single({ path, served, row, record, id, cacheTable, enforced = false }) {
       const t0 = Date.now();
       try {
         const oldOutcome = served ? OUT.SERVED : OUT.NOT_FOUND;
+
+        // ⚠️ UNDER ENFORCE THE COMPARISON IS TAUTOLOGICAL, AND PRETENDING OTHERWISE
+        // PRODUCES FALSE FINDINGS. The query that served this record carried the row
+        // filter in its WHERE, so "what was served" and "what the model allows" are the
+        // same decision, already made once.
+        //
+        // Re-deriving it from the returned record does not merely duplicate that work,
+        // it gets it WRONG: ?full=true now SELECTS only the role's readable fields, and
+        // Sales_Rep__c is not one of them for a Sales Rep — so the row check sees a null
+        // rep, concludes the record is invisible, and logs a narrowing on a record the
+        // server had just correctly served. Measured: every rep detail view.
+        if (enforced) {
+          return emit({
+            path,
+            oldOutcome,
+            newOutcome: oldOutcome,
+            newCountSource: "enforced_by_query",
+            verdict: "same_outcome",
+            narrower: false,
+            wider: false,
+            shadowMs: Date.now() - t0,
+          });
+        }
         const f = rowFilter(objectKey, access);
         if (f.deny) {
           // §3.1: a module denial on a single read is a 404, never a 403 — a record you

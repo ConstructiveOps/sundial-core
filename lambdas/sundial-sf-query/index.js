@@ -865,6 +865,7 @@ async function handleSingleReadFull(ctx) {
       served: false,
       id,
       cacheTable: ctx.cacheTable,
+      enforced: !!enforce,
     });
     return jsonResponse(404, cors, {
       error: "not_found",
@@ -880,7 +881,7 @@ async function handleSingleReadFull(ctx) {
   // SHADOW: full mode selects the role's readable fields, which always include
   // Sales_Rep__c / Dealer__c / Client__c for the objects that carry them — the new
   // decision is an in-memory check with no second fetch of any kind.
-  await ctx.shadow.single({ path: "single.full", served: true, record });
+  await ctx.shadow.single({ path: "single.full", served: true, record, enforced: !!enforce });
   // Belt and braces behind the narrowed SELECT: the query already fetched only these,
   // so this is a no-op — and if it ever is not, the response is still right.
   const projected = projectRecord(objectKey, access, record);
@@ -906,7 +907,7 @@ async function handleSingleRead(ctx) {
 
   // Module denial -> 404, not 403 (§3.1). See handleSingleReadFull for why.
   if (enforce?.deny) {
-    await shadow.single({ path: "single.soql", served: false, id, cacheTable });
+    await shadow.single({ path: "single.soql", served: false, id, cacheTable, enforced: !!enforce });
     return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
   }
 
@@ -937,7 +938,7 @@ async function handleSingleRead(ctx) {
       // SHADOW: the cache row already carries sales_rep_sf_id / dealer_sf_id (Phase 1),
       // which is exactly what the TEMP guard could not do and why it skipped this
       // shortcut. Evaluating the row in hand costs nothing.
-      await shadow.single({ path: "single.cache", served: true, row: cached });
+      await shadow.single({ path: "single.cache", served: true, row: cached, enforced: !!enforce });
       // §4.3: the cache row shortcut is projected the same way a list row is.
       return jsonResponse(200, cors, {
         source: "cache",
@@ -963,7 +964,7 @@ async function handleSingleRead(ctx) {
   // c. Missing or cross-tenant -> 404.
   if (!records || records.length === 0) {
     // SHADOW: see the same branch in handleSingleReadFull — one cache probe, only here.
-    await shadow.single({ path: "single.soql", served: false, id, cacheTable });
+    await shadow.single({ path: "single.soql", served: false, id, cacheTable, enforced: !!enforce });
     return jsonResponse(404, cors, {
       error: "not_found",
       code: "RECORD_NOT_FOUND",
@@ -975,7 +976,7 @@ async function handleSingleRead(ctx) {
   // SHADOW: buildCacheSelect selects every field with a cache column, and Sales_Rep__c /
   // Dealer__c both have one since Phase 1 — so the filter fields are on this record and
   // no extra query is needed.
-  await shadow.single({ path: "single.soql", served: true, record: sfRecord });
+  await shadow.single({ path: "single.soql", served: true, record: sfRecord, enforced: !!enforce });
   const existingVersion = await getExistingCacheVersion(
     supabase,
     cacheTable,
@@ -1099,7 +1100,15 @@ async function handleListRead(ctx) {
   // record, so there is no enumeration oracle to protect against here -- and a 403 is the
   // answer the client can render honestly.
   if (enforce?.deny) {
-    await shadow.list({ path: "list.cache", cacheTable, oldCount: 0, oldTotal: 0 });
+    await shadow.list({
+      path: "list.cache",
+      cacheTable,
+      oldCount: 0,
+      oldTotal: 0,
+      // What is actually being returned, so the watch does not read a correct denial
+      // as a narrowing the model just found.
+      oldOutcome: "forbidden",
+    });
     return jsonResponse(403, cors, { error: "forbidden", code: enforce.code || DENY.MODULE_FORBIDDEN });
   }
 

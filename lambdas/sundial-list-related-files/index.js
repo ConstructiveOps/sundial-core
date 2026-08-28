@@ -13,6 +13,10 @@
 
 import { resolveIdentity } from "../../lib/identity.js";
 import {
+  alwaysEnforcedAccess,
+  assertActionOnRecord,
+} from "../../lib/access-enforce.js";
+import {
   corsHeaders,
   normalizeHeaders,
   jsonResponse,
@@ -76,6 +80,19 @@ export const handler = async (event) => {
     }
 
     // Gate on the PARENT record.
+    // ACCESS MODEL (D-064 §3.6). This route was UNGATED entirely — §3.6 calls it out
+    // by name for that reason. It walks from one record to its related records' files,
+    // so an ungated related-files call is a way to reach Solar files from a Customer id
+    // without ever asking about the Solar record.
+    const access = alwaysEnforcedAccess(identity);
+    const denied = await assertActionOnRecord(
+      objectKey === "solar" ? "files.solar.related" : `files.${objectKey}.list`,
+      objectKey,
+      recordId,
+      access
+    );
+    if (denied) return jsonResponse(denied.status, cors, denied.body);
+
     const owned = await assertTenantOwnsRecord(recordId, objectKey, tenantId);
     if (!owned) {
       return jsonResponse(404, cors, {

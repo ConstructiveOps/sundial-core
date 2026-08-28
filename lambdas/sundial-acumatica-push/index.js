@@ -40,6 +40,7 @@
 
 import { getSalesforceToken, sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
+import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { putAcumaticaEntity, normalizeAcumaticaPhone } from "../../lib/acumatica.js";
 import { lookupTaxZone } from "../../lib/acumatica-tax-zones.js";
 
@@ -303,6 +304,14 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId;
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // ACCESS MODEL (D-064 §3.6): pushing a customer into Acumatica is an accounting
+    // action, tenant scope only. No record check is needed beyond the action gate —
+    // a sales role cannot perform it on ANY record, so there is nothing to scope.
+    {
+      const denied = assertAction("acumatica.sync", alwaysEnforcedAccess(identity));
+      if (denied) return jsonResponse(denied.status, cors, denied.body);
     }
 
     // --- Read the customer, TENANT-SCOPED (Id + Client__c) ------------------

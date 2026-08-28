@@ -24,6 +24,10 @@
 
 import { resolveIdentity } from "../../lib/identity.js";
 import {
+  alwaysEnforcedAccess,
+  assertActionOnRecord,
+} from "../../lib/access-enforce.js";
+import {
   corsHeaders,
   normalizeHeaders,
   jsonResponse,
@@ -259,16 +263,23 @@ export const handler = async (event) => {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
     }
 
-    // TEMP — Sales Rep hard-restrict (remove with the per-user visibility feature;
-    // see TASKS.md "Sales Rep visibility"). A caller whose Hierarchy_Level__c ===
-    // "Sales Rep" may NOT list/download SOLAR record files (Customer files stay
-    // allowed). Solar files can expose install/proposal docs across reps.
-    if (identity?.user?.hierarchyLevel === "Sales Rep" && objectKey === "solar") {
-      return jsonResponse(403, cors, {
-        error: "forbidden",
-        code: "SALES_REP_FILES_RESTRICTED",
-      });
-    }
+    // ACCESS MODEL (D-064 §3.6). This REPLACES the TEMP Sales-Rep solar-files 403
+    // that stood here from 2026-08-03. Two differences that matter:
+    //
+    //   1. It keys on the CALLER's resolved scope, not on a hierarchy string. The
+    //      TEMP version let any role it did not recognise through, which is how a
+    //      Technician could list any record's files.
+    //   2. It also gates CUSTOMER files, on the RECORD. The TEMP version allowed
+    //      customer files to every rep for every customer in the tenant — 31,653 of
+    //      them — because it only ever asked about the object, never the record.
+    const access = alwaysEnforcedAccess(identity);
+    const denied = await assertActionOnRecord(
+      `files.${objectKey}.list`,
+      objectKey,
+      recordId,
+      access
+    );
+    if (denied) return jsonResponse(denied.status, cors, denied.body);
 
     // Tenant-ownership gate. Not owned (or unknown object) -> 404.
     const owned = await assertTenantOwnsRecord(recordId, objectKey, tenantId);

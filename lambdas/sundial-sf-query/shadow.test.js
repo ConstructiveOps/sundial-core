@@ -25,6 +25,9 @@ import { mock } from "node:test";
 
 // The real module, captured BEFORE the mock is installed, so the mock can delegate to it.
 import * as realAccess from "../../lib/access.js";
+// The REAL generated manifest — Phase 4 assertions read from it rather than a fixture,
+// so they fail if the workbook stops saying what they assume.
+import customerManifest from "../../lib/field-manifest/customer.json" with { type: "json" };
 
 const TENANT = "a1W7y000007AszBEAS";
 const REP_A = "a1O7y00000REPAAAAA";
@@ -374,9 +377,11 @@ test("an UNRECOGNIZED mode falls back to off, loudly", async () => {
   );
 });
 
-test("mode ENFORCE is recognized, warns, and behaves as shadow", async () => {
-  // Phase 3 gives it meaning. Until then an early flip must not crash the Lambda and must
-  // not silently mean off — either would waste the shadow window.
+test("mode ENFORCE now SERVES the filtered answer (Phase 3)", async () => {
+  // Phase 2's version of this test asserted the opposite -- that enforce served the OLD
+  // answer -- because enforce was recognized but unimplemented. Phase 3 gives it meaning,
+  // and the assertion flips with it. Left as a named change rather than a quiet edit:
+  // this single test is the difference between "measuring" and "enforcing".
   process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Sales Rep", { userId: REP_A });
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
@@ -385,10 +390,166 @@ test("mode ENFORCE is recognized, warns, and behaves as shadow", async () => {
   const body = JSON.parse(res.body);
 
   assert.equal(res.statusCode, 200);
-  assert.equal(body.records.length, 2, "enforce must still SERVE the old answer");
+  assert.equal(body.records.length, 1, "a rep is served their OWN record and no other");
+  assert.equal(body.records[0].sf_id, CUST_1);
+  assert.equal(body.total, 1, "the COUNT is scoped too, not just the page");
+});
+
+test("under ENFORCE the log still runs, and now agrees with what was served", async () => {
+  // Shadow logging stays on after the cutover as the post-launch watch. Under enforce the
+  // served answer and the computed answer are the SAME answer, so a disagreement line is
+  // the signal that enforcement and the model have drifted -- the one failure nobody
+  // would otherwise notice, because the portal would look fine.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
+
+  await handler(listEvent("customer"));
   const line = oneLine();
-  assert.equal(line.mode, "shadow");
-  assert.equal(line.newTotal, 1, "and log the new one");
+  assert.equal(line.mode, "enforce");
+  assert.equal(line.oldTotal, 1, "what was served");
+  assert.equal(line.newTotal, 1, "what the model says");
+  assert.equal(line.verdict, "same_count");
+  assert.equal(line.wider, false);
+  assert.equal(line.narrower, false);
+});
+
+test("ENFORCE: a denied module is 403 on a LIST and 404 on a SINGLE read (§3.1)", async () => {
+  // Not a style choice. A 403 on a record id confirms the record exists, which turns any
+  // detail endpoint into an enumeration oracle for a rep counting the tenant. A closed
+  // MODULE leaks nothing about any particular record, so that one is an honest 403.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [];
+
+  const list = await handler(listEvent("po"));
+  assert.equal(list.statusCode, 403);
+  assert.equal(JSON.parse(list.body).code, "MODULE_FORBIDDEN");
+
+  const single = await handler(singleEvent("po", "a2X000000000001AAA"));
+  assert.equal(single.statusCode, 404);
+  assert.equal(JSON.parse(single.body).code, "RECORD_NOT_FOUND");
+});
+
+test("ENFORCE: roofing closes for a sales scope, stays open for tenant", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.cacheRows = [];
+
+  ctx.identity = identityFor("Sales Dealer", { userId: REP_A });
+  assert.equal((await handler(listEvent("roofing"))).statusCode, 403);
+
+  ctx.logs = [];
+  ctx.identity = identityFor("Admin", { dealer: null });
+  assert.equal((await handler(listEvent("roofing"))).statusCode, 200);
+});
+
+test("ENFORCE: the cache SHORTCUT refuses another rep's row", async () => {
+  // The row is fresh and in the cache, so the shortcut would have served it. It must fall
+  // through to the SOQL path, which carries the same clause, and 404.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_2, REP_B)];
+  ctx.sfRows = []; // the SOQL clause finds nothing either
+
+  const res = await handler(singleEvent("customer", CUST_2));
+  assert.equal(res.statusCode, 404);
+});
+
+test("ENFORCE: a rep's OWN row is still served from the cache shortcut", async () => {
+  // The narrowing must not become "reps get nothing" -- that is the failure mode a
+  // fail-closed change is most likely to ship.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+
+  const res = await handler(singleEvent("customer", CUST_1));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).source, "cache", "served from the cache, not live SOQL");
+});
+
+test("ENFORCE: ?q= search narrows WITHIN the role's scope, never outside it", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [
+    customerRow(CUST_1, REP_A, { name: "ZZ Alpha" }),
+    customerRow(CUST_2, REP_B, { name: "ZZ Beta" }),
+  ];
+
+  const res = await handler(listEvent("customer", { q: "ZZ" }));
+  const body = JSON.parse(res.body);
+  assert.equal(body.records.length, 1);
+  assert.equal(body.records[0].sf_id, CUST_1);
+  assert.equal(body.total, 1);
+});
+
+test("ENFORCE: TENANT scope is untouched on every surface", async () => {
+  // The rule that does not compress: enforcement may only narrow a SALES role. If a
+  // tenant-scope user loses a single row, the change is wrong regardless of what else
+  // passes.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  const list = await handler(listEvent("customer"));
+  assert.equal(JSON.parse(list.body).records.length, 2, "every row, as today");
+  assert.equal(JSON.parse(list.body).total, 2);
+
+  const single = await handler(singleEvent("customer", CUST_2));
+  assert.equal(single.statusCode, 200, "including another rep's record");
+
+  const full = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  assert.equal(full.statusCode, 200);
+
+  const meta = await handler(event("/sf/meta/roofing/picklists", { object: "roofing" }));
+  assert.equal(meta.statusCode, 200, "and the meta routes of a module sales roles cannot reach");
+});
+
+test("ENFORCE: scope none reaches nothing, on every route", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Technician", { userId: REP_B });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT }];
+
+  assert.equal((await handler(listEvent("customer"))).statusCode, 403);
+  assert.equal((await handler(singleEvent("customer", CUST_1))).statusCode, 404);
+  assert.equal((await handler(singleEvent("customer", CUST_1, { full: "true" }))).statusCode, 404);
+  assert.equal((await handler(event("/sf/users", null))).statusCode, 403);
+  assert.equal(
+    (await handler(event("/sf/meta/customer/picklists", { object: "customer" }))).statusCode,
+    403
+  );
+});
+
+test("ENFORCE: GET /sf/users returns the §3.5 union for a dealer", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Dealer", { userId: REP_A });
+  ctx.sfRows = [
+    { Id: REP_A, First_Name__c: "Rep", Last_Name__c: "A" },
+    { Id: "a1O7y00000ADMINAAAA", First_Name__c: "An", Last_Name__c: "Admin" },
+  ];
+
+  const res = await handler(event("/sf/users", null));
+  assert.equal(res.statusCode, 200);
+  const soql = ctx.soqlSeen.find((q) => q.includes("Supabase_User_Id__c"));
+  assert.match(soql, /Dealer__c = '/, "the dealer half");
+  assert.match(soql, /Access_Level__c IN \('Executive', 'Admin', 'Manager'\)/, "the staff half");
+  assert.match(soql, /Active__c = true/, "and the endpoint's own active rule survives");
+});
+
+test("ENFORCE: the picklist MODULE gate closes, values stay org-wide", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const denied = await handler(
+    event("/sf/meta/roofing/picklist/Stage__c", { object: "roofing", field: "Stage__c" })
+  );
+  assert.equal(denied.statusCode, 403, "roofing is closed to sales roles");
+
+  const allowed = await handler(
+    event("/sf/meta/customer/picklist/Stage__c", { object: "customer", field: "Stage__c" })
+  );
+  assert.equal(allowed.statusCode, 200, "customer is reachable; §4.4 field filtering is Phase 4");
 });
 
 // ---------------------------------------------------------------------------
@@ -536,45 +697,46 @@ test("THE SEARCH TERM IS NEVER LOGGED", async () => {
   assert.equal(line.params.hasValue, true);
 });
 
-test("list.live.rep: the TEMP guard's own path, marked as a mixed-source comparison", async () => {
-  // The old total here is a SOQL COUNT and the new one is a cache count. A row of drift
-  // between them is cache lag, and the summary has to be able to tell that apart from a
-  // real widening.
-  process.env.ACCESS_MODEL_MODE = "shadow";
+test("§7.4: a rep's list is CACHE-served — the live-SOQL bypass is gone", async () => {
+  // This replaces the TEMP guard's "list.live.rep" test. That path no longer exists, and
+  // its absence IS the improvement: the guard forced every restricted read to live SOQL
+  // because its field was not cached, and SOQL's OFFSET cap of 2000 made ~1,500 of
+  // Dennis's 3,536 customers unreachable on deep pages. An id equality on an indexed
+  // cache column has no such cap.
+  process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Sales Rep", { userId: REP_A, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
 
-  await handler(listEvent("customer"));
+  const res = await handler(listEvent("customer"));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.source, "cache", "served from the cache like any other role");
+  assert.equal(body.records.length, 1);
   const line = oneLine();
-  assert.equal(line.path, "list.live.rep");
-  assert.equal(line.temp, true, "the TEMP guard was active on this request");
-  assert.equal(line.countSourcesDiffer, true);
-  assert.equal(line.newTotal, 1);
+  assert.equal(line.path, "list.cache", "not list.live.rep — that path is deleted");
+  assert.equal(line.temp, false, "and no TEMP guard is active on any request any more");
 });
 
-test("THE MIS-STAMPED USER: tenant scope + TEMP guard is a WIDENING, and is not shortcut", async () => {
-  // Hierarchy_Level__c = "Sales Rep" while Access_Level__c = Admin — the Phase 0
-  // user-admin default bug. Today they are served Dennis's name-matched set; under the
-  // new model they get the whole tenant. Taking the tenant-scope shortcut here would
-  // report "identical" and hide the single most important line in the whole phase.
-  process.env.ACCESS_MODEL_MODE = "shadow";
+test("§7.4: Hierarchy_Level__c is NO LONGER READ — the mis-stamped user is cured", async () => {
+  // The Phase 0 user-admin default stamped users as Hierarchy_Level__c = "Sales Rep"
+  // regardless of their real role, and the TEMP guard keyed on exactly that string — so
+  // an Admin carrying it was served Dennis's book. Removing the guard removes the whole
+  // failure class: nothing reads that field on a read path now, so the mis-stamp is
+  // inert rather than dangerous.
+  process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Admin", { dealer: null, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT }]; // the guard's narrow live answer
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
 
-  await handler(listEvent("customer"));
+  const res = await handler(listEvent("customer"));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.records.length, 2, "an Admin sees the tenant, mis-stamp or not");
+  assert.equal(body.total, 2);
   const line = oneLine();
   assert.equal(line.scope, "tenant");
-  assert.equal(line.temp, true);
-  assert.equal(line.newCountSource, "cache_count", "the shortcut must NOT have been taken");
-  assert.equal(line.oldTotal, 1);
-  assert.equal(line.newTotal, 2);
-  assert.equal(line.wider, true);
-  assert.equal(line.verdict, "wider");
+  assert.equal(line.temp, false);
+  assert.equal(line.verdict, "same_count", "and enforce agrees with itself");
 });
-
-// --- single reads ----------------------------------------------------------
 
 test("single.cache: the row in hand answers it — no extra query", async () => {
   process.env.ACCESS_MODEL_MODE = "shadow";
@@ -633,18 +795,22 @@ test("single.soql served: the filter fields ride along on the record — no seco
   assert.equal(line.narrower, true);
 });
 
-test("THE WIDENING DETECTOR: a 404 today that the new model would serve", async () => {
-  // The TEMP guard filters on a hardcoded NAME, so a rep who is not Dennis is served
-  // Dennis's records and 404s on their OWN. Old 404 / new served is a widening on a
-  // served path, and a cache probe is the only way to see it — there is no record in
-  // hand to evaluate when the answer was "not found".
-  process.env.ACCESS_MODEL_MODE = "shadow";
-  ctx.identity = identityFor("Sales Rep", { userId: REP_A, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = []; // the guard's name clause matches nothing -> 404
-  ctx.cacheRows = [customerRow(CUST_1, REP_A)]; // but it IS this rep's record
+test("the widening detector still fires — the 404-branch cache probe survives §7.4", async () => {
+  // The Phase 2 version of this test manufactured the widening with the TEMP guard: it
+  // hid a rep's own record and the probe found it. The guard is gone, so the scenario is
+  // built directly instead — a record the SERVED query missed that the row filter would
+  // have allowed. The detector matters more after the cutover, not less: it is the only
+  // thing that would notice enforcement and the model drifting apart.
+  process.env.ACCESS_MODEL_MODE = "shadow"; // shadow, so the served answer stays unfiltered
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = []; // the served read finds nothing -> 404
+  // STALE, so the cache shortcut declines to serve it and the request falls through to
+  // the Salesforce miss above. That is the shape the probe exists for: the row is in the
+  // cache and the caller may see it, but the served path returned nothing.
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { last_synced_at: "2020-01-01T00:00:00Z" })];
 
   const res = await handler(singleEvent("customer", CUST_1));
-  assert.equal(res.statusCode, 404, "still 404 — shadow serves nothing");
+  assert.equal(res.statusCode, 404, "shadow serves nothing differently");
   const line = oneLine();
   assert.equal(line.oldOutcome, "not_found");
   assert.equal(line.newOutcome, "served");
@@ -929,6 +1095,168 @@ test("a scoped user's dealer is the RESOLVED one, not the raw fallback", async (
   assert.equal(line.scope, "dealer");
   assert.equal(line.dealer, DEALER);
   assert.equal(line.dealerActive, true);
+});
+
+
+// ---------------------------------------------------------------------------
+// 6. Phase 4 — the field manifest (§4.3, §4.4)
+// ---------------------------------------------------------------------------
+// These run against the REAL generated manifest, not a fixture, so they fail if the
+// workbook stops saying what the assertions assume. That is the intent: the sheet is the
+// source of truth and a test that mocked it would be testing itself.
+
+test("?full=true: a hidden field is ABSENT from the response for a rep", async () => {
+  // Commission and burden fields are `hidden` for Sales Rep in the customer workbook.
+  // "Absent", not "null": a null would tell the rep the field exists and is empty.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{
+    Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A,
+    First_Name__c: "Zed", Commission_Total__c: 3834.5, Burden_Rate__c: 0.21,
+  }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(!("Commission_Total__c" in body.record), "commission must not be present");
+  assert.ok(!("Burden_Rate__c" in body.record), "burden rate must not be present");
+  assert.equal(body.record.First_Name__c, "Zed", "a readable field still comes through");
+});
+
+test("?full=true: the hidden fields are NEVER FETCHED, not fetched-then-stripped", async () => {
+  // §4.3 is explicit about this and it is the stronger property: data a role may not see
+  // should not leave Salesforce at all. A strip-after-fetch would hold the values in
+  // Lambda memory and in any log line that dumped the record.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  await handler(singleEvent("customer", CUST_1, { full: "true" }));
+
+  const soql = ctx.soqlSeen.find((q) => /FROM Sundial_Customer__c/.test(q));
+  assert.ok(soql, "expected the full-mode query");
+  assert.doesNotMatch(soql, /Commission_Total__c/, "hidden field must not be SELECTed");
+  assert.doesNotMatch(soql, /Burden_Rate__c/, "nor this one");
+  assert.match(soql, /First_Name__c/, "readable fields are still selected");
+});
+
+test("?full=true: access.editable matches the manifest, and excludes protected fields", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.ok(Array.isArray(body.access.editable), "the client needs a list to reflect");
+  assert.deepEqual(
+    body.access.editable,
+    [...customerManifest.roles["Sales Rep"].edit].sort(),
+    "editable is the manifest's edit set, verbatim"
+  );
+  for (const protectedField of ["Sales_Rep__c", "Dealer__c", "Client__c", "Stage__c"]) {
+    assert.ok(
+      !body.access.editable.includes(protectedField),
+      `${protectedField} must never be editable by a sales role`
+    );
+  }
+  assert.match(body.access.manifestVersion, /^customer:[0-9a-f]{8}/);
+});
+
+test("?full=true: TENANT scope is unprojected and unchanged", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.sfRows = [{
+    Id: CUST_1, Client__c: TENANT, First_Name__c: "Zed", Commission_Total__c: 3834.5,
+  }];
+
+  const res = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.record.Commission_Total__c, 3834.5, "staff still see commissions");
+  assert.equal(body.access.editable, null, "null means: apply your existing describe rules");
+});
+
+test("list rows are projected too — the hidden columns do not ride along", async () => {
+  // The detail view is not the only way a field reaches the browser. A list row carries
+  // the same columns, and projecting only the detail read would have left every hidden
+  // number sitting in the list payload.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [
+    customerRow(CUST_1, REP_A, { commission_total: 3834.5, burden_rate: 0.21, stage: "Sold" }),
+  ];
+
+  const res = await handler(listEvent("customer"));
+  const [row] = JSON.parse(res.body).records;
+
+  assert.ok(!("commission_total" in row), "hidden column must not reach a list row");
+  assert.ok(!("burden_rate" in row), "nor this one");
+  assert.equal(row.sf_id, CUST_1, "control columns survive — a row needs to be a row");
+  assert.equal(row.client_sf_id, TENANT);
+});
+
+test("search rows are projected on the same rule as list rows", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { name: "ZZ Alpha", commission_total: 99 })];
+
+  const res = await handler(listEvent("customer", { q: "ZZ" }));
+  const [row] = JSON.parse(res.body).records;
+  assert.ok(row, "the row is still served");
+  assert.ok(!("commission_total" in row), "and still projected");
+});
+
+test("§4.4: picklist metadata is filtered to the role's fields", async () => {
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const res = await handler(
+    event("/sf/meta/customer/picklists", { object: "customer" })
+  );
+  const body = JSON.parse(res.body);
+  assert.equal(res.statusCode, 200);
+  const rep = new Set(customerManifest.roles["Sales Rep"].read);
+  for (const name of Object.keys(body.picklists)) {
+    assert.ok(rep.has(name), `${name} is not readable by this role and must not appear`);
+  }
+});
+
+test("§4.4: a single picklist for a hidden field 404s — not 403", async () => {
+  // Same reasoning as a record: a 403 confirms the field exists, which turns the
+  // describe into an enumeration oracle. It must be indistinguishable from a typo.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+
+  const res = await handler(
+    event("/sf/meta/customer/picklist/Hidden_Picklist__c", {
+      object: "customer",
+      field: "Hidden_Picklist__c",
+    })
+  );
+  assert.equal(res.statusCode, 404);
+  assert.equal(JSON.parse(res.body).code, "FIELD_NOT_FOUND");
+});
+
+test("THE PHASE 4 SWITCH: with the mode OFF, nothing is projected", async () => {
+  // The same property Phases 2 and 3 shipped under, and the one that makes the env var a
+  // real rollback: field projection is bound to enforce, not to the deploy.
+  delete process.env.ACCESS_MODEL_MODE;
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { commission_total: 3834.5 })];
+  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Commission_Total__c: 3834.5 }];
+
+  const list = await handler(listEvent("customer"));
+  assert.equal(
+    JSON.parse(list.body).records[0].commission_total,
+    3834.5,
+    "mode off must not project"
+  );
+
+  const full = await handler(singleEvent("customer", CUST_1, { full: "true" }));
+  assert.equal(JSON.parse(full.body).record.Commission_Total__c, 3834.5);
+  assert.equal(JSON.parse(full.body).access.editable, null);
 });
 
 // Restore the console for any downstream reporter.

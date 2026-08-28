@@ -767,14 +767,34 @@ lands only after its server change is verified in prod. Branch per repo per phas
         they carry no role columns, and `fieldsFor()` does not exist. Phase 2 shadows
         §3.1's module gate on those routes and stamps every line
         `fieldFilter: "deferred_phase4"` so the gap is visible in the data.
-- [ ] **Phase 3 — Enforce reads, retire TEMP.** Enforce-with-overlap, then TEMP removal
-      as two separate deploys. Gate: matrix passes; Dennis's counts unchanged.
-- [ ] **Phase 4 — Field manifest, writes, client cutover.** Sheets move to
-      sundial-core, `generate-field-configs.mjs`, manifest loader, `?full=true`
-      projection, `sf-update` row+field+protected rules, delete
-      `temp-role-tab-visibility.ts`.
-- [ ] **Phase 5 — Actions and files.** `canAction` in budget / acumatica-push /
-      aurora-push / all four file Lambdas; `assertVisibleRecord` on customer files.
+- [x] **Phase 3 — Enforce reads, retire TEMP (2026-08-28).** Branch
+      `feature/access-model-p3`. Two deploys with a matrix between them.
+  - [x] §7.3 enforce with the TEMP clause ANDed on top. 0 widenings, 0 tenant-scope
+        movement across 150 surfaces.
+  - [x] §7.4 TEMP guard deleted — `repRestrictFor`, the `TEMP_*` constants and all five
+        guarded sites. The live-SOQL bypass and its OFFSET clamp go with it.
+  - [x] Dennis verified server-side (never logged in as): 3,536 customer / 781 solar,
+        cache and Salesforce agreeing, one page at the 5,000 cap.
+  - [x] `verify-access-matrix.mjs`: FIXED A FALSE RED — the spec modelled only rep
+        ownership, so dealer scope was expected to 404 on its own dealer's records.
+  - [ ] Remaining: 5 `files.*` surfaces still open — Phase 5.
+  - [ ] harmon-crm client (nav/search/dashboard from `user.access.modules`).
+- [x] **Phase 4 — Field manifest, writes, client cutover (2026-08-28).** Workbooks
+      moved to `docs/`; `generate-field-configs.mjs` (refusals proved by poisoning a
+      COPY and restoring byte-identical); `lib/field-manifest/` loader that throws at
+      cold start; `?full=true` selects only the role's readable fields; list/search
+      projection; §4.4 picklist filter; sf-update's four gates; §2.3 invariants 1 AND 2.
+      `temp-role-tab-visibility.ts` DELETED. Live: 24/24 field assertions, 24/24 write
+      probes.
+- [x] **Phase 5 — Actions and files (2026-08-28).** `lib/access-enforce.js` is the
+      shared gate for all seven. Solar files 403 on every route for sales roles;
+      customer files on visible records only; delete tenant-only; Aurora design-request
+      allowed on own records and 404 on another rep's.
+  - [x] `scripts/set-access-mode.mjs` — sets and VERIFIES the flag on all nine Lambdas.
+        Seven had none, and a Lambda without it enforces nothing while looking deployed.
+  - [!] **Phase 5 gates deliberately IGNORE ACCESS_MODEL_MODE.** They replaced an
+        existing control, so an env rollback would make the system looser than before.
+        Rolling Phase 5 back is a previous-zip redeploy.
 - [ ] **Phase 6 — Supabase RLS (reduced by A4 + A5).** The cache-table revoke shipped in
       Phase 1; the comments/mentions policies shipped in Phase 1b. What is left:
       `sql/sundial_access_rls.sql` **drops** the six accidental cache-table SELECT

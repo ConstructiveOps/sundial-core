@@ -20,6 +20,11 @@
 
 import { resolveIdentity } from "../../lib/identity.js";
 import {
+  alwaysEnforcedAccess,
+  assertActionOnRecord,
+  assertAction,
+} from "../../lib/access-enforce.js";
+import {
   corsHeaders,
   normalizeHeaders,
   jsonResponse,
@@ -113,6 +118,22 @@ export const handler = async (event) => {
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
     }
+
+    // ACCESS MODEL (D-064 §3.6): DELETE IS TENANT-SCOPE ONLY, for customer files as
+    // well as solar. A rep may upload to their own customer and may not remove what is
+    // there — deletion is destructive and unrecoverable from the portal, and the record
+    // outlives the rep's involvement with it.
+    //
+    // The record id checked is the one EMBEDDED IN THE KEY, the same one the ownership
+    // gate below uses, so the visibility question and the deletion target cannot differ.
+    const access = alwaysEnforcedAccess(identity);
+    const denied = await assertActionOnRecord(
+      `files.${objectKey}.delete`,
+      objectKey,
+      recordId,
+      access
+    );
+    if (denied) return jsonResponse(denied.status, cors, denied.body);
 
     // Ownership gate on the recordId EMBEDDED IN THE KEY. You can only delete
     // within a record folder your tenant owns.

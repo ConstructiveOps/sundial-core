@@ -85,21 +85,21 @@ const SURFACES = [
     // The rep's OWN test customer. 200 for its rep and for tenant scope; 404 for a
     // rep it does not belong to (a record you may not see is indistinguishable from
     // one that does not exist, §3.1).
-    pending: (u, ctx) =>
-      u.futureScope === "tenant" ? 200 : u.futureScope === "none" ? 404 : ctx.ownsRecord ? 200 : 404,
+    pending: (u, ctx) => recordVisible(u, ctx, ctx.ownRecord),
   },
   {
     key: "customer.single.other",
     label: "GET /sf/customer/{otherRepsRecord}",
     path: (ctx) => (ctx.otherCustomerId ? `/sf/customer/${ctx.otherCustomerId}` : null),
-    pending: (u) => (u.futureScope === "tenant" ? 200 : 404),
+    // "Another REP's record" is not automatically "another DEALER's record" -- for a
+    // dealer-scope user the other rep may well be one of theirs, and then 200 is correct.
+    pending: (u, ctx) => recordVisible(u, ctx, ctx.otherRecord),
   },
   {
     key: "customer.full",
     label: "GET /sf/customer/{ownRecord}?full=true",
     path: (ctx) => (ctx.ownCustomerId ? `/sf/customer/${ctx.ownCustomerId}?full=true` : null),
-    pending: (u, ctx) =>
-      u.futureScope === "tenant" ? 200 : u.futureScope === "none" ? 404 : ctx.ownsRecord ? 200 : 404,
+    pending: (u, ctx) => recordVisible(u, ctx, ctx.ownRecord),
   },
   {
     key: "customer.search",
@@ -160,8 +160,20 @@ const SURFACES = [
     label: "GET /files/by-record/{ownRecord}",
     // The route requires an explicit ?object= (fail-closed allowlist in lib/file-access.js).
     path: (ctx) => (ctx.ownCustomerId ? `/files/by-record/${ctx.ownCustomerId}?object=customer` : null),
+    // `none` scope gets 403, not 404, and that is deliberate (measured 2026-08-28).
+    //
+    // The file gate asks the ACTION question first — "may this role list customer files
+    // at all" — and `none` fails it before any record is considered. 404 would be the
+    // rule if the refusal depended on WHICH record was asked for, because then the
+    // status code would distinguish a record that exists from one that does not. It does
+    // not: a `none`-scope caller gets 403 for every id, real or invented, so there is no
+    // oracle to protect against and 403 is the more honest answer — the same one the
+    // list endpoints give them.
+    //
+    // A SALES role is different and still 404s: they CAN list customer files, so the
+    // refusal does depend on the record, and the code must not reveal which.
     pending: (u, ctx) =>
-      u.futureScope === "tenant" ? 200 : u.futureScope === "none" ? 404 : ctx.ownsRecord ? 200 : 404,
+      u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.ownRecord),
   },
   {
     key: "files.solar.list",
@@ -240,16 +252,40 @@ async function call(token, path) {
 
 // The fixture ids, resolved live so the script survives a re-seed.
 async function loadFixtureIds() {
+  // Dealer__c on BOTH sides is not decoration. A `dealer`-scope user owns no record by
+  // rep, so a spec written only in terms of rep ownership demands 404 from them on their
+  // own dealer's records -- which §3.1 says they SHOULD see. That mismatch is a false red
+  // that would have failed the Phase 3 gate against correct server behaviour.
   const rows = await sfQuery(
-    `SELECT Id, Name, Sales_Rep__c, Linked_Solar_Project__c FROM Sundial_Customer__c ` +
+    `SELECT Id, Name, Sales_Rep__c, Dealer__c, Linked_Solar_Project__c FROM Sundial_Customer__c ` +
       `WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' AND Name LIKE 'ZZ PORTAL TEST%'`
   );
   const users = await sfQuery(
-    `SELECT Id, Email__c FROM Sundial_User__c WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' ` +
+    `SELECT Id, Email__c, Dealer__c FROM Sundial_User__c WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' ` +
       `AND Email__c LIKE 'tim+zz-%'`
   );
   const userIdByEmail = new Map(users.map((u) => [u.Email__c?.toLowerCase(), u.Id]));
-  return { customers: rows, userIdByEmail };
+  const userDealerById = new Map(users.map((u) => [u.Id, u.Dealer__c ?? null]));
+  return { customers: rows, userIdByEmail, userDealerById };
+}
+
+/**
+ * Is ONE record visible to this user under §3.1 -- 200, or the deliberate 404?
+ *
+ * Written once, used by every single-record surface, so the three of them cannot drift
+ * apart. `tenant` sees everything; `none` sees nothing; `dealer` matches on the record's
+ * Dealer__c; `own` matches on its Sales_Rep__c.
+ *
+ * ⚠️ 404, NEVER 403, on a record. A 403 would confirm the record exists.
+ */
+function recordVisible(u, ctx, rec) {
+  if (u.futureScope === "tenant") return 200;
+  if (u.futureScope === "none") return 404;
+  if (!rec) return 404;
+  if (u.futureScope === "dealer") {
+    return rec.dealer && ctx.userDealer && rec.dealer === ctx.userDealer ? 200 : 404;
+  }
+  return rec.rep && ctx.sfUserId && rec.rep === ctx.sfUserId ? 200 : 404;
 }
 
 async function main() {
@@ -271,11 +307,18 @@ async function main() {
     // own-vs-other distinction that is the entire point of `own` scope.
     const own = fixtures.customers.find((c) => c.Sales_Rep__c && c.Sales_Rep__c === sfUserId) ?? null;
     const other = fixtures.customers.find((c) => c.Sales_Rep__c && c.Sales_Rep__c !== sfUserId) ?? null;
+    const ownRec = own ?? fixtures.customers[0] ?? null;
     const ctx = {
-      ownCustomerId: own?.Id ?? fixtures.customers[0]?.Id ?? null,
+      sfUserId,
+      userDealer: fixtures.userDealerById.get(sfUserId) ?? null,
+      ownCustomerId: ownRec?.Id ?? null,
       otherCustomerId: other?.Id ?? null,
-      ownSolarId: own?.Linked_Solar_Project__c ?? fixtures.customers[0]?.Linked_Solar_Project__c ?? null,
+      ownSolarId: ownRec?.Linked_Solar_Project__c ?? null,
       ownsRecord: Boolean(own),
+      // The two records the single-record surfaces address, as {rep, dealer} facts so
+      // recordVisible() can answer for any scope without re-querying.
+      ownRecord: ownRec ? { rep: ownRec.Sales_Rep__c ?? null, dealer: ownRec.Dealer__c ?? null } : null,
+      otherRecord: other ? { rep: other.Sales_Rep__c ?? null, dealer: other.Dealer__c ?? null } : null,
     };
 
     const pw = passwords[email];

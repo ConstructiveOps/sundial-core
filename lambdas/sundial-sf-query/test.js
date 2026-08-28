@@ -14,9 +14,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
 
+// The REAL access module -- not mocked here, so these tests exercise the shipped rules.
+import { resolveScope, accessBlock } from "../../lib/access.js";
+
 const TENANT = "a0XharmonTENANT";
 const CUSTOMER_A = "a1P000000000001AAA";
 const CUSTOMER_B = "a1P000000000002AAA";
+const REP_A = "a1O7y00000REPAAAAA";
+const REP_B = "a1O7y00000REPBBBBB";
+const DEALER = "a0Y0000000DEALERAA";
+
+/** An identity shaped like resolveIdentity()'s return, for an `own`-scope sales rep. */
+function repIdentity(userId) {
+  const user = {
+    id: userId,
+    accessLevel: "Sales Rep",
+    dealer: { id: DEALER, active: true, isInternal: false },
+    hierarchyLevel: "Sales Rep", // deliberately set: §7.4 means it is no longer READ
+  };
+  return {
+    user,
+    access: accessBlock(resolveScope(user, TENANT)),
+    tenantId: TENANT,
+    tenantSlug: "harmon",
+  };
+}
 
 const ctx = {
   identity: { tenantId: TENANT, tenantSlug: "harmon", user: { id: "u1", hierarchyLevel: "Client" } },
@@ -28,11 +50,14 @@ const ctx = {
 };
 
 function resetCtx() {
+  const user = { id: "u1", hierarchyLevel: "Client", accessLevel: "Admin", dealer: null };
   ctx.identity = {
     tenantId: TENANT,
     tenantSlug: "harmon",
-    user: { id: "u1", hierarchyLevel: "Client" },
+    user,
+    access: accessBlock(resolveScope(user, TENANT)),
   };
+  delete process.env.ACCESS_MODEL_MODE;
   ctx.soqlSeen = [];
   ctx.cacheFilters = [];
   ctx.cacheRows = [];
@@ -118,10 +143,16 @@ const CACHE_COLUMNS = [
   "sf_id", "client_sf_id", "tenant_id", "created_date", "is_stale",
   "last_synced_at", "cache_version", "project_name", "customer_name_at_creation",
   "sundial_customer_sf_id", "stage",
+  // The Phase 1 row-filter columns. Without these the enforcement tests would pass
+  // for the wrong reason -- a filter on a column the fixture does not have matches
+  // nothing, which looks exactly like a filter that works.
+  "sales_rep_sf_id", "dealer_sf_id",
 ];
 const SF_FIELDS = [
   { name: "Id", type: "id" },
   { name: "Client__c", type: "reference" },
+  { name: "Sales_Rep__c", type: "reference" },
+  { name: "Dealer__c", type: "reference" },
   { name: "Sundial_Customer__c", type: "reference" },
   { name: "Project_Name__c", type: "string" },
   { name: "Stage__c", type: "picklist" },
@@ -229,39 +260,69 @@ test("a customer with no children returns empty — NOT the whole table", async 
   }
 });
 
-test("Sales-Rep restriction composes with parentId (intersection, live path)", async () => {
-  ctx.identity.user.hierarchyLevel = "Sales Rep";
-  ctx.sfRows = [{ Id: "a1Q001", Sundial_Customer__c: CUSTOMER_A, Client__c: TENANT }];
+test("a sales rep's related list is CACHE-served now, not live SOQL (§7.4)", async () => {
+  // The TEMP guard forced every restricted-rep read to live Salesforce, because the
+  // field it filtered on was not cached. That is what capped a rep at the first ~2,000
+  // rows of their own book (SOQL OFFSET) and what this replaces. The row filter is an id
+  // equality on an indexed cache column, so a rep now takes the same path as anyone.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = repIdentity(REP_A);
+  ctx.cacheRows = [
+    solarRow("a1Q001", CUSTOMER_A, { sales_rep_sf_id: REP_A }),
+    solarRow("a1Q002", CUSTOMER_A, { sales_rep_sf_id: REP_B }),
+  ];
 
   const res = await handler(listEvent("solar", { parentId: CUSTOMER_A }));
-  assert.equal(res.statusCode, 200);
+  const body = JSON.parse(res.body);
 
-  const selects = ctx.soqlSeen.filter((s) => !/COUNT\(Id\)/.test(s));
-  assert.ok(selects.length > 0, "expected a live SELECT for the restricted rep");
-  for (const soql of ctx.soqlSeen) {
-    // Both clauses, ANDed — the rep clause must survive the parent filter.
-    assert.match(soql, /Sales_Representative__c = 'Dennis Alessandro'/, soql);
-    assert.match(soql, new RegExp(`Sundial_Customer__c = '${CUSTOMER_A}'`), soql);
-    assert.match(soql, new RegExp(`Client__c = '${TENANT}'`), soql);
-    assert.doesNotMatch(soql, / OR /, `rep clause must never be OR-ed: ${soql}`);
-  }
+  assert.equal(res.statusCode, 200);
+  assert.equal(body.source, "cache", "no live-SOQL bypass survives");
+  assert.equal(body.records.length, 1, "their own project for this customer, and no other");
+  assert.equal(body.records[0].sf_id, "a1Q001");
+  assert.deepEqual(
+    ctx.soqlSeen.filter((s) => /FROM Sundial_Solar__c/.test(s)),
+    [],
+    "and Salesforce was not queried at all"
+  );
+  delete process.env.ACCESS_MODEL_MODE;
 });
 
 test("a rep cannot reach another rep's projects via a customer's related list", async () => {
-  // Salesforce is the enforcement point on this path: the rep clause is in the
-  // WHERE, so the org returns nothing for a customer whose projects belong to a
-  // different rep. The endpoint must surface that empty set, not fall back to an
-  // unrestricted read.
-  ctx.identity.user.hierarchyLevel = "Sales Rep";
-  ctx.cacheRows = [solarRow("a1Q003", CUSTOMER_B)]; // another rep's, sitting in cache
-  ctx.sfRows = []; // SF: no rows for this rep + this customer
+  // THE SAME PROPERTY THE TEMP-GUARD VERSION OF THIS TEST PROTECTED, re-pinned against
+  // the enforcement that replaced it. The row filter is applied FIRST and ?parentId= is
+  // ANDed after it, so a related list can only ever narrow within what the caller may
+  // see. A cached row belonging to another rep must not leak through the parent filter.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = repIdentity(REP_A);
+  ctx.cacheRows = [solarRow("a1Q003", CUSTOMER_B, { sales_rep_sf_id: REP_B })];
 
   const res = await handler(listEvent("solar", { parentId: CUSTOMER_B }));
   const body = JSON.parse(res.body);
 
-  assert.equal(body.records.length, 0, "cached row for another rep must not leak");
-  assert.equal(body.total, 0);
-  assert.equal(body.source, "salesforce", "restricted rep must not be served from cache");
+  assert.equal(body.records.length, 0, "another rep's row must not leak");
+  assert.equal(body.total, 0, "and must not be counted either");
+  delete process.env.ACCESS_MODEL_MODE;
+});
+
+test("the row filter is ANDed, never OR-ed, on the live path", async () => {
+  // An OR anywhere in this composition would turn a narrowing into a widening. Pinned on
+  // the cold-cache path, which is the only one that still builds SOQL for a list.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = repIdentity(REP_A);
+  ctx.cacheRows = []; // cold -> live fallback
+  ctx.sfRows = [{ Id: "a1Q001", Sundial_Customer__c: CUSTOMER_A, Client__c: TENANT }];
+
+  await handler(listEvent("solar", { parentId: CUSTOMER_A }));
+
+  const seen = ctx.soqlSeen.filter((s) => /FROM Sundial_Solar__c/.test(s));
+  assert.ok(seen.length > 0, "expected the cold-cache live fallback");
+  for (const soql of seen) {
+    assert.match(soql, new RegExp(`Sales_Rep__c = '${REP_A}'`), soql);
+    assert.match(soql, new RegExp(`Sundial_Customer__c = '${CUSTOMER_A}'`), soql);
+    assert.match(soql, new RegExp(`Client__c = '${TENANT}'`), soql);
+    assert.doesNotMatch(soql, / OR /, `the row filter must never be OR-ed: ${soql}`);
+  }
+  delete process.env.ACCESS_MODEL_MODE;
 });
 
 test("search composes with parentId — narrows within the related list", async () => {

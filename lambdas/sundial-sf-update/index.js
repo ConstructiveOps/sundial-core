@@ -54,6 +54,52 @@ const OBJECT_ALLOWLIST = {
 
 const SF_API_VERSION = "v60.0";
 
+// --- ACCESS MODEL (D-064 §3.4) ---------------------------------------------
+// The WRITE path's four gates, in order, each failing closed:
+//   1. canReadObject   -> 403 MODULE_FORBIDDEN   (a module closed to this scope)
+//   2. assertVisible   -> 404 RECORD_NOT_FOUND   (a record outside the row filter)
+//   3. field authority -> 403 FIELD_FORBIDDEN    (a field the manifest does not grant)
+//   4. protected list  -> 403 FIELD_FORBIDDEN    (ownership fields, whatever the sheet says)
+//
+// ⚠️ ONE FORBIDDEN FIELD REJECTS THE WHOLE PATCH (§3.4 step 3). Not "drop it and write
+// the rest" — a body carrying a field the caller cannot edit is either a stale client or
+// a probe, and silently writing the remainder would make the two indistinguishable and
+// leave the caller believing the whole thing landed.
+//
+// ⚠️ Gate 3 runs only for a SALES role. Tenant scope keeps today's behaviour exactly:
+// describe-updateable plus the existing blocklist, and nothing else. Phase 4 must not
+// narrow what Harmon staff can write.
+import { resolveMode, MODES } from "../sundial-sf-query/shadow.js";
+import {
+  canReadObject,
+  rowFilter,
+  OBJECT_ACCESS,
+  DENY,
+  escapeSoqlValue,
+} from "../../lib/access.js";
+import { fieldsFor } from "../../lib/field-manifest/index.js";
+
+/**
+ * Fields a SALES role may never write, whatever the manifest says (§3.4 step 4).
+ *
+ * The generator already refuses to mark these `edit`, so this is the second of two
+ * independent checks on the same rule. That duplication is deliberate: the generator
+ * protects the sheet, this protects the request, and neither depends on the other having
+ * run. A hand-edited manifest, a stale deploy, or a future generator bug all stop here.
+ *
+ * Lowercased, because the body's casing is the caller's choice.
+ */
+const SALES_PROTECTED_FIELDS = new Set([
+  "sales_rep__c",
+  "dealer__c",
+  "client__c",
+  "stage__c",
+  "status__c",
+]);
+
+/** Objects a sales role may CREATE (§3.4 step 5). Customer, and nothing else. */
+const SALES_CREATABLE = new Set(["customer"]);
+
 // --- Field-write blocklist -------------------------------------------------
 // Lowercased for case-insensitive matching. These are NEVER accepted from the
 // request, even if the describe marks them updateable/createable:
@@ -293,6 +339,126 @@ function validateWritableFields(describe, fields, mode) {
   return { rejected, clean };
 }
 
+// --- The access gate (D-064 §3.4) ------------------------------------------
+//
+// Returns null when the write may proceed, or a response to return instead. `access`
+// is null unless ACCESS_MODEL_MODE=enforce, and a null access short-circuits every gate
+// — the same switch that keeps sf-query's off/shadow modes byte-identical.
+function accessGate({ objectKey, access, mode, cors, isCreate }) {
+  if (!access) return null; // not enforcing
+
+  // 1. Module gate. On a WRITE this is 403 even for a single record, unlike a read's
+  //    404: the caller supplied the object, not a record id, so refusing the module
+  //    leaks nothing about which records exist.
+  if (!canReadObject(objectKey, access)) {
+    return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+  }
+
+  // 5. Create is narrower than read: a sales role may create a customer and nothing
+  //    else (§3.4 step 5). Projects, users and POs are created by staff or by server
+  //    automation, both of which run as tenant scope.
+  if (isCreate && access.scope !== "tenant" && !SALES_CREATABLE.has(objectKey)) {
+    return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+  }
+  return null;
+}
+
+/**
+ * Field authorization for a SALES role (§3.4 steps 3 and 4).
+ *
+ * Returns null to proceed, or the list of forbidden field names. The caller turns that
+ * into one 403 naming them and LOGS IT: a hidden field in a PATCH body from a sales role
+ * is an attack signal, not a validation slip, and the log line is how anyone would ever
+ * know it happened.
+ */
+function forbiddenFields(objectKey, access, fields) {
+  if (!access || access.scope === "tenant") return null; // tenant keeps describe rules
+  const manifest = fieldsFor(objectKey, access);
+  const bad = [];
+  for (const key of Object.keys(fields)) {
+    const lower = key.toLowerCase();
+    // Protected first, so the message names the real reason even if the sheet is wrong.
+    if (SALES_PROTECTED_FIELDS.has(lower)) {
+      bad.push(key);
+      continue;
+    }
+    // The manifest is keyed by canonical API name; the body's casing is the caller's.
+    const canonical = manifest
+      ? [...manifest.edit].find((f) => f.toLowerCase() === lower)
+      : null;
+    if (!canonical) bad.push(key);
+  }
+  return bad.length > 0 ? bad : null;
+}
+
+/**
+ * §2.3 invariant 2 — REASSIGNMENT RE-STAMPS THE DEALER.
+ *
+ * When a PATCH changes `Sales_Rep__c`, `Dealer__c` is re-derived from the NEW rep and
+ * written in the SAME Salesforce update. Not a follow-up write: a second call could fail
+ * on its own and leave the record in exactly the broken state this exists to prevent.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS NOT OPTIONAL, AND WHY IT FAILS SILENTLY WITHOUT IT
+ * ---------------------------------------------------------------------------
+ * Stamping on CREATE alone leaves a reassigned deal pointing at the OLD rep's dealer.
+ * Nothing about that looks wrong from any seat that would notice:
+ *
+ *   - the record itself looks fine;
+ *   - the NEW rep can see it, because `own` scope matches on Sales_Rep__c, which moved;
+ *   - the OLD rep correctly loses it, for the same reason;
+ *   - and the only person who sees anything wrong is the LOSING dealer's manager, who
+ *     still sees a deal their organization no longer sells — while the WINNING dealer's
+ *     manager cannot see a deal their own rep now owns.
+ *
+ * That is a cross-dealer data leak and a support ticket, and neither party is positioned
+ * to report it as one. A1 says the dealer is derived from the rep, always; this is the
+ * half of A1 that lives on the write path.
+ *
+ * NULL IS A VALID ANSWER AND MUST BE WRITTEN. Clearing the rep, or assigning a rep who
+ * has no dealer, sets `Dealer__c` to null. Leaving the old value would be the same leak
+ * with extra steps — the deal would stay shared with an organization that has no rep on
+ * it at all.
+ *
+ * @returns {{ ok: true, dealerId: string|null } | { ok: false, response: object }}
+ */
+async function dealerForNewRep({ repValue, tenantId, cors }) {
+  const repId = typeof repValue === "string" ? repValue.trim() : repValue;
+
+  // Clearing the rep clears the dealer. No lookup needed, and no reason to make one.
+  if (repId === null || repId === undefined || repId === "") {
+    return { ok: true, dealerId: null };
+  }
+
+  // The lookup is TENANT-SCOPED, which is a second thing it buys: a reassignment can
+  // never point at a user outside the caller's tenant, whatever id was supplied.
+  const rows = await sfQuery(
+    `SELECT Id, Dealer__c FROM Sundial_User__c ` +
+      `WHERE Id = '${soqlEscapeString(String(repId))}' ` +
+      `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+  );
+
+  if (!rows || rows.length === 0) {
+    // A successful query returning nothing means the id is not a user in this tenant.
+    // Refuse with a clear error rather than letting Salesforce reject it later with a
+    // cross-reference message nobody can act on — and rather than stamping a null
+    // dealer onto a write that is about to fail anyway.
+    return {
+      ok: false,
+      response: jsonResponse(400, cors, {
+        error: "invalid_sales_rep",
+        code: "INVALID_SALES_REP",
+        message:
+          "Sales_Rep__c must be an active Sundial_User__c in this tenant. " +
+          "Dealer__c is derived from it and cannot be set independently.",
+      }),
+    };
+  }
+
+  // A rep with no dealer yields a null dealer. Explicitly, not by omission.
+  return { ok: true, dealerId: rows[0].Dealer__c ?? null };
+}
+
 // --- Salesforce write (REST) with one 401 refresh/retry --------------------
 async function sfWrite(method, path, bodyObj) {
   async function run(forceRefresh) {
@@ -357,7 +523,7 @@ async function sfErrorResponse(resp, cors) {
 }
 
 // --- UPDATE (PATCH /sf/{object}/{id}) --------------------------------------
-async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
+async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objectKey, access, identity }) {
   if (!id) {
     return jsonResponse(400, cors, {
       error: "missing_id",
@@ -369,11 +535,27 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
   // 1) Tenant-ownership pre-check FIRST. A record outside the caller's tenant is
   //    indistinguishable from one that does not exist -> 404 either way. This is
   //    the isolation gate: we never touch a record we can't prove the caller owns.
+  //
+  //    §3.4 step 2: the ROW FILTER is ANDed into this same existence check rather than
+  //    added as a second query. One question, one answer, and no window between "may I
+  //    see it" and "I am writing it".
+  const rowClause = (() => {
+    if (!access) return "";
+    const f = rowFilter(objectKey, access);
+    // A denial here cannot happen — the module gate ran first — but if it ever did,
+    // an empty clause would mean "unfiltered", so refuse to build the query instead.
+    if (f.deny) return null;
+    return ` AND ${f.soql}`;
+  })();
+  if (rowClause === null) {
+    return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
   const ownSoql =
     `SELECT Id FROM ${entry.sfObject} ` +
     `WHERE Id = '${soqlEscapeString(id)}' ` +
-    `AND Client__c = '${soqlEscapeString(tenantId)}' ` +
-    `LIMIT 1`;
+    `AND Client__c = '${soqlEscapeString(tenantId)}'` +
+    rowClause +
+    ` LIMIT 1`;
   const owned = await sfQuery(ownSoql);
   if (!owned || owned.length === 0) {
     return jsonResponse(404, cors, {
@@ -385,7 +567,32 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
   // the raw path value — it is guaranteed a real, well-formed id in this tenant.
   const recordId = owned[0].Id;
 
-  // 2) Validate the requested fields against describe (updateable) + blocklist.
+  // 2) FIELD AUTHORIZATION for a sales role (§3.4 steps 3 + 4), BEFORE the describe
+  //    check, so the answer to "may I write this field" is the access model's and not
+  //    an accident of what Salesforce happens to consider updateable.
+  const forbidden = forbiddenFields(objectKey, access, fields);
+  if (forbidden) {
+    // Logged with the caller: a hidden field in a PATCH body from a sales role is an
+    // attack signal, not a validation slip (§3.4 step 3).
+    console.warn(
+      JSON.stringify({
+        accessDenial: "FIELD_FORBIDDEN",
+        user: identity?.user?.id ?? null,
+        level: access?.level ?? null,
+        scope: access?.scope ?? null,
+        object: objectKey,
+        recordId: id,
+        fields: forbidden,
+      })
+    );
+    return jsonResponse(403, cors, {
+      error: "forbidden_field",
+      code: DENY.FIELD_FORBIDDEN,
+      fields: forbidden,
+    });
+  }
+
+  // 3) Validate the requested fields against describe (updateable) + blocklist.
   const { rejected, clean } = validateWritableFields(describe, fields, "update");
   if (rejected.length > 0) {
     return jsonResponse(400, cors, {
@@ -395,7 +602,46 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
     });
   }
 
-  // 3) PATCH to Salesforce (success is 204 No Content).
+  // 4) §2.3 INVARIANT 2. If this PATCH moves the rep, the dealer moves with it, in
+  //    this same update. Tenant scope only by construction: a sales role cannot reach
+  //    Sales_Rep__c at all (it is in SALES_PROTECTED_FIELDS and was refused above).
+  //
+  //    The derived value WINS over anything the body said about Dealer__c. A1 is that
+  //    the dealer is derived from the rep and is never an independent input; honouring
+  //    both would let one PATCH set a rep from one dealer and a dealer from another,
+  //    which is the disagreement invariant 5 exists to make impossible.
+  const repKey = Object.keys(clean).find((k) => k.toLowerCase() === "sales_rep__c");
+  if (repKey) {
+    const derived = await dealerForNewRep({
+      repValue: clean[repKey],
+      tenantId,
+      cors,
+    });
+    if (!derived.ok) return derived.response;
+
+    const dealerKey =
+      Object.keys(clean).find((k) => k.toLowerCase() === "dealer__c") ?? "Dealer__c";
+    if (
+      dealerKey in clean &&
+      (clean[dealerKey] ?? null) !== derived.dealerId
+    ) {
+      console.warn(
+        JSON.stringify({
+          accessNote: "DEALER_DERIVED_OVERRIDE",
+          message:
+            "Dealer__c in the request body was replaced by the value derived from " +
+            "Sales_Rep__c (A1: the dealer is never an independent input).",
+          object: objectKey,
+          recordId: recordId,
+          supplied: clean[dealerKey] ?? null,
+          derived: derived.dealerId,
+        })
+      );
+    }
+    clean[dealerKey] = derived.dealerId;
+  }
+
+  // 5) PATCH to Salesforce (success is 204 No Content).
   const resp = await sfWrite(
     "PATCH",
     `/services/data/${SF_API_VERSION}/sobjects/${entry.sfObject}/${encodeURIComponent(
@@ -405,7 +651,7 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
   );
   if (!resp.ok) return await sfErrorResponse(resp, cors);
 
-  // 4) Mark the cache row stale (do NOT delete — just flag). Best-effort: a
+  // 6) Mark the cache row stale (do NOT delete — just flag). Best-effort: a
   //    cache-flag failure must NEVER fail the write. Tenant-scoped update; a
   //    missing cache row is a harmless no-op.
   try {
@@ -428,7 +674,31 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors }) {
 }
 
 // --- CREATE (POST /sf/{object}) --------------------------------------------
-async function handleCreate({ entry, tenantId, fields, describe, cors }) {
+async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey, access, identity }) {
+  // FIELD AUTHORIZATION for a sales role, as on update. Note the ownership fields are
+  // in SALES_PROTECTED_FIELDS, so a body naming Sales_Rep__c or Dealer__c on create is
+  // REJECTED rather than silently overwritten by the stamp below — the caller learns
+  // their input was refused instead of believing it was honoured.
+  const forbidden = forbiddenFields(objectKey, access, fields);
+  if (forbidden) {
+    console.warn(
+      JSON.stringify({
+        accessDenial: "FIELD_FORBIDDEN",
+        user: identity?.user?.id ?? null,
+        level: access?.level ?? null,
+        scope: access?.scope ?? null,
+        object: objectKey,
+        create: true,
+        fields: forbidden,
+      })
+    );
+    return jsonResponse(403, cors, {
+      error: "forbidden_field",
+      code: DENY.FIELD_FORBIDDEN,
+      fields: forbidden,
+    });
+  }
+
   // Validate against describe (createable) + blocklist. Client__c in the body is
   // blocklisted and rejected here — it is NEVER accepted from input.
   const { rejected, clean } = validateWritableFields(describe, fields, "create");
@@ -446,6 +716,23 @@ async function handleCreate({ entry, tenantId, fields, describe, cors }) {
   // another tenant. (Client__c can never arrive via the body; the blocklist
   // rejects it above, so this assignment is authoritative and un-overridable.)
   const payload = { ...clean, Client__c: tenantId };
+
+  // §2.3 invariant 1: OWNERSHIP IS STAMPED SERVER-SIDE for a sales role, from the
+  // AccessContext, exactly as Client__c is. The body cannot reach these — they are in
+  // SALES_PROTECTED_FIELDS and were rejected above — so this assignment is the only
+  // writer and cannot be overridden.
+  //
+  // `Dealer__c` is stamped from the caller's own dealer rather than derived from the
+  // rep, which is the same value by construction here: the rep IS the caller. A1's
+  // "derive the dealer from the rep" matters on REASSIGNMENT (invariant 2), which is
+  // tenant-scope only and is not this path.
+  //
+  // Tenant scope is untouched: staff keep setting Sales_Rep__c from the body, which is
+  // how a coordinator creates a customer on a rep's behalf.
+  if (access && access.scope !== "tenant") {
+    payload.Sales_Rep__c = access.userId;
+    payload.Dealer__c = access.dealerId;
+  }
 
   const resp = await sfWrite(
     "POST",
@@ -541,6 +828,20 @@ export const handler = async (event) => {
       });
     }
 
+    // ACCESS MODEL (D-064 §3.4). Null unless ACCESS_MODEL_MODE=enforce, and every gate
+    // treats null as "not enforcing" — so this Lambda's behaviour is bound to the same
+    // switch as sf-query's, and rolls back the same way.
+    const enforcing = resolveMode() === MODES.ENFORCE;
+    const access = enforcing ? identity.access : null;
+
+    const gated = accessGate({
+      objectKey,
+      access,
+      cors,
+      isCreate: method === "POST",
+    });
+    if (gated) return gated;
+
     // Describe is the authority for field-write safety (cached per object).
     const describe = await getRawDescribe(entry.sfObject);
 
@@ -552,6 +853,9 @@ export const handler = async (event) => {
         fields: body.fields,
         describe,
         cors,
+        objectKey,
+        access,
+        identity,
       });
     }
     // POST
@@ -561,6 +865,9 @@ export const handler = async (event) => {
       fields: body.fields,
       describe,
       cors,
+      objectKey,
+      access,
+      identity,
     });
   } catch (err) {
     console.error("sf-update unexpected error:", err?.message || String(err));

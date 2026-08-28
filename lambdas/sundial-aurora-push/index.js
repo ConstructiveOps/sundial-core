@@ -60,6 +60,10 @@ import {
   soqlEscapeString,
 } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
+import {
+  alwaysEnforcedAccess,
+  assertActionOnRecord,
+} from "../../lib/access-enforce.js";
 import { getSecret } from "../../lib/secrets.js";
 import {
   ALL_EMAIL_FIELD_NAMES,
@@ -609,6 +613,25 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId; // SALESFORCE Client record id
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // ACCESS MODEL (D-064 §3.6). THE ONE ACTION OPEN TO SALES ROLES, and Tim's call
+    // (§12.2): sending a design request IS the rep's job, and the dealer's name and the
+    // stamped rep flow into the Aurora project.
+    //
+    // ⚠️ BOTH QUESTIONS. canAction says every rep MAY submit design requests;
+    // assertRecordVisible says whether THIS rep may submit for THAT customer. Asking
+    // only the first would let a rep fire a design request at any customer id in the
+    // tenant — and this route creates a real Aurora project and emails a real person,
+    // so the request itself is the side effect, not the response.
+    {
+      const denied = await assertActionOnRecord(
+        "aurora.design_request",
+        "customer",
+        recordId,
+        alwaysEnforcedAccess(identity)
+      );
+      if (denied) return jsonResponse(denied.status, cors, denied.body);
     }
 
     // --- Design-request: widen the SELECT to the notification-email field set.

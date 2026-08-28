@@ -2593,3 +2593,52 @@ Phase 1b shipped `sql/sundial_access_p1b_comment_rls.sql` (Parts A/B/C) and the 
 Neither collision is being repaired retroactively. New backend decisions continue from the highest number in **this** file (D-064 as of today), and the coordination rule in the provenance note above stands.
 
 ---
+
+---
+
+## D-064 status change — ACCEPTED, 2026-08-28
+
+D-064 (sales-rep and dealer access model) moves from **Proposed/Building** to
+**ACCEPTED and LIVE**. Phases 0 through 5 are deployed and verified; Phases 6 and 7
+remain and are non-blocking cleanup.
+
+**What is enforced, and where.** `lib/access.js` is the single authority — the module
+gate, the row filter, the §3.5 users union — with `lib/field-manifest/` for field
+visibility and `lib/access-enforce.js` as the shared action/record gate. Nine Lambdas
+consult them: `sf-query`, `sf-update`, the four file Lambdas, `budget`,
+`acumatica-push`, `aurora-push`. No Lambda re-implements a rule.
+
+**The TEMP guard is gone.** `repRestrictFor`, the `TEMP_*` constants, all five guarded
+sites in `sf-query`, and `list-files`'s hierarchy 403 are deleted. Recorded for the
+history: it keyed on a hardcoded NAME so any user carrying `Hierarchy_Level__c = "Sales
+Rep"` was served Dennis's book and 404'd on their own records; its default was OPEN so an
+unrecognised hierarchy saw all 31,653 customers; and it bypassed the cache, forcing live
+SOQL whose OFFSET cap of 2000 left ~1,500 of Dennis's 3,536 customers unreachable.
+
+**Amendment A9 (2026-08-28) — the switch may tighten, never loosen.**
+`ACCESS_MODEL_MODE` exists so enforcement code can ship inert and be turned on
+separately. That is correct when a new gate REPLACES NOTHING. It is wrong when a change
+REMOVES an existing control: Phase 5 replaced `list-files`'s TEMP 403 with a switchable
+gate, and "mode off" stopped meaning "yesterday's behaviour" and started meaning
+something looser. For four minutes between deploy and flag, that endpoint had no rep
+restriction (CloudWatch: zero invocations, nothing exposed). The sharper hazard is that
+`ACCESS_MODEL_MODE=off` is the documented incident rollback, which would have re-opened
+Solar files at exactly the moment somebody was already handling a problem.
+
+**Rule:** a gate that replaces an existing control is NOT switchable. Phase 5's gates
+read `alwaysEnforcedAccess()` and ignore the mode; rolling them back is a previous-zip
+redeploy — the slower, more deliberate action that removing a security control should
+require.
+
+**Amendment A10 (2026-08-28) — `none` scope gets 403 on record-addressed file routes,
+not 404.** The 404 rule exists so a status code cannot distinguish an existing record
+from a missing one. A `none`-scope caller is refused by the ACTION gate before any record
+is considered, and gets 403 for every id, real or invented — so there is no oracle, and
+403 is the honest answer. A SALES role still 404s on those routes, because their refusal
+DOES depend on which record was asked for.
+
+**Evidence.** Dennis zero-diff (3,536 / 781, both directions) before any enforcement;
+302 shadow lines with 8 classified and 0 unexplained widenings; after the cutover, the
+full access matrix green across 140 surfaces with zero pending rows, 24/24 live field
+assertions, 24/24 live write probes, and a shadow summary under enforce showing 0
+disagreements. Unit tests 652 → 743.

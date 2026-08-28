@@ -1,6 +1,13 @@
 # Sundial Access Model — sales reps and dealers
 
-**Status:** BUILDING. Phase 0, **Phase 1 and Phase 1b shipped 2026-08-27** (`feature/access-model-p1`,
+**Status:** ✅ **LIVE — D-064 ACCEPTED 2026-08-28.** Phases 0–5 shipped; nine Lambdas
+enforce; the access matrix is green with every row asserted and zero pending. Phase 6
+(dropping the inert cache policies) and Phase 7 (cleanup) remain, both non-blocking.
+Shadow logging stays ON under enforce as the post-launch watch — a disagreement line now
+means enforcement and the model have drifted, which is the one failure nobody would
+otherwise notice. Historical status follows.
+
+**Was:** BUILDING. Phase 0, **Phase 1 and Phase 1b shipped 2026-08-27** (`feature/access-model-p1`,
 `feature/access-model-p1b`). Phase 1: data model, backfills, cache columns, `lib/access.js`, the
 `access` block on `/auth/me` — all six gates pass, evidence in §8, **nothing any live user saw
 changed**, measured twice. **Phase 1b: the comments/mentions RLS is LIVE and is the first thing in
@@ -1235,7 +1242,13 @@ equal counts are not an equal set); report reconciled for every other user;
 Technician/unknown-level users identified and re-levelled. Deploy order is `off` first (matrix must
 be identical), then `shadow` (matrix must STILL be identical — shadow serves old answers).
 
-### Phase 3 — Enforce reads, retire TEMP
+### Phase 3 — Enforce reads, retire TEMP  ✅ SHIPPED 2026-08-28
+**Both steps deployed.** §7.3 enforce (0 widenings, 0 tenant-scope movement across 150
+surfaces), then §7.4 TEMP removal. Dennis: 3,536 / 781, cache and Salesforce agreeing, one
+page — the OFFSET clamp is gone with the bypass. Every sf-query read surface matches this
+spec; the 5 that do not are `files.*` and belong to Phase 5. `ACCESS_MODEL_MODE=enforce`;
+shadow logging stays on as the post-launch watch.
+
 sundial-core: `enforce` (step 7.3), then TEMP removal (7.4) as two separate deploys. `/sf/users`,
 `/sf/user`, module deny, counts, picklist meta.
 harmon-crm: nav/module hiding and global-search legs from `user.access.modules` (safe to ship any time

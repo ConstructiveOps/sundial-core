@@ -25,6 +25,7 @@
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { sfQuery, soqlEscapeString, sfUpdateRecord } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
+import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import {
   corsHeaders,
   normalizeHeaders,
@@ -235,6 +236,16 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId;
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // ACCESS MODEL (D-064 §3.6): the budget IS the cost build-up — burden rates,
+    // adders, commission inputs. It is the single clearest example of what the field
+    // manifest hides from a sales role on the READ side, so leaving the recalc that
+    // produces it open would hand back through an action exactly what the field rules
+    // were written to withhold. Tenant scope only.
+    {
+      const denied = assertAction("budget.recalc", alwaysEnforcedAccess(identity));
+      if (denied) return jsonResponse(denied.status, cors, denied.body);
     }
 
     const body = parseJsonBody(event);

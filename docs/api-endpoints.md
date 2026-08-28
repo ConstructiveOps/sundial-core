@@ -860,3 +860,68 @@ it was not applied.
 API Gateway deployment is manual via the AWS Console (Actions → Deploy API → stage `prod`). When Phase 1 begins, this should be moved to an infrastructure-as-code workflow (Terraform, CDK, or SAM) so changes can be reviewed in pull requests and rolled back if needed.
 
 Until then: any route changes in the Console must be deployed via Actions → Deploy API before they take effect at the prod URL.
+
+---
+
+## Admin routes — dealers (D-064)
+
+### `GET /admin/dealers`
+
+Active `Sundial_Dealer__c` records in the caller's tenant, for the Dealer dropdown on
+the user form. **Super-admin gated**, like every route on `sundial-user-admin`.
+
+```json
+{ "dealers": [ { "id": "a1X7y00001ASRILEA5", "name": "ZZ TEST DEALER A" } ] }
+```
+
+Active only: offering an inactive dealer would let an admin create a user who
+authenticates and then sees nothing (§2.1).
+
+⚠️ **Deliberately NOT in `sundial-sf-query`'s `OBJECT_ALLOWLIST`.** That allowlist is
+the read surface every portal user reaches; dealers are an admin lookup, and adding them
+there would expose the tenant's dealer roster to every authenticated caller for the sake
+of one dropdown.
+
+⚠️ **The same list is also returned by `GET /admin/users`** as a `dealers` key, from the
+same server function. That exists because a new API Gateway route is a manual step
+(`scripts/wire-admin-dealers-route.ps1`) and dealer onboarding could not wait for it.
+The two cannot diverge — one function, two callers.
+
+### `POST /admin/users` / `PATCH /admin/users/{id}` — `dealerId`
+
+**Required** when `accessLevel` is `Sales Rep` or `Sales Dealer`; **refused** for
+tenant-wide levels.
+
+| Code | Status | When |
+|---|---|---|
+| `DEALER_REQUIRED_FOR_SALES_ROLE` | 400 | a sales role would end up with no dealer |
+| `DEALER_NOT_FOUND` | 400 | unknown id, another tenant's dealer, an INACTIVE dealer, or a value that is not a Salesforce id — all indistinguishable on purpose |
+| `DEALER_NOT_APPLICABLE` | 400 | `dealerId` sent for a tenant-wide level |
+
+On PATCH the rule is evaluated against the state the request **results in**, not against
+the body: a PATCH setting only `accessLevel: "Sales Rep"` is refused if the record has
+no dealer, and allowed if it already has one. Moving OUT of a sales role leaves
+`Dealer__c` untouched.
+
+`GET /admin/users` returns `dealerId` and `dealerName` per user.
+
+---
+
+## Access enforcement — response codes (D-064)
+
+Under `ACCESS_MODEL_MODE=enforce`, every read and write endpoint answers to
+`lib/access.js`. The status codes are not interchangeable:
+
+| Situation | Code | Why |
+|---|---|---|
+| A module closed to this scope, on a **list/search/create** | **403** `MODULE_FORBIDDEN` | Names a module, not a record. Leaks nothing about what exists |
+| A record outside the row filter, on a **single read** | **404** `RECORD_NOT_FOUND` | A record you may not see must be indistinguishable from one that does not exist. A 403 on a record id **confirms the record exists** and turns any detail endpoint into an enumeration oracle |
+| A field the role may not write, on a PATCH/POST | **403** `FIELD_FORBIDDEN` | Names the field, and **rejects the whole request** — writing the rest would leave the caller believing it all landed |
+| An action the role may not perform | **403** `ACTION_FORBIDDEN` | A capability, not a record |
+| A picklist for a field the role may not read | **404** `FIELD_NOT_FOUND` | Same oracle reasoning as a record |
+
+⚠️ One deliberate exception: on the **record-addressed file routes**, a `none`-scope
+caller gets **403**, not 404. They are refused by the action gate before any record is
+considered, and get the same answer for every id — so there is no oracle, and 403 is the
+honest answer. A **sales** role still 404s there, because their refusal DOES depend on
+which record was asked for.

@@ -1,5 +1,96 @@
 # Sundial — Progress Log
 
+## 2026-08-28 — Dealer provisioning, Phase 6 SQL, Phase 7 cleanup
+
+The three items after the access model went live. Dealer onboarding is unblocked, the
+Phase 6 SQL is ready to apply, and Phase 7's cleanup is done.
+
+### 1. Dealer support in user provisioning (the blocking item)
+
+`sundial-user-admin` accepts `dealerId` on create and PATCH, **required** for
+`Sales Rep` / `Sales Dealer`, validated by id against an ACTIVE
+`Sundial_Dealer__c` in the caller's tenant. `GET /admin/users` returns `dealerId` +
+`dealerName`; the client gets a Dealer dropdown that appears only for the two sales
+levels, and a Dealer column on the list.
+
+Four decisions worth naming:
+
+- **A `dealerId` on a tenant-wide level is a 400, not a silent drop.** An admin who
+  sends a field and is not told it was ignored believes it was applied.
+- **Unknown / cross-tenant / inactive all answer `DEALER_NOT_FOUND`.** A distinct
+  "exists but is not yours" would confirm another tenant's record ids. Inactive gets its
+  own message, because it is the one an admin can act on.
+- **The PATCH rule asks where the user ENDS UP**, not what the body says. A PATCH
+  carrying only `accessLevel: "Sales Rep"` mentions neither dealers nor visibility, and
+  is refused or allowed entirely on whether the record already has a dealer.
+- **The super-admin refusal is ordered before the dealer refusal.** Both fire on the same
+  request; the combination is the more consequential and its message says what to do.
+
+**Found by the e2e, not by review:** a malformed `dealerId` made Salesforce reject the
+SOQL with MALFORMED_ID, so `sfQuery` threw and the caller got **500 where 400 was
+specified**. A caller mistake must not read as a server fault. Shape-checked before the
+query now, and a query failure denies.
+
+Also corrected: the e2e's own throwaway user was a dealerless "Sales Rep", which under
+the access model correctly resolves to scope `none` — so its "the Sales list loads"
+assertions started failing on correct refusals. Made a Manager, which is what that block
+was always testing.
+
+**`GET /admin/dealers` needs a manual API Gateway route**
+(`scripts/wire-admin-dealers-route.ps1`, which deploys the stage itself). Because
+onboarding was blocked on it, the same list also rides along with `GET /admin/users` from
+the same server function — so the dropdown works with no infrastructure change, and the
+two cannot diverge.
+
+Live: **provisioning e2e 30/30**, full matrix green.
+
+### 2. Phase 6 — the plan was not safe as written
+
+`sql/sundial_access_p6_drop_inert.sql` is ready to paste, and it is **bigger than the
+plan**, because `current_user_tenant_id()` turned out to be referenced by **ten**
+policies, not six.
+
+The four extra are on `asset_cache`, `chat_messages`, `sundial_file_metadata` and
+`portal_users` — and unlike the six cache tables, **those four still carry all 16
+`anon`/`authenticated` privileges, writes included**. On the six, the policy is
+decoration and the A4 revoke is the real control. On the other four, the inert policy is
+the only thing in the way.
+
+So dropping the function without `CASCADE` fails; with `CASCADE` it takes those four
+policies too and **opens three live tables to any browser session with the anon key**.
+`sundial_file_metadata` is the file index for every record in the tenant.
+
+This is the Phase 0 §5.1b finding unchanged, sitting on four tables nobody revisited when
+A4 moved the cache revoke forward. The file therefore does what A4 did: **revoke first,
+then drop**, in one transaction, so a failure at the revoke rolls back before any drop
+runs. The revoke is verified rather than assumed — every direct Supabase table read in
+the client is `.from('comments')` ×4 and `.from('comment_mentions')` ×3, and the four
+tables appear zero times in `src/`.
+
+### 3. Phase 7 — cleanup
+
+- `sundial-auth-proxy` no longer writes `profiles.role`. It carried
+  `Hierarchy_Level__c`, which nothing reads since the TEMP guard was deleted. Left
+  **un-written rather than dropped**: an unwritten column goes stale harmlessly, where a
+  dropped one would break the upsert on the next deploy that forgot. A row whose `role`
+  says "Sales Rep" while `access_scope` says "tenant" invites the wrong fix.
+- `docs/salesforce-schema.md` gains the access-model objects and fields:
+  `Sundial_Dealer__c`, `Dealer__c` on five objects (and A1's derive-from-rep rule),
+  `Access_Level__c` as the only scope input, `Super_Admin__c`,
+  `Hierarchy_Level__c` **deprecated** (kept, derived, unread — with its failure mode on
+  record), `Roles__c` **unused**, and the legacy rep name fields.
+- `docs/caching-architecture.md` corrected: `client_sf_id` is the isolation key and
+  `tenant_id` is a label (confusing them is what made the retired policies deny by
+  accident); the TTL is a flat 10 minutes; the Phase 1 row-filter columns and why they
+  killed the OFFSET-capped live-SOQL bypass; reads are access-filtered first.
+- `docs/api-endpoints.md` gains the dealer routes and a table of **which status code
+  each refusal uses and why** — 403 for a module or capability, 404 for a record or a
+  field, because a 403 on a record id confirms it exists.
+- `harmon-crm/CLAUDE.md` re-synced from sundial-core's, wholesale, with the four
+  repo-specific facts patched back (path, `main` mainline, DISCOVERY.md, and a header
+  saying which copy is the source of truth). Copying and patching back rather than
+  hand-merging is deliberate: it cannot leave a shared rule in only one copy.
+
 ## 2026-08-28 — Access model Phases 3, 4 and 5: D-064 is LIVE and ACCEPTED
 
 The whole access model shipped tonight, in one evening, replacing the planned

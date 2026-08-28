@@ -795,14 +795,23 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [!] **Phase 5 gates deliberately IGNORE ACCESS_MODEL_MODE.** They replaced an
         existing control, so an env rollback would make the system looser than before.
         Rolling Phase 5 back is a previous-zip redeploy.
-- [ ] **Phase 6 — Supabase RLS (reduced by A4 + A5).** The cache-table revoke shipped in
-      Phase 1; the comments/mentions policies shipped in Phase 1b. What is left:
-      `sql/sundial_access_rls.sql` **drops** the six accidental cache-table SELECT
-      policies (inert after the revoke — removing a misleading artefact, not a control)
-      and `public.portal_users`, plus the `profiles` policy review.
-- [ ] **Phase 7 — Cleanup and docs.** `profiles.role` dropped from the upsert;
-      `Hierarchy_Level__c` deprecated; `Roles__c` documented unused; api-endpoints and
-      caching-architecture corrected.
+- [~] **Phase 6 — Supabase RLS.** `sql/sundial_access_p6_drop_inert.sql` WRITTEN and
+      ready for Tim to paste. **Bigger than the plan, because the plan was not safe:**
+      `current_user_tenant_id()` is referenced by TEN policies, not six. The four extra
+      (`asset_cache`, `chat_messages`, `sundial_file_metadata`, `portal_users`) still
+      carry ALL 16 anon/authenticated privileges, so their inert policy is the only thing
+      in the way — a CASCADE drop would have opened three live tables. The file revokes
+      those four FIRST, then drops, in one transaction.
+  - [ ] **TIM: paste and run it**, then the five verification queries.
+  - [ ] `profiles` policy review (not in the file; still outstanding).
+- [x] **Phase 7 — Cleanup and docs (2026-08-28).** `profiles.role` no longer written
+      (auth-proxy deployed); `salesforce-schema.md` gains the access-model objects with
+      `Hierarchy_Level__c` deprecated and `Roles__c` unused; `caching-architecture.md`
+      corrected (`client_sf_id` vs `tenant_id`, flat 10-min TTL, the row-filter columns);
+      `api-endpoints.md` gains the dealer routes and the refusal-code table;
+      `harmon-crm/CLAUDE.md` re-synced.
+  - [ ] **Deferred:** dropping the `profiles.role` COLUMN is a schema change for Tim.
+        Un-written is safe; un-dropped is tidy-up.
 
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:

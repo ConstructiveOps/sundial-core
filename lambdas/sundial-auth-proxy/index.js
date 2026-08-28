@@ -100,8 +100,9 @@ function mapIdentityError(code) {
 
 // --- profile upsert (additive side effect) ---------------------------------
 // Keep the caller's public.profiles row current on every successful /auth/me so
-// Supabase RLS (auth.uid() = profiles.id) can resolve tenant/role for the
-// upcoming comments feature. Uses the SERVICE-ROLE client (only it may write
+// Supabase RLS (auth.uid() = profiles.id) can resolve the caller's tenant and SCOPE --
+// which is no longer "upcoming": Phase 1b's comment policies read access_scope and
+// dealer_sf_id from this row on every browser-direct query. Uses the SERVICE-ROLE client (only it may write
 // profiles under RLS). This is a pure side effect — it never affects the HTTP
 // response, and it NEVER throws: all errors are caught and logged so a profile
 // write failure cannot break login. Value-safe: logs no tokens/secrets/PII bodies.
@@ -132,7 +133,20 @@ async function upsertProfile(identity) {
       id: authUserId, // = auth.users uuid (token sub) — the RLS key
       tenant_id: identity.tenantId ?? null, // Salesforce Client record id
       sundial_user_id: u.id ?? null, // Sundial_User__c Id
-      role: u.hierarchyLevel ?? null, // Hierarchy_Level__c, stored as-is
+      // ⚠️ `role` IS DELIBERATELY NOT WRITTEN (D-064 Phase 7). It carried
+      // Hierarchy_Level__c, which nothing reads any more: the TEMP guard that keyed on
+      // it was deleted in Phase 3, and access_scope / access_level below are what
+      // Phase 1b's record_visible() actually consults.
+      //
+      // Left un-written rather than merely ignored, because a stale column that LOOKS
+      // like an authorization input is the hazard this whole rollout kept tripping over
+      // -- portal_users, current_user_tenant_id(), the rail-id tab list. A row whose
+      // `role` says "Sales Rep" while `access_scope` says "tenant" invites somebody to
+      // "fix" the disagreement in the wrong direction.
+      //
+      // The COLUMN is left in place: dropping it is a schema change for Tim to apply,
+      // and an unwritten column goes stale harmlessly where a dropped one would break
+      // this upsert on the next deploy that forgot. Existing values simply stop moving.
       email: u.email ?? null,
       full_name: fullName,
       // access_scope | access_level | dealer_sf_id. Written on EVERY /auth/me, so a

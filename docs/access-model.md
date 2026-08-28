@@ -1235,7 +1235,13 @@ equal counts are not an equal set); report reconciled for every other user;
 Technician/unknown-level users identified and re-levelled. Deploy order is `off` first (matrix must
 be identical), then `shadow` (matrix must STILL be identical — shadow serves old answers).
 
-### Phase 3 — Enforce reads, retire TEMP
+### Phase 3 — Enforce reads, retire TEMP  ✅ SHIPPED 2026-08-28
+**Both steps deployed.** §7.3 enforce (0 widenings, 0 tenant-scope movement across 150
+surfaces), then §7.4 TEMP removal. Dennis: 3,536 / 781, cache and Salesforce agreeing, one
+page — the OFFSET clamp is gone with the bypass. Every sf-query read surface matches this
+spec; the 5 that do not are `files.*` and belong to Phase 5. `ACCESS_MODEL_MODE=enforce`;
+shadow logging stays on as the post-launch watch.
+
 sundial-core: `enforce` (step 7.3), then TEMP removal (7.4) as two separate deploys. `/sf/users`,
 `/sf/user`, module deny, counts, picklist meta.
 harmon-crm: nav/module hiding and global-search legs from `user.access.modules` (safe to ship any time

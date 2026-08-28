@@ -694,45 +694,46 @@ test("THE SEARCH TERM IS NEVER LOGGED", async () => {
   assert.equal(line.params.hasValue, true);
 });
 
-test("list.live.rep: the TEMP guard's own path, marked as a mixed-source comparison", async () => {
-  // The old total here is a SOQL COUNT and the new one is a cache count. A row of drift
-  // between them is cache lag, and the summary has to be able to tell that apart from a
-  // real widening.
-  process.env.ACCESS_MODEL_MODE = "shadow";
+test("§7.4: a rep's list is CACHE-served — the live-SOQL bypass is gone", async () => {
+  // This replaces the TEMP guard's "list.live.rep" test. That path no longer exists, and
+  // its absence IS the improvement: the guard forced every restricted read to live SOQL
+  // because its field was not cached, and SOQL's OFFSET cap of 2000 made ~1,500 of
+  // Dennis's 3,536 customers unreachable on deep pages. An id equality on an indexed
+  // cache column has no such cap.
+  process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Sales Rep", { userId: REP_A, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT, Sales_Rep__c: REP_A }];
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
 
-  await handler(listEvent("customer"));
+  const res = await handler(listEvent("customer"));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.source, "cache", "served from the cache like any other role");
+  assert.equal(body.records.length, 1);
   const line = oneLine();
-  assert.equal(line.path, "list.live.rep");
-  assert.equal(line.temp, true, "the TEMP guard was active on this request");
-  assert.equal(line.countSourcesDiffer, true);
-  assert.equal(line.newTotal, 1);
+  assert.equal(line.path, "list.cache", "not list.live.rep — that path is deleted");
+  assert.equal(line.temp, false, "and no TEMP guard is active on any request any more");
 });
 
-test("THE MIS-STAMPED USER: tenant scope + TEMP guard is a WIDENING, and is not shortcut", async () => {
-  // Hierarchy_Level__c = "Sales Rep" while Access_Level__c = Admin — the Phase 0
-  // user-admin default bug. Today they are served Dennis's name-matched set; under the
-  // new model they get the whole tenant. Taking the tenant-scope shortcut here would
-  // report "identical" and hide the single most important line in the whole phase.
-  process.env.ACCESS_MODEL_MODE = "shadow";
+test("§7.4: Hierarchy_Level__c is NO LONGER READ — the mis-stamped user is cured", async () => {
+  // The Phase 0 user-admin default stamped users as Hierarchy_Level__c = "Sales Rep"
+  // regardless of their real role, and the TEMP guard keyed on exactly that string — so
+  // an Admin carrying it was served Dennis's book. Removing the guard removes the whole
+  // failure class: nothing reads that field on a read path now, so the mis-stamp is
+  // inert rather than dangerous.
+  process.env.ACCESS_MODEL_MODE = "enforce";
   ctx.identity = identityFor("Admin", { dealer: null, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT }]; // the guard's narrow live answer
   ctx.cacheRows = [customerRow(CUST_1, REP_A), customerRow(CUST_2, REP_B)];
 
-  await handler(listEvent("customer"));
+  const res = await handler(listEvent("customer"));
+  const body = JSON.parse(res.body);
+
+  assert.equal(body.records.length, 2, "an Admin sees the tenant, mis-stamp or not");
+  assert.equal(body.total, 2);
   const line = oneLine();
   assert.equal(line.scope, "tenant");
-  assert.equal(line.temp, true);
-  assert.equal(line.newCountSource, "cache_count", "the shortcut must NOT have been taken");
-  assert.equal(line.oldTotal, 1);
-  assert.equal(line.newTotal, 2);
-  assert.equal(line.wider, true);
-  assert.equal(line.verdict, "wider");
+  assert.equal(line.temp, false);
+  assert.equal(line.verdict, "same_count", "and enforce agrees with itself");
 });
-
-// --- single reads ----------------------------------------------------------
 
 test("single.cache: the row in hand answers it — no extra query", async () => {
   process.env.ACCESS_MODEL_MODE = "shadow";
@@ -791,18 +792,22 @@ test("single.soql served: the filter fields ride along on the record — no seco
   assert.equal(line.narrower, true);
 });
 
-test("THE WIDENING DETECTOR: a 404 today that the new model would serve", async () => {
-  // The TEMP guard filters on a hardcoded NAME, so a rep who is not Dennis is served
-  // Dennis's records and 404s on their OWN. Old 404 / new served is a widening on a
-  // served path, and a cache probe is the only way to see it — there is no record in
-  // hand to evaluate when the answer was "not found".
-  process.env.ACCESS_MODEL_MODE = "shadow";
-  ctx.identity = identityFor("Sales Rep", { userId: REP_A, hierarchyLevel: "Sales Rep" });
-  ctx.sfRows = []; // the guard's name clause matches nothing -> 404
-  ctx.cacheRows = [customerRow(CUST_1, REP_A)]; // but it IS this rep's record
+test("the widening detector still fires — the 404-branch cache probe survives §7.4", async () => {
+  // The Phase 2 version of this test manufactured the widening with the TEMP guard: it
+  // hid a rep's own record and the probe found it. The guard is gone, so the scenario is
+  // built directly instead — a record the SERVED query missed that the row filter would
+  // have allowed. The detector matters more after the cutover, not less: it is the only
+  // thing that would notice enforcement and the model drifting apart.
+  process.env.ACCESS_MODEL_MODE = "shadow"; // shadow, so the served answer stays unfiltered
+  ctx.identity = identityFor("Sales Rep", { userId: REP_A });
+  ctx.sfRows = []; // the served read finds nothing -> 404
+  // STALE, so the cache shortcut declines to serve it and the request falls through to
+  // the Salesforce miss above. That is the shape the probe exists for: the row is in the
+  // cache and the caller may see it, but the served path returned nothing.
+  ctx.cacheRows = [customerRow(CUST_1, REP_A, { last_synced_at: "2020-01-01T00:00:00Z" })];
 
   const res = await handler(singleEvent("customer", CUST_1));
-  assert.equal(res.statusCode, 404, "still 404 — shadow serves nothing");
+  assert.equal(res.statusCode, 404, "shadow serves nothing differently");
   const line = oneLine();
   assert.equal(line.oldOutcome, "not_found");
   assert.equal(line.newOutcome, "served");

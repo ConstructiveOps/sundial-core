@@ -1,5 +1,79 @@
 # Sundial — Progress Log
 
+## 2026-08-28 — Access model Phase 3: reads ENFORCED, the TEMP guard is gone
+
+D-064 §7.3 + §7.4, on `feature/access-model-p3`. **What a sales role can see is now
+decided by `lib/access.js` and nowhere else.** Deployed in two steps with a matrix
+between them, plus a third matrix proving the enforce-capable code was inert before the
+env flip.
+
+### The gate that replaced the 3-day cook
+
+Both offline artifacts, run tonight before any enforcement:
+
+- `access-shadow-report.mjs`: **Dennis zero-diff on both objects** — customer 3,536 vs
+  3,536, solar 781 vs 781, `onlyInOld` and `onlyInNew` both zero. 23 real users, every
+  one "no change". One user resolves to `none` and it is ZZ Tech One, a fixture.
+- `access-shadow-summary.mjs`: 302 lines of real traffic, 8 widenings, **all classified**
+  (the four ZZ reps gaining their own records), 0 unexplained, 0 shadow errors.
+
+### Step 7.3 — enforce, with the TEMP clause still ANDed on top
+
+Measured across 150 surfaces: **0 widenings, 0 tenant-scope movement.** 117 differences,
+every one a narrowing. roofing/po closed to sales roles, the users list filtered to the
+§3.5 union (132 → 26–28), counts scoped by construction because the same builder produces
+the page and the COUNT.
+
+### Step 7.4 — the TEMP guard deleted
+
+`repRestrictFor`, the three `TEMP_*` constants and all five guarded sites are gone. Worth
+recording what it cost, because the replacement fixes three defects that were baked in:
+
+1. **It keyed on a NAME, not the caller.** Any user with `Hierarchy_Level__c = "Sales Rep"`
+   was served *Dennis's* book and 404'd on their own records. Measured tonight on the ZZ
+   fixtures: four reps, every one of them.
+2. **Its default was OPEN.** Any hierarchy value it did not recognise — Technician, blank,
+   anything — got no restriction and saw all 31,653 customers.
+3. **It bypassed the cache**, because the field it filtered on was not cached. That forced
+   live SOQL, and SOQL's OFFSET cap of 2000 left ~1,500 of Dennis's 3,536 customers
+   unreachable on deep pages. Safe, but incomplete.
+
+**Dennis, verified server-side without logging in as him** (CLAUDE.md forbids it, and the
+rule earned its place): 3,536 customers and 781 solar, cache and Salesforce agreeing
+exactly, both in ONE page at the 5,000 cap. Identical to the gate report.
+
+### The end state, measured
+
+| user | customer | solar | roofing | po | users | own record | other's record |
+|---|---|---|---|---|---|---|---|
+| 4 ZZ reps (`own`) | 1/1 | 1/1 | 403 | 403 | 26–28 | 200 | 404 |
+| zz-mgr-a (`dealer`) | 2/2 | 2/2 | 403 | 403 | 28 | 200 | 200 *(same dealer)* |
+| tech / nodealer / inactive-dealer (`none`) | 403 | 403 | 403 | 403 | 403 | 404 | 404 |
+| admin / exec (`tenant`) | 31,656 | 4,488 | 2/2 | 0/0 | 132 | 200 | 200 |
+
+5 surfaces still miss the spec, all `files.*` — Phase 5.
+
+### Two defects found in the instruments, not the code
+
+**The matrix had a false red.** Its `pending` spec modelled only *rep* ownership, so a
+`dealer`-scope user "owned" nothing and the spec demanded 404 on their own dealer's
+records — which §3.1 says they should see. It would have failed the Phase 3 gate against
+correct server behaviour. `recordVisible()` now answers for every scope from the record's
+rep *and* dealer.
+
+**The diff tool conflated data drift with regression.** `SOL-10043` was created through
+the portal at 19:52:21Z mid-run, moving every tenant-scope solar total 4,487 → 4,488 and
+reading as "4 DIFFERENCES". A run that cries wolf when somebody sells a system trains you
+to skim past the one that matters, so the tool now separates a **status/expectation**
+change (the gate) from a **total-only** drift (informational, never suppressed).
+
+### Five tests were deleted-and-rewritten, not deleted
+
+All five tested the TEMP guard. Two of them protected a real security property — a rep must
+not reach another rep's projects through `?parentId=` — which survives the guard and is
+re-pinned against the enforcement that replaced it, on the cache path where the answer now
+comes from. One asserts Salesforce is not queried at all.
+
 ## 2026-08-28 — Access model Phase 2: shadow mode, built and not yet deployed
 
 D-064 (`docs/access-model.md` §7 step 1, §8 Phase 2), on `feature/access-model-p2`.

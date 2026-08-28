@@ -135,6 +135,27 @@ const SURFACES = [
     pending: (u) => (u.futureScope === "none" ? 403 : 200),
   },
   {
+    key: "users.route",
+    label: "GET /sf/users",
+    // The LITERAL route (note the trailing s), distinct from the `user` object list
+    // above: it queries Salesforce directly and returns a compact {id,name} projection
+    // for the mention picker and the rep dropdown. Same §3.5 rule, different code path —
+    // and it was uncovered here until Phase 2, which meant the union could have regressed
+    // on one route while the matrix stayed green on the other.
+    path: () => "/sf/users",
+    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+  },
+  {
+    key: "meta.picklists",
+    label: "GET /sf/meta/customer/picklists",
+    // §3.1's meta row: a sales scope reaches picklists only for objects it can read.
+    // Customer is readable by every scope but `none`, so the MODULE answer is 200 —
+    // §4.4's field-level narrowing arrives with the Phase 4 manifest and will not change
+    // this status code, only the field set inside the body.
+    path: () => "/sf/meta/customer/picklists",
+    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+  },
+  {
     key: "files.customer.list",
     label: "GET /files/by-record/{ownRecord}",
     // The route requires an explicit ?object= (fail-closed allowlist in lib/file-access.js).

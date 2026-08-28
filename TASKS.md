@@ -713,9 +713,51 @@ lands only after its server change is verified in prod. Branch per repo per phas
       `sundial_user_cache` fallback resolves her to `tenant`), but she has been
       unable to reach the portal since she was provisioned. Fix the address, then
       re-invite through the `/admin/users` path.
-- [ ] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE=shadow` in `sf-query`; ≥3 business days
-      of logs with zero `onlyInNew` for Dennis; every other user reconciled and
-      re-levelled before the flip.
+- [~] **Phase 2 — Shadow.** `ACCESS_MODEL_MODE` in `sf-query`; the new decision computed
+      and logged on every read path while the TEMP guard keeps serving every response.
+      Branch `feature/access-model-p2`. **Built 2026-08-28, not yet deployed.**
+  - [x] `lambdas/sundial-sf-query/shadow.js` — the recorder. Three modes (`off` default,
+        `shadow`, `enforce` = warn + behave as shadow); an unrecognized value warns and
+        falls back to `off`. Every method try/caught in its entirety: shadow can never
+        change a status code, a payload byte, or throw.
+  - [x] 13 read paths instrumented, one line each: `list.cache`, `list.live.cold`,
+        `list.live.rep`, `list.live.parent_uncached`, `search.cache`,
+        `search.live.{rep,parent_uncached}`, `single.cache`, `single.soql`,
+        `single.full`, `users.route`, `meta.picklist`, `meta.picklists`.
+  - [x] **No added Salesforce round trip on any path.** Cache-side counts only, and for
+        `tenant` scope with no TEMP guard, no query at all — `rowFilter` returns the exact
+        predicate the request already ran. The shortcut is NOT taken when the TEMP guard
+        is active: that combination is the mis-stamped user, and it is the widening this
+        phase exists to find.
+  - [x] `lib/access.js` gains `userFilter()` + `TENANT_ACCESS_LEVELS` (§3.5's union).
+        `rowFilter` refuses `user` by design, so without this both `/sf/users` and
+        `/sf/user` would have shadowed as a blackout that is not the design.
+  - [x] `scripts/access-shadow-summary.mjs` — CloudWatch Insights aggregation per
+        user × object × path, with the widening section that stops the phase.
+  - [x] `verify-access-matrix.mjs` gains `GET /sf/users` and
+        `GET /sf/meta/customer/picklists` — two paths shadow instruments that the matrix
+        did not cover, so "identical before and after" could not have been checked on them.
+  - [x] Tests: 31 in `lambdas/sundial-sf-query/shadow.test.js` + 8 in `lib/access.test.js`.
+        Suite **652 → 683** green. Pinned: mode off logs nothing and queries nothing; a
+        throwing `lib/access` cannot fail a request; the widening detector fires on a
+        404-today/served-tomorrow single read; the search term never reaches the log.
+  - [ ] **DEPLOY (needs Tim's approval of the diff).** `sundial-sf-query` with
+        `ACCESS_MODEL_MODE` UNSET first → run `verify-access-matrix.mjs` (must be
+        identical) → set `ACCESS_MODEL_MODE=shadow` → re-run the matrix (must STILL be
+        identical) → first `access-shadow-summary.mjs` over the ZZ matrix traffic to
+        prove the pipeline end to end.
+  - [ ] **≥3 business days of shadow logs** while Harmon uses the portal normally, then
+        the §8 gate: zero unexplained widenings in the summary AND zero `onlyInNew` for
+        Dennis in `access-shadow-report.mjs`. Equal counts are not an equal set — both
+        scripts run before Phase 3, not one.
+  - [ ] Every user the window surfaces as `scope none` (Technician, blank or unmapped
+        `Access_Level__c`) re-levelled before the flip.
+  - [!] **The picklist FIELD filter is deferred to Phase 4 and cannot be done here.**
+        §4.4 scopes picklist metadata to the role's `read ∪ edit` set, which comes from
+        the field manifest Phase 4 builds: the workbooks have not moved into sundial-core,
+        they carry no role columns, and `fieldsFor()` does not exist. Phase 2 shadows
+        §3.1's module gate on those routes and stamps every line
+        `fieldFilter: "deferred_phase4"` so the gap is visible in the data.
 - [ ] **Phase 3 — Enforce reads, retire TEMP.** Enforce-with-overlap, then TEMP removal
       as two separate deploys. Gate: matrix passes; Dennis's counts unchanged.
 - [ ] **Phase 4 — Field manifest, writes, client cutover.** Sheets move to

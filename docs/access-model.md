@@ -6,8 +6,10 @@
 changed**, measured twice. **Phase 1b: the comments/mentions RLS is LIVE and is the first thing in
 this design that changes what a live user sees** — the measured cross-user leak is closed, and one
 restricted rep went from reading all 511 tenant comments to the 79 on his own records (§8, "Phase 1b
-gate"). Amendments **A7** (§5.2) and **A8** (§5.3) were taken while building it. Reads are still
-unenforced: `sundial-sf-query` runs the TEMP guard untouched, so Phase 2 is next. Companion ADR: D-064 in
+gate"). Amendments **A7** (§5.2) and **A8** (§5.3) were taken while building it. **Phase 2 (shadow) is BUILT on `feature/access-model-p2`** — `sundial-sf-query` computes the
+new decision on every read path behind `ACCESS_MODEL_MODE`, logs the comparison, and serves the
+old answer unchanged; the default `off` leaves the code path identical to Phase 1. Reads are
+still unenforced: the TEMP guard is untouched and decides every response. Companion ADR: D-064 in
 `DECISIONS.md` (§11 here is its text). Supersedes the enforcement sections of D-043 and retires the
 TEMP restrict (`sundial-sf-query` "TEMP — Sales Rep hard-restrict", 2026-08-03) and the cosmetic tab
 hiding (harmon-crm D-048).
@@ -1013,9 +1015,34 @@ Principle: **new and old enforcement overlap; nothing is removed until a scripte
 set is identical-or-tighter for every live user.**
 
 1. **Shadow mode.** `sf-query` gains `ACCESS_MODEL_MODE = off | shadow | enforce` (env, default
-   `off`). In `shadow`, every list/single/full read computes both the TEMP decision and the new
-   `rowFilter`, serves the TEMP result, and emits one structured log line per request:
-   `{ user, object, path, oldCount, newCount, onlyInOld: [...ids], onlyInNew: [...ids] }`.
+   `off`). In `shadow`, every read path computes both the TEMP decision and the new one, serves
+   the TEMP result, and emits one structured log line per request:
+   `{ shadow, mode, user, level, scope, dealer, temp, object, path, params, oldOutcome, oldCount,
+   oldTotal, newOutcome, newTotal, newCountSource, verdict, narrower, wider, shadowMs }`.
+
+   > **Amended 2026-08-28 (Phase 2): counts and outcome flags per request, id sets offline.**
+   > This step originally specified `onlyInOld: [...ids], onlyInNew: [...ids]` in the request
+   > line. On Dennis's customer list that is 3,534 record ids written to CloudWatch on every
+   > page load — expensive, and a record-id dump in a log that has no business holding one.
+   > The exact id-set differences are step 2's job, computed offline against the same two
+   > rules. Per request, counts and outcome flags are what shadow can produce without adding
+   > work to a hot path, and they are enough to find both a narrowing and a widening.
+   >
+   > Three further Phase 2 decisions, all recorded in `lambdas/sundial-sf-query/shadow.js`:
+   > **(a) no added Salesforce round trip, ever** — comparisons are cache-side counts, and for
+   > `tenant` scope with no TEMP guard active there is no query at all, because `rowFilter`
+   > returns the exact predicate the request already ran (`identical_by_construction`). That
+   > shortcut is deliberately **not** taken when the TEMP guard is active, because a
+   > tenant-scope user carrying `Hierarchy_Level__c = "Sales Rep"` is the mis-stamped case and
+   > is precisely the widening this phase exists to find. **(b)** Single reads and `?full=true`
+   > compare outcomes using the record already in hand; the one exception is a **404**, where a
+   > single indexed cache probe answers "would the new model have served this?" — the only way
+   > a widening on that path is visible at all. **(c)** `GET /sf/users` and `GET /sf/user` are
+   > shadowed through a new pure `userFilter()` in `lib/access.js` (§3.5's union), added in
+   > Phase 2 because `rowFilter` refuses `user` by design and shadowing it as a denial would
+   > have measured a blackout that is not the design. The picklist routes shadow the **module
+   > gate only**; §4.4's field-level narrowing needs the Phase 4 manifest and every such line
+   > is stamped `fieldFilter: "deferred_phase4"` rather than left to imply the route is settled.
 2. **Diff report.** `scripts/access-shadow-report.mjs` runs offline against Salesforce + the cache,
    per portal user, per object: old visible id set (TEMP rule for `Hierarchy_Level__c = Sales Rep`
    users; everything for everyone else) vs new set (`rowFilter`). Output is a table plus the two
@@ -1189,9 +1216,24 @@ already applied — and both are recorded because each would have passed a revie
 
 ### Phase 2 — Shadow
 sundial-core: `sf-query` wired to `lib/access` behind `ACCESS_MODEL_MODE=shadow`; module gate,
-users filter, picklist filter all computed-but-not-served; structured shadow logs.
-**Gate:** ≥ 3 business days of shadow logs with zero `onlyInNew` for Dennis; report reconciled for every
-other user; Technician/unknown-level users identified and re-leveled.
+users filter (new `userFilter()`, §3.5), picklist module gate all computed-but-not-served;
+structured shadow logs. **Built 2026-08-28 on `feature/access-model-p2`:**
+`lambdas/sundial-sf-query/shadow.js` (the recorder — try/caught in its entirety, never changes a
+response), 13 instrumented read paths, `lib/access.js` gains `userFilter()` and
+`TENANT_ACCESS_LEVELS`, `scripts/access-shadow-summary.mjs` (CloudWatch aggregation), and
+`verify-access-matrix.mjs` gains `GET /sf/users` and `GET /sf/meta/customer/picklists` — two read
+paths shadow instruments that the matrix did not previously cover.
+
+⚠️ **The picklist FIELD filter is NOT in this phase and cannot be.** §4.4 scopes picklist metadata
+to the role's `read ∪ edit` set, which comes from the field manifest Phase 4 builds; the workbooks
+have not moved into sundial-core, they carry no role columns, and `fieldsFor()` does not exist.
+Phase 2 shadows §3.1's module gate on those two routes and says so in the log line.
+
+**Gate:** ≥ 3 business days of shadow logs with zero unexplained widenings and zero `onlyInNew` for
+Dennis (the id-set half comes from `access-shadow-report.mjs`, which the summary does not replace —
+equal counts are not an equal set); report reconciled for every other user;
+Technician/unknown-level users identified and re-levelled. Deploy order is `off` first (matrix must
+be identical), then `shadow` (matrix must STILL be identical — shadow serves old answers).
 
 ### Phase 3 — Enforce reads, retire TEMP
 sundial-core: `enforce` (step 7.3), then TEMP removal (7.4) as two separate deploys. `/sf/users`,

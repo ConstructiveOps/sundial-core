@@ -581,3 +581,57 @@ test("a visibility check that ERRORS fails open — the insert policy is the pri
   assert.equal(parse(res).sent, true);
   assert.equal(ctx.sent.length, 1);
 });
+
+test("A11: a rep mentioned on a SOLAR comment is SKIPPED, not emailed", async () => {
+  // D-064 A11: sales-role comments are CUSTOMER-ONLY. This Lambda needs no code
+  // change to honour that -- record_visible_for() is the single predicate and the SQL
+  // amendment returns false for solar at `own`/`dealer` scope, so the re-check below
+  // simply starts answering no.
+  //
+  // The test exists to PIN that inheritance. The alternative -- assuming it -- is how
+  // a Lambda ends up with its own quietly-diverging copy of an authorization rule,
+  // which is the exact failure D-064 was written to end.
+  //
+  // What is at stake if it ever stops inheriting: the notification email carries the
+  // COMMENT BODY. A rep who cannot open a solar thread would receive its contents by
+  // email, which is a worse leak than the tab being visible.
+  fresh();
+  ctx.rows.comments[0].record_object = "solar";
+  ctx.rows.comments[0].record_id = "a1Q7y00000JWmkvEAD";
+  ctx.recordVisible = false; // what the amended RPC now returns for this pair
+
+  const res = await handler(hookEvent());
+
+  assert.equal(res.statusCode, 200, "a skip is not an error -- pg_net must not retry");
+  assert.equal(parse(res).sent, false);
+  assert.equal(parse(res).reason, "record_not_visible");
+  assert.equal(ctx.sent.length, 0, "NO EMAIL -- the body never leaves the Lambda");
+  assert.equal(
+    ctx.rows.comment_mentions[0].notified_at,
+    null,
+    "and the row stays replayable, in case the rule or the record changes later"
+  );
+
+  // The check must have asked about THIS record, not about some default.
+  const call = ctx.rpcCalls.find((c) => c.fn === "record_visible_for");
+  assert.ok(call, "record_visible_for was never called");
+  assert.equal(call.args.p_object, "solar");
+  assert.equal(call.args.p_id, "a1Q7y00000JWmkvEAD");
+  assert.equal(call.args.p_profile_id, RECIPIENT);
+});
+
+test("A11: the SAME mention on a CUSTOMER comment still sends", async () => {
+  // The control. Without it, the test above passes just as happily if the Lambda
+  // stopped sending mail altogether.
+  fresh();
+  ctx.rows.comments[0].record_object = "customer";
+  ctx.rows.comments[0].record_id = "a1P7y00000AmyXCEAZ";
+  ctx.recordVisible = true;
+
+  const res = await handler(hookEvent());
+
+  assert.equal(parse(res).sent, true);
+  assert.equal(ctx.sent.length, 1);
+  const call = ctx.rpcCalls.find((c) => c.fn === "record_visible_for");
+  assert.equal(call.args.p_object, "customer");
+});

@@ -912,6 +912,20 @@ self-corrects at their first login. Zero users today.
 
 ### 5.3 Policies
 
+> **AMENDED 2026-08-28 — A11: SALES-ROLE COMMENTS ARE CUSTOMER-ONLY.**
+> `record_visible_for()` returns **false for `solar`** when the resolved scope is `own`
+> or `dealer`, so a rep or dealer manager cannot read, write or be @-mentioned into
+> comments on a Solar record — including their own. **Tenant scope is unchanged**; Harmon
+> staff keep full comments on both objects.
+>
+> Everything below describing sales-role comments on Solar is superseded by that. The
+> mechanism is unchanged: one predicate, called by both comments policies and both
+> mentions policies, so read, write and mention move together. `sundial-comment-notify`
+> needs no code change — its §3.7 re-check calls the same RPC and inherits the rule.
+>
+> Applied by `sql/sundial_access_p8_comments_customer_only.sql`; rationale in
+> DECISIONS.md (D-064 A11).
+
 > **A5 (2026-08-27): this section is now Phase 1b, immediately after Phase 1** — not Phase 6.
 > Phase 0 measured what it closes: a Sales Rep with no elevated access reads **every comment in the
 > tenant**, all 485, none of them their own, on records they cannot open (§5.1a). That is a live

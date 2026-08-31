@@ -826,6 +826,23 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [ ] **Deferred:** dropping the `profiles.role` COLUMN is a schema change for Tim.
         Un-written is safe; un-dropped is tidy-up.
 
+- [x] **A11 verified at the database (2026-08-30).** p8 SQL applied;
+      `scripts/verify-comment-scope.mjs` 6/6 green against prod on the browser's own
+      PostgREST path with an end-user token. Read filtered to 0 rows against a comment
+      staff can see, write and mention both refused with 42501, customer controls green.
+      This was the last unverifiable layer of A11 — the other two (notify inheritance,
+      client gating) were pinned by tests in 580bd7d.
+- [x] **`access.visible` shipped (2026-08-30).** `sundial-sf-query` deployed, matrix 0
+      surfaces differ, `ACCESS_MODEL_MODE=enforce` preserved. `?full=true` states the
+      renderable field set instead of leaving the client to infer it from key presence.
+      Verified live: 232 / 236 / `null` names for rep / dealer / tenant, matching the
+      manifest read sets exactly, with `Id` and `Client__c` excluded and **0** read-set
+      names absent from the record (so the predicate can only hide more, never less).
+      Documented in `docs/access-model.md` §4.3/§4.5 and `docs/api-endpoints.md`.
+  - [ ] **Client not merged yet:** `harmon-crm` `feature/access-visible` (`a02a438`),
+        34 tests + tsc + build green. No rush — the fallback path handles the new payload
+        shape, so the client is correct either merged or not.
+
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that
       gates real access is generated from it — and `generate-field-configs.mjs` warns on

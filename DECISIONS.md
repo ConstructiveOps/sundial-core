@@ -2691,3 +2691,60 @@ an id matching no rail item: a silent no-op, and precisely how the deleted
 model the browser is not merely reflecting a refusal it would meet anyway — it talks to
 Supabase itself. RLS remains the control; not rendering the panel stops it mounting and
 subscribing to a realtime channel for threads RLS will refuse.
+
+---
+
+## D-064 amendment A12 — the server states the renderable field set, 2026-08-30
+
+**Refines §4.3.** `GET /sf/{object}/{id}?full=true` now returns `access.visible` — the
+caller's manifest read set, or `null` for tenant scope — alongside `access.editable`.
+
+**What changed, and what did not.** Nothing observable changed. The client had been
+deciding "may I render this field?" by asking `'Foo__c' in record`, and against current
+data the two predicates agree exactly: for zz-rep-a1 the manifest read set is **232**
+names, the record carried **234** keys, and the difference is precisely `Id` and
+`Client__c`. That equivalence is why this is worth writing down — a change with no visible
+effect gets reverted by the next person who reads it as redundant.
+
+**Why state it rather than infer it.** Key presence is a property of the *payload*; it was
+being read as a statement of *intent*. It answers correctly today and is one schema change
+away from not:
+
+- `Id` and `Client__c` are **always retained** — the record key and the tenant control
+  field. Any section that ever lists one of them renders for a caller entitled to nothing
+  else inside it. No section does today — all 14 customer and 18 solar sections were
+  checked — which is luck, not design.
+- anything that later fills nulls in for absent fields (a cache shim, a mapper, a
+  defensive `?? null`) turns "hidden" into "visible" with no code change on either side,
+  no test failure, and no error anywhere.
+
+Neither is possible against the list: `Id` is not in it, and a null-filling mapper cannot
+add a name to it.
+
+**The safety property.** **0** names in the read set are absent from the record, on every
+surface measured. The list is therefore a strict subset of what the payload already
+carried, so switching the predicate to it can only ever hide **more**, never less — which
+is what makes the change fail-closed rather than a widening risk.
+
+**`visible` and `editable` stay separate because read is not edit.** The Solar sheet gives
+a sales role read on **115** fields and edit on **none**, so every one of those is
+renderable *and* read-only. One combined list would either hide all 115 or make them
+writable. `null` on either means tenant scope; `[]` is a real answer meaning "nothing
+here" and is not the same thing — the client tests `Array.isArray`, not truthiness.
+
+**Deploy order does not matter.** `computeRecordAccess()` falls back to key presence when
+`access.visible` is absent, so client and Lambda can ship in either order without a blank
+detail page in between.
+
+| Layer | Change |
+|---|---|
+| `sundial-sf-query` | `access.visible` on `?full=true`. Deployed 2026-08-30, matrix 0 surfaces differ, `ACCESS_MODEL_MODE=enforce` preserved |
+| Client | `computeRecordAccess()` reads the list, falls back to key presence. `harmon-crm` `feature/access-visible` |
+| List / search | **Unchanged and deliberately untouched** — rows are projected to `listColumns` in snake_case (`sf_id`, …) and carry no `access` block, so neither predicate applies to them |
+
+**One testing note worth keeping.** The first sabotage run — client ignores
+`access.visible` — **passed**, because the two predicates agree on today's data. That is
+the correct result and it showed the DOM test could not tell them apart. Three unit tests
+were then written specifically to discriminate them, the load-bearing one being a section
+whose only field is a control field: hidden against the list, visible under key presence.
+A test that cannot fail is not evidence.

@@ -148,6 +148,19 @@ Adding a child object is **one entry** in the `PARENT_FILTER` registry in
 - **LIST and SEARCH rows are a PROJECTION, not the full cache row** (the single-record read is not — it still returns every column):
   - **Null-valued keys are omitted.** A field with no value is ABSENT from the row rather than present as `null`. This has always been true of rows refreshed from Salesforce (`source: "cache+salesforce"`), so it is not a new shape — it is now consistent across every list row. Read fields with `??` / `||` / `?.`, never with `"key" in row`.
   - **Long-text columns are excluded**: `notes`, any column ending `_notes`, any column containing `findings`. Use the single-record read (`GET /sf/{object}/{id}`) or `?full=true` when you need them.
+
+  - **`?full=true` carries an `access` block** (D-064 §4.3):
+
+    ```json
+    "access": { "visible": ["Primary_Email__c", …], "editable": [ … ], "manifestVersion": "…" }
+    ```
+
+    `visible` = the fields the caller may render, `editable` = the subset they may write. **Both
+    `null` means tenant scope** (no restriction); `[]` means "nothing", which is not the same thing.
+    The client reflects both and decides neither — the server refuses regardless.
+
+    List and search responses carry **no `access` block**: their rows are projected to `listColumns`
+    in snake_case (`sf_id`, …), so the field predicate does not apply to them.
   - Both exist to stay under **Lambda's 6,291,556-byte response cap** — see the warning below.
 - Rows are ordered **`created_date` DESC (newest first), NULLs last, with `sf_id` as a stable tiebreaker** — so the first page is the most recent records and paging never shifts rows as they are re-synced. `created_date` is a cache column populated from Salesforce: `CreatedDate` for most objects, **`COALESCE(Contract_Date__c, CreatedDate)` for Solar**. Backed by the `(client_sf_id, created_date DESC NULLS LAST, sf_id)` index. (If the `created_date` column is absent, the endpoint falls back to stable `sf_id` order — no error.) Only the rows on the requested page are freshness-checked/refreshed — a read never scans the whole table.
 

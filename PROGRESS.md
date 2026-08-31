@@ -1,5 +1,98 @@
 # Sundial — Progress Log
 
+## 2026-08-30 — A11 verified at the database; `access.visible` replaces the inference
+
+Two things closed today. Both were about the same weakness: a rule that was *believed*
+rather than *demonstrated*.
+
+### 1. A11 (sales-role comments are Customer-only) is now proven, not assumed
+
+The p8 SQL is applied and `scripts/verify-comment-scope.mjs` is **6/6 green** against
+prod, signed in as zz-rep-a1 with an ordinary end-user token:
+
+| | |
+|---|---|
+| 0. SETUP | staff comments on a solar record and reads it back |
+| 1. READ | the rep sees **0 rows** for that comment |
+| 2. WRITE | the rep inserting a solar comment → **42501** |
+| 3. MENTION | staff mentioning the rep on it → **42501** |
+| 4. CONTROL ×2 | customer comments still read *and* write for the same rep |
+
+**Why a live script when the SQL ships its own V1–V8.** Those run as Tim, in the SQL
+editor, and call the predicate directly. That proves the *function* returns the right
+answer. It does not prove the policies call it, that they are attached to the tables the
+browser queries, or that a real end-user JWT resolves to the profile the predicate keys
+on. Comments are browser-direct (D-056), so this script takes the identical path a rep's
+browser takes — nothing mocked, no service key, no Lambda in the middle to be blamed.
+
+Check 3 is the one that matters most: `sundial-comment-notify` emails the comment
+**body**, so if the mention row could exist, a rep who cannot open the thread would
+receive its contents by email — a worse leak than the tab being visible.
+
+**Writing the script surfaced three of its own false greens**, each of which would have
+reported success against a broken model:
+
+- it asserted "0 rows" against a record carrying **no solar comments at all** — green
+  with RLS switched off entirely. Staff now seeds a row first, so 0 rows is a statement
+  about RLS rather than about an empty table.
+- it *claimed in a comment* that the solar record was visible to the rep while silently
+  falling back to a hard-coded id, because cache rows key on `sf_id` and it read `Id`.
+  Had the rep not been able to see it, every refusal would have been about the RECORD.
+  Now a hard 200-assert that aborts.
+- cleanup deleted the rep's comment **as staff**, which RLS refuses and PostgREST reports
+  as 0 rows and no error. It printed "deleted" and left two probe rows behind, which
+  surfaced as a phantom extra row in the next run. Every delete now runs as the row's
+  author and verifies its own count.
+
+### 2. `access.visible` — the server states the renderable set
+
+`sundial-sf-query` deployed; matrix **0 surfaces differ**; `ACCESS_MODEL_MODE=enforce`
+preserved. `?full=true` now returns `access.visible` alongside `access.editable`.
+
+Verified live:
+
+| | zz-rep-a1 | zz-mgr-a | zz-admin |
+|---|---|---|---|
+| `access.visible` (customer) | 232 | 236 | `null` (tenant) |
+| matches the manifest read set | yes | yes | n/a |
+| contains `Id` / `Client__c` | no | no | n/a |
+| read-set names absent from the record | **0** | **0** | n/a |
+
+Solar for the rep: `visible=115`, `editable=0` — read on 115 fields, edit on none. That
+is exactly why the two are separate fields: read is not edit, and collapsing them would
+either hide all 115 or make them writable.
+
+**This changed no behaviour today, which is the point worth recording.** The client had
+been inferring visibility from key presence (`'Foo__c' in record`), and against current
+data the two predicates agree exactly — the difference between the 232-name read set and
+the 234 record keys is precisely `Id` and `Client__c`. The reason to switch anyway is
+that presence is a property of the *payload* and was being read as a statement of
+*intent*:
+
+- those two control fields are always retained, so any section that ever lists one of
+  them renders for a caller entitled to nothing else inside it. No section does today,
+  which is luck rather than design.
+- anything that later fills nulls in for absent fields (a cache shim, a mapper, a
+  defensive `?? null`) would widen what renders with no code change on either side, no
+  test failure, and no error anywhere.
+
+`0 names absent from the record` is the safety property: the list is a strict subset of
+what the payload already carried, so the new predicate can only ever hide **more**.
+
+**Client** (`harmon-crm`, `feature/access-visible`): `computeRecordAccess()` reads the
+list, falling back to key presence for an older payload so the two sides can deploy in
+either order. New `CustomerDetailPage.access.test.tsx` asserts **set equality** on the
+rail — buttons rendered == sections with ≥1 visible field + granted synthetic tabs, both
+directions — with the expected side derived from the real config and the real read set.
+The existing tests assert "this one is absent" and "that one is present", and every one
+of them passes while a *third* section leaks.
+
+Falsified in both directions before being believed: removing the filter fails the
+equality test, and ignoring `access.visible` fails the three tests written specifically
+to discriminate the new predicate from the old. The first sabotage run **passed**, which
+correctly showed the DOM test could not yet tell the two apart — hence those three.
+
+
 ## 2026-08-28 — Dealer provisioning, Phase 6 SQL, Phase 7 cleanup
 
 The three items after the access model went live. Dealer onboarding is unblocked, the

@@ -2642,3 +2642,109 @@ DOES depend on which record was asked for.
 full access matrix green across 140 surfaces with zero pending rows, 24/24 live field
 assertions, 24/24 live write probes, and a shadow summary under enforce showing 0
 disagreements. Unit tests 652 → 743.
+
+
+---
+
+## D-064 amendment A11 — sales-role comments are Customer-only, 2026-08-28
+
+**Amends the answer-9 comment scope.** Answer 9 gave a sales role comments on any record
+they could see, which included Solar. It no longer does.
+
+**Decision.** For `own` and `dealer` scope, comments are **CUSTOMER-ONLY**. A rep or
+dealer manager may not read, write, or be @-mentioned into comments on a Solar record —
+**including their own solar projects**. Tenant scope is unchanged: Harmon staff keep full
+comments on both objects.
+
+**Why, given a rep can see the Solar record itself.** Because a comment is not a field,
+and the field manifest already answered the underlying question: the Solar sheet gives a
+sales role READ on 115 of 473 fields and EDIT on **none**. A Solar project is, to a rep,
+a record they may look at and not touch.
+
+A comment thread on it is neither. It is staff prose about engineering, permitting,
+budget and scheduling — the parts of the record the manifest hides — written on the
+assumption that only staff read it. Leaving comments open on Solar lets the prose route
+around the field rules: the numbers are hidden, the sentence quoting the numbers is not.
+
+**The mention half is the sharper one.** `comment_mentions` insert is gated on
+`record_visible_for(mentioned_user, …)`, so a staff member now simply *cannot* mention a
+rep onto a solar comment — refused at the database. That is what stops
+`sundial-comment-notify` emailing a rep the **body** of a comment they could not open:
+the mention row cannot exist to trigger it. Receiving the contents by email would be a
+worse leak than seeing the tab.
+
+**Implemented in one predicate, three layers.**
+
+| Layer | Change |
+|---|---|
+| RLS | `sql/sundial_access_p8_comments_customer_only.sql` — `record_visible_for()` returns `false` for `solar` at `own`/`dealer`. `record_visible()` is a wrapper and inherits it; V4 proves that rather than assuming it. Both comments policies and both mentions policies call these, so read, write and mention move together |
+| `sundial-comment-notify` | **No code change.** The §3.7 re-check calls the same RPC, so it inherits the rule and skips. Pinned by two tests rather than assumed — a Lambda with its own quietly-diverging copy of an authorization rule is the exact failure D-064 exists to end |
+| Client | The Comments panel is gated from the access block on both detail pages |
+
+**One implementation note worth keeping.** The instruction was to gate comments "the same
+way as Files". Files is a rail **tab**; the Comments panel is **persistent** — it renders
+alongside whichever tab is active. Gating it through the hidden-tab set would have added
+an id matching no rail item: a silent no-op, and precisely how the deleted
+`temp-role-tab-visibility.ts` failed. It is gated at its render site instead.
+
+**And comments are browser-direct (D-056)**, so unlike every other client rule in this
+model the browser is not merely reflecting a refusal it would meet anyway — it talks to
+Supabase itself. RLS remains the control; not rendering the panel stops it mounting and
+subscribing to a realtime channel for threads RLS will refuse.
+
+---
+
+## D-064 amendment A12 — the server states the renderable field set, 2026-08-30
+
+**Refines §4.3.** `GET /sf/{object}/{id}?full=true` now returns `access.visible` — the
+caller's manifest read set, or `null` for tenant scope — alongside `access.editable`.
+
+**What changed, and what did not.** Nothing observable changed. The client had been
+deciding "may I render this field?" by asking `'Foo__c' in record`, and against current
+data the two predicates agree exactly: for zz-rep-a1 the manifest read set is **232**
+names, the record carried **234** keys, and the difference is precisely `Id` and
+`Client__c`. That equivalence is why this is worth writing down — a change with no visible
+effect gets reverted by the next person who reads it as redundant.
+
+**Why state it rather than infer it.** Key presence is a property of the *payload*; it was
+being read as a statement of *intent*. It answers correctly today and is one schema change
+away from not:
+
+- `Id` and `Client__c` are **always retained** — the record key and the tenant control
+  field. Any section that ever lists one of them renders for a caller entitled to nothing
+  else inside it. No section does today — all 14 customer and 18 solar sections were
+  checked — which is luck, not design.
+- anything that later fills nulls in for absent fields (a cache shim, a mapper, a
+  defensive `?? null`) turns "hidden" into "visible" with no code change on either side,
+  no test failure, and no error anywhere.
+
+Neither is possible against the list: `Id` is not in it, and a null-filling mapper cannot
+add a name to it.
+
+**The safety property.** **0** names in the read set are absent from the record, on every
+surface measured. The list is therefore a strict subset of what the payload already
+carried, so switching the predicate to it can only ever hide **more**, never less — which
+is what makes the change fail-closed rather than a widening risk.
+
+**`visible` and `editable` stay separate because read is not edit.** The Solar sheet gives
+a sales role read on **115** fields and edit on **none**, so every one of those is
+renderable *and* read-only. One combined list would either hide all 115 or make them
+writable. `null` on either means tenant scope; `[]` is a real answer meaning "nothing
+here" and is not the same thing — the client tests `Array.isArray`, not truthiness.
+
+**Deploy order does not matter.** `computeRecordAccess()` falls back to key presence when
+`access.visible` is absent, so client and Lambda can ship in either order without a blank
+detail page in between.
+
+| Layer | Change |
+|---|---|
+| `sundial-sf-query` | `access.visible` on `?full=true`. Deployed 2026-08-30, matrix 0 surfaces differ, `ACCESS_MODEL_MODE=enforce` preserved |
+| Client | `computeRecordAccess()` reads the list, falls back to key presence. `harmon-crm` `feature/access-visible` |
+| List / search | **Unchanged and deliberately untouched** — rows are projected to `listColumns` in snake_case (`sf_id`, …) and carry no `access` block, so neither predicate applies to them |
+
+**One testing note worth keeping.** The first sabotage run — client ignores
+`access.visible` — **passed**, because the two predicates agree on today's data. That is
+the correct result and it showed the DOM test could not tell them apart. Three unit tests
+were then written specifically to discriminate them, the load-bearing one being a section
+whose only field is a control field: hidden against the list, visible under key presence.
+A test that cannot fail is not evidence.

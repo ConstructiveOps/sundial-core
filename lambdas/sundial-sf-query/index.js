@@ -886,14 +886,35 @@ async function handleSingleReadFull(ctx) {
   // so this is a no-op — and if it ever is not, the response is still right.
   const projected = projectRecord(objectKey, access, record);
   const editable = editableFor(objectKey, access);
+
+  // §4.3: the RENDERABLE set, stated explicitly rather than left to be inferred.
+  //
+  // The client used to decide "may I render this field?" by asking whether the key was
+  // present on the record. That works today and is one schema change away from not
+  // working, because presence is a property of the PAYLOAD, not a statement of intent:
+  //
+  //   - `Id` and `Client__c` are ALWAYS retained (they are the record key and the
+  //     tenant control field), so any section that ever lists one of them would render
+  //     for a role that can see nothing else in it. No section does today -- checked,
+  //     all 14 customer and 18 solar sections -- which is luck, not design.
+  //   - anything that later fills in nulls for missing fields (a cache shim, a mapper,
+  //     a defensive `?? null`) silently turns "hidden" into "visible" with no code
+  //     change on either side and no error anywhere.
+  //
+  // Sending the list removes the inference. `null` means tenant scope: no restriction,
+  // render everything, exactly as before.
+  const visibleSet = fieldsFor(objectKey, access);
+  const visible = visibleSet ? [...visibleSet.read].sort() : null;
   return jsonResponse(200, cors, {
     source: "salesforce",
     full: true,
     record: projected,
-    // §4.3. The client renders a field read-only iff it is absent from this list; it
-    // decides nothing itself. `editable: null` means tenant scope — the client keeps
-    // its existing describe-driven behaviour.
-    access: { editable, manifestVersion: MANIFEST_VERSION },
+    // §4.3. `visible` is the set the client may RENDER; `editable` the subset it may
+    // offer an input for. The client reflects both and decides neither. `null` on
+    // either means tenant scope — no restriction, existing behaviour unchanged.
+    //
+    // Both are needed: read is not edit, and a field can be renderable-but-read-only.
+    access: { visible, editable, manifestVersion: MANIFEST_VERSION },
   });
 }
 

@@ -795,28 +795,57 @@ lands only after its server change is verified in prod. Branch per repo per phas
   - [!] **Phase 5 gates deliberately IGNORE ACCESS_MODEL_MODE.** They replaced an
         existing control, so an env rollback would make the system looser than before.
         Rolling Phase 5 back is a previous-zip redeploy.
-- [~] **Phase 6 — Supabase RLS.** `sql/sundial_access_p6_drop_inert.sql` WRITTEN and
-      ready for Tim to paste. **Bigger than the plan, because the plan was not safe:**
-      `current_user_tenant_id()` is referenced by TEN policies, not six. The four extra
-      (`asset_cache`, `chat_messages`, `sundial_file_metadata`, `portal_users`) still
-      carry ALL 16 anon/authenticated privileges, so their inert policy is the only thing
-      in the way — a CASCADE drop would have opened three live tables. The file revokes
-      those four FIRST, then drops, in one transaction.
-  - [ ] **TIM: paste and run it**, then the six verification queries.
-  - [!] **`portal_users` is NOT dropped, and that changed after the first run failed.**
-        Five FK constraints across four tables point at it
-        (`chat_messages`, `notifications`, `audit_log`, and `sundial_file_metadata`
-        twice) — it is an empty table but a REFERENCED PARENT. Dropping it is not needed
-        to disarm the trap: once the policies and the function are gone, populating it
-        does nothing. An OPTIONAL commented block at the end of the SQL file drops it
-        properly, another day.
-  - [ ] **Dead columns found while deciding that:** `sundial_file_metadata`
+- [x] **Phase 6 — Supabase RLS. APPLIED AND VERIFIED AGAINST THE LIVE DATABASE
+      (2026-08-30).** `sql/sundial_access_p6_drop_inert.sql` ran; all checks including
+      3b passed. Re-confirmed by direct catalog query on 2026-08-30:
+
+      | Check | Live value |
+      |---|---|
+      | `current_user_tenant_id()` functions remaining | **0** |
+      | Policies on the six cache tables | **0** |
+      | `asset_cache` anon/auth privileges, policies | **0/0, 0** |
+      | `chat_messages` anon/auth privileges, policies | **0/0, 0** |
+      | `sundial_file_metadata` anon/auth privileges, policies | **0/0, 0** |
+      | `portal_users` anon/auth privileges, policies | **0/0, 0** |
+
+      **The file was bigger than the plan because the plan was not safe:**
+      `current_user_tenant_id()` was referenced by TEN policies, not six. The four extra
+      (`asset_cache`, `chat_messages`, `sundial_file_metadata`, `portal_users`) carried
+      ALL 16 anon/authenticated privileges, so their inert policy was the only thing in
+      the way — a CASCADE drop would have opened three live tables. The file revoked
+      those four FIRST, then dropped, in one transaction. All four now sit at 0/0.
+  - [x] **Phase 1b comment policies survived intact** (verified 2026-08-30): `comments`
+        carries `comments_select_visible` + `comments_insert_visible` (both calling
+        `record_visible`) and `comments_delete_own`; `comment_mentions` carries
+        `mentions_insert_scoped` (calls the predicate) and `mentions_select_own`. RLS
+        enabled on both, and both `record_visible` and `record_visible_for` still exist.
+        `comments_delete_own` is author-scoped, which is why a staff account cannot
+        delete a rep's comment — worth remembering, since PostgREST reports that refusal
+        as 0 rows and no error (it silently broke the first cleanup in
+        `verify-comment-scope.mjs`).
+  - [~] **`portal_users` is NOT dropped, and it is now INERT rather than load-bearing.**
+        0 rows, RLS enabled, 0 anon/authenticated privileges, 0 policies. It survives
+        because it is a REFERENCED PARENT, not because it protects anything.
+        **SIX FK constraints point at it, not the five this file's header claims** —
+        `chat_messages`, `notifications`, `audit_log`, `sundial_file_metadata` (twice),
+        **plus `portal_users_parent_user_id_fkey`, its own self-lookup**, which the
+        header's "five across four tables" missed. That does not change the conclusion —
+        it still cannot be dropped without dealing with the children — but the header
+        undercounts, and the header is the reason the table survives.
+        Dropping it is not needed to disarm the original trap: with the policies and the
+        function gone, populating it does nothing. An OPTIONAL commented block at the end
+        of the SQL file drops it properly, another day.
+  - [ ] **Dead columns, to decide with the table's fate:** `sundial_file_metadata`
         `uploaded_by_user_id` and `deleted_by_user_id` are uuid FKs to the empty
-        `portal_users`, so they are 0-of-35 populated and CANNOT be written — any value
-        would violate the constraint. Attribution works via `uploaded_by_user_name`
-        (35 of 35), which is what the Lambdas write. Decide the columns' fate with the
-        table's.
-  - [ ] `profiles` policy review (not in the file; still outstanding).
+        `portal_users`, so they are **0 of 42** populated and CANNOT be written — any
+        value would violate the constraint. Attribution works via
+        `uploaded_by_user_name` (**42 of 42**), which is what the Lambdas write.
+  - [x] **`profiles` policy review — DONE (2026-08-30), and it is correct as it stands.**
+        RLS enabled; exactly one policy, `own_profile_select` = `auth.uid() = id`,
+        SELECT only; and only SELECT is granted (1 of 4 privileges to `anon` and to
+        `authenticated`). So a caller can read their own row and nothing else, and no
+        client can write the table at all. The `anon` SELECT grant is harmless: with no
+        `auth.uid()`, the policy matches no row.
 - [x] **Phase 7 — Cleanup and docs (2026-08-28).** `profiles.role` no longer written
       (auth-proxy deployed); `salesforce-schema.md` gains the access-model objects with
       `Hierarchy_Level__c` deprecated and `Roles__c` unused; `caching-architecture.md`
@@ -824,7 +853,26 @@ lands only after its server change is verified in prod. Branch per repo per phas
       `api-endpoints.md` gains the dealer routes and the refusal-code table;
       `harmon-crm/CLAUDE.md` re-synced.
   - [ ] **Deferred:** dropping the `profiles.role` COLUMN is a schema change for Tim.
-        Un-written is safe; un-dropped is tidy-up.
+        Confirmed live 2026-08-30: the column still exists and still holds **35**
+        non-null values — stale data that nothing writes and nothing reads. Un-written is
+        safe; un-dropped is tidy-up.
+
+- [x] **A11 verified at the database (2026-08-30).** p8 SQL applied;
+      `scripts/verify-comment-scope.mjs` 6/6 green against prod on the browser's own
+      PostgREST path with an end-user token. Read filtered to 0 rows against a comment
+      staff can see, write and mention both refused with 42501, customer controls green.
+      This was the last unverifiable layer of A11 — the other two (notify inheritance,
+      client gating) were pinned by tests in 580bd7d.
+- [x] **`access.visible` shipped (2026-08-30).** `sundial-sf-query` deployed, matrix 0
+      surfaces differ, `ACCESS_MODEL_MODE=enforce` preserved. `?full=true` states the
+      renderable field set instead of leaving the client to infer it from key presence.
+      Verified live: 232 / 236 / `null` names for rep / dealer / tenant, matching the
+      manifest read sets exactly, with `Id` and `Client__c` excluded and **0** read-set
+      names absent from the record (so the predicate can only hide more, never less).
+      Documented in `docs/access-model.md` §4.3/§4.5 and `docs/api-endpoints.md`.
+  - [ ] **Client not merged yet:** `harmon-crm` `feature/access-visible` (`a02a438`),
+        34 tests + tsc + build green. No rush — the fallback path handles the new payload
+        shape, so the client is correct either merged or not.
 
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that

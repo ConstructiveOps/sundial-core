@@ -674,12 +674,39 @@ never leave Salesforce), and the response carries:
 
 ```json
 { "source": "salesforce", "full": true, "record": { … visible fields only … },
-  "access": { "editable": ["Sales_Rep_Notes__c", …], "manifestVersion": "sha256:…" } }
+  "access": { "visible":  ["Primary_Email__c", …],
+              "editable": ["Sales_Rep_Notes__c", …],
+              "manifestVersion": "sha256:…" } }
 ```
 
-Tenant scope: unchanged query; `access.editable` = describe-updateable minus blocklist. List/search rows
-go through `projectRow` with `listColumns`. The cache row shortcut on single reads is projected the
-same way.
+`visible` is the set the client may **render**; `editable` the subset it may offer an input for. Both
+`null` means tenant scope — no restriction, existing behaviour unchanged. `[]` is a real answer
+("nothing here") and is not the same as `null`.
+
+Both are needed because **read is not edit**: the Solar sheet gives a sales role read on 115 fields and
+edit on **none**, so every one of those is renderable *and* read-only. Collapsing the two would either
+hide them all or make them writable.
+
+**`visible` was added 2026-08-30** (deployed, matrix green). Before it, the client inferred visibility
+from key presence — `'Foo__c' in record` — which gives the identical answer today and is one schema
+change away from not. Measured against prod for zz-rep-a1: manifest read set **232** names, record keys
+**234**, difference exactly `Id` + `Client__c`, and **0** names in the read set absent from the record.
+
+That last number is the safety property: the list is a strict subset of what the payload already
+carried, so switching the predicate to it can only ever hide **more**, never less.
+
+Two ways the inference could have gone wrong, both closed by stating the set:
+
+- `Id` and `Client__c` are **always retained** (record key, tenant control field). Any section that
+  ever lists one of them renders for a caller entitled to nothing else inside it. No section does today
+  — all 14 customer and 18 solar sections checked — which is luck, not design.
+- anything that later fills nulls in for absent fields (a cache shim, a mapper, a defensive `?? null`)
+  turns "hidden" into "visible" with no code change on either side and no error anywhere.
+
+Tenant scope: unchanged query; `access.editable` = describe-updateable minus blocklist, `access.visible`
+`null`. List/search rows go through `projectRow` with `listColumns` and carry **no `access` block at
+all** — they key on snake_case cache columns (`sf_id`, …), so neither predicate can be applied to list
+data. The cache row shortcut on single reads is projected the same way as a live read.
 
 ### 4.4 Picklist metadata
 
@@ -692,9 +719,20 @@ exception to tenant scoping stays).
 - `AuthContext` exposes `user.access` (`scope`, `modules`, `actions`, `manifestVersion`).
 - `nav.ts` filters items by `modules`; `GlobalSearch` runs only enabled legs; `DashboardPage` counts
   come from the already-filtered list.
-- Detail pages render `sections.filter(s => s.fields.some(f => f.apiName in record))`, and
-  `record-editing.ts` treats a field as editable iff `access.editable` includes it (the sheet's
-  `readOnly` remains a rendering hint for tenant scope).
+- Detail pages render `sections.filter(s => s.fields.some(f => access.visible.includes(f.apiName)))`
+  via the shared `computeRecordAccess()` helper (`src/hooks/useRecordAccess.ts`), and treat a field as
+  editable iff `access.editable` includes it (the sheet's `readOnly` remains a rendering hint for
+  tenant scope). A section with zero visible fields is hidden; a partly-stripped one renders only its
+  survivors.
+  - The helper falls back to `f.apiName in record` when `access.visible` is absent, so client and
+    Lambda can deploy in either order without a blank detail page in between.
+  - It is a **pure function, not a hook**, on purpose: both pages need it *after* their early returns,
+    and a hook there throws "Rendered more hooks than during the previous render" on the
+    loading→loaded transition. See the note at the bottom of that file.
+  - `CustomerDetailPage.access.test.tsx` asserts **set equality** on the rail — buttons rendered ==
+    sections with ≥1 visible field + granted synthetic tabs, both directions — against the real
+    config and the real 232-name read set. Spot checks of the form "this one is absent" all pass
+    while a third section leaks; only enumeration catches that.
 - Action buttons render iff `actions` includes the key. They still get a 403 if forced.
 - `temp-role-tab-visibility.ts` and its two call sites are **deleted** in Phase 4, not adapted.
 
@@ -911,6 +949,20 @@ scoped by their access level rather than to `none`. It can only affect whether t
 self-corrects at their first login. Zero users today.
 
 ### 5.3 Policies
+
+> **AMENDED 2026-08-28 — A11: SALES-ROLE COMMENTS ARE CUSTOMER-ONLY.**
+> `record_visible_for()` returns **false for `solar`** when the resolved scope is `own`
+> or `dealer`, so a rep or dealer manager cannot read, write or be @-mentioned into
+> comments on a Solar record — including their own. **Tenant scope is unchanged**; Harmon
+> staff keep full comments on both objects.
+>
+> Everything below describing sales-role comments on Solar is superseded by that. The
+> mechanism is unchanged: one predicate, called by both comments policies and both
+> mentions policies, so read, write and mention move together. `sundial-comment-notify`
+> needs no code change — its §3.7 re-check calls the same RPC and inherits the rule.
+>
+> Applied by `sql/sundial_access_p8_comments_customer_only.sql`; rationale in
+> DECISIONS.md (D-064 A11).
 
 > **A5 (2026-08-27): this section is now Phase 1b, immediately after Phase 1** — not Phase 6.
 > Phase 0 measured what it closes: a Sales Rep with no elevated access reads **every comment in the

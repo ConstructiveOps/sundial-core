@@ -2748,3 +2748,41 @@ the correct result and it showed the DOM test could not tell them apart. Three u
 were then written specifically to discriminate them, the load-bearing one being a section
 whose only field is a control field: hidden against the list, visible under key presence.
 A test that cannot fail is not evidence.
+
+---
+
+## D-064 amendment A13 — the mention picker asks the database, 2026-08-31
+
+**Adds `mentionable_users()`.** The @-mention picker greys out a name whose mention RLS
+would refuse, and gets that answer from `sql/sundial_access_p9_mentionable_users.sql`
+rather than working it out in TypeScript.
+
+**Why not compute it client-side.** The question "would this mention be refused?" is
+exactly the `mentions_insert_scoped` WITH CHECK:
+`record_visible_for(mentioned_user_id, object, id) AND user_visible(mentioned_user_id)`.
+Answering it in the browser would need every user's access level, dealer and Sundial id
+shipped down, plus the record's `Sales_Rep__c` — which a Sales Rep cannot read at all, it
+is not in their manifest set. It would also be a **second copy of an authorization rule**,
+free to drift from the policy it mirrors. A11 already made the opposite choice correctly
+by having `sundial-comment-notify` call the same predicate instead of restating it, and
+this follows it.
+
+**The caller-visibility gate is load-bearing.** `record_visible_for(u, …)` says whether
+*u* can see a record; it says nothing about the caller. The function's first conjunct is
+therefore `record_visible(p_object, p_id)` — without it, any authenticated user could pass
+an arbitrary record id and learn which staff can see it, an enumeration oracle over records
+they have no access to, built from a function whose purpose is to protect them. On an
+unseen record it returns **zero rows**, so the picker greys out everyone.
+
+**It is a hint, never a control.** RLS still refuses the insert and remains the only thing
+that does. Every failure path — RPC error, function not yet applied, empty list — leaves
+the hint null and greys out nobody, because a hint that wrongly *denies* is worse than no
+hint. `grant execute` to `authenticated` only; `anon` is deliberately not granted.
+
+**One correction to the record.** The bug this came from (reps could not tag staff) was
+diagnosed mid-session as an RLS refusal, on the strength of a 42501 from a probe that used
+`.insert().select('id')`. That `.select()` makes it `INSERT … RETURNING`, which
+`mentions_select_own` filters, and **Postgres reports it with the same 42501 text as a
+WITH CHECK failure**. RLS was correct throughout; the bug was a `.slice(0, 6)` in the
+picker. Recorded because the error code is not self-describing and the same false finding
+is easy to reach twice — see PROGRESS 2026-08-31 for the two-shape proof.

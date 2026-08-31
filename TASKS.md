@@ -874,6 +874,21 @@ lands only after its server change is verified in prod. Branch per repo per phas
         34 tests + tsc + build green. No rush — the fallback path handles the new payload
         shape, so the client is correct either merged or not.
 
+- [x] **@-mention picker fix (2026-08-31, launch blocker for dealer onboarding).**
+      Reps could not tag Harmon staff. NOT an access-model bug: `/sf/users`, RLS and
+      notify were all correct; the client capped the list at 6 over a last-name ordering.
+      Cap raised to 50 and reported ("+N more"), ranking added, and picker entries whose
+      mention RLS would refuse are greyed with a reason.
+      `verify-comment-scope.mjs` 10/10 with permanent cases 5 (rep tags tenant staff,
+      row persists) and 6 (staff present beyond the old cap — the target sits at 19 of 27).
+  - [ ] **TIM: paste `sql/sundial_access_p9_mentionable_users.sql`**, then V1–V4. Until
+        it is applied the grey-out is simply inactive (the RPC errors, the hint stays
+        null, nobody is greyed) — the picker fix itself does not depend on it.
+  - [ ] **Open question, not a bug:** a rep can still SELECT a same-dealer peer before the
+        RPC answers, and the mention is then refused silently. Correct per A11, now
+        visible rather than silent — but consider surfacing a post-send notice if any
+        picked mention was rejected.
+
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that
       gates real access is generated from it — and `generate-field-configs.mjs` warns on

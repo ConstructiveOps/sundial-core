@@ -337,6 +337,117 @@ async function main() {
     await purge(rep, custIns.data?.[0]?.id ?? null, 'control comment');
   }
 
+  // ---------------------------------------------------------------- 5. MENTIONS
+  //
+  // The launch blocker of 2026-08-31: reps reported they could not @-mention Harmon
+  // staff. Diagnosed to the CLIENT picker (`.slice(0, 6)` over a last-name-ordered list,
+  // so a bare "@" showed only the alphabetically-first six). The server union and RLS
+  // were both correct — but nothing was asserting either, so nothing would have caught
+  // it if they had not been.
+  //
+  // ⚠️ THE INSERT BELOW DELIBERATELY HAS NO `.select()`.
+  //
+  // That is the client's exact call shape, and the difference is not cosmetic. Adding
+  // `.select()` makes it INSERT ... RETURNING, and RETURNING is filtered by
+  // `mentions_select_own` (a mention is readable only by the person mentioned). Postgres
+  // reports that with the SAME 42501 "new row violates row-level security policy" text as
+  // a WITH CHECK failure. During the original diagnosis that produced a false "RLS
+  // refuses tenant-staff mentions" finding, which was wrong and sent the investigation
+  // at the database instead of the picker. Keep the shapes identical to the client's.
+  const staffTarget = await signIn(url, key, STAFF_EMAIL, passwords);
+  let mentionComment = null;
+  try {
+    const c5 = await rep.sb
+      .from('comments')
+      .insert({
+        tenant_id: tenantId,
+        record_object: 'customer',
+        record_id: CUSTOMER_ID,
+        author_id: rep.userId,
+        author_name: 'ZZ A11 probe',
+        body: 'ZZ A11 mention probe — rep tagging tenant staff on own customer',
+      })
+      .select('id')
+      .single();
+
+    if (c5.error) {
+      check('5. MENTION  could not create the customer comment to tag on', false,
+        `${c5.error.code}: ${c5.error.message}`);
+    } else {
+      mentionComment = c5.data.id;
+      const m5 = await rep.sb
+        .from('comment_mentions')
+        .insert({ comment_id: mentionComment, mentioned_user_id: staffTarget.userId });
+
+      check(
+        '5. MENTION  a rep CAN tag tenant-scope staff on their own customer record',
+        !m5.error,
+        m5.error
+          ? `${m5.error.code}: ${m5.error.message} — §3.5 and A11 both say this must work`
+          : 'allowed — A11 closes Solar comments, it does not close tagging staff',
+      );
+
+      // Prove the row PERSISTED, not merely that the call returned no error. Read as the
+      // mentioned user, since mentions_select_own is the only way to see it.
+      const seen = await staffTarget.sb
+        .from('comment_mentions')
+        .select('id')
+        .eq('comment_id', mentionComment);
+      check(
+        '5. MENTION  the mention row actually persisted',
+        !seen.error && (seen.data ?? []).length === 1,
+        seen.error
+          ? `${seen.error.code}: ${seen.error.message}`
+          : `${(seen.data ?? []).length} row(s) visible to the mentioned user`,
+      );
+    }
+  } finally {
+    if (mentionComment) {
+      // The mention row is deleted by the MENTIONED user: mentions_select_own scopes
+      // visibility to them, and you cannot delete what you cannot see.
+      await staffTarget.sb.from('comment_mentions').delete().eq('comment_id', mentionComment);
+      await purge(rep, mentionComment, 'mention probe comment');
+    }
+  }
+
+  // ---------------------------------------------------------------- 6. PICKER SOURCE
+  //
+  // The picker is fed by GET /sf/users (`api.listUsers()`), so if staff are missing from
+  // THAT, no amount of client fixing helps. Asserted here because the reported symptom
+  // was "staff never appear", and the only way to tell a server-side omission from a
+  // client-side truncation is to check the payload itself.
+  const picker = await fetch(`${API}/sf/users`, {
+    headers: { Authorization: `Bearer ${rep.token}` },
+  });
+  const pickerBody = await picker.json().catch(() => ({}));
+  const pickerUsers = pickerBody.users ?? [];
+  const staffPresent = pickerUsers.some((u) => u.supabaseUserId === staffTarget.userId);
+  const noAuthId = pickerUsers.filter((u) => !u.supabaseUserId);
+
+  check(
+    '6. PICKER   GET /sf/users includes tenant-scope staff for a sales role (§3.5)',
+    picker.status === 200 && staffPresent,
+    picker.status !== 200
+      ? `HTTP ${picker.status}`
+      : `${pickerUsers.length} users returned; the staff target is ${staffPresent ? 'present' : 'MISSING'}` +
+        `; ${noAuthId.length} without a Supabase login` +
+        (noAuthId.length ? ` (not mentionable, shown greyed: ${noAuthId.map((u) => u.name).join(', ')})` : ''),
+  );
+
+  // The rep must reach staff who are NOT in the first handful, since that is precisely
+  // what the old cap hid. Counting past the old limit is what makes this a regression
+  // test rather than a restatement of check 6.
+  const staffIndex = pickerUsers.findIndex((u) => u.supabaseUserId === staffTarget.userId);
+  check(
+    '6. PICKER   staff are reachable beyond the old 6-name cap',
+    staffIndex >= 0 && pickerUsers.length > 6,
+    `the staff target sits at position ${staffIndex + 1} of ${pickerUsers.length}` +
+      (staffIndex >= 6
+        ? ' — INVISIBLE under the old .slice(0, 6), which is the bug this pins'
+        : ' — inside the old cap, so this run does not exercise the truncation'),
+  );
+
+
   // ---------------------------------------------------------------- verdict
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);

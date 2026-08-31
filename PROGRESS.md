@@ -1,5 +1,87 @@
 # Sundial — Progress Log
 
+## 2026-08-31 — @-mention picker: reps could not tag Harmon staff (launch blocker)
+
+Reported against the rep view on Customer comments: only David Coleman, John Heckert and
+Troy Johnston ever appeared in the @-picker. Specified to work by §3.5 and explicitly kept
+by A11, so it blocked dealer onboarding.
+
+### It was not an access-model bug
+
+Diagnosed layer by layer as zz-rep-a1 against production:
+
+| Layer | Result |
+|---|---|
+| `GET /sf/users` (the picker's source) | **27 users**, staff included, all with a Supabase id. CORRECT |
+| RLS — rep tags tenant staff on own customer record | **ALLOWED**. CORRECT |
+| `sundial-comment-notify` | fired and sent. CORRECT |
+| Client picker | **`users.filter(...).slice(0, 6)`** ← the bug |
+
+`/sf/users` orders by last name, so a bare "@" showed the alphabetically-first six: three
+ZZ test accounts, then Coleman, Heckert, Johnston — **exactly the three names reported**.
+The other 21 were reachable only by typing. Nothing was ever denied; the list was cut off,
+and a cut-off list is indistinguishable from a permission boundary. The staff target used
+by the new regression check sits at **position 19 of 27**.
+
+### ⚠️ A false finding, corrected — it is recorded here so it is not re-derived
+
+Mid-diagnosis this log's author reported **"layer 2 fails too — 42501, RLS refuses the
+mention"**. That was **wrong**, and the cause was the probe, not the database.
+
+The probe used `.insert({…}).select('id')`. The `.select()` makes it
+`INSERT … RETURNING`, and RETURNING is filtered by `mentions_select_own` — a mention is
+readable only by the person mentioned. **Postgres reports that with the same 42501 "new
+row violates row-level security policy" text as a WITH CHECK failure**, so the two are
+indistinguishable from the error alone. Proven by running both shapes in one session:
+
+```
+mention zz-admin WITH  .select('id')  -> 42501: new row violates row-level security policy
+mention zz-admin WITHOUT .select()    -> ALLOWED   <- the client's exact call shape
+row actually persisted (read as the mentioned admin): YES
+```
+
+The client (`CommentThread.tsx`) inserts without `.select()`, so RLS was never involved.
+The lesson worth keeping: **a probe that does not match the caller's exact call shape can
+manufacture a security finding out of nothing**, and 42501 is not self-describing.
+
+### One refusal that is correct and stays
+
+A rep tagging a **same-dealer peer** (own scope) on a record that is not that peer's is
+refused, because `record_visible_for` is false for them. That is right by A11's own
+reasoning — a mention emails the comment **body**, so tagging someone who cannot open the
+record would route around the record rule. Previously the picker offered those names and
+the mention vanished with only a `console.warn`. They are now greyed out with
+"Can't be tagged — they don't have access to this record".
+
+### The fix (client + one SQL function)
+
+- **Cap raised 6 → 50** and reported: anything beyond it renders a "+N more — keep typing"
+  row, so a truncated list can never again read as a permission rule.
+- **Ranking replaces alphabetical luck**: name-token prefix, then full-string prefix, then
+  substring; stable within a rank so Salesforce's ordering still breaks ties.
+- **Grey-out driven by `mentionable_users()`** (`sql/sundial_access_p9_mentionable_users.sql`),
+  a SECURITY DEFINER function that calls **the same predicates the
+  `mentions_insert_scoped` policy calls**. The alternative — recomputing the rule in
+  TypeScript — would have needed every user's access level, dealer and Sundial id in the
+  browser plus the record's `Sales_Rep__c` (which a rep cannot even read), and would have
+  been a second copy of an authorization rule free to drift from the policy it mirrors.
+  That is the exact failure D-064 exists to end.
+  - Its first conjunct is `record_visible(p_object, p_id)` — **the caller must be able to
+    see the record before learning anything about anyone else's access to it**. Without
+    that the function is an enumeration oracle over records the caller has no access to.
+  - It is a HINT. RLS still refuses, and remains the only control; every failure path
+    leaves the hint null and greys out nobody.
+
+### Tests
+
+`verify-comment-scope.mjs` is now **10/10** and gains permanent cases 5 and 6: a rep tags
+tenant staff on their own customer record and the row **persists** (read back as the
+mentioned user), and `/sf/users` contains staff **beyond the old 6-name cap**. The new
+`mention-picker.test.ts` replays the real 27-name production payload, including a control
+that reproduces the OLD six-name output — without it, the fix's test would pass just as
+happily against a list that was never broken.
+
+
 ## 2026-08-30 — A11 verified at the database; `access.visible` replaces the inference
 
 Two things closed today. Both were about the same weakness: a rule that was *believed*

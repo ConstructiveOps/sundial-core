@@ -59,7 +59,9 @@
 --           constraint sundial_file_metadata_uploaded_by_user_id_fkey ...
 --           constraint sundial_file_metadata_deleted_by_user_id_fkey ...
 --
--- FIVE foreign keys across FOUR tables point at it. It holds zero ROWS, but it is a
+-- SIX foreign keys point at it (corrected 2026-08-30 by catalog query; the five listed
+-- above are the cross-table ones, and `portal_users_parent_user_id_fkey` — its own
+-- self-lookup — was missed). It holds zero ROWS, but it is a
 -- referenced parent in the schema — which is a different thing from abandoned, and the
 -- whole transaction rolled back rather than half-applying. That is the `begin`/`commit`
 -- doing its job.

@@ -14,6 +14,7 @@
 import { getSecret } from "../lib/secrets.js";
 import customerManifest from "../lib/field-manifest/customer.json" with { type: "json" };
 import solarManifest from "../lib/field-manifest/solar.json" with { type: "json" };
+import roofingManifest from "../lib/field-manifest/roofing.json" with { type: "json" };
 import { sfQuery, soqlEscapeString } from "../lib/salesforce.js";
 
 const API_BASE = (process.env.API_BASE_URL ||
@@ -25,6 +26,33 @@ const ONLY_USER = (() => {
 })();
 
 const MANIFESTS = { customer: customerManifest, solar: solarManifest };
+
+/**
+ * The column(s) that tell a user WHICH RECORD a list row is.
+ *
+ * Asserted PRESENT, which is the opposite of every other check in this file. The rest
+ * assert nothing LEAKS -- that a role receives no column it should not. A manifest that
+ * hid every single field would pass all of them.
+ *
+ * That is not hypothetical. On 2026-09-01 solar board cards and the list "Project"
+ * column were blank for both sales roles, because `Project_Name__c` had no row in the
+ * workbook and so never reached `listColumns`. Every leak assertion here was green
+ * throughout: the rows were narrow, not wide. Narrow is the failure mode a leak test
+ * cannot see.
+ *
+ * The rule these encode (see IDENTITY_LIST_COLUMNS in generate-field-configs.mjs):
+ * the identity of a record a role may SEE is a `read` field by definition. A row you
+ * may have but cannot name is not a narrower answer, it is a broken one.
+ *
+ * Customer lists ANY-OF: the client renders first+last, falling back to `name`
+ * (salesCustomerName in src/components/sales/helpers.ts), so one of the three suffices.
+ * Solar and roofing name the record directly.
+ */
+const IDENTITY_LIST_COLUMNS = {
+  customer: ["first_name", "last_name", "name"],
+  solar: ["project_name"],
+  roofing: ["project_name"],
+};
 
 /** Which ZZ users to run, and which manifest role each one resolves to. */
 const USERS = [
@@ -200,6 +228,81 @@ for (const u of USERS) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// IDENTITY COLUMNS — every role must be able to NAME the rows it receives
+// ---------------------------------------------------------------------------
+console.log("\n--- identity columns (list rows must be legible) ---");
+
+const ALL_MANIFESTS = {
+  customer: customerManifest,
+  solar: solarManifest,
+  roofing: roofingManifest,
+};
+
+for (const [object, manifest] of Object.entries(ALL_MANIFESTS)) {
+  const identity = IDENTITY_LIST_COLUMNS[object] ?? [];
+  for (const role of Object.keys(manifest.roles)) {
+    const cols = new Set(manifest.listColumns[role] ?? []);
+    const have = identity.filter((c) => cols.has(c));
+    // ANY-OF, not all: customer resolves through a fallback chain, and one is enough
+    // to render a name. Requiring all three would fail on a correct manifest.
+    check(
+      have.length > 0,
+      `${object} / ${role}: listColumns can NAME the row`,
+      have.length
+        ? `via ${have.join(", ")}`
+        : `NONE of [${identity.join(", ")}] is in listColumns — every row renders blank`,
+    );
+  }
+}
+
+// The live half. The manifest check above is the reliable regression guard (it is
+// deterministic and cannot be confused by null values); this proves the deployed
+// Lambda actually honours it, on real rows, for a real sales-role token.
+//
+// ⚠️ A LIST ROW OMITS BOTH STRIPPED AND NULL COLUMNS (projectListRow drops nulls for
+// the payload cap), so "absent" alone proves nothing. The assertion is therefore made
+// only against rows where the value is actually populated, established by reading the
+// SAME record as tenant scope first. Skipping is honest; a false pass is not.
+const tenantToken = await tokenFor("admin");
+for (const object of ["customer", "solar"]) {
+  const identity = IDENTITY_LIST_COLUMNS[object] ?? [];
+  const asTenant = await get(tenantToken, `/sf/${object}?limit=50`);
+  const tenantRows = new Map(
+    (asTenant.body?.records ?? []).map((r) => [r.sf_id, r]),
+  );
+
+  for (const u of USERS) {
+    if (!u.role) continue;
+    if (ONLY_USER && u.slug !== ONLY_USER) continue;
+    const token = await tokenFor(u.slug);
+    const res = await get(token, `/sf/${object}?limit=50`);
+    if (res.status === 403) continue; // module closed for this role; nothing to name
+    const rows = res.body?.records ?? [];
+    if (rows.length === 0) continue;
+
+    // Rows where tenant scope proves at least one identity value is POPULATED.
+    const testable = rows.filter((r) => {
+      const t = tenantRows.get(r.sf_id);
+      return t && identity.some((c) => t[c] != null && String(t[c]).trim() !== "");
+    });
+    if (testable.length === 0) {
+      check(true, `${object} / ${u.slug}: no row with a populated name to test (skipped)`);
+      continue;
+    }
+    const blank = testable.filter(
+      (r) => !identity.some((c) => r[c] != null && String(r[c]).trim() !== ""),
+    );
+    check(
+      blank.length === 0,
+      `${object} / ${u.slug}: all ${testable.length} named row(s) arrive NAMED`,
+      blank.length
+        ? `${blank.length} row(s) lost their name in projection, e.g. ${blank[0].sf_id}`
+        : "",
+    );
+  }
+}
 console.log("\n" + "=".repeat(100));
 console.log(
   failures === 0

@@ -86,6 +86,43 @@ const ALWAYS_LIST_COLUMNS = [
   "cache_version",
 ];
 
+/**
+ * IDENTITY columns: what a record is CALLED, per object.
+ *
+ * ⚠️ This IS a visibility decision, which is exactly why it is not in
+ * ALWAYS_LIST_COLUMNS. That list is plumbing -- keys and freshness markers, no business
+ * data -- and folding a project name into it would have made its own warning false.
+ *
+ * THE RULE, and it is a rule rather than an exception list:
+ *
+ *   The identity of a record a role is entitled to SEE is a `read` field by definition.
+ *
+ * A row you may have but cannot name is not a narrower answer, it is a broken one. The
+ * access model decides WHICH rows a role sees (`rowFilter`); it was never meant to decide
+ * whether those rows arrive legible. Withholding the name protects nothing -- the caller
+ * already holds the record, its address, its stage and its id.
+ *
+ * WHY THESE NEED A LIST AT ALL. The generator emits a field only if the workbook has a row
+ * for it, and `Sundial_Solar__c.Project_Name__c` has NO ROW in
+ * Sundial_Solar_Fields_by_Section.xlsx -- so it was never hidden by anyone. It fell through
+ * the gap between the sheet and the schema. That produced blank board cards and an empty
+ * "Project" column for every sales role (found 2026-09-01), on a column populated 4492 of
+ * 4492 rows in cache.
+ *
+ * Reviewed once, here, and deliberately SHORT. Anything with a sheet row belongs in the
+ * SHEET: `Customer_Name_at_Creation__c` had one marked `hidden`, and was fixed by editing
+ * row 65 to `read` -- NOT by adding it here. Add to this list only when a column names the
+ * record and there is no sheet row that could carry the decision.
+ *
+ * Customer is absent on purpose: `First_Name__c` / `Last_Name__c` / `Name` all have sheet
+ * rows marked `edit`, so its list identity already resolves. Checked, not assumed.
+ */
+const IDENTITY_LIST_COLUMNS = {
+  // Board card titles and the list "Project" column, for both project objects.
+  solar: ["project_name"],
+  roofing: ["project_name"],
+};
+
 const OBJECTS = [
   {
     key: "customer",
@@ -135,22 +172,56 @@ const OBJECTS = [
 // 2), then delete harmon-crm's two generators, its sheet copies AND its
 // generate:configs npm script together -- all three, or the deletion breaks whatever
 // is left behind.
-function warnIfClientCopyDrifted(spec) {
+/**
+ * Hash a workbook by its CELL CONTENT, not its bytes.
+ *
+ * ⚠️ THIS USED TO HASH THE FILE BYTES, AND THAT MADE IT CRY WOLF.
+ *
+ * Excel never writes the same bytes twice: the .xlsx is a zip, and save timestamps and
+ * entry ordering differ on every write. So editing BOTH copies identically -- which is
+ * exactly what the warning asks you to do -- still produced "copy DIFFERS", and the only
+ * way to silence it was to copy one file over the other rather than edit both.
+ *
+ * That is worse than useless. A warning that fires on the correct action teaches you to
+ * ignore it, and this one is the sole guard against the layout and the field rules being
+ * generated from different sheets.
+ *
+ * Measured on 2026-09-01: the two Solar copies had different byte hashes and IDENTICAL
+ * content (475 rows, ebfa53257b31 both sides) right after the row-65 edit was applied to
+ * each. Content is what the generator actually reads, so content is what it compares.
+ */
+async function workbookContentHash(file) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(file);
+  const parts = [];
+  for (const ws of wb.worksheets) {
+    parts.push("SHEET:" + ws.name);
+    ws.eachRow((row, n) => {
+      // Rich text arrives as an object; take its plain text so a formatting-only
+      // change does not read as a content change.
+      const vals = (row.values ?? []).map((v) =>
+        v == null ? "" : typeof v === "object" && "text" in v ? String(v.text) : String(v),
+      );
+      parts.push(n + "\t" + vals.join("\t"));
+    });
+  }
+  return crypto.createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
+async function warnIfClientCopyDrifted(spec) {
   const sibling = path.join(ROOT, "..", "harmon-crm", "docs", spec.workbook);
   if (!fs.existsSync(sibling)) return null;
-  const sha = (p) =>
-    crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
-  const here = sha(path.join(DOCS, spec.workbook));
-  const there = sha(sibling);
+  const here = await workbookContentHash(path.join(DOCS, spec.workbook));
+  const there = await workbookContentHash(sibling);
   if (here === there) return null;
   return (
     spec.workbook +
-    ": harmon-crm copy DIFFERS from this one (" +
+    ": harmon-crm copy DIFFERS IN CONTENT from this one (" +
     here.slice(0, 12) +
     " vs " +
     there.slice(0, 12) +
-    "). This file is the source of truth; copy it over, or the client layout and the " +
-    "server field rules describe different sheets."
+    "). This file is the source of truth; re-apply the edit there, or the client layout " +
+    "and the server field rules describe different sheets."
   );
 }
 
@@ -290,6 +361,9 @@ async function buildManifest(spec) {
   const listColumns = {};
   for (const role of ROLES) {
     const cols = new Set(ALWAYS_LIST_COLUMNS);
+    // The record's name, for objects whose sheet has no row that could carry it.
+    // See IDENTITY_LIST_COLUMNS: a row you may have but cannot NAME is broken, not narrow.
+    for (const col of IDENTITY_LIST_COLUMNS[spec.key] ?? []) cols.add(col);
     for (const name of roles[role].read) {
       const def = fields.get(name.toLowerCase());
       if (def) cols.add(sfFieldToColumn(def));
@@ -312,7 +386,7 @@ async function buildManifest(spec) {
   // The two committed copies must stay identical until the client generator moves
   // here; a silent divergence would mean the layout and the field rules describe
   // different sheets.
-  const drift = warnIfClientCopyDrifted(spec);
+  const drift = await warnIfClientCopyDrifted(spec);
   if (drift) warnings.push(drift);
 
   return { key: spec.key, manifest: { version, ...payload }, errors, warnings, rowCount: rows.length };

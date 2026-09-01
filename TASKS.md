@@ -889,6 +889,42 @@ lands only after its server change is verified in prod. Branch per repo per phas
         visible rather than silent — but consider surfacing a post-send notice if any
         picked mention was rejected.
 
+- [x] **Solar list/board identity blank for sales roles (2026-09-01).** Board card titles
+      and the list "Project" column were empty for zz-rep-a1 and zz-mgr-a. TWO causes, on
+      two different paths:
+  - `Project_Name__c` had **NO ROW** in `Sundial_Solar_Fields_by_Section.xlsx`, so the
+        generator never emitted it — never hidden by anyone, it fell through the gap
+        between the sheet and the schema. Fixed by `IDENTITY_LIST_COLUMNS` in
+        `generate-field-configs.mjs`, its own reviewed list carrying the rule: **the
+        identity of a record a role may SEE is a `read` field by definition.** Deliberately
+        NOT `ALWAYS_LIST_COLUMNS`, which documents itself as plumbing and no business data.
+  - `Customer_Name_at_Creation__c` had a row marked `hidden`; Tim edited row 65 cols I/J
+        to `read` in both repo copies.
+  - Manifest diff, nothing else moved: solar read 115→116 / 118→119, list 122→124 /
+        125→127; roofing list 7→8; **customer unchanged**.
+  - Customer list identity was CHECKED and is fine — `First_Name__c`/`Last_Name__c`/`Name`
+        are all `edit` in the sheet and all in `listColumns`.
+  - Solar's board gained the `?? customerName(card)` fallback Roofing always had, so the
+        next missing column degrades instead of going blank.
+  - `warnIfClientCopyDrifted()` now hashes **cell content, not file bytes**. Excel never
+        writes identical bytes twice, so it fired on the very action it asks for (editing
+        both copies) — a warning that fires on the correct action gets ignored, and it is
+        the only guard against layout and field rules coming from different sheets.
+
+- [!] **DECISION NEEDED BEFORE ROOFING IS EVER GRANTED TO A SALES ROLE.**
+      `Sundial_Roofing_Fields_by_Section.xlsx` uses the sheet `Field List (Module)`, which
+      has **no Sales Rep / Sales Dealer columns at all**. The generator therefore emits
+      `read: 0` for both roles, and `listColumns` is 8 — seven plumbing columns plus the
+      `project_name` just added.
+      **Consequence:** the moment `roofing` is added to a sales role's modules, every
+      roofing list row is a card title and nothing else, and every roofing detail page is
+      empty. Today this is invisible only because `/sf/roofing` returns **403** to sales
+      roles, which is a module gate, not a field decision.
+      **This is deliberately NOT fixed alongside the Solar bug** (Tim, 2026-09-01): adding
+      `project_name` makes the cards render but decides nothing about the other 168 fields.
+      Roofing needs real role columns in its workbook — a per-field review like Solar's —
+      and that is a sheet exercise, not a code change. Do it BEFORE granting the module.
+
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that
       gates real access is generated from it — and `generate-field-configs.mjs` warns on

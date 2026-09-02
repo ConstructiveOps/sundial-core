@@ -1,5 +1,60 @@
 # Sundial — Progress Log
 
+## 2026-09-02 — NS Adder Price fields visible to sales roles
+
+`NS_Adder_1..5_Price__c` now reach Sales Rep and Sales Dealer on both
+`Sundial_Customer__c` and `Sundial_Solar__c`. The fields were already deployed in
+Salesforce with integration-user FLS granted; the portal renders a field only if the
+manifest lists it, and neither manifest carried the names.
+
+Regenerated from the updated workbooks with `node scripts/generate-field-configs.mjs
+--apply` (verified as this repo's only writer of `lib/field-manifest` before running).
+
+**The diff is exactly the ten entries and nothing else**, checked field-by-field rather
+than by count — a count match would also be satisfied by five arriving and five unrelated
+fields moving:
+
+| | read | listColumns | edit |
+|---|---|---|---|
+| customer / Sales Rep | 232 → 237 | 239 → 244 | 146 unchanged |
+| customer / Sales Dealer | 236 → 241 | 243 → 248 | 146 unchanged |
+| solar / Sales Rep | 116 → 121 | 124 → 129 | 0 unchanged |
+| solar / Sales Dealer | 119 → 124 | 127 → 132 | 0 unchanged |
+| roofing | — | — | version UNCHANGED |
+
+Zero removals anywhere. Every addition matched `NS_Adder_[1-5]_Price__c` (read) or
+`ns_adder_[1-5]_price` (listColumns).
+
+**The deliberate split is intact and asserted, not assumed.** The Markup / Material Cost /
+Labor Hours inputs stay `hidden` for both sales roles — verified 0 of them in either read
+set — and no NS adder field is editable by either role. A sales role sees what an adder
+*costs the customer*, never the cost build-up behind it, which is the same line the Solar
+sheet draws everywhere else (read on 121 fields, edit on none).
+
+The generator ran with **zero warnings**: the `QAQC_Inspection_Confirmed_with_Customer__c`
+row that had been warning since August is gone from the sheet, and the harmon-crm workbook
+copies match (that check compares cell content rather than file bytes since 2026-09-01, so
+a dual edit no longer trips it).
+
+### Deploy is required, and the live verifier already says so
+
+Two Lambdas bundle `lib/field-manifest` — `sundial-sf-query` and `sundial-sf-update`.
+Established by bundling **every** Lambda with esbuild and grepping the output for
+`NS_Adder_1_Price__c`, rather than by reading imports and reasoning about the graph.
+Neither `lib/access.js` nor `lib/access-enforce.js` pulls the manifest in, so nothing
+else picks it up transitively.
+
+`verify-field-manifest-live.mjs` is **32 of 34** on the un-deployed code, and both
+failures are `manifestVersion matches the deployed manifest` — the assertion whose whole
+job is to notice this. Every leak assertion and every identity assertion still passes. It
+returns to 34/34 once both functions are deployed.
+
+`sundial-sf-update`'s change is behaviourally a no-op — the Price fields are formulas and
+appear in no `edit` set, so a write to one was already refused and still is. It is
+deployed anyway so both functions report the same `manifestVersion`; a split version is
+the kind of thing that turns a later investigation into an archaeology exercise.
+
+
 ## 2026-08-31 — @-mention picker: reps could not tag Harmon staff (launch blocker)
 
 Reported against the rep view on Customer comments: only David Coleman, John Heckert and

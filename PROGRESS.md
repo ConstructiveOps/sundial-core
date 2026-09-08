@@ -1,5 +1,86 @@
 # Sundial — Progress Log
 
+## 2026-09-08 — Commission burden: the internal rep is burdened again (D-071)
+
+Part 3 of the September Acumatica batch, same branch `fix/sept-integration-tweaks`.
+`lambdas/sundial-budget/budgetCalc.js`. **Built, not deployed.** Suite **828 green**;
+budgetCalc's own 210 checks pass (was 208).
+
+One line changed:
+
+```js
+const commBurden = (mgmtComm + setterComm + internalComm) * commBurdenRate;  // J12
+```
+
+`budgetCalc.js` carried a warning comment telling the next reader **not** to re-add the
+rep component. That comment did its job — it is why this was changed deliberately rather
+than by someone "fixing" the calc to match the workbook — but the ruling behind it has
+been reversed by Harmon.
+
+**The line has now been ruled on three times**, so the comment records the sequence rather
+than just the current answer:
+
+| | | basis |
+|---|---|---|
+| D19 Stage 2 | 2026-08-21 | rate × (mgmt + setter + internal rep) |
+| D21 | 2026-08-22 | rate × (mgmt + setter) — neither rep |
+| **D-071** | **2026-09-08** | **rate × (mgmt + setter + internal rep)** |
+
+**The principle, which was never written down and is why the answer oscillated: burden
+follows PAYROLL, and only payroll.** An internal rep is paid through payroll — D16 is
+explicit that internal deals raise no PO for exactly that reason — so the employer costs
+burden represents are real. An external rep is paid by a **dealer purchase order**: no
+payroll, no employer tax, nothing to burden. D21's error was treating the two rep lines as
+one category because both are "rep commission"; they are two different payment
+**mechanisms**, and burden is a fact about the mechanism, not about who earned the money.
+
+The term is `internalComm`, which the deal-type routing already sets — reused rather than
+re-deriving `isInternal`, so that decision stays in one place.
+
+**External jobs are unchanged by construction**, because `internalComm` is zero on them.
+The HOLLAND fixture is external, so its 415.50 does not move — which makes it the
+regression proof that external did not change **and simultaneously blind to which of the
+three rules is in force**. The fixture header now says that outright instead of leaving it
+to be rediscovered; the internal-deal behaviour tests are the only thing pinning the basis.
+
+**Worked delta — the fixture job sold internally** (rate 0.75, mgmt 484, setter 70,
+internal rep 14,032):
+
+| | D21 | D-071 |
+|---|---|---|
+| Commission burden (J12) | 415.50 | **10,939.50** |
+| Total commissions (J13) | 15,001.50 | 25,525.50 |
+| Job cost w/ commission (J29) | 39,558.98 | 50,082.98 |
+| Balance of revenue (N10) | 21,500.50 | 10,976.50 |
+| GP $ (N14) | −3,056.98 | −13,580.98 |
+
+The +10,524.00 is 0.75 × 14,032. **The magnitude is expected rather than a bug:** under the
+redline model the internal rep amount is an order of magnitude larger than when the sheet's
+burden array was written, so this term now dominates an internal job's burden. (The
+negative GP is the fixture's own pre-existing property — see COMMISSION_REPIN — not an
+effect of this change.)
+
+**Traced all the way through, not just the one field.** Burden feeds `Total_Commissions__c`
+→ J29 (job cost with commission) and N10 (balance of revenue) → N14 (GP $) → both GP
+percentages, plus `Commission_PPW__c` and `Cost_PPW_With_Commission__c`. A new test asserts
+every one of those moved by exactly the delta and that the output fields agree with the
+cells, so the workbook cannot end up internally inconsistent. It also asserts that
+`BURDENEXR · RESIDENTAL` (labor burden) did **not** move — the two burdens share a task id
+and are separated only by InventoryID, so a leak between them would be easy to miss.
+
+**The sheet agrees again.** The REVISED workbook's J12 always included K8, and D21's
+standing instruction not to "restore" it is withdrawn. The `BURDENEXR · SALESCOMM` budget
+line reads `Commission_Burden_Amt__c` directly so it needed no arithmetic change — but its
+mapping note stated D21's rule, and a note is what a reader checks a number against, so it
+was corrected.
+
+⚠️ **Every already-pushed INTERNAL job now has a stale budget in Acumatica.** Nothing
+recalculates on its own; those projects carry the D21 burden until re-pushed. That is a
+data task, in TASKS.md, not something this change does.
+
+Decisions: **D-071**; rework-doc **D35**, with D21 marked partially reversed in place
+rather than deleted.
+
 ## 2026-09-08 — Budget push Stage E: JOBTYPE and a project-manager refresh
 
 Part 2 of the September Acumatica batch, same branch `fix/sept-integration-tweaks`.

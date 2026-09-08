@@ -4,6 +4,20 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Commission burden: internal rep re-included (D-071) — BUILT, NOT DEPLOYED (2026-09-08)
+
+Branch `fix/sept-integration-tweaks`, part 3 of 3. budgetCalc 210 checks + suite 828 green.
+
+- [x] **Burden = rate × (mgmt + setter + INTERNAL rep)**, partially reversing D21. Principle recorded: **burden follows payroll, and only payroll** — internal reps are paid through payroll (D16), external reps by a dealer PO. Term is `internalComm`, reusing the existing routing rather than re-deriving `isInternal`.
+- [x] **D21 comment block updated, not deleted** — it now carries all three rulings (D19 Stage 2 → D21 → D-071) and the reason the answer moved, so the next reader sees the history rather than just the current formula.
+- [x] **External unchanged by construction**, and asserted: the HOLLAND fixture's 415.50 does not move. Its header now says outright that it is blind to which burden rule is in force.
+- [x] **Traced downstream**: J12 → J13 → J29 / N10 → N14 → both GP percentages, plus Commission_PPW / Cost_PPW_With_Commission, with a test asserting fields agree with cells and that `BURDENEXR · RESIDENTAL` (labor burden) did not move.
+- [x] **`BURDENEXR · SALESCOMM` mapping note corrected** in `sundial-acumatica-budget-push` — the line reads `Commission_Burden_Amt__c` directly so no arithmetic changed, but the note stated D21's rule.
+- [ ] **TIM: deploy** `.\deploy.ps1 sundial-budget`. (Parts 1 and 2 deploy `sundial-acumatica-push` and `sundial-acumatica-budget-push`; all three are independent, but the whole branch is one release.)
+- [ ] **⚠️ HARMON/TIM: every already-pushed INTERNAL job has a stale Acumatica budget.** Nothing recalculates on its own — those projects keep the D21 burden until re-pushed. Before re-pushing, decide with Harmon whether prior jobs are repriced at all or only new ones are: the change is large (0.75 × the internal rep amount, ~10.5k on a 14k commission), and re-pushing also moves each job's commission POs.
+- [ ] **TIM: find the affected jobs.** `Sundial_Solar__c` where the deal routes internal (`Sales_Company_Harmon_Solar_or_Third__c = 'Harmon Solar'`) and `Budget_Push_Status__c = 'Pushed'`. No script written — the count and the repricing decision come first.
+- [ ] **Sanity-check the magnitude before the first live internal push.** On the fixture job, burden goes 415.50 → 10,939.50. That is expected under the redline model (the internal rep term dominates), but it is a big enough number that it should be confirmed against a real internal job rather than assumed from the worked example.
+
 ## Acumatica budget-push Stage E: JOBTYPE + PM refresh — BUILT, NOT DEPLOYED (2026-09-08)
 
 Branch `fix/sept-integration-tweaks`, part 2 of 3. Suite 828 green.

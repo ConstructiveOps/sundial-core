@@ -169,12 +169,16 @@ const STORAGE_PRICE_TOTAL = 27800;
  *   redline 1.85 (external, non-Lightreach)
  *   commission = 36502 − 1.85 × 8800 − 3110 = 17112     → $1.9445/W
  *   subtotal   = 17112 + 484 + 70 = 17666
- *   burden     = 0.75 × (484 + 70) = 415.50              (D21: mgmt + setter ONLY)
+ *   burden     = 0.75 × (484 + 70) = 415.50              (mgmt + setter; see below)
  *   total      = 18081.50                                → $2.0547/W all-in
  *
- * The 415.50 is unchanged by D21 — this is an EXTERNAL deal, so the rep amount was
- * never in the basis either way. That also means these cells CANNOT catch a regression
- * in the burden basis; the D21 behaviour tests are what pin it.
+ * ⚠️ THE 415.50 HAS SURVIVED EVERY BURDEN RULING, AND THAT IS THE POINT OF IT. The
+ * basis has been ruled on three times — D19 Stage 2 included the internal rep, D21
+ * removed both reps, D-071 (2026-09-08) put the internal one back — and this number
+ * moved under none of them, because this is an EXTERNAL deal and its internal-rep term
+ * is always zero. So these cells are the regression proof that EXTERNAL JOBS DID NOT
+ * MOVE, and they are simultaneously BLIND to which rule is in force. The internal-deal
+ * behaviour tests are the only thing pinning the basis itself.
  *
  * The 3110 is `stdAdderPriceTotal`, which the workbook and the Salesforce
  * `Total_Adder_Price__c` formula agree on — that agreement is what lets the two halves
@@ -246,7 +250,7 @@ const FIELD_EXPECTED = {
   Sales_Mgr_Commission_Amt__c: 352,    // .04 × 8800 — component, not the SLMC line
   Overhead_Commission_Amt__c: 132,     // .015 × 8800
   Commission_Subtotal__c: 17666,
-  Commission_Burden_Amt__c: 415.5,     // D21: 0.75 × (mgmt 484 + setter 70), no rep
+  Commission_Burden_Amt__c: 415.5,     // 0.75 × (mgmt 484 + setter 70); external, so no rep term
   Total_Commissions__c: 18081.5,
   Commission_PPW__c: 2.054715909090909,
   Module_Material_Cost__c: 5280,
@@ -406,44 +410,103 @@ it('the §D fields track their extras twins exactly', () => {
   for (const [f, x] of pairs) assert.strictEqual(fields[f], extras[x], `${f} != extras.${x}`);
 });
 
-it('D19: an INTERNAL deal routes to the internal amount, and D21: it is NOT burdened', () => {
+it('D19: an INTERNAL deal routes to the internal amount, and D-071: it IS burdened', () => {
   const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL });
   assert.strictEqual(r.extras.dealType, 'internal');
   assert.ok(Math.abs(r.extras.internalCommissionAmt - 14032) < TOL);
   assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt) < TOL);
-  // D21: burden is 0.75 × (484 + 70) = 415.50 — management and setter only. The rep
-  // amount is NOT in the basis, so this is the same 415.50 the external case produces.
-  // Before D21 it was 0.75 × (14032 + 484 + 70) = 10939.50.
+  // D-071 (2026-09-08, partially reverses D21): 0.75 × (14032 + 484 + 70) = 10,939.50.
+  // Under D21 this was 0.75 × (484 + 70) = 415.50. The internal rep is paid through
+  // payroll (D16 — internal deals raise no PO for exactly that reason), so the employer
+  // costs burden represents are real; an external rep is paid by a dealer PO and has
+  // none. Burden follows the payment mechanism, not the job of the person paid.
   assert.ok(
-    Math.abs(r.fields.Commission_Burden_Amt__c - 415.5) < TOL,
+    Math.abs(r.fields.Commission_Burden_Amt__c - 10939.5) < TOL,
     `internal burden was ${r.fields.Commission_Burden_Amt__c}`
   );
-  // 14032 + 484 + 70 + 415.50
-  assert.ok(Math.abs(r.fields.Total_Commissions__c - 15001.5) < TOL);
+  // 14032 + 484 + 70 + 10939.50   (was 15,001.50 under D21)
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - 25525.5) < TOL);
 });
 
-it('D21: burden is identical whichever way the deal is sold', () => {
-  // The single sentence of the ruling, as an assertion: routing picks the Acumatica
-  // line and nothing else. If someone restores the sheet's K8-in-the-burden-array
-  // behaviour, this fails — the main fixture cannot, because it is an external deal
-  // where the internal cell is zero and both formulas agree.
-  const ext = calculateBudget(REVISED).fields.Commission_Burden_Amt__c;
-  const int = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).fields.Commission_Burden_Amt__c;
-  assert.ok(Math.abs(ext - int) < TOL, `external ${ext} != internal ${int}`);
-  assert.ok(Math.abs(ext - 415.5) < TOL);
-});
-
-it('D21: the rep commission is absent from the burden basis at any size', () => {
-  // Scaling the rep amount by 10x must not move burden by a cent. A basis bug that
-  // happened to be small on the fixture would still show up here.
-  const base = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).fields.Commission_Burden_Amt__c;
-  for (const amt of [0, 1000, 140320]) {
+it('D-071: the internal rep amount IS in the burden basis, and scales with it', () => {
+  // Scaling the rep amount must move burden by exactly rate × the change. A basis that
+  // dropped the term would sit flat at 415.50; one that double-counted would move twice.
+  const mgmtPlusSetter = 484 + 70;
+  for (const amt of [0, 1000, 14032, 140320]) {
     const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL, Commission_Total__c: amt });
+    const expected = 0.75 * (mgmtPlusSetter + amt);
     assert.ok(
-      Math.abs(r.fields.Commission_Burden_Amt__c - base) < TOL,
-      `rep ${amt} moved burden to ${r.fields.Commission_Burden_Amt__c}`
+      Math.abs(r.fields.Commission_Burden_Amt__c - expected) < TOL,
+      `rep ${amt}: burden ${r.fields.Commission_Burden_Amt__c}, expected ${expected}`
     );
   }
+});
+
+it('D-071: the EXTERNAL rep amount is still absent from the burden basis at any size', () => {
+  // The half of D21 that survives, and the reason external jobs did not move: a dealer
+  // PO carries no payroll burden. Scaling a third-party commission by 10x must not move
+  // burden by a cent.
+  const base = calculateBudget(REVISED).fields.Commission_Burden_Amt__c;
+  assert.ok(Math.abs(base - 415.5) < TOL);
+  for (const amt of [0, 1000, 171120]) {
+    const r = calculateBudget({ ...REVISED, Commission_Total__c: amt });
+    assert.ok(
+      Math.abs(r.fields.Commission_Burden_Amt__c - base) < TOL,
+      `external rep ${amt} moved burden to ${r.fields.Commission_Burden_Amt__c}`
+    );
+  }
+});
+
+it('D-071: the burden difference between internal and external is exactly rate × rep', () => {
+  // States the ruling as one subtraction. If someone restores D21, this collapses to 0;
+  // if someone burdens BOTH rep lines, the external side moves and it fails the other way.
+  const ext = calculateBudget(REVISED).fields.Commission_Burden_Amt__c;
+  const int = calculateBudget({ ...REVISED, ...INTERNAL_DEAL }).fields.Commission_Burden_Amt__c;
+  assert.ok(Math.abs(int - ext - 0.75 * 14032) < TOL, `delta was ${int - ext}`);
+  assert.ok(Math.abs(int - ext - 10524) < TOL);
+});
+
+it('D-071: the burden change flows all the way to job cost and GP, not just the field', () => {
+  // The sheet has to stay internally consistent. Burden feeds Total_Commissions__c, which
+  // feeds J29 (job cost with commission) and N10 (balance of revenue), which feeds N14
+  // (GP $) and both GP percentages. A change that stopped at Commission_Burden_Amt__c
+  // would leave a workbook whose columns disagree with each other.
+  const r = calculateBudget({ ...REVISED, ...INTERNAL_DEAL });
+  const DELTA = 10524; // 0.75 × 14032 — what D-071 added over D21
+
+  // Cells J12/J13 carry the new numbers...
+  assert.ok(Math.abs(r.cells.J12 - 10939.5) < TOL, `J12 ${r.cells.J12}`);
+  assert.ok(Math.abs(r.cells.J13 - 25525.5) < TOL, `J13 ${r.cells.J13}`);
+
+  // ...and everything downstream moved by exactly DELTA from its D21 value.
+  assert.ok(Math.abs(r.cells.J29 - (39558.98 + DELTA)) < TOL, `J29 ${r.cells.J29}`);
+  assert.ok(Math.abs(r.cells.N10 - (21500.5 - DELTA)) < TOL, `N10 ${r.cells.N10}`);
+  assert.ok(Math.abs(r.cells.N14 - (-3056.98 - DELTA)) < TOL, `N14 ${r.cells.N14}`);
+
+  // The output fields must agree with the cells — they are two renderings of one number.
+  assert.ok(Math.abs(r.fields.Commission_Burden_Amt__c - r.cells.J12) < TOL);
+  assert.ok(Math.abs(r.fields.Total_Commissions__c - r.cells.J13) < TOL);
+  assert.ok(Math.abs(r.fields.Balance_of_Revenue__c - r.cells.N10) < TOL);
+  assert.ok(Math.abs(r.fields.GP_Dollars__c - r.cells.N14) < TOL, `GP_Dollars__c ${r.fields.GP_Dollars__c}`);
+
+  // Both GP percentages are derived from the moved GP, so they moved as well. Stored as
+  // percentages (×100) while the cells hold fractions.
+  assert.ok(Math.abs(r.fields.GP_Percent_With_Comm__c - r.cells.N15 * 100) < TOL);
+  assert.ok(Math.abs(r.fields.GP_Percent_No_Comm__c - r.cells.N16 * 100) < TOL);
+  const extGp = calculateBudget(REVISED).fields.GP_Percent_With_Comm__c;
+  assert.ok(r.fields.GP_Percent_With_Comm__c < extGp, 'internal GP% must fall, not rise');
+
+  // Commission PPW is total commissions over watts, so it moved too: 25525.50 / 8800.
+  assert.ok(Math.abs(r.fields.Commission_PPW__c - 25525.5 / 8800) < TOL);
+
+  // BURDENEXR · RESIDENTAL (labor burden) is a DIFFERENT line and must NOT have moved —
+  // the two burdens share a task id and are separated only by InventoryID.
+  const ext = calculateBudget(REVISED);
+  assert.strictEqual(
+    r.fields.Total_Labor_Burden_Budget__c,
+    ext.fields.Total_Labor_Burden_Budget__c,
+    'commission burden must not leak into the labor-burden line'
+  );
 });
 
 it('D19: "Harmon Solar" is matched case-insensitively, like the Salesforce formula', () => {

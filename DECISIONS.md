@@ -3005,3 +3005,87 @@ Lambdas.
 - Expect the unmapped-manager note often, and do not treat it as a defect: 3,815 of 4,494
   Solar records carry a PM, and nine of the eleven distinct stored values are retired
   picklist entries with no Acumatica employee.
+
+---
+
+## D-071: Commission burden includes the internal rep again — burden follows payroll
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Supersedes:** the commission-burden basis set by rework-doc D21 (2026-08-22), partially — the external half of that ruling stands.
+**Related:** rework doc D19 (redline commission model), D16 (internal deals raise no PO), D35 (the same ruling in the integration doc's own series), D-070 (part 2 of this batch).
+
+### Context
+
+`budgetCalc.js` computed `commBurden = (mgmtComm + setterComm) × rate` and carried a
+warning comment telling the next reader **not** to re-add the rep component, because the
+REVISED workbook's J12 includes it and D21 had ruled the workbook superseded.
+
+That comment was doing its job — it is why this change was made deliberately rather than
+by someone "fixing" the calc to match the sheet. But the ruling behind it was wrong, and
+Harmon has reversed the half of it that was.
+
+This line has now been ruled on three times:
+
+| | basis | |
+|---|---|---|
+| D19 Stage 2 | 2026-08-21 | rate × (mgmt + setter + internal rep) |
+| D21 | 2026-08-22 | rate × (mgmt + setter) — neither rep |
+| **D-071** | **2026-09-08** | **rate × (mgmt + setter + internal rep)** |
+
+### Decision
+
+`commBurden = (mgmtComm + setterComm + internalComm) × commBurdenRate`.
+
+**The principle, which was never written down before and is the reason the answer
+oscillated: burden follows PAYROLL, and only payroll.**
+
+- An **internal** rep is paid through payroll. D16 is explicit that internal deals raise
+  no purchase order for exactly that reason. The employer costs burden represents are
+  real, so the commission carries burden.
+- An **external** rep is paid by a **dealer purchase order**. No payroll, no employer tax,
+  nothing to burden.
+- Management and the setter are payroll, and always were.
+
+D21's error was treating the two rep lines as one category because both are "rep
+commission". They are two different **payment mechanisms**, and burden is a fact about the
+mechanism, not about who earned the money.
+
+The internal term is `internalComm`, which the existing deal-type routing already sets —
+reused rather than re-deriving `isInternal`, so the routing decision is made in exactly
+one place.
+
+### Consequences
+
+- **External jobs are unchanged by construction.** `internalComm` is zero on an external
+  deal, so every external job computes exactly as it did under D21. The HOLLAND fixture is
+  external: its 415.50 does not move, which makes it the regression proof that external
+  did not change — and simultaneously **blind to which of the three rules is in force**.
+  The internal-deal behaviour tests are the only thing pinning the basis, and the fixture
+  header now says so rather than leaving it to be rediscovered.
+- **Worked delta, fixture job sold internally** (rate 0.75, mgmt 484, setter 70, internal
+  rep 14,032):
+
+  | | D21 | D-071 |
+  |---|---|---|
+  | Commission burden (J12) | 415.50 | **10,939.50** |
+  | Total commissions (J13) | 15,001.50 | 25,525.50 |
+  | Job cost w/ commission (J29) | 39,558.98 | 50,082.98 |
+  | Balance of revenue (N10) | 21,500.50 | 10,976.50 |
+  | GP $ (N14) | −3,056.98 | −13,580.98 |
+
+  The +10,524.00 is 0.75 × 14,032. **The magnitude is expected, not a bug:** under the
+  redline model the internal rep amount is an order of magnitude larger than when the
+  sheet's burden array was written, so this term now dominates an internal job's burden.
+  (The negative GP is the fixture's own pre-existing property — see COMMISSION_REPIN in
+  the test file — not an effect of this change.)
+- **The sheet agrees again.** D21's standing instruction not to "restore" the workbook's
+  K8-in-the-burden-array behaviour is withdrawn; the workbook was right.
+- The `BURDENEXR · SALESCOMM` budget line reads `Commission_Burden_Amt__c` directly, so it
+  needed no arithmetic change — but its mapping note stated D21's rule, and a note is what
+  a reader checks a number against, so it was corrected. `BURDENEXR · RESIDENTAL` (labor
+  burden) is untouched, and a test pins that the two burdens do not leak into each other.
+- **Every already-pushed internal job now has a stale budget in Acumatica.** Nothing
+  recalculates on its own; those projects carry the D21 burden until they are re-pushed.
+  Identifying and re-pushing them is a data task, listed in TASKS.md, not something this
+  change does.

@@ -426,7 +426,11 @@ function calculateBudget(rec) {
   // ROUTING: one amount, two possible destinations, decided by deal type alone.
   //   EXTERNAL → SLPC OUT · OTHER · M1&M2COM
   //   INTERNAL → SLPC · LABOR · SALESCOMM
-  // NEITHER is burdened (D21) — the routing decides the Acumatica line and nothing else.
+  // ~~NEITHER is burdened (D21)~~ — superseded 2026-09-08 (D-071): the INTERNAL one is
+  // burdened because it is paid through payroll, the external one is not because it is a
+  // dealer PO. So the routing decides the Acumatica line AND, through `internalComm`
+  // below, whether the amount carries burden. `internalComm` is the single place that
+  // decision is made; the burden term reuses it rather than re-testing `isInternal`.
   const thirdPartyComm = isInternal ? 0 : repCommission;        // K7 → SLPC OUT · M1&M2COM
   const internalComm = isInternal ? repCommission : 0;          // K8 → SLPC · SALESCOMM
 
@@ -454,22 +458,41 @@ function calculateBudget(rec) {
 
   const commSubtotal = thirdPartyComm + internalComm + mgmtComm + setterComm; // J11
 
-  // D21 (Harmon ruling, 2026-08-22): burden is 75% of MANAGEMENT + SETTER ONLY.
+  // ⚠️ BURDEN = RATE × (MANAGEMENT + SETTER + INTERNAL REP). Harmon ruling 2026-09-08
+  // (D-071), which PARTIALLY REVERSES D21. Read the history before changing this again —
+  // this line has now been ruled on three times and the reasoning is not obvious from the
+  // formula.
   //
-  // NEITHER rep line is burdened — not the external one (never was) and not the
-  // internal redline commission either. This CHANGES the D19 Stage 2 behaviour, where
-  // internal followed the old rule and carried burden on the whole rep amount: on the
-  // fixture job that was 10,939.50 of burden against 415.50 for the same job sold
-  // externally. D21 makes the two identical, which is the point of the ruling.
+  //   ~~D19 Stage 2 (2026-08-21)~~  rate × (mgmt + setter + internal rep)
+  //   ~~D21 (2026-08-22)~~          rate × (mgmt + setter) — NEITHER rep burdened
+  //   D-071 (2026-09-08)            rate × (mgmt + setter + internal rep)  ← current
   //
-  // ⚠️ THE SHEET DISAGREES AND THE SHEET IS SUPERSEDED. The REVISED workbook's J12
-  // includes K8 (the internal rep cell) in its burden array. Do not "restore" it to
-  // match the workbook — under the redline model the internal rep amount is an order of
-  // magnitude larger than it was when that array was written, and Harmon has ruled on
-  // what it should be. Note the fixture cannot catch a regression here on its own: it is
-  // an EXTERNAL deal, so K8 is zero and both formulas agree. The internal-deal
-  // behaviour test is the only thing pinning this.
-  const commBurden = (mgmtComm + setterComm) * commBurdenRate;                // J12
+  // The current rule is D19's, restored, and the principle underneath it is now stated
+  // rather than implied: **burden follows PAYROLL, and only payroll.** An internal rep is
+  // paid through payroll (D16 — internal deals raise no PO precisely because the money
+  // goes through the payroll system), so the employer costs that burden represents are
+  // real. An external rep is paid by a DEALER PURCHASE ORDER; there is no payroll, no
+  // employer tax, and nothing to burden. Management and the setter are payroll, and
+  // always were.
+  //
+  // D21's error was treating the two rep lines as one category because they are both
+  // "rep commission". They are two different payment mechanisms, and burden is a fact
+  // about the mechanism, not about who earned it.
+  //
+  // THE SHEET AGREES AGAIN. The REVISED workbook's J12 includes K8 (the internal rep
+  // cell), and the D21 comment here used to warn against "restoring" it. That warning is
+  // withdrawn: the sheet was right. What remains true from it is the magnitude — under
+  // the redline model the internal rep amount is an order of magnitude larger than when
+  // that array was written, so this term dominates the burden on an internal job. That is
+  // expected, not a bug; see the worked numbers in the internal-deal test.
+  //
+  // ⚠️ EXTERNAL JOBS ARE UNCHANGED BY CONSTRUCTION, AND THE FIXTURE CANNOT PROVE THIS
+  // RULE. `internalComm` is already zero on an external deal (the routing above decides
+  // it — this reuses that decision rather than re-deriving `isInternal`), so every
+  // external job computes exactly as it did under D21. The HOLLAND fixture is external,
+  // so it is a regression proof that external did NOT move and is blind to which of the
+  // three rules above is in force. The internal-deal test is the only thing pinning this.
+  const commBurden = (mgmtComm + setterComm + internalComm) * commBurdenRate;  // J12
   const totalCommissions = commSubtotal + commBurden;                         // J13 / N9
   const commissionPPW = watts > 0 ? totalCommissions / watts : 0;             // J14
 

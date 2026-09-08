@@ -22,7 +22,10 @@ import { mock } from "node:test";
 import {
   NON_COMMISSION_ATTRIBUTES,
   buildAttributeSyncWriteback,
+  nonCommissionFieldNames,
+  JOBTYPE_VALUE,
 } from "../../lib/acumatica-attributes.js";
+import { PROJECT_MANAGER_FIELD } from "../../lib/acumatica-project-manager.js";
 
 const ctx = {
   lines: [],
@@ -1082,6 +1085,136 @@ test("both problems are reported together, not just the first", async () => {
   });
   assert.match(r.note, /inactive/);
   assert.match(r.note, /KW discarded/);
+});
+
+// ===========================================================================
+// Stage E, 2026-09-08: JOBTYPE and the project-manager refresh
+// ===========================================================================
+
+/** Run the stage with a happy PO stage and capture what Stage E was handed. */
+async function captureStageE(values) {
+  let seen = null;
+  const r = await runDownstreamStages("a0X1", "R261065", values, {
+    syncCommissionPos: async () => ({ ok: true, status: "Both Raised" }),
+    syncProjectAttributes: async (projectId, vals, opts) => {
+      seen = { projectId, vals, opts };
+      return { ok: true, action: "synced" };
+    },
+  });
+  return { result: r, seen };
+}
+
+test("JOBTYPE is passed on EVERY budget push, as the shared constant", async () => {
+  // Superseded 2026-09-08 (D31 / D-067): the old rule omitted JOBTYPE because RS vs RSDC
+  // was said to be Layer-1's to know. It is not what JOBTYPE holds.
+  const { seen } = await captureStageE({});
+  assert.equal(seen.opts.jobType, JOBTYPE_VALUE);
+  assert.equal(seen.opts.jobType, "RS");
+});
+
+test("the JOBTYPE constant is the LIB one, not a literal retyped in this Lambda", () => {
+  // Two string literals would be two things to keep right, and the drift is silent: a job
+  // created under one spelling and refreshed under the other just stops carrying it.
+  assert.equal(JOBTYPE_VALUE, "RS");
+  assert.notEqual(JOBTYPE_VALUE, "Residential Solar");
+  assert.notEqual(JOBTYPE_VALUE, "RSDC", "there is no RSDC job type — all 35 live RSDC projects carry RS");
+});
+
+test("RSDC jobs get JOBTYPE=RS too — the attribute is not the template", async () => {
+  // A domestic-content job is still a residential solar job.
+  const { seen } = await captureStageE({ Domestic_Content_Eligible__c: "Yes" });
+  assert.equal(seen.opts.jobType, "RS");
+});
+
+test("a mapped project manager is refreshed on every push", async () => {
+  // The point of doing this here at all: managers get assigned AFTER the project exists,
+  // and Layer-1 only ever sees the field at create time.
+  const { result, seen } = await captureStageE({ Project_Manager__c: "Lindsay McCormack" });
+  assert.equal(seen.opts.projectManager, "E00675");
+  assert.equal(result.projectManager, "E00675");
+  assert.equal(result.ok, true);
+  assert.equal(result.note, null, "a resolved manager is not a problem");
+});
+
+test("BLANK project manager sends null — it must never CLEAR the manager", async () => {
+  // There is one manager slot. Clearing on a blank would strip the manager off every job
+  // whose Salesforce field is empty, on the first push after go-live.
+  for (const blank of [undefined, null, "", "   ", ";;"]) {
+    const { result, seen } = await captureStageE({ Project_Manager__c: blank });
+    assert.equal(seen.opts.projectManager, null, `expected null for ${JSON.stringify(blank)}`);
+    assert.equal(result.note, null, "a blank manager is not a problem to report");
+    assert.equal(result.ok, true);
+  }
+});
+
+test("an UNKNOWN manager name leaves Acumatica alone, warns, and does NOT fail the push", async () => {
+  // 683 live Solar records carry "Breana Evans", a retired picklist value with no
+  // Acumatica employee. This has to be a note on a pushed budget, not a failed push.
+  const { result, seen } = await captureStageE({ Project_Manager__c: "Breana Evans" });
+  assert.equal(seen.opts.projectManager, null, "unknown must not become a guess");
+  assert.equal(result.ok, false, "reported...");
+  assert.match(result.note, /Budget lines pushed OK/, "...but the budget still pushed");
+  assert.match(result.note, /project manager/);
+  assert.match(result.note, /Breana Evans/);
+  assert.match(result.note, /left unchanged/);
+});
+
+test("TWO mapped managers refuse rather than pick one, and say which two", async () => {
+  // Project_Manager__c is a multipicklist; Acumatica has one slot. Silently taking the
+  // first would put one of two people's name on a job with no record of the choice.
+  const { result, seen } = await captureStageE({
+    Project_Manager__c: "Lindsay McCormack;Cameron Labonte",
+  });
+  assert.equal(seen.opts.projectManager, null);
+  assert.equal(result.ok, false);
+  assert.match(result.note, /more than one Acumatica employee/);
+  assert.match(result.note, /Lindsay McCormack; Cameron Labonte/);
+  assert.match(result.note, /left unchanged/);
+});
+
+test("ONE mapped name among unmapped ones resolves, and does NOT warn", async () => {
+  const { result, seen } = await captureStageE({
+    Project_Manager__c: "Breana Evans;Cameron Labonte",
+  });
+  assert.equal(seen.opts.projectManager, "E01177");
+  // No note. The warning exists because we SKIPPED a write; here the write happened and
+  // is right. Acumatica has one manager slot, so the second name was never representable
+  // whatever we did — reporting a correct outcome as a problem is how the note that
+  // matters gets ignored.
+  assert.equal(result.note, null);
+  assert.equal(result.ok, true);
+});
+
+test("a manager problem never marks the ATTRIBUTE sync as failed", async () => {
+  // They are separate facts. Attribute_Sync_Status__c must not read Failed because a
+  // retired name is sitting in a picklist.
+  const { result } = await captureStageE({ Project_Manager__c: "Breana Evans" });
+  assert.equal(result.attributes.ok, true);
+  assert.equal(buildAttributeSyncWriteback(result.attributes, "T")["Attribute_Sync_Status__c"], "Synced");
+});
+
+test("a malformed manager value cannot throw past the stage", async () => {
+  // The whole stage discipline: an exception here would land in the worker's catch and
+  // mark a budget push that wrote every line as Failed.
+  for (const weird of [{}, [], 12345, Symbol.iterator ? undefined : null]) {
+    const { result } = await captureStageE({ Project_Manager__c: weird });
+    assert.equal(typeof result.ok, "boolean", `threw on ${String(weird)}`);
+  }
+});
+
+test("the worker SELECTs Project_Manager__c — otherwise the refresh reads undefined", () => {
+  // Undefined is indistinguishable from "no manager assigned", so a missing field would
+  // silently turn the refresh into a permanent no-op.
+  assert.ok(workerFieldNames().includes(PROJECT_MANAGER_FIELD));
+  assert.ok(downstreamFieldNames().includes("Project_Manager__c"));
+});
+
+test("the ATTRIBUTE-ONLY path is NOT given JOBTYPE or a project manager", async () => {
+  // Deliberate, and not an oversight: that path serves legacy and hand-budgeted projects,
+  // and its claim to safety is that it writes only what it was asked to. Widening it is a
+  // decision to take on purpose, not a side effect of this one.
+  assert.equal(NON_COMMISSION_ATTRIBUTES.includes("JOBTYPE"), false);
+  assert.equal(nonCommissionFieldNames().includes(PROJECT_MANAGER_FIELD), false);
 });
 
 // ===========================================================================

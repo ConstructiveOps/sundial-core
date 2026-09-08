@@ -4,6 +4,21 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Acumatica budget-push Stage E: JOBTYPE + PM refresh — BUILT, NOT DEPLOYED (2026-09-08)
+
+Branch `fix/sept-integration-tweaks`, part 2 of 3. Suite 828 green.
+
+- [x] **A — JOBTYPE on every budget push**, as the shared `JOBTYPE_VALUE` (`RS`), verified by re-read. The old "inference is not authority" exclusion rested on JOBTYPE tracking RS vs RSDC; it does not, so the comment now cites the ruling (D31 / D-067).
+- [x] **B — project manager refreshed on every push** from `Project_Manager__c` via the shared map. Catches managers assigned after creation, which Layer-1 structurally cannot. ⚠️ Refreshes, **never clears**: blank / unmapped / two-mapped all omit `ProjectProperties` entirely.
+- [x] **Both ride the same `Project` PUT and the same verifying re-read.** `$expand` now names `ProjectProperties` on both reads — without it the object is absent and every successful write would verify as a failure.
+- [x] **Shared definitions moved to `lib/`** — `JOBTYPE_*` into `acumatica-attributes.js`, `normalizePicklist` + PM map + resolver into the new `acumatica-project-manager.js`. Both Lambdas import; no duplicate literals.
+- [x] **Fixed a latent bug found while building this**: the `unverified` return spread `...check` after `ok: false`, so a failed manager write with passing attributes would have reported a clean sync.
+- [x] **`Project_Manager__c` added to `attributeFieldNames()`** so the worker SELECTs it — missing, it reads `undefined` and the refresh silently becomes a no-op.
+- [ ] **TIM: deploy** `.\deploy.ps1 sundial-acumatica-budget-push` **and** `.\deploy.ps1 sundial-acumatica-push` together — they now share `lib/acumatica-project-manager.js` and the JOBTYPE constants, and each bundle carries its own copy of lib. Deploying one alone is not wrong, but they should not drift.
+- [ ] **TIM: on the first live push, check `Budget_Push_Error__c`.** An unmapped project manager is expected to be *common*, not rare (3,815 of 4,494 Solar records carry a PM; nine of eleven distinct values are retired names). If the note is noisier than useful, the fix is to map the remaining names, not to silence the warning.
+- [ ] **HARMON: decide whether the retired PM names need Acumatica employees.** `Breana Evans` (683 records), `Selena Bribiescas` (239), `Jessica Patrick` (91), `Jose Gomez` (81), `Kalvin Pachote` (69), `Brian Lechliter #2` (23), `Justin Preston` (15), `Leanna Mayer` (10), `Ben Wollschlager` (2). Until they are mapped, those jobs keep whatever manager Acumatica already holds.
+- [ ] **Open, deliberately not decided here: should the attribute-only path back-fill JOBTYPE on legacy projects?** It abstains today (D-061 scope), and a test pins that. Worth asking Harmon whether legacy projects want it; it is a one-line change once someone decides.
+
 ## Acumatica Layer-1 September tweaks — BUILT, NOT DEPLOYED (2026-09-08)
 
 Branch `fix/sept-integration-tweaks`, part 1 of 3. All field names and value formats read

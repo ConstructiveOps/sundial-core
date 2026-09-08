@@ -1,5 +1,71 @@
 # Sundial — Progress Log
 
+## 2026-09-08 — Budget push Stage E: JOBTYPE and a project-manager refresh
+
+Part 2 of the September Acumatica batch, same branch `fix/sept-integration-tweaks`.
+`lambdas/sundial-acumatica-budget-push` now sends two more things on every push. **Built,
+not deployed.** Suite **828 green** (was 809).
+
+**A — JOBTYPE, on every budget push.** Stage E used to omit it deliberately:
+
+> RS vs RSDC is authoritative at Layer-1 creation and this worker only infers it from
+> which lines the scaffold has — inference is not authority.
+
+The premise turned out to be false, which the part-1 probe settled: JOBTYPE does not hold
+RS vs RSDC. Its allowed ValueIDs are `CE CS EV RE RS SE`, there is no RSDC job type, and
+all 35 live RSDC-template projects carry `RS`. It is a constant for every job either
+Lambda touches, so nothing is inferred and there is no authority to defer to. The comment
+now cites the ruling instead of the dead argument.
+
+**B — the project manager, refreshed on every push.** This is the half Layer-1
+structurally cannot cover: **managers are assigned after the project exists**, and Layer-1
+sees `Project_Manager__c` once, at create, when it is usually still blank. Without a
+refresh the field would be correct on almost nothing.
+
+> ⚠️ **It refreshes, it never clears.** A blank field, an unmapped name and two mapped
+> names all resolve to "say nothing", so `ProjectProperties` is left out of the body
+> entirely and the merge leaves what is there alone. Clearing on a blank would be worse
+> than not running at all: there is one manager slot, most Solar records carry a retired
+> name that maps to no Acumatica employee, and the first push after go-live would strip
+> the manager off every one of them.
+
+An unmapped name is a note on a **pushed** budget (`Budget_Push_Error__c`, status still
+`Pushed`), never a failed push — and it does not mark the attribute sync `Failed` either,
+because those are separate facts. Expect the note often rather than rarely: 3,815 of 4,494
+Solar records carry a PM and nine of the eleven distinct values are retired names.
+
+Both ride the **same `Project` PUT** that already carries the attributes and are proven by
+the **same verifying re-read**: one round trip, one proof, nothing that can half-succeed.
+`ProjectProperties` has to be named in `$expand` or it comes back absent, so a
+verification without it would report every successful write as a failure — the sync asks
+for `Attributes,ProjectProperties` on both reads, and a test asserts it.
+
+**Shared, not copied.** `JOBTYPE_ATTRIBUTE_ID` / `JOBTYPE_VALUE` moved into
+`lib/acumatica-attributes.js`; `normalizePicklist`, `PROJECT_MANAGER_EMPLOYEE_IDS` and
+`resolveProjectManager` into a new `lib/acumatica-project-manager.js`. Both Lambdas import
+them. Two copies of a name map eventually become two different name maps, and that failure
+is silent — a job created under one spelling and refreshed under the other would simply
+stop having a manager, with nothing to report it. `Project_Manager__c` joins
+`attributeFieldNames()` so the worker's SELECT carries it; missing, it would arrive as
+`undefined`, read as "no manager assigned", and turn the refresh into a permanent no-op.
+
+**A latent bug surfaced and is fixed.** The `unverified` return spread `...check` *after*
+`ok: false`, so `check.ok === true` overwrote it. Harmless while that branch only ran on
+`!check.ok` — but the moment a second thing could fail, a manager write that did not land
+would have been reported as a clean sync. Caught by the new drop-the-manager test, which
+is the argument for testing the failure shape rather than the happy path.
+
+**Deliberately NOT changed: the attribute-only path (D-061).** It still sends neither
+JOBTYPE nor a manager. Its whole claim to safety on legacy and hand-budgeted projects is
+that it writes only what it was asked to, and adding a field because the field happens to
+be safe is how that claim erodes. Back-filling legacy JOBTYPE is a decision to take
+deliberately; a test pins the current scope so the abstention is visible rather than
+accidental.
+
+Decisions: **D-070**; rework-doc **D34**, with D31 amended and the §7 attribute map
+corrected (JOBTYPE's source is now the shared constant, and the project manager is listed
+as the non-attribute it is).
+
 ## 2026-09-08 — Layer-1 Create Project: address, parent account, project manager, JOBTYPE
 
 `lambdas/sundial-acumatica-push` now fills in four things Harmon has been typing by hand

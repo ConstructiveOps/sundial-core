@@ -144,12 +144,14 @@ const {
   verifyProjectExtras,
   FINANCING_PARTNER_PARENT_ACCOUNTS,
   PROJECT_MANAGER_EMPLOYEE_IDS,
-  PROJECT_JOBTYPE_VALUE,
-  PROJECT_JOBTYPE_ATTRIBUTE_ID,
   DEFAULT_STATE,
   CUSTOMER_COUNTRY,
 } = mod;
 const { normalizeAcumaticaPhone } = await import("../../lib/acumatica.js");
+// Imported from lib, not from the Lambda, because lib is where the ONE definition lives —
+// both this Lambda and the budget push send it. Asserting a re-export would prove the
+// alias, not the value.
+const { JOBTYPE_VALUE, JOBTYPE_ATTRIBUTE_ID } = await import("../../lib/acumatica-attributes.js");
 
 // ===========================================================================
 // Phone normalisation (unchanged — the production breakage this guards)
@@ -394,10 +396,10 @@ test("JOBTYPE is the code RS, not any human phrasing of it", () => {
   // Acumatica accepts an unrecognised combo value with a 200 and discards it, so this
   // is the kind of mistake that ships and then never reports itself. The allowed
   // ValueIDs read live 2026-09-08 are CE, CS, EV, RE, RS, SE.
-  assert.equal(PROJECT_JOBTYPE_VALUE, "RS");
-  assert.notEqual(PROJECT_JOBTYPE_VALUE, "Residential Solar");
-  assert.notEqual(PROJECT_JOBTYPE_VALUE, "Residential - Solar");
-  assert.equal(PROJECT_JOBTYPE_ATTRIBUTE_ID, "JOBTYPE");
+  assert.equal(JOBTYPE_VALUE, "RS");
+  assert.notEqual(JOBTYPE_VALUE, "Residential Solar");
+  assert.notEqual(JOBTYPE_VALUE, "Residential - Solar");
+  assert.equal(JOBTYPE_ATTRIBUTE_ID, "JOBTYPE");
 });
 
 // ===========================================================================

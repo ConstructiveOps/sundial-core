@@ -47,7 +47,17 @@ import {
   normalizeAcumaticaPhone,
 } from "../../lib/acumatica.js";
 import { lookupTaxZone } from "../../lib/acumatica-tax-zones.js";
-import { verifyAttributeWrite } from "../../lib/acumatica-attributes.js";
+import {
+  verifyAttributeWrite,
+  JOBTYPE_ATTRIBUTE_ID,
+  JOBTYPE_VALUE,
+} from "../../lib/acumatica-attributes.js";
+import {
+  normalizePicklist,
+  resolveProjectManager,
+  PROJECT_MANAGER_EMPLOYEE_IDS,
+  PROJECT_MANAGER_FIELD,
+} from "../../lib/acumatica-project-manager.js";
 
 const SF_API_VERSION = "v60.0";
 const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
@@ -57,32 +67,20 @@ const SOLAR_SF_OBJECT = "Sundial_Solar__c";
 const CUSTOMER_CLASS = "RESIDENT";
 
 // ===========================================================================
-// PICKLIST MATCHING — one normaliser, because one of these values is NOT ASCII
+// SHARED PICKLIST + PROJECT-MANAGER MAPS
 // ===========================================================================
-/**
- * Normalise a Salesforce picklist value for comparison: trim, collapse internal
- * whitespace, fold every dash-like character to a plain hyphen, lowercase.
- *
- * ⚠️ THE DASH FOLD IS LOAD-BEARING, NOT TIDINESS. The live
- * `Sundial_Customer__c.Financing_Partner__c` picklist contains
- *
- *     "Participate Prepaid Lease U+2013 Cash"      <- EN DASH
- *     "Participate Prepaid Lease - Financed"       <- ASCII hyphen
- *
- * verified against the org 2026-09-08 (4 records and 1 record respectively). The two
- * sibling values do not even agree with each other. A trimmed, case-insensitive match
- * written against the hyphen spelling — which is how the mapping was handed to us, and
- * how it reads in every document — matches `- Financed` and silently misses `– Cash`,
- * so four Participate customers would be created with no parent account and no warning.
- * Folding the dash is what makes "case-insensitive and trimmed" actually true here.
- */
-export function normalizePicklist(v) {
-  return String(v ?? "")
-    .replace(/[‐-―−]/g, "-") // hyphen/en/em/figure/minus -> "-"
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
+// `normalizePicklist` (the dash-folding matcher) and the project-manager name map moved
+// to lib/ when the budget push started writing ProjectManager too. Both Lambdas write the
+// same Acumatica field, and two copies of a name map eventually become two different name
+// maps — see the module header there. Re-exported so this Lambda's callers and tests keep
+// one import site.
+export {
+  normalizePicklist,
+  resolveProjectManager,
+  PROJECT_MANAGER_EMPLOYEE_IDS,
+  PROJECT_MANAGER_FIELD,
+};
+
 
 // ===========================================================================
 // B. PARENT ACCOUNT (Billing tab) BY FINANCING PARTNER
@@ -204,83 +202,16 @@ export function buildCustomerAddress(cust) {
 }
 
 // ===========================================================================
-// C. PROJECT MANAGER + JOBTYPE
+// C. PROJECT MANAGER + JOBTYPE — both now shared with the budget push
 // ===========================================================================
-/**
- * `Sundial_Solar__c.Project_Manager__c` -> Acumatica `ProjectProperties.ProjectManager`,
- * which holds an EmployeeID string. Both ids read back from the live tenant 2026-09-08:
- *
- *   Lindsay McCormack -> E00675   (Active)
- *   Cameron Labonte   -> E01177   (Active; Acumatica spells it "Cameron LaBonte")
- *
- * These two are exactly the ACTIVE values of the Salesforce multipicklist. The field
- * also carries nine legacy values on existing records (Breana Evans 683, Selena
- * Bribiescas 239, Jessica Patrick 91, …) that are no longer selectable and have no
- * Acumatica employee mapped, which is why an unmapped name omits and warns instead of
- * failing: 3,815 of 4,494 solar records carry a PM and most of them are legacy.
- */
-export const PROJECT_MANAGER_EMPLOYEE_IDS = Object.freeze({
-  [normalizePicklist("Lindsay McCormack")]: "E00675",
-  [normalizePicklist("Cameron Labonte")]: "E01177",
-});
-
-/**
- * Resolve the Acumatica employee for a project manager.
- *
- * ⚠️ `Project_Manager__c` IS A MULTIPICKLIST (verified by describe, 2026-09-08:
- * `type: "multipicklist"`, length 4099), so its value can be a semicolon-separated
- * list. Acumatica's project has ONE manager slot. Treating the raw string as a single
- * name would send `"Lindsay McCormack;Cameron Labonte"` and match nothing — which at
- * least fails visibly — but picking silently from a list would put one of two people's
- * name on a job with no record of the coin toss.
- *
- * So: exactly one distinct mapped employee wins. Zero mapped names, or two different
- * ones, omit the field and warn.
- *
- * @returns {{employeeId: string|null, names: string[], unknownNames: string[], ambiguous: boolean}}
- */
-export function resolveProjectManager(raw) {
-  const names = String(raw ?? "")
-    .split(";")
-    .map((n) => n.trim())
-    .filter((n) => n !== "");
-  if (names.length === 0) {
-    return { employeeId: null, names: [], unknownNames: [], ambiguous: false };
-  }
-
-  const unknownNames = [];
-  const matched = new Set();
-  for (const name of names) {
-    const id = PROJECT_MANAGER_EMPLOYEE_IDS[normalizePicklist(name)];
-    if (id) matched.add(id);
-    else unknownNames.push(name);
-  }
-  if (matched.size === 1) {
-    return { employeeId: [...matched][0], names, unknownNames, ambiguous: false };
-  }
-  return { employeeId: null, names, unknownNames, ambiguous: matched.size > 1 };
-}
-
-/**
- * JOBTYPE, set on EVERY project this Lambda creates — RS scaffold and RSDC alike.
- *
- * ⚠️ THE VALUE IS THE CODE `RS`, NOT THE LABEL. JOBTYPE is a Combo attribute, and a
- * combo attribute stores its ValueID while the UI shows the description. Read live
- * 2026-09-08: the definition's allowed ValueIDs are `CE`, `CS`, `EV`, `RE`, `RS`, `SE`,
- * and 40 sampled projects all carry `Value: "RS"` beside `ValueDescription:
- * "Residential - Solar"`. Writing the human phrase — "Residential Solar", which is what
- * this change was specified as, or even the exact label "Residential - Solar" — would be
- * accepted with a 200 and thrown away, because that is what Acumatica does with an
- * attribute value it does not recognise (the standing hazard documented on
- * verifyAttributeWrite, proved 2026-08-24 with `NOTAREALATTR`).
- *
- * RSDC does NOT get a different JOBTYPE. The attribute answers "what kind of job is
- * this" and both templates answer "residential solar"; the live RSDC projects confirm
- * it — every one of them carries `RS`. The template encodes the domestic-content
- * election, JOBTYPE does not.
- */
-export const PROJECT_JOBTYPE_ATTRIBUTE_ID = "JOBTYPE";
-export const PROJECT_JOBTYPE_VALUE = "RS";
+// `resolveProjectManager` + the name map live in lib/acumatica-project-manager.js and
+// `JOBTYPE_ATTRIBUTE_ID` / `JOBTYPE_VALUE` in lib/acumatica-attributes.js, imported at the
+// top of this file. They moved out of here on 2026-09-08 when the budget push began
+// refreshing the same two things on every push (ADR D-070): Layer-1 sets them at create,
+// when a project manager is often not assigned yet, and the budget push is the only thing
+// that ever revisits them. One definition each, because the way two copies drift apart is
+// silent — a job created under one spelling and refreshed under the other would simply
+// stop having a manager, and nothing would report it.
 
 // Project template lookup: Sundial project type -> Acumatica ProjectTemplateID.
 // RS and RSDC differ by exactly one budget line — DCREBATE | BILLING | <N/A> | Income —
@@ -894,11 +825,11 @@ export const handler = async (event) => {
         ProjectTemplateID: av(templateId), // template auto-scaffolds tasks + budget
         Customer: av(acuCustomerId),
         // JOBTYPE on EVERY project, RS and RSDC alike. The value is the combo's
-        // ValueID (`RS`), never the label — see PROJECT_JOBTYPE_VALUE.
+        // ValueID (`RS`), never the label — see JOBTYPE_VALUE.
         Attributes: [
           {
-            AttributeID: av(PROJECT_JOBTYPE_ATTRIBUTE_ID),
-            Value: av(PROJECT_JOBTYPE_VALUE),
+            AttributeID: av(JOBTYPE_ATTRIBUTE_ID),
+            Value: av(JOBTYPE_VALUE),
           },
         ],
       };
@@ -906,7 +837,7 @@ export const handler = async (event) => {
       if (pm.employeeId) {
         projectBody.ProjectProperties = { ProjectManager: av(pm.employeeId) };
       }
-      summary.project.jobType = PROJECT_JOBTYPE_VALUE;
+      summary.project.jobType = JOBTYPE_VALUE;
 
       // CREATE in Acumatica. Keyed by ProjectID, so a retry re-PUTs the SAME
       // project (update) rather than duplicating. Comes back "In Planning"/Hold —
@@ -979,7 +910,7 @@ export const handler = async (event) => {
       console.log(
         `acumatica-push CREATED project=${returnedProjectId} template=${templateId} ` +
           `dc=${JSON.stringify(cleanStr(cust.Domestic_Content_Eligible__c) || null)} ` +
-          `dcEligible=${domesticContentEligible} jobType=${PROJECT_JOBTYPE_VALUE} ` +
+          `dcEligible=${domesticContentEligible} jobType=${JOBTYPE_VALUE} ` +
           `attributesVerified=${summary.project.attributesVerified} ` +
           `projectManager=${JSON.stringify(pm.employeeId)} ` +
           `customer=${acuCustomerId} customerStage=${summary.customer.stage} ` +

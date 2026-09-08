@@ -2937,3 +2937,71 @@ and the financing partner.
   or an omitted project manager is now attributable without re-reading either system.
 - Generalises the D-060 lesson: a decision worth making is worth writing down where it can
   be read after the records change.
+
+---
+
+## D-070: Stage E writes JOBTYPE and refreshes the project manager on every budget push
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Related:** D-067 / D-068 (Layer-1 writes both at create), D-060 (Stage E wiring), D-061 (the attribute-only path, deliberately NOT widened), rework doc D24 (partial PUTs merge; the silent-200 hazard) and D34.
+
+### Context
+
+Two things Layer-1 now sets at project creation only ever get set once, and one of them
+is usually not knowable yet at that moment.
+
+`sundial-acumatica-budget-push` explicitly declined to send JOBTYPE, on this reasoning:
+
+> RS vs RSDC is authoritative at Layer-1 creation and this worker only infers it from
+> which lines the scaffold has — inference is not authority.
+
+The premise is false. JOBTYPE does not hold RS vs RSDC: its allowed ValueIDs are
+`CE CS EV RE RS SE`, there is no RSDC job type, and all 35 live RSDC-template projects
+carry `RS` (D-067). It is a constant for every job either Lambda touches, so nothing is
+inferred and there is no authority to defer to.
+
+The project manager is a sharper case. **Managers are assigned after the project exists.**
+Layer-1 sees `Project_Manager__c` once, at create, when it is usually still blank — so
+without a refresh the field is set correctly on almost nothing.
+
+### Decision
+
+Stage E sends both, on every budget push, riding the **same `Project` PUT** that already
+carries the attributes and proven by the **same verifying re-read**. One round trip, one
+proof, nothing that can half-succeed.
+
+⚠️ **THE REFRESH NEVER CLEARS.** A blank field, an unmapped name and two mapped names all
+resolve to "say nothing", so `ProjectProperties` is omitted from the body entirely and the
+merge leaves whatever is there alone.
+
+An unmapped name is a **note on a pushed budget** — status stays `Pushed`,
+`Budget_Push_Error__c` says what was skipped — never a failed push, and never a `Failed`
+on the attribute sync, because those are separate facts about the job.
+
+Both definitions moved to `lib/`: `JOBTYPE_ATTRIBUTE_ID` / `JOBTYPE_VALUE` into
+`acumatica-attributes.js`, and `normalizePicklist` / `PROJECT_MANAGER_EMPLOYEE_IDS` /
+`resolveProjectManager` into a new `acumatica-project-manager.js`, imported by both
+Lambdas.
+
+### Consequences
+
+- **Clearing on a blank would have been worse than not running at all.** There is one
+  manager slot; most Solar records carry a retired name that maps to no Acumatica
+  employee; and the first push after go-live would have stripped the manager off every
+  one of them. That is the single rule most worth not getting wrong here.
+- **Two copies of a name map become two different name maps, silently.** A job created
+  under one Lambda's spelling and refreshed under the other's would just stop having a
+  manager, and nothing would report it. Hence one definition each, in `lib/`.
+- **D-061 is NOT widened.** The attribute-only path still sends neither. Its whole claim
+  to safety on legacy and hand-budgeted projects is that it writes only what it was asked
+  to, and adding a field because the field happens to be safe is how that claim erodes.
+  Back-filling legacy JOBTYPE is a decision to take deliberately.
+- A latent bug surfaced while building this and is fixed: the `unverified` return spread
+  `...check` **after** `ok: false`, so `check.ok === true` overwrote it. Harmless while
+  that branch only ran on `!check.ok`; it would have reported a failed manager write as a
+  clean sync the moment a second thing could fail. `ok` is now set after the spread, with
+  a comment saying why the order matters.
+- Expect the unmapped-manager note often, and do not treat it as a defect: 3,815 of 4,494
+  Solar records carry a PM, and nine of the eleven distinct stored values are retired
+  picklist entries with no Acumatica employee.

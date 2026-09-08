@@ -54,7 +54,12 @@ import {
   nonCommissionFieldNames,
   buildAttributeSyncWriteback,
   NON_COMMISSION_ATTRIBUTES,
+  JOBTYPE_VALUE,
 } from "../../lib/acumatica-attributes.js";
+import {
+  resolveProjectManager,
+  PROJECT_MANAGER_FIELD,
+} from "../../lib/acumatica-project-manager.js";
 
 const PROJECT_BUDGET_ENTITY = "ProjectBudget";
 const SOLAR_SF_OBJECT = "Sundial_Solar__c";
@@ -1239,12 +1244,30 @@ async function handleWorker(event) {
  * ---------------------------------------------------------------------------
  * An exception here would land in the worker's catch and mark a SUCCESSFUL budget push as
  * failed. Each stage is therefore wrapped, and an exception is reported as that stage's
- * failure rather than the push's.
+ * failure rather than the push's. That covers the project manager too: an unmapped name
+ * is a note on a pushed budget, never a failed push.
  *
- * JOBTYPE is deliberately NOT passed to the attribute sync. RS vs RSDC is authoritative at
- * Layer-1 creation and this worker only infers it from which lines the scaffold has —
- * inference is not authority. Omitting it means the merge leaves whatever Layer-1 wrote
- * intact, which is the correct outcome.
+ * ---------------------------------------------------------------------------
+ * JOBTYPE AND THE PROJECT MANAGER, ADDED 2026-09-08
+ * ---------------------------------------------------------------------------
+ * ~~JOBTYPE is deliberately NOT passed to the attribute sync. RS vs RSDC is authoritative
+ * at Layer-1 creation and this worker only infers it from which lines the scaffold has —
+ * inference is not authority.~~ **Superseded by the owner's ruling (D31 / ADR D-067).**
+ * That argument assumed JOBTYPE tracks RS vs RSDC. It does not: the allowed ValueIDs are
+ * `CE CS EV RE RS SE`, there is no RSDC job type, and all 35 live RSDC-template projects
+ * carry `RS`. It is the constant `JOBTYPE_VALUE` for every job either Lambda touches, so
+ * nothing is inferred and there is no authority to defer to. Imported, never retyped.
+ *
+ * The PROJECT MANAGER is refreshed here for a reason Layer-1 cannot cover: managers are
+ * assigned after the project exists. Layer-1 sets it at create, when the field is often
+ * still blank; this stage is the only thing that ever revisits it.
+ *
+ * ⚠️ **IT REFRESHES, IT NEVER CLEARS.** Blank field, unmapped name, two mapped names —
+ * all three resolve to "say nothing", so the PUT omits `ProjectProperties` entirely and
+ * the merge leaves whatever is there alone. Clearing on a blank would be worse than not
+ * running at all: there is one manager slot, most Solar records carry a legacy name that
+ * maps to no Acumatica employee, and the first push after go-live would strip the manager
+ * off every one of them.
  */
 export async function runDownstreamStages(recordId, acumaticaProjectId, values, deps = {}) {
   const runPos = deps.syncCommissionPos ?? syncCommissionPos;
@@ -1267,8 +1290,32 @@ export async function runDownstreamStages(recordId, acumaticaProjectId, values, 
   }
 
   let attrs = null;
+  let projectManager = null;
   try {
-    attrs = await runAttrs(acumaticaProjectId, values);
+    // Resolved INSIDE the try: a malformed multipicklist value must not be able to throw
+    // past this function and turn a written budget into a failed push.
+    const pm = resolveProjectManager(values?.[PROJECT_MANAGER_FIELD]);
+    projectManager = pm.employeeId;
+
+    // Both of these leave Acumatica untouched and say so. Neither is a failure — an
+    // unmapped manager is the common case, not the exception (nine of the eleven names
+    // live on Solar records are retired and map to no Acumatica employee).
+    if (pm.ambiguous) {
+      problems.push(
+        `project manager: ${JSON.stringify(pm.names.join("; "))} maps to more than one Acumatica ` +
+          `employee, so it was left unchanged`
+      );
+    } else if (!pm.employeeId && pm.unknownNames.length > 0) {
+      problems.push(
+        `project manager: no Acumatica employee mapped for ${JSON.stringify(pm.unknownNames.join("; "))}, ` +
+          `so it was left unchanged`
+      );
+    }
+
+    attrs = await runAttrs(acumaticaProjectId, values, {
+      jobType: JOBTYPE_VALUE,
+      projectManager,
+    });
     if (attrs && attrs.ok === false && attrs.action !== "blocked") {
       problems.push(`attributes: ${attrs.message || attrs.reason || attrs.action}`);
     }
@@ -1282,6 +1329,7 @@ export async function runDownstreamStages(recordId, acumaticaProjectId, values, 
     ok: problems.length === 0,
     commissionPos: pos,
     attributes: attrs,
+    projectManager,
     // null clears the field on a clean run, which is what Budget_Push_Error__c's contract
     // has always been.
     note: problems.length === 0 ? null : `Budget lines pushed OK. ${problems.join(" | ")}`.slice(0, 32000),

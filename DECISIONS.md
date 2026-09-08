@@ -2786,3 +2786,154 @@ diagnosed mid-session as an RLS refusal, on the strength of a 42501 from a probe
 WITH CHECK failure**. RLS was correct throughout; the bug was a `.slice(0, 6)` in the
 picker. Recorded because the error code is not self-describing and the same false finding
 is easy to reach twice — see PROGRESS 2026-08-31 for the two-shape proof.
+
+---
+
+## D-066: Layer-1 writes customer address and parent account at create
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Related:** D-058 (the Acumatica secret is a pointer, not a tenant), `docs/integrations/acumatica-budget-rework-v2.md` D32.
+
+### Context
+
+`sundial-acumatica-push` created Acumatica customers with a name, class, email, phone and
+tax zone, and nothing else. Address and the Billing-tab parent account were typed in by
+hand afterwards — visible in the live data as customers the Lambda created on 2026-08-28
+that carry a full address and a `ParentRecord` the Lambda never sent.
+
+### Decision
+
+Both are written from Salesforce at create. Address goes to **`MainContact.Address`** —
+there is no `MainAddress` field on the `Customer` entity — from `Street__c` / `City__c` /
+`State__c` / `Postal_Code__c`, with `Country` always `"US"`. Parent account goes to
+**`ParentRecord`** (a top-level `StringValue` holding a CustomerID) via a four-row map off
+`Financing_Partner__c`.
+
+Three rules, each the same shape as the existing phone-mask and tax-zone rules:
+
+1. **Omit-empty.** A blank street or postal code is left out, never sent as `""`, so a push
+   cannot blank an address someone completed by hand. State and Country always send.
+2. **NEW customers only.** This runs on the create branch, so a correction made in
+   Acumatica on an existing customer is never reached.
+3. **Never guess.** An unrecognised state files under `AZ` **and warns**; an unmapped
+   financing partner gets no parent **and warns**.
+
+### Consequences
+
+- ⚠️ **The financing-partner picklist is not ASCII.** `Participate Prepaid Lease – Cash`
+  uses an EN DASH (U+2013, 4 live records) while its sibling `… - Financed` uses a hyphen
+  (1 record). Matching is trimmed, case-insensitive **and dash-folded**; without the fold,
+  four real Participate customers would get no parent and no warning. A test pins all eight
+  dash codepoints.
+- `Cash` and blank produce no parent and **no** warning — 256 live Cash records, and warning
+  on the correct answer is how a warning gets ignored.
+- The state list is the USPS set rather than an enumeration of Acumatica's, because the
+  `Default/25.200.001` endpoint exposes no `State` entity. That is exactly why the fallback
+  warns instead of failing: a state code Acumatica rejects would 422 the whole customer.
+
+---
+
+## D-067: Layer-1 writes JOBTYPE = RS on every project, and verifies it landed
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Related:** D-060 / D-061 (attribute sync + its observability), `docs/integrations/acumatica-budget-rework-v2.md` D24 (the silent-200 hazard) and D31.
+
+### Context
+
+The `JOBTYPE` project attribute was written by hand. `lib/acumatica-attributes.js`
+deliberately excludes it from both sync paths on the grounds that "RS vs RSDC is
+authoritative at Layer-1 project creation" — but Layer-1 was not writing it either, so
+nobody was.
+
+### Decision
+
+Layer-1 sends `JOBTYPE` in the project-create body, on **every** project, and proves it
+landed with a re-read through `verifyAttributeWrite`.
+
+**The value is the code `RS`, on both templates.** JOBTYPE is a Combo attribute: it stores
+a `ValueID` and displays a description. The allowed ValueIDs are `CE`, `CS`, `EV`, `RE`,
+`RS`, `SE`; there is **no `RSDC`**, and all 35 live RSDC-template projects carry `RS`. The
+attribute answers *what kind of job*; the template answers *did they elect domestic
+content*.
+
+### Consequences
+
+- This change was specified as `JOBTYPE = "Residential Solar"`. That value does not exist —
+  it is neither the ValueID (`RS`) nor the label (`Residential - Solar`) — and Acumatica
+  would have accepted it with a 200 and discarded it. Built as `RS`; a test asserts the
+  constant is not either human phrasing.
+- A failed verification **warns, it does not fail the push**: the project exists and is
+  correctly scaffolded, and a missing reporting attribute is a one-field fix. The summary
+  distinguishes `false` (discarded) from `null` (the re-read itself failed) — "we could not
+  tell" is not "verified".
+- `NON_COMMISSION_ATTRIBUTES` still excludes JOBTYPE, and now has a better reason to:
+  Layer-1 owns it.
+
+---
+
+## D-068: Layer-1 sets the Acumatica project manager, from a multipicklist
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Related:** D-066, D-067, `docs/integrations/acumatica-budget-rework-v2.md` D33.
+
+### Context
+
+`ProjectProperties.ProjectManager` was set by hand after every create. It holds an Acumatica
+**EmployeeID**, not a name.
+
+### Decision
+
+Map `Sundial_Solar__c.Project_Manager__c` → EmployeeID: `Lindsay McCormack` → `E00675`,
+`Cameron Labonte` → `E01177` (both read back Active from the live tenant). Blank omits;
+anything unmapped omits **and warns**; a push never fails over a project manager.
+
+### Consequences
+
+- ⚠️ **`Project_Manager__c` is a multipicklist** (`type: "multipicklist"`, length 4099), so
+  its value can be a semicolon-separated list, while an Acumatica project has one manager
+  slot. The resolver splits on `;` and requires **exactly one** distinct mapped employee.
+  Two different ones omit and warn — silently picking one of two people would put a name on
+  a job with no record of the choice.
+- Unmapped is the normal case, not the edge: 3,815 of 4,494 Solar records carry a PM, and
+  nine of the eleven distinct stored values are retired names with no Acumatica employee
+  (`Breana Evans` 683, `Selena Bribiescas` 239, …). The two mapped names are exactly the
+  two *active* picklist values. Expect this warning often; it is not a defect.
+
+---
+
+## D-069: The Create Project log line carries the decision AND its input
+
+**Date:** 2026-09-08
+**Status:** Accepted (built, NOT deployed)
+**Related:** D-060 (the observability gap this is the same species as), `docs/integrations/acumatica-budget-rework-v2.md` §8.
+
+### Context
+
+Harmon reported Acumatica projects scaffolded RSDC whose `Domestic_Content_Eligible__c`
+read blank. `sundial-acumatica-push` logged only failures: `templateId` and
+`domesticContentEligible` went into the HTTP response and nowhere else. Six invocations
+since the RSDC fix produced four CloudWatch lines each — INIT, START, END, REPORT — so the
+question had to be answered by joining live Acumatica to live Salesforce eleven days later,
+against records that had moved on. (It was answered: no code defect. The one apparent case
+was two customer records sharing one `Acumatica_Project_ID__c`; five more RSDC projects were
+hand-created and Salesforce has no project id for them at all.)
+
+### Decision
+
+Emit one INFO line per project create carrying the chosen template, the **raw
+`Domestic_Content_Eligible__c` string as it was read**, the resolved boolean, JOBTYPE and
+its verification result, the project manager, the customer id and stage, the parent account
+and the financing partner.
+
+### Consequences
+
+- Logging the raw value rather than only the boolean is the point. If someone edits the
+  field after the push, the log line and the record now visibly disagree, which is an
+  answer; a boolean alone would just be a second thing to doubt.
+- The same line makes D-066/D-067/D-068 answerable from logs too — a missing parent account
+  or an omitted project manager is now attributable without re-reading either system.
+- Generalises the D-060 lesson: a decision worth making is worth writing down where it can
+  be read after the records change.

@@ -1,5 +1,86 @@
 # Sundial — Progress Log
 
+## 2026-09-08 — Layer-1 Create Project: address, parent account, project manager, JOBTYPE
+
+`lambdas/sundial-acumatica-push` now fills in four things Harmon has been typing by hand
+after every create, and logs what it decided. **Built, not deployed** — branch
+`fix/sept-integration-tweaks`. Suite **809 green** (34 in this Lambda, up from 10).
+
+Every field name and value format below was read off the **live** tenant first (`client_id`
+suffix `Harmon Electric`, `harmonelectric.acumatica.com`) with GETs only, per the runbook's
+step-2 tenant proof. Nothing here was guessed from documentation.
+
+**A — customer address.** `Street__c` / `City__c` / `State__c` / `Postal_Code__c` →
+**`MainContact.Address`** (there is no `MainAddress` field on `Customer`), `Country` always
+`"US"`. State is the two-letter code — `"AZ"`, not `"AZ - ARIZONA"` — which Salesforce
+already stores, so this validates rather than translates. Blank street/city/zip are omitted,
+never sent as `""`, so a push cannot blank an address someone completed by hand.
+Unrecognised state files under `AZ` and warns. NEW customers only.
+
+**B — parent account.** `Financing_Partner__c` → **`ParentRecord`** (a top-level
+`StringValue` holding a CustomerID): Participate Prepaid Lease Cash *and* Financed →
+`C001310754`, Lightreach → `C001308357`, Credit Human → `01868`. All three read back Active.
+`Cash`/blank → no parent and no warning (256 live Cash records; warning on the correct
+answer is how warnings get ignored); anything else → no parent **and** a warning, so a new
+finance partner surfaces rather than silently billing nowhere.
+
+> ⚠️ **The picklist contains an EN DASH.** `Participate Prepaid Lease – Cash` is U+2013 (4
+> records); its sibling `… - Financed` is an ASCII hyphen (1 record). The mapping was handed
+> to us with hyphens throughout. A trimmed, case-insensitive match — which is what
+> "case-insensitive" usually means — would have matched Financed and **silently missed
+> Cash**. `normalizePicklist()` folds every dash codepoint before comparing; a test pins all
+> eight.
+
+**C — project manager + JOBTYPE.** `Sundial_Solar__c.Project_Manager__c` →
+**`ProjectProperties.ProjectManager`**, which takes an **EmployeeID**: Lindsay McCormack →
+`E00675`, Cameron Labonte → `E01177` (both Active). That field is a **multipicklist**, so
+its value can be a semicolon list while Acumatica has one manager slot — exactly one
+distinct match wins; zero or two omit and warn rather than coin-toss between two people.
+Unmapped is the common case (3,815 of 4,494 Solar records carry a PM; nine of eleven stored
+values are retired names), so it never fails a push.
+
+`JOBTYPE` is now written on **every** project, RS and RSDC alike — and its value is the code
+**`RS`**, not the label. It is a Combo attribute storing a `ValueID`; the allowed ValueIDs
+are `CE CS EV RE RS SE`, there is no `RSDC`, and all 35 live RSDC projects carry `RS`. This
+was specified to us as `"Residential Solar"`, which is neither the ValueID nor the label
+`"Residential - Solar"` — Acumatica would have accepted it with a 200 and discarded it.
+Verified by re-read (`verifyAttributeWrite`); a discarded attribute warns rather than
+failing a project that is otherwise correct, and the summary distinguishes `false`
+(discarded) from `null` (the re-read itself failed).
+
+**D — the "RSDC on non-DC jobs" report: no code defect.** Deployment confirmed current
+first (`LastModified 2026-08-28T21:28:38Z`; bundle downloaded and grepped — it carries both
+`residential_solar_dc` and the `acumatica.sync` gate, so it is at or past `a39170b`). Of the
+35 RSDC projects: **29** map to a customer reading `"Yes"` today; **5** have no Salesforce
+customer carrying their project id at all (R261075, R261087, R261092, R261094, R261095 —
+hand-created in Acumatica); and the single apparent exception, **R261088**, is two
+`Sundial_Customer__c` records both named "Jesus Barron", both carrying
+`Acumatica_Project_ID__c = R261088`. The one that actually pushed had a blank flag, so the
+code correctly chose **RS** and re-PUT an ID that already existed as RSDC — and Acumatica
+scaffolds from a template at create and ignores it on update. Full evidence in
+`docs/integrations/acumatica-budget-rework-v2.md` §8.
+
+**What the report did expose was a logging gap.** The premise going in was that
+`summary.project.templateId` and `.domesticContentEligible` were logged. They were not —
+they went into the HTTP response only, and this Lambda logged nothing but failures. Six
+invocations since the RSDC fix produced INIT/START/END/REPORT and nothing else, so an
+eleven-day-old decision had to be reconstructed by joining two live systems that had both
+moved on. There is now one INFO line per create carrying the template, the **raw field value
+as read**, the resolved boolean, JOBTYPE and its verification, the project manager, the
+customer and its stage, the parent account and the financing partner. Raw value on purpose:
+a later edit then shows up as this line disagreeing with the record.
+
+**Probe note worth keeping.** Minting an Acumatica token per probe process exhausted the
+concurrent-session licence, after which every entity GET returned an **IIS 406 HTML page**
+(the request had fallen through to the static file handler, which does not serve
+`application/json`) while `/entity` and `swagger.json` kept answering normally. It reads
+exactly like a malformed-request bug and is not one. One token, sequential reads, and
+`POST /entity/auth/logout` at the end.
+
+Decisions: **D-066** (address + parent account), **D-067** (JOBTYPE), **D-068** (project
+manager), **D-069** (the create log line); rework-doc **D31/D32/D33**, and §8's "JOBTYPE
+should carry the same code as the template" corrected.
+
 ## 2026-09-02 — NS Adder Price fields visible to sales roles
 
 `NS_Adder_1..5_Price__c` now reach Sales Rep and Sales Dealer on both

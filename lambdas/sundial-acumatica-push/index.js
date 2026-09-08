@@ -41,8 +41,13 @@
 import { getSalesforceToken, sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
-import { putAcumaticaEntity, normalizeAcumaticaPhone } from "../../lib/acumatica.js";
+import {
+  putAcumaticaEntity,
+  getAcumaticaEntity,
+  normalizeAcumaticaPhone,
+} from "../../lib/acumatica.js";
 import { lookupTaxZone } from "../../lib/acumatica-tax-zones.js";
+import { verifyAttributeWrite } from "../../lib/acumatica-attributes.js";
 
 const SF_API_VERSION = "v60.0";
 const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
@@ -50,6 +55,232 @@ const SOLAR_SF_OBJECT = "Sundial_Solar__c";
 
 // Hardcoded for Layer 1 (all pushes are residential solar customers).
 const CUSTOMER_CLASS = "RESIDENT";
+
+// ===========================================================================
+// PICKLIST MATCHING — one normaliser, because one of these values is NOT ASCII
+// ===========================================================================
+/**
+ * Normalise a Salesforce picklist value for comparison: trim, collapse internal
+ * whitespace, fold every dash-like character to a plain hyphen, lowercase.
+ *
+ * ⚠️ THE DASH FOLD IS LOAD-BEARING, NOT TIDINESS. The live
+ * `Sundial_Customer__c.Financing_Partner__c` picklist contains
+ *
+ *     "Participate Prepaid Lease U+2013 Cash"      <- EN DASH
+ *     "Participate Prepaid Lease - Financed"       <- ASCII hyphen
+ *
+ * verified against the org 2026-09-08 (4 records and 1 record respectively). The two
+ * sibling values do not even agree with each other. A trimmed, case-insensitive match
+ * written against the hyphen spelling — which is how the mapping was handed to us, and
+ * how it reads in every document — matches `- Financed` and silently misses `– Cash`,
+ * so four Participate customers would be created with no parent account and no warning.
+ * Folding the dash is what makes "case-insensitive and trimmed" actually true here.
+ */
+export function normalizePicklist(v) {
+  return String(v ?? "")
+    .replace(/[‐-―−]/g, "-") // hyphen/en/em/figure/minus -> "-"
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+// ===========================================================================
+// B. PARENT ACCOUNT (Billing tab) BY FINANCING PARTNER
+// ===========================================================================
+/**
+ * `Sundial_Customer__c.Financing_Partner__c` -> Acumatica `ParentRecord` (CustomerID).
+ *
+ *   Participate Prepaid Lease - Cash        -> C001310754   Participate Holdings LLC
+ *   Participate Prepaid Lease - Financed    -> C001310754   Participate Holdings LLC
+ *   Lightreach                              -> C001308357   LIghtReach/Palmetto
+ *   Credit Human                            -> 01868        Credit Human
+ *   Cash, blank, anything else              -> no parent account at all
+ *
+ * All three targets were read back from the live tenant 2026-09-08 and are Active
+ * RESIDENT accounts; `LIghtReach/Palmetto` really is spelled with that capital I in
+ * Acumatica, which is why the name is recorded here rather than trusted to memory.
+ *
+ * Keys are stored already-normalised (see normalizePicklist) so the en-dash value and
+ * the hyphen value both land on the same entry.
+ *
+ * A financing partner that is neither blank, nor "Cash", nor listed gets NO parent and
+ * a summary warning. That is the point of the warning: Harmon adds finance partners,
+ * and a new one must surface as "nobody taught Sundial where this one belongs" rather
+ * than as a customer that quietly billed to the wrong place — or to nowhere.
+ */
+export const FINANCING_PARTNER_PARENT_ACCOUNTS = Object.freeze({
+  [normalizePicklist("Participate Prepaid Lease - Cash")]: "C001310754",
+  [normalizePicklist("Participate Prepaid Lease - Financed")]: "C001310754",
+  [normalizePicklist("Lightreach")]: "C001308357",
+  [normalizePicklist("Credit Human")]: "01868",
+});
+
+/**
+ * Financing partners that deliberately have no parent account, so they do not warn.
+ * "Cash" is a real, common, correct answer (256 records) — warning on it every time
+ * would train everyone to ignore the warning that matters.
+ */
+export const FINANCING_PARTNERS_WITHOUT_PARENT = Object.freeze(
+  new Set([normalizePicklist("Cash")])
+);
+
+/**
+ * @returns {{parentAccount: string|null, unlisted: boolean}}
+ *   parentAccount - the Acumatica CustomerID to set as ParentRecord, or null for none
+ *   unlisted      - a non-blank partner that is neither mapped nor known-parentless
+ */
+export function resolveParentAccount(financingPartner) {
+  const key = normalizePicklist(financingPartner);
+  if (key === "") return { parentAccount: null, unlisted: false };
+  const parentAccount = FINANCING_PARTNER_PARENT_ACCOUNTS[key] ?? null;
+  if (parentAccount) return { parentAccount, unlisted: false };
+  return { parentAccount: null, unlisted: !FINANCING_PARTNERS_WITHOUT_PARENT.has(key) };
+}
+
+// ===========================================================================
+// A. CUSTOMER ADDRESS
+// ===========================================================================
+/**
+ * Acumatica stores US states as the two-letter USPS code — `"AZ"`, not
+ * `"AZ - ARIZONA"`. Verified 2026-09-08 by reading 39 customers created since
+ * 2026-08-20: 35 `"AZ"`, 1 `"MA"`, and `Country` `"US"` on all 39. The Salesforce side
+ * already matches — `Sundial_Customer__c.State__c` holds `"AZ"` (21,797), `"OK"`
+ * (1,687), `"FL"` (102) and so on, two-letter throughout — so this is a validation, not
+ * a translation.
+ *
+ * The list is the USPS set rather than an enumeration of Acumatica's own states,
+ * because the `Default/25.200.001` endpoint exposes no `State` entity to enumerate.
+ * That is the reason the fallback exists and warns: a code Acumatica happens not to
+ * accept would 422 the entire customer create, and losing a customer over a state code
+ * is worse than filing an out-of-state job under AZ and saying so out loud.
+ */
+export const US_STATE_CODES = Object.freeze(
+  new Set([
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO",
+    "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA",
+    "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+    "AS", "GU", "MP", "PR", "VI",
+  ])
+);
+
+/** Harmon is a Phoenix company; an unusable state code files the job at home. */
+export const DEFAULT_STATE = "AZ";
+
+/** Every Sundial customer is domestic. Sent unconditionally, never derived. */
+export const CUSTOMER_COUNTRY = "US";
+
+/**
+ * @returns {{state: string, fellBack: boolean}} — `state` is always sent.
+ */
+export function resolveCustomerState(raw) {
+  const code = String(raw ?? "").trim().toUpperCase();
+  if (US_STATE_CODES.has(code)) return { state: code, fellBack: false };
+  return { state: DEFAULT_STATE, fellBack: true };
+}
+
+/**
+ * Build the Acumatica `MainContact.Address` block from the Salesforce address fields.
+ *
+ * OMIT-EMPTY, matching the body style already used for Email/Phone1/TaxZone: a blank
+ * street or postal code is left out entirely rather than sent as `""`, so a push can
+ * never blank an address someone completed in Acumatica by hand. State and Country are
+ * the exception — both are always sent, because both always have a defensible value.
+ *
+ * The read path needs `$expand=MainContact,MainContact/Address` to see this back; the
+ * write path just nests it, which is how it is written here.
+ */
+export function buildCustomerAddress(cust) {
+  const street = orNull(cust?.Street__c);
+  const city = orNull(cust?.City__c);
+  const postalCode = orNull(cust?.Postal_Code__c);
+  const { state, fellBack } = resolveCustomerState(cust?.State__c);
+
+  const address = { State: av(state), Country: av(CUSTOMER_COUNTRY) };
+  if (street) address.AddressLine1 = av(street);
+  if (city) address.City = av(city);
+  if (postalCode) address.PostalCode = av(postalCode);
+  return { address, stateFellBack: fellBack, rawState: cleanStr(cust?.State__c) };
+}
+
+// ===========================================================================
+// C. PROJECT MANAGER + JOBTYPE
+// ===========================================================================
+/**
+ * `Sundial_Solar__c.Project_Manager__c` -> Acumatica `ProjectProperties.ProjectManager`,
+ * which holds an EmployeeID string. Both ids read back from the live tenant 2026-09-08:
+ *
+ *   Lindsay McCormack -> E00675   (Active)
+ *   Cameron Labonte   -> E01177   (Active; Acumatica spells it "Cameron LaBonte")
+ *
+ * These two are exactly the ACTIVE values of the Salesforce multipicklist. The field
+ * also carries nine legacy values on existing records (Breana Evans 683, Selena
+ * Bribiescas 239, Jessica Patrick 91, …) that are no longer selectable and have no
+ * Acumatica employee mapped, which is why an unmapped name omits and warns instead of
+ * failing: 3,815 of 4,494 solar records carry a PM and most of them are legacy.
+ */
+export const PROJECT_MANAGER_EMPLOYEE_IDS = Object.freeze({
+  [normalizePicklist("Lindsay McCormack")]: "E00675",
+  [normalizePicklist("Cameron Labonte")]: "E01177",
+});
+
+/**
+ * Resolve the Acumatica employee for a project manager.
+ *
+ * ⚠️ `Project_Manager__c` IS A MULTIPICKLIST (verified by describe, 2026-09-08:
+ * `type: "multipicklist"`, length 4099), so its value can be a semicolon-separated
+ * list. Acumatica's project has ONE manager slot. Treating the raw string as a single
+ * name would send `"Lindsay McCormack;Cameron Labonte"` and match nothing — which at
+ * least fails visibly — but picking silently from a list would put one of two people's
+ * name on a job with no record of the coin toss.
+ *
+ * So: exactly one distinct mapped employee wins. Zero mapped names, or two different
+ * ones, omit the field and warn.
+ *
+ * @returns {{employeeId: string|null, names: string[], unknownNames: string[], ambiguous: boolean}}
+ */
+export function resolveProjectManager(raw) {
+  const names = String(raw ?? "")
+    .split(";")
+    .map((n) => n.trim())
+    .filter((n) => n !== "");
+  if (names.length === 0) {
+    return { employeeId: null, names: [], unknownNames: [], ambiguous: false };
+  }
+
+  const unknownNames = [];
+  const matched = new Set();
+  for (const name of names) {
+    const id = PROJECT_MANAGER_EMPLOYEE_IDS[normalizePicklist(name)];
+    if (id) matched.add(id);
+    else unknownNames.push(name);
+  }
+  if (matched.size === 1) {
+    return { employeeId: [...matched][0], names, unknownNames, ambiguous: false };
+  }
+  return { employeeId: null, names, unknownNames, ambiguous: matched.size > 1 };
+}
+
+/**
+ * JOBTYPE, set on EVERY project this Lambda creates — RS scaffold and RSDC alike.
+ *
+ * ⚠️ THE VALUE IS THE CODE `RS`, NOT THE LABEL. JOBTYPE is a Combo attribute, and a
+ * combo attribute stores its ValueID while the UI shows the description. Read live
+ * 2026-09-08: the definition's allowed ValueIDs are `CE`, `CS`, `EV`, `RE`, `RS`, `SE`,
+ * and 40 sampled projects all carry `Value: "RS"` beside `ValueDescription:
+ * "Residential - Solar"`. Writing the human phrase — "Residential Solar", which is what
+ * this change was specified as, or even the exact label "Residential - Solar" — would be
+ * accepted with a 200 and thrown away, because that is what Acumatica does with an
+ * attribute value it does not recognise (the standing hazard documented on
+ * verifyAttributeWrite, proved 2026-08-24 with `NOTAREALATTR`).
+ *
+ * RSDC does NOT get a different JOBTYPE. The attribute answers "what kind of job is
+ * this" and both templates answer "residential solar"; the live RSDC projects confirm
+ * it — every one of them carries `RS`. The template encodes the domestic-content
+ * election, JOBTYPE does not.
+ */
+export const PROJECT_JOBTYPE_ATTRIBUTE_ID = "JOBTYPE";
+export const PROJECT_JOBTYPE_VALUE = "RS";
 
 // Project template lookup: Sundial project type -> Acumatica ProjectTemplateID.
 // RS and RSDC differ by exactly one budget line — DCREBATE | BILLING | <N/A> | Income —
@@ -91,7 +322,14 @@ const CUSTOMER_FIELDS = [
   "Name",
   "Primary_Email__c",
   "Primary_Phone__c",
+  // Address, written to MainContact.Address on NEW customers only (item A).
+  // City__c does double duty: it also drives the tax-zone lookup.
+  "Street__c",
   "City__c",
+  "State__c",
+  "Postal_Code__c",
+  // Drives ParentRecord on the Billing tab (see FINANCING_PARTNER_PARENT_ACCOUNTS).
+  "Financing_Partner__c",
   "Acumatica_Project_ID__c",
   "Acumatica_Customer_ID__c",
   "Acumatica_Customer_GUID__c",
@@ -238,6 +476,81 @@ async function sfPatch(sfObject, id, fieldsObj) {
   return resp;
 }
 
+/**
+ * Re-read a just-created project and prove the JOBTYPE attribute and the project
+ * manager actually landed.
+ *
+ * Never throws and never fails the push: it appends warnings and sets
+ * `summary.project.attributesVerified`. `null` there means "we could not tell"
+ * (the re-read itself failed), which is deliberately distinct from `false`.
+ *
+ * @param {string} projectId
+ * @param {{attributes: Array<{AttributeID: {value: string}, Value: {value: string}}>,
+ *          expectedManager: string|null, summary: object, recordId: string}} opts
+ */
+export async function verifyProjectExtras(projectId, opts) {
+  const { attributes = [], expectedManager = null, summary, recordId } = opts;
+  const sent = attributes.map((a) => ({
+    AttributeID: a?.AttributeID?.value,
+    Value: a?.Value?.value,
+  }));
+
+  let after;
+  try {
+    after = await getAcumaticaEntity("Project", {
+      $filter: `ProjectID eq '${String(projectId).replace(/'/g, "''")}'`,
+      $expand: "Attributes,ProjectProperties",
+    });
+  } catch (err) {
+    after = { ok: false, status: null, text: err?.message || String(err) };
+  }
+  if (!after.ok) {
+    console.warn(
+      `acumatica-push: project ${projectId} was created but the verifying re-read failed ` +
+        `(${after.status}) for ${recordId} — cannot say whether JOBTYPE landed.`
+    );
+    summary.project.attributesVerified = null;
+    summary.warnings.push({ code: "project_verify_read_failed", status: after.status ?? null });
+    return;
+  }
+
+  const project = (Array.isArray(after.data) ? after.data : [after.data])[0];
+  const check = verifyAttributeWrite(sent, project?.Attributes);
+  summary.project.attributesVerified = check.ok;
+  if (!check.ok) {
+    const detail =
+      (check.missing.length ? `discarded: ${check.missing.join(", ")}` : "") +
+      (check.mismatched.length
+        ? `${check.missing.length ? " | " : ""}holding something else: ${check.mismatched
+            .map((m) => `${m.attributeId}=${JSON.stringify(m.got)} (sent ${JSON.stringify(m.sent)})`)
+            .join("; ")}`
+        : "");
+    console.error(
+      `acumatica-push: JOBTYPE UNVERIFIED on project ${projectId} for ${recordId} — ${detail}`
+    );
+    summary.warnings.push({
+      code: "project_attributes_unverified",
+      missing: check.missing,
+      mismatched: check.mismatched,
+    });
+  }
+
+  if (expectedManager) {
+    const got = cleanStr(project?.ProjectProperties?.ProjectManager?.value);
+    if (got !== expectedManager) {
+      console.error(
+        `acumatica-push: ProjectManager UNVERIFIED on project ${projectId} for ${recordId} — ` +
+          `sent ${expectedManager}, read back ${JSON.stringify(got || null)}.`
+      );
+      summary.warnings.push({
+        code: "project_manager_unverified",
+        sent: expectedManager,
+        got: got || null,
+      });
+    }
+  }
+}
+
 // --- handler ---------------------------------------------------------------
 export const handler = async (event) => {
   const method = event?.requestContext?.http?.method || event?.httpMethod || "";
@@ -255,8 +568,23 @@ export const handler = async (event) => {
   // partial failure clearly reports what WAS and WASN'T completed.
   const summary = {
     recordId: null,
-    customer: { stage: null, acumaticaCustomerId: null, acumaticaCustomerGuid: null },
-    project: { stage: null, projectId: null, templateId: null, domesticContentEligible: null },
+    customer: {
+      stage: null,
+      acumaticaCustomerId: null,
+      acumaticaCustomerGuid: null,
+      parentAccount: null,
+      financingPartner: null,
+      state: null,
+    },
+    project: {
+      stage: null,
+      projectId: null,
+      templateId: null,
+      domesticContentEligible: null,
+      projectManager: null,
+      jobType: null,
+      attributesVerified: null,
+    },
     finalize: { synced: false },
     warnings: [],
   };
@@ -378,6 +706,33 @@ export const handler = async (event) => {
         summary.warnings.push({ code: "tax_zone_unmatched", city });
       }
 
+      // ADDRESS (item A). NEW customers only — this whole branch is the create path,
+      // so an address someone corrected in Acumatica on an existing customer is never
+      // reached, let alone overwritten.
+      const { address, stateFellBack, rawState } = buildCustomerAddress(cust);
+      if (stateFellBack) {
+        console.warn(
+          `acumatica-push: state ${JSON.stringify(rawState)} is not a US state code — ` +
+            `filed as ${DEFAULT_STATE} for ${recordId}.`
+        );
+        summary.warnings.push({
+          code: "state_fallback",
+          value: rawState || null,
+          usedState: DEFAULT_STATE,
+        });
+      }
+
+      // PARENT ACCOUNT (item B). Billing tab; the financing partner decides it.
+      const financingPartner = cleanStr(cust.Financing_Partner__c);
+      const { parentAccount, unlisted } = resolveParentAccount(financingPartner);
+      if (unlisted) {
+        console.warn(
+          `acumatica-push: financing partner ${JSON.stringify(financingPartner)} is not in ` +
+            `FINANCING_PARTNER_PARENT_ACCOUNTS — no parent account set for ${recordId}.`
+        );
+        summary.warnings.push({ code: "financing_partner_unmapped", value: financingPartner });
+      }
+
       // Build the Acumatica customer body (omit empty optional fields).
       const customerBody = {
         CustomerName: av(customerName),
@@ -387,8 +742,19 @@ export const handler = async (event) => {
       const mainContact = {};
       if (phone) mainContact.Phone1 = av(phone);
       if (email) mainContact.Email = av(email);
-      if (Object.keys(mainContact).length > 0) customerBody.MainContact = mainContact;
+      // The address hangs off MainContact, not off Customer — there is no MainAddress
+      // field on this entity (schema read 2026-09-08). Address is always present, so
+      // MainContact is now always sent.
+      mainContact.Address = address;
+      customerBody.MainContact = mainContact;
       if (zone) customerBody.TaxZone = av(zone);
+      // Omitted entirely when there is no parent, rather than sent as "": a blank
+      // ParentRecord is a value, and Acumatica would take it as "detach the parent".
+      if (parentAccount) customerBody.ParentRecord = av(parentAccount);
+
+      summary.customer.parentAccount = parentAccount;
+      summary.customer.financingPartner = financingPartner || null;
+      summary.customer.state = address.State.value;
 
       // CREATE in Acumatica. Nothing is written to Salesforce until this succeeds.
       const custRes = await putAcumaticaEntity("Customer", customerBody);
@@ -453,7 +819,7 @@ export const handler = async (event) => {
 
     // Read the linked solar record, TENANT-SCOPED.
     const solarSoql =
-      `SELECT Id, Project_Created_in_Acumatica__c, Client__c FROM ${SOLAR_SF_OBJECT} ` +
+      `SELECT Id, Project_Created_in_Acumatica__c, Project_Manager__c, Client__c FROM ${SOLAR_SF_OBJECT} ` +
       `WHERE Id = '${soqlEscapeString(linkedSolarId)}' ` +
       `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`;
     const solarRecords = await sfQuery(solarSoql);
@@ -495,12 +861,52 @@ export const handler = async (event) => {
       }
 
       const description = orNull(cust.Description__c);
+
+      // PROJECT MANAGER (item C). Omit-and-warn on anything not confidently resolved —
+      // the same rule as the phone and the tax zone, and for the same reason: a project
+      // is not worth failing over an unmapped name, and a guessed name is worse than
+      // a blank one.
+      const pm = resolveProjectManager(solar.Project_Manager__c);
+      if (pm.ambiguous) {
+        console.warn(
+          `acumatica-push: Project_Manager__c ${JSON.stringify(cleanStr(solar.Project_Manager__c))} ` +
+            `resolves to more than one Acumatica employee — ProjectManager omitted for ${recordId}.`
+        );
+        summary.warnings.push({
+          code: "project_manager_ambiguous",
+          value: cleanStr(solar.Project_Manager__c),
+          names: pm.names,
+        });
+      } else if (!pm.employeeId && pm.unknownNames.length > 0) {
+        console.warn(
+          `acumatica-push: no Acumatica employee mapped for project manager ` +
+            `${JSON.stringify(pm.unknownNames.join("; "))} — ProjectManager omitted for ${recordId}.`
+        );
+        summary.warnings.push({
+          code: "project_manager_unmapped",
+          names: pm.unknownNames,
+        });
+      }
+      summary.project.projectManager = pm.employeeId;
+
       const projectBody = {
         ProjectID: av(projectId),
         ProjectTemplateID: av(templateId), // template auto-scaffolds tasks + budget
         Customer: av(acuCustomerId),
+        // JOBTYPE on EVERY project, RS and RSDC alike. The value is the combo's
+        // ValueID (`RS`), never the label — see PROJECT_JOBTYPE_VALUE.
+        Attributes: [
+          {
+            AttributeID: av(PROJECT_JOBTYPE_ATTRIBUTE_ID),
+            Value: av(PROJECT_JOBTYPE_VALUE),
+          },
+        ],
       };
       if (description) projectBody.Description = av(description);
+      if (pm.employeeId) {
+        projectBody.ProjectProperties = { ProjectManager: av(pm.employeeId) };
+      }
+      summary.project.jobType = PROJECT_JOBTYPE_VALUE;
 
       // CREATE in Acumatica. Keyed by ProjectID, so a retry re-PUTs the SAME
       // project (update) rather than duplicating. Comes back "In Planning"/Hold —
@@ -517,6 +923,24 @@ export const handler = async (event) => {
       }
       const returnedProjectId = cleanStr(projRes.data?.ProjectID?.value) || projectId;
       summary.project.projectId = returnedProjectId;
+
+      // VERIFY THE ATTRIBUTE + MANAGER LANDED, by re-reading the project.
+      //
+      // ⚠️ A 200 is not evidence that an attribute was written. An AttributeID (or a
+      // combo value) Acumatica does not recognise is accepted and silently discarded —
+      // proved 2026-08-24 with `NOTAREALATTR`, and the whole reason verifyAttributeWrite
+      // exists. JOBTYPE is exactly the shape of write that fails this way, because its
+      // stored value is a code (`RS`) and every human source for it says the label.
+      //
+      // A failed verification does NOT fail the push. The project exists and is correctly
+      // scaffolded; a missing JOBTYPE is a reporting gap Harmon can fix in one field. It
+      // is reported loudly instead, in the summary and in CloudWatch.
+      await verifyProjectExtras(returnedProjectId, {
+        attributes: projectBody.Attributes,
+        expectedManager: pm.employeeId,
+        summary,
+        recordId,
+      });
 
       // STAMP the date. Failure here is retry-safe (re-PUT updates the same
       // project by ProjectID), but the stage is not "done" until stamped.
@@ -538,6 +962,33 @@ export const handler = async (event) => {
         );
       }
       summary.project.stage = "created";
+
+      // ⚠️ THE ONE LINE THAT MAKES A "WRONG TEMPLATE" REPORT ANSWERABLE LATER.
+      //
+      // Until now this Lambda logged only failures. `templateId` and
+      // `domesticContentEligible` went into the HTTP response and nowhere else, so when
+      // Harmon reported RSDC projects on non-domestic-content jobs (2026-09) there was
+      // no record of what any creation had decided or what it decided it from — the
+      // question had to be reconstructed by joining live Acumatica to live Salesforce,
+      // both of which had moved on since. The answer turned out to be "the code was
+      // right", which is exactly the answer that is expensive to prove without a log.
+      //
+      // Log the decision AND its input, at INFO, on every create. `dc=` is the field
+      // value as it was READ, not the boolean, so an edit made afterwards is visible as
+      // a disagreement between this line and the record rather than as a mystery.
+      console.log(
+        `acumatica-push CREATED project=${returnedProjectId} template=${templateId} ` +
+          `dc=${JSON.stringify(cleanStr(cust.Domestic_Content_Eligible__c) || null)} ` +
+          `dcEligible=${domesticContentEligible} jobType=${PROJECT_JOBTYPE_VALUE} ` +
+          `attributesVerified=${summary.project.attributesVerified} ` +
+          `projectManager=${JSON.stringify(pm.employeeId)} ` +
+          `customer=${acuCustomerId} customerStage=${summary.customer.stage} ` +
+          // Both null when the customer already existed — this run did not set them.
+          // customerStage above is what says which of those two things happened.
+          `parentAccount=${JSON.stringify(summary.customer.parentAccount)} ` +
+          `financingPartner=${JSON.stringify(summary.customer.financingPartner)} ` +
+          `sfRecord=${recordId}`
+      );
     }
 
     // =====================================================================

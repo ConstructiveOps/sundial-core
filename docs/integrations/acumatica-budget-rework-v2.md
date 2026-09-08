@@ -43,6 +43,10 @@ Drafted 2026-08-15 from the BRADS workbook. **REVISED 2026-08-20: `Harmon Budget
 | D29 | **A SALESFORCE Percent FIELD HAS THREE DOMAINS AND THEY DISAGREE — see D-063.** Measured on a live record by `scripts/probe-percent-field-domain.mjs`: metadata `<defaultValue>` is **decimal** (25% = `0.25`), REST/SOQL is **display** (25% = `25`), a **formula** reference is **decimal** again (25% = `0.25`). So `<defaultValue>25</defaultValue>` on the five `NS_Adder_N_Markup_Percent__c` fields meant **2500%**, and every record created since stored `2500` — invisible because Setup renders the expression back as "25". Two errors then cancelled: the `Total_Adder_Price__c` formula's `Markup/100` saw `25` (2500 ÷ 100) and produced the correct `1.25` by accident. **Fixing either side alone is worse than fixing neither** (data-only → `1.0025`; formula-only → `26`), so: the formula's `/100` is REMOVED, `budgetCalc` KEEPS its `/100` (it reads the display domain), the defaults become `0.25`, and the data fix (`scripts/fix-ns-markup-percent-domain.mjs`, 7 records, 2026-08-24) ran FIRST. Customer's markup fields widened `Percent(6,3)` → `Percent(18,4)` to match Solar. Guarded by `NS_MARKUP_IMPLAUSIBLE` (>100%). Exposure was nil — all 7 affected records had zero NS material. | Tim, 2026-08-24 |
 | D30 | **THE PERCENT-DOMAIN CLASS IS AUDITED, NOT CHASED — D-063a.** Two more instances of D29 on `Sundial_Solar__c`: `Labor_Burden_Rate__c` and `Commission_Burden_Rate__c` shipped with `<defaultValue>75</defaultValue>` = **7500%**, on **4,473 of 4,474** records. Unlike the markup case **nothing cancelled it** — `budgetCalc` divides by 100 once and correctly, so 7500 becomes a **75.0 multiplier**, every burden figure 100x too large. It never bit only because exactly ONE Solar record has ever completed a budget calc and it holds the correct 75. Fixed: defaults → `0.75` via `v2-field-alignments`, 4,473 records → 75, and `BURDEN_RATE_IMPLAUSIBLE` throws above 100% before either rate becomes a multiplier. **`scripts/audit-percent-field-defaults.mjs` now sweeps every Percent field on every Sundial object** (metadata AND data, non-zero exit on a suspect) — it found **six more instances on `Sundial_Roofing__c`** that nobody was looking for (`Burden_Rate__c` 20→2000%, `Labor_Markup_Percent__c` 35→3500%, `Material_/Other_Markup_Percent__c` 30→3000%, `Commission_Markup_Percent__c` 20→2000%, `Commission_Rate_Percent__c` 2.5→250%), fixed by Tim in Setup. `Customer.Proposed_Offset__c` is an exempted false positive — over-production above 100% is real. Roofing has no calc engine yet; **its burden/markup guards ship with that work**. | Tim, 2026-08-24 |
 
+| D31 | **JOBTYPE IS WRITTEN BY LAYER-1 AT PROJECT CREATE, AND ITS VALUE IS THE CODE `RS` — not the label, and not the template.** §8 previously said "JOBTYPE should carry the same code" as the template, which is wrong twice over. (a) **JOBTYPE is a Combo attribute**: it stores a `ValueID` and shows a description. Read live 2026-09-08, the definition's allowed ValueIDs are `CE`, `CS`, `EV`, `RE`, `RS`, `SE`, and sampled projects carry `Value: "RS"` beside `ValueDescription: "Residential - Solar"`. The human phrasings — "Residential Solar", or even the exact label "Residential - Solar" — would be **accepted with a 200 and discarded**, the D24 standing hazard. (b) **RSDC is not a JOBTYPE.** There is no `RSDC` value; every one of the 35 live RSDC-template projects carries JOBTYPE `RS`. The attribute answers *what kind of job*, the template answers *did they elect domestic content*, and they are not the same question. So Layer-1 sends `JOBTYPE = RS` on **every** project it creates, both templates, and **verifies it by re-read** (`verifyAttributeWrite`) because a 200 proves nothing. A discarded JOBTYPE warns, it does not fail the push — the project is real and correctly scaffolded, and a missing reporting attribute is a one-field fix. This does not disturb D26: the attribute-only path still never sends JOBTYPE, and now has a better reason not to — Layer-1 owns it. | Live probe + Tim, 2026-09-08 |
+| D32 | **PARENT ACCOUNT (Billing tab) IS SET AT CUSTOMER CREATE FROM `Financing_Partner__c` — and the picklist contains an EN DASH.** Acumatica field is **`ParentRecord`**, a top-level `StringValue` on `Customer` holding a CustomerID (verified live: `C000099` → `"C001305538"`). Map: `Participate Prepaid Lease - Cash` and `… - Financed` → **`C001310754`** (Participate Holdings LLC); `Lightreach` → **`C001308357`** (LIghtReach/Palmetto — that capital I is Acumatica's spelling); `Credit Human` → **`01868`**. All three read back Active 2026-09-08. `Cash`, blank → **no parent, no warning** (256 live Cash records; warning on the correct answer trains people to ignore warnings). Any other non-blank value → no parent **plus a summary warning**, so a new finance partner surfaces instead of silently billing nowhere. ⚠️ **The live picklist spells the two Participate values differently from each other**: `Participate Prepaid Lease U+2013 Cash` (EN DASH, 4 records) and `Participate Prepaid Lease - Financed` (ASCII hyphen, 1 record). A trimmed case-insensitive match written against the hyphen — which is how the mapping was handed to us and how it reads in every document — matches Financed and **silently misses Cash**. `normalizePicklist()` therefore folds every dash-like codepoint before comparing; a test pins all eight. **NEW customers only** — the create branch is the only place this runs, so a parent someone set by hand is never touched. Omitted entirely rather than sent blank: an empty `ParentRecord` is a value, and Acumatica would read it as *detach*. | Live probe + Tim, 2026-09-08 |
+| D33 | **PROJECT MANAGER IS SET AT PROJECT CREATE FROM `Sundial_Solar__c.Project_Manager__c`, AND THAT FIELD IS A MULTIPICKLIST.** Acumatica field is **`ProjectProperties.ProjectManager`**, a `StringValue` holding an **EmployeeID** — not a name (live: `R261111` → `"E01177"`; 149 of 150 sampled active projects carry `E00675`). Map: `Lindsay McCormack` → **`E00675`**, `Cameron Labonte` → **`E01177`**; both Active, both confirmed by `Employee` lookup 2026-09-08 (Acumatica spells the second "Cameron LaBonte"). These two are exactly the *active* values of the Salesforce picklist. ⚠️ **`Project_Manager__c` is `type: "multipicklist"`, length 4099**, so its value can be a semicolon-separated list while Acumatica has one manager slot: the resolver splits on `;`, and **exactly one distinct mapped employee wins**. Zero matches, or two different ones, **omit the field and warn** — picking one of two people silently would put a name on a job with no record of the coin toss. Unmapped is the common case, not the exception: 3,815 of 4,494 Solar records carry a PM and nine of the eleven distinct values are retired names (`Breana Evans` 683, `Selena Bribiescas` 239, …) with no Acumatica employee. So an unknown name **never fails a push** — same rule as the phone mask and the tax zone. Verified on re-read alongside JOBTYPE. | Live probe + Tim, 2026-09-08 |
+
 ## 1. What survives from v1 (do not rebuild)
 
 - lib/acumatica.js (auth, GET/PUT helpers), secret `sundial/acumatica/connected-app` (**a POINTER — see below**), API Gateway routes, CORS.
@@ -727,7 +731,13 @@ the sync needs a read-modify-write cycle before it can be wired at all. **Step 5
 [`acumatica-attribute-sync-runbook.md`](acumatica-attribute-sync-runbook.md) is that
 test**, and it is the reason that runbook exists.
 
-## 8. Template selection (RS / RSDC) — **IMPLEMENTED 2026-08-26**; JOBTYPE attribute should carry the same code.
+## 8. Template selection (RS / RSDC) — **IMPLEMENTED 2026-08-26**
+
+> ⚠️ **CORRECTED 2026-09-08 (D31).** This heading used to end "; JOBTYPE attribute should
+> carry the same code." It should not, and cannot. JOBTYPE's allowed ValueIDs are `CE`,
+> `CS`, `EV`, `RE`, `RS`, `SE` — there is no `RSDC`, and all 35 live RSDC-template
+> projects carry JOBTYPE `RS`. The template records the domestic-content election; the
+> attribute records the kind of job. Layer-1 now writes `JOBTYPE = RS` on both.
 
 ### The rule (single source of truth)
 
@@ -792,11 +802,68 @@ input and is no longer read by any Lambda** — it is gone from `INPUT_FIELDS` i
 do not re-add it expecting the calc to read it, because it does not. A test asserts that setting
 it to `'YES'` has no effect.
 
-> **Not changed by this fix:** the `JOBTYPE` attribute (§7) is still sourced separately and
-> should carry the same `RS`/`RSDC` code the project was scaffolded from. The Salesforce field
-> metadata for `DC_Rebate_Amount__c` (`salesforce/v2-budget-output-fields/generate.mjs`) still
-> describes the rebate as keyed off `Domestic_Content__c`; that description is now stale and
-> needs a metadata deploy to correct, so it is deliberately left alone here.
+> ~~**Not changed by this fix:** the `JOBTYPE` attribute (§7) is still sourced separately and
+> should carry the same `RS`/`RSDC` code the project was scaffolded from.~~ **SUPERSEDED
+> 2026-09-08 by D31** — JOBTYPE is now written by Layer-1, always as `RS`, on both templates.
+> There is no `RSDC` JOBTYPE value to carry. The Salesforce field metadata for
+> `DC_Rebate_Amount__c` (`salesforce/v2-budget-output-fields/generate.mjs`) still describes the
+> rebate as keyed off `Domestic_Content__c`; that description is now stale and needs a metadata
+> deploy to correct, so it is deliberately left alone here.
+
+### The 2026-09 "RSDC on non-DC jobs" report — investigated, no code defect
+
+Harmon reported projects scaffolded **RSDC** whose `Domestic_Content_Eligible__c` now reads
+blank. Investigated 2026-09-08 before changing anything, because the deployed logic is strict
+("Yes" only) and the pre-fix bug produced RS *never* RSDC, so the report and the code could not
+both be right.
+
+**Deployment confirmed current first.** `aws lambda get-function sundial-acumatica-push` →
+`LastModified 2026-08-28T21:28:38Z`; the bundle was downloaded and grepped, and contains both
+`residential_solar_dc` and the D-064 `acumatica.sync` gate — i.e. it is at or past `a39170b`,
+the newest commit touching this Lambda. The RSDC fix has been live since roughly
+2026-08-27 18:00Z (the first six invocations after `3c26016` created R261101–R261103, all
+RSDC, all `"Yes"`).
+
+**The evidence.** 35 projects in Acumatica carry `ProjectTemplateID = RSDC`. Joined to
+Salesforce by `Acumatica_Project_ID__c`:
+
+| | |
+|---|---|
+| RSDC projects whose customer reads `"Yes"` today | **29** |
+| RSDC projects with **no** Salesforce customer carrying that project id | **5** — R261075, R261087, R261092, R261094, R261095. Hand-created in Acumatica; four of the five people exist in Salesforce with `Acumatica_Project_ID__c` **null**, so Layer-1 never touched them. |
+| RSDC projects whose pushing record reads blank | **1** — R261088 |
+
+**R261088 is a duplicate-record artifact, not a template bug.** Two `Sundial_Customer__c`
+records are both named "Jesus Barron" and **both carry `Acumatica_Project_ID__c = R261088`**:
+
+- `a1P7y00000ATfdOEAT` — created 2026-08-02, `Domestic_Content_Eligible__c = "Yes"`, never
+  synced. This is the record the project number was earmarked against.
+- `a1P7y00000AlKC1EAN` — created 2026-08-23, flag **blank**, and the one that actually pushed
+  (`Acumatica_Customer_ID__c = C001311229`, stamped 2026-08-28, `LastModifiedDate`
+  2026-08-28T19:52:40Z — matching the CloudWatch invocation 19:52:27→19:52:40 to the second).
+
+With the flag blank, the code selected **RS** and sent `ProjectTemplateID: RS` for an ID that
+already existed as RSDC. Acumatica scaffolds from a template at create and ignores it on
+update, so the project kept the RSDC it was born with. (Acumatica's own `LastModifiedDateTime`
+on R261088 is 2026-08-28T22:51:36Z — three hours after the push — and its Description differs
+from the pushing record's `Description__c`, so a person edited it that evening too.)
+
+**Conclusion: no code change.** Nothing in the deployed logic chose RSDC for a record that did
+not read `"Yes"`. The real defects are two data ones, both outside this Lambda: duplicate
+customer records sharing one Acumatica project id, and hand-created projects that Salesforce
+does not know about.
+
+**What DID need fixing was the logging, and that is the part worth keeping.** The premise going
+in was that `summary.project.templateId` and `.domesticContentEligible` were logged. **They were
+not** — they went into the HTTP response and nowhere else, and this Lambda logged only failures.
+Six invocations since the RSDC fix produced four log lines each: INIT, START, END, REPORT. The
+question "which template did this creation choose, and from what" had to be answered by joining
+live Acumatica to live Salesforce eleven days later, by which time both had moved on — which is
+how a duplicate record ended up looking like a template bug for a while. Layer-1 now emits one
+INFO line per create carrying template, the **raw field value as read**, the resolved boolean,
+JOBTYPE, verification result, project manager, customer, parent account and financing partner.
+`dc=` is the raw string on purpose: an edit made afterwards then shows up as this line
+disagreeing with the record, instead of as a mystery.
 
 
 ## 9. Open questions (updated 2026-08-20)
@@ -854,3 +921,4 @@ it to `'YES'` has no effect.
 - (pending) ADD to mapping: §4a ×14 + §4b ×8 Customer fields + Internal_Rep_Commission_PPW__c.
 - (pending) REMOVE from mapping: CC diff list, Tim-reviewed.
 - NEVER MAP: formula fields; §4c Cost fields (null = derive semantic would be destroyed by a copy).
+- 2026-09-08 — Layer-1 create now READS four more Customer fields (`Street__c`, `State__c`, `Postal_Code__c`, `Financing_Partner__c`) and one more Solar field (`Project_Manager__c`). Reads only — no new Salesforce writes, no mapping change. See D31/D32/D33.

@@ -4,6 +4,22 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Acumatica Layer-1 September tweaks — BUILT, NOT DEPLOYED (2026-09-08)
+
+Branch `fix/sept-integration-tweaks`, part 1 of 3. All field names and value formats read
+off the LIVE tenant first (GETs only). Suite 809 green.
+
+- [x] **A — customer address at create.** `Street__c`/`City__c`/`State__c`/`Postal_Code__c` → `MainContact.Address`; `Country` always `"US"`; state validated as a two-letter code, unrecognised → `AZ` + warning. Omit-empty, NEW customers only.
+- [x] **B — parent account by financing partner** → `ParentRecord`. Participate (both) → `C001310754`, Lightreach → `C001308357`, Credit Human → `01868`; Cash/blank → none, silent; anything else → none + warning. ⚠️ Matching folds dashes — the live picklist has an EN DASH in `Participate Prepaid Lease – Cash`.
+- [x] **C — project manager + JOBTYPE.** `Project_Manager__c` (a MULTIPICKLIST) → `ProjectProperties.ProjectManager` as an EmployeeID (`E00675` / `E01177`); exactly one distinct match wins. `JOBTYPE = RS` on every project, both templates — the Combo's ValueID, **not** the label. Verified by re-read.
+- [x] **D — RSDC-on-non-DC diagnosis: no code defect.** 29/35 RSDC projects trace to a `"Yes"` customer, 5 were hand-created with no Salesforce project id, and R261088 is two customer records sharing one `Acumatica_Project_ID__c`. Evidence in `docs/integrations/acumatica-budget-rework-v2.md` §8.
+- [x] **The create is now logged.** One INFO line per create with template + the raw DC field value + JOBTYPE + verification + PM + parent account. The premise that these were already logged was wrong; that is why D took a live-system join to answer.
+- [ ] **TIM: deploy** `.\deploy.ps1 sundial-acumatica-push` when you are ready. Nothing else in the batch depends on it.
+- [ ] **TIM: watch the first live create** in CloudWatch for the new `acumatica-push CREATED` line — specifically `attributesVerified=true`. `ProjectProperties.ProjectManager` and `ParentRecord` on a CREATE are the two shapes that could not be proven by write, because the secret points at LIVE and the probe was read-only.
+- [ ] **HARMON (data, not code): two duplicate "Jesus Barron" customers** (`a1P7y00000ATfdOEAT` and `a1P7y00000AlKC1EAN`) both carry `Acumatica_Project_ID__c = R261088`. Whichever is wrong should be cleared, or the next push re-PUTs a project that belongs to the other record.
+- [ ] **HARMON (data): five RSDC projects Salesforce does not know about** — R261075 (Gary Muehlenkamp), R261087 (Andre'a Clark), R261092 (Melvin Orantes Magana), R261094 (Elijah Johnson), R261095 (Brenda Klick). Four of the five people exist as customers with a null `Acumatica_Project_ID__c`; pushing one of those today would create a SECOND Acumatica project for the same job.
+- [ ] **Consider: uniqueness on `Acumatica_Project_ID__c`.** A duplicate is what made a correct template selection look like a bug for a fortnight. Cheap to add, and it would have prevented the whole investigation.
+
 ## Portal testing hygiene (2026-08-24)
 
 - [x] **Designated portal test record created**: `Sundial_Customer__c`

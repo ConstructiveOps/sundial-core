@@ -1,0 +1,794 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Job__c - the work (was Sundial_Service__c; renamed D-072). One record per
+  customer issue: intake, triage, scheduling context, ONE payer (Bill-To lives here - a second
+  payer at the same address is a second job), time roll-ups from Service Calls (Flow, D-065.3).
+  Every job has exactly one Sundial_Estimate__c (required lookup) - lines and money live there;
+  the Estimate_* formulas below read through. Invoice number = job number (D-065 amendment 1).
+  Job Status has NO estimate states - those are Sundial_Estimate__c.Status__c (D-072.3).
+  Run scripts/verify-service-schema.mjs BEFORE deploying.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Sundial_Customer__c</fullName>
+        <description>Required - every job belongs to a customer (D-065.1: no Asset; history from this link + originating-project lookups).</description>
+        <externalId>false</externalId>
+        <label>Sundial Customer</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Customer__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Service_Jobs</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Estimate__c</fullName>
+        <description>REQUIRED: the job's living estimate (D-072.2). Quick-create makes it in the same transaction; Create Job links an existing one.</description>
+        <externalId>false</externalId>
+        <label>Estimate</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Estimate__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Service_Jobs</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Sundial_Service_Jobs</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Customer_Name_at_Creation__c</fullName>
+        <description>Snapshot at record creation (standard snapshot pattern).</description>
+        <externalId>false</externalId>
+        <label>Customer Name at Creation</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Address_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Address at Creation</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Primary_Phone_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Phone at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Phone</type>
+    </fields>
+    <fields>
+        <fullName>Primary_Email_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Email at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Email</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Intake_Channel__c</fullName>
+        <description>Which door the request came in.</description>
+        <externalId>false</externalId>
+        <label>Intake Channel</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Phone</fullName>
+                    <default>false</default>
+                    <label>Phone</label>
+                </value>
+                <value>
+                    <fullName>Email</fullName>
+                    <default>false</default>
+                    <label>Email</label>
+                </value>
+                <value>
+                    <fullName>Web Form</fullName>
+                    <default>false</default>
+                    <label>Web Form</label>
+                </value>
+                <value>
+                    <fullName>Monitoring Alert</fullName>
+                    <default>false</default>
+                    <label>Monitoring Alert</label>
+                </value>
+                <value>
+                    <fullName>Manufacturer Referral</fullName>
+                    <default>false</default>
+                    <label>Manufacturer Referral</label>
+                </value>
+                <value>
+                    <fullName>Leasing Company</fullName>
+                    <default>false</default>
+                    <label>Leasing Company</label>
+                </value>
+                <value>
+                    <fullName>Online Booking</fullName>
+                    <default>false</default>
+                    <label>Online Booking</label>
+                </value>
+                <value>
+                    <fullName>Estimate Conversion</fullName>
+                    <default>false</default>
+                    <label>Estimate Conversion</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Intake_Date__c</fullName>
+        <description>When the request arrived (not record creation).</description>
+        <externalId>false</externalId>
+        <label>Intake Date</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Source_Email_From__c</fullName>
+        <description>Email-intake path: the original sender.</description>
+        <externalId>false</externalId>
+        <label>Source Email From</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Email</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Source_Email_Reference__c</fullName>
+        <description>Sender-side case/ticket reference.</description>
+        <externalId>false</externalId>
+        <label>Source Email Reference</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Needs_Intake_Review__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Set by the AI email-intake worker; office confirms the customer match before triage. AI never auto-schedules.</description>
+        <externalId>false</externalId>
+        <label>Needs Intake Review</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Assigned_To__c</fullName>
+        <description>Current owner; feeds My Queue and the assignment notification.</description>
+        <externalId>false</externalId>
+        <label>Assigned To</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_User__c</referenceTo>
+        <relationshipLabel>Assigned Service Jobs</relationshipLabel>
+        <relationshipName>Assigned_Service_Jobs</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <description>Job pipeline (service-workflows.md 2.1 minus the estimate states). Transitions guarded in Lambda code, not validation rules.</description>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>New</fullName>
+                    <default>true</default>
+                    <label>New</label>
+                </value>
+                <value>
+                    <fullName>Triaging</fullName>
+                    <default>false</default>
+                    <label>Triaging</label>
+                </value>
+                <value>
+                    <fullName>Remote Investigation</fullName>
+                    <default>false</default>
+                    <label>Remote Investigation</label>
+                </value>
+                <value>
+                    <fullName>Ready to Schedule</fullName>
+                    <default>false</default>
+                    <label>Ready to Schedule</label>
+                </value>
+                <value>
+                    <fullName>Scheduled</fullName>
+                    <default>false</default>
+                    <label>Scheduled</label>
+                </value>
+                <value>
+                    <fullName>In Progress</fullName>
+                    <default>false</default>
+                    <label>In Progress</label>
+                </value>
+                <value>
+                    <fullName>Awaiting Parts</fullName>
+                    <default>false</default>
+                    <label>Awaiting Parts</label>
+                </value>
+                <value>
+                    <fullName>Awaiting Office Review</fullName>
+                    <default>false</default>
+                    <label>Awaiting Office Review</label>
+                </value>
+                <value>
+                    <fullName>Ready to Bill</fullName>
+                    <default>false</default>
+                    <label>Ready to Bill</label>
+                </value>
+                <value>
+                    <fullName>Invoiced</fullName>
+                    <default>false</default>
+                    <label>Invoiced</label>
+                </value>
+                <value>
+                    <fullName>Paid</fullName>
+                    <default>false</default>
+                    <label>Paid</label>
+                </value>
+                <value>
+                    <fullName>Closed</fullName>
+                    <default>false</default>
+                    <label>Closed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Resolution__c</fullName>
+        <description>Terminal disposition; required (in code) when Status = Closed.</description>
+        <externalId>false</externalId>
+        <label>Resolution</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Completed</fullName>
+                    <default>false</default>
+                    <label>Completed</label>
+                </value>
+                <value>
+                    <fullName>Resolved Remotely - No Charge</fullName>
+                    <default>false</default>
+                    <label>Resolved Remotely - No Charge</label>
+                </value>
+                <value>
+                    <fullName>Estimate Declined</fullName>
+                    <default>false</default>
+                    <label>Estimate Declined</label>
+                </value>
+                <value>
+                    <fullName>Cancelled</fullName>
+                    <default>false</default>
+                    <label>Cancelled</label>
+                </value>
+                <value>
+                    <fullName>Duplicate</fullName>
+                    <default>false</default>
+                    <label>Duplicate</label>
+                </value>
+                <value>
+                    <fullName>Referred Out</fullName>
+                    <default>false</default>
+                    <label>Referred Out</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Status_Changed_At__c</fullName>
+        <description>Stamped on every transition; feeds sat-too-long alerts.</description>
+        <externalId>false</externalId>
+        <label>Status Changed At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Priority__c</fullName>
+        <externalId>false</externalId>
+        <label>Priority</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Low</fullName>
+                    <default>false</default>
+                    <label>Low</label>
+                </value>
+                <value>
+                    <fullName>Standard</fullName>
+                    <default>true</default>
+                    <label>Standard</label>
+                </value>
+                <value>
+                    <fullName>High</fullName>
+                    <default>false</default>
+                    <label>High</label>
+                </value>
+                <value>
+                    <fullName>Emergency</fullName>
+                    <default>false</default>
+                    <label>Emergency</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Service_Type__c</fullName>
+        <externalId>false</externalId>
+        <label>Service Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Warranty</fullName>
+                    <default>false</default>
+                    <label>Warranty</label>
+                </value>
+                <value>
+                    <fullName>Paid Service</fullName>
+                    <default>false</default>
+                    <label>Paid Service</label>
+                </value>
+                <value>
+                    <fullName>Monitoring Follow-up</fullName>
+                    <default>false</default>
+                    <label>Monitoring Follow-up</label>
+                </value>
+                <value>
+                    <fullName>Maintenance</fullName>
+                    <default>false</default>
+                    <label>Maintenance</label>
+                </value>
+                <value>
+                    <fullName>Upgrade</fullName>
+                    <default>false</default>
+                    <label>Upgrade</label>
+                </value>
+                <value>
+                    <fullName>Partner Work Order</fullName>
+                    <default>false</default>
+                    <label>Partner Work Order</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>System_Ownership__c</fullName>
+        <description>Leased / third-party steers the Bill To default.</description>
+        <externalId>false</externalId>
+        <label>System Ownership</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Customer Owned</fullName>
+                    <default>false</default>
+                    <label>Customer Owned</label>
+                </value>
+                <value>
+                    <fullName>Leased</fullName>
+                    <default>false</default>
+                    <label>Leased</label>
+                </value>
+                <value>
+                    <fullName>Third-Party Owned</fullName>
+                    <default>false</default>
+                    <label>Third-Party Owned</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Issue_Description__c</fullName>
+        <description>Customer-reported issue at intake (board tooltip reads the first line).</description>
+        <externalId>false</externalId>
+        <label>Issue Description</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Initial_Remote_Diagnosis__c</fullName>
+        <description>Remote-first findings before any truck roll.</description>
+        <externalId>false</externalId>
+        <label>Initial Remote Diagnosis</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Office_Notes__c</fullName>
+        <description>Internal office log - append-only stamped entries (D-065.8). Separate from tech notes per the 9/9 meeting; tech notes live on Service Calls and are shown here read-only.</description>
+        <externalId>false</externalId>
+        <label>Office Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Customer_Summary__c</fullName>
+        <description>The customer-facing paragraph for the receipt and the photo job report. AI-drafted from the calls' Work Notes, office-edited before send.</description>
+        <externalId>false</externalId>
+        <label>Customer Summary</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Originating_Solar_Project__c</fullName>
+        <description>Installed system: specs, install date, photos read from here (no Asset object).</description>
+        <externalId>false</externalId>
+        <label>Originating Solar Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Solar__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Service_Jobs</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Originating_Roofing_Project__c</fullName>
+        <externalId>false</externalId>
+        <label>Originating Roofing Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Roofing__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Service_Jobs</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Originating_Commercial_Project__c</fullName>
+        <description>Phase 3 object - REMOVE from the package if Sundial_Commercial__c is absent.</description>
+        <externalId>false</externalId>
+        <label>Originating Commercial Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Commercial__c</referenceTo>
+        <relationshipLabel>Service Jobs</relationshipLabel>
+        <relationshipName>Service_Jobs</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Type__c</fullName>
+        <description>THE payer for this job (D-072.6). No customer default, no per-visit override. 'Internal Warranty' is the tenant-neutral value for on-us warranty work.</description>
+        <externalId>false</externalId>
+        <label>Bill To Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Customer</fullName>
+                    <default>true</default>
+                    <label>Customer</label>
+                </value>
+                <value>
+                    <fullName>Internal Warranty</fullName>
+                    <default>false</default>
+                    <label>Internal Warranty</label>
+                </value>
+                <value>
+                    <fullName>Manufacturer</fullName>
+                    <default>false</default>
+                    <label>Manufacturer</label>
+                </value>
+                <value>
+                    <fullName>Leasing Partner</fullName>
+                    <default>false</default>
+                    <label>Leasing Partner</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Name__c</fullName>
+        <description>Payer name when not the customer (leasing partner, manufacturer). Partner list is tenant config.</description>
+        <externalId>false</externalId>
+        <label>Bill To Name</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Billing_Reference__c</fullName>
+        <description>Partner PO / work-order number. External ID (indexed) - 'SunRun calls with THEIR number'; printed on the invoice.</description>
+        <externalId>true</externalId>
+        <label>Billing Reference</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Payment_Status__c</fullName>
+        <description>Derived from Service Payments vs invoice total (Lambda/Flow).</description>
+        <externalId>false</externalId>
+        <label>Payment Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>None</fullName>
+                    <default>true</default>
+                    <label>None</label>
+                </value>
+                <value>
+                    <fullName>Deposit Paid</fullName>
+                    <default>false</default>
+                    <label>Deposit Paid</label>
+                </value>
+                <value>
+                    <fullName>Partially Paid</fullName>
+                    <default>false</default>
+                    <label>Partially Paid</label>
+                </value>
+                <value>
+                    <fullName>Paid</fullName>
+                    <default>false</default>
+                    <label>Paid</label>
+                </value>
+                <value>
+                    <fullName>Refunded</fullName>
+                    <default>false</default>
+                    <label>Refunded</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Customer_Card_on_File__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>A SetupIntent completed for this customer (mirror of the customer's Stripe state at last check). Cards live in Stripe, never here.</description>
+        <externalId>false</externalId>
+        <label>Customer Card on File</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Estimate_Status__c</fullName>
+        <description>Cross-object formula - the job list shows it as a column.</description>
+        <externalId>false</externalId>
+        <label>Estimate Status</label>
+        <formula>TEXT(Estimate__r.Status__c)</formula>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+    </fields>
+    <fields>
+        <fullName>Estimate_Total__c</fullName>
+        <description>Cross-object formula onto the living estimate - no sync, no drift (D-072.3).</description>
+        <externalId>false</externalId>
+        <label>Estimate Total</label>
+        <formula>Estimate__r.Total__c</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Estimate_Approved_Amount__c</fullName>
+        <description>What the customer last approved.</description>
+        <externalId>false</externalId>
+        <label>Estimate Approved Amount</label>
+        <formula>Estimate__r.Approved_Amount__c</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Estimate_Deposit_Amount__c</fullName>
+        <externalId>false</externalId>
+        <label>Estimate Deposit Amount</label>
+        <formula>Estimate__r.Deposit_Amount__c</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Total_Call_Count__c</fullName>
+        <description>Roll-up via record-triggered Flow on Service Call change (D-065.3). Migration writes totals directly.</description>
+        <externalId>false</externalId>
+        <label>Total Call Count</label>
+        <precision>5</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Total_Time_Minutes__c</fullName>
+        <description>Sum of Service Call durations across all techs (roll-up Flow).</description>
+        <externalId>false</externalId>
+        <label>Total Time Minutes</label>
+        <precision>9</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>First_Scheduled_Start__c</fullName>
+        <description>Earliest Service Call Scheduled_Start (roll-up Flow) - list sorting.</description>
+        <externalId>false</externalId>
+        <label>First Scheduled Start</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Geocode_Lat__c</fullName>
+        <description>Service-address geocode, best-effort at intake; feeds geofence + travel hints.</description>
+        <externalId>false</externalId>
+        <label>Geocode Latitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Geocode_Lon__c</fullName>
+        <externalId>false</externalId>
+        <label>Geocode Longitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Geocode_Status__c</fullName>
+        <description>Failed/Manual rows fall back to no geofence rather than blocking clock-ins.</description>
+        <externalId>false</externalId>
+        <label>Geocode Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Pending</fullName>
+                    <default>true</default>
+                    <label>Pending</label>
+                </value>
+                <value>
+                    <fullName>Geocoded</fullName>
+                    <default>false</default>
+                    <label>Geocoded</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+                <value>
+                    <fullName>Manual</fullName>
+                    <default>false</default>
+                    <label>Manual</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Street_View_Image_Key__c</fullName>
+        <description>S3 key of the street-view still fetched once at geocode time (9/9 ask). Blank = none available.</description>
+        <externalId>false</externalId>
+        <label>Street View Image Key</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Job</label>
+    <nameField>
+        <displayFormat>SVC-{00000}</displayFormat>
+        <label>Job Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Jobs</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

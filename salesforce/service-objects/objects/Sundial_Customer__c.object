@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Customer__c - ONE NEW FIELD ONLY (D-072). package.xml lists it as a CustomField
+  member, so this file adds Stripe_Customer_Id__c and touches nothing else on the object.
+  NEVER convert this to a whole-object deploy: it would overwrite the live object's settings.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Stripe_Customer_Id__c</fullName>
+        <description>Stripe customer reference (card on file via SetupIntent; also the Service Club subscription customer). Cards are vaulted in Stripe, never in Salesforce. Deployed as a single CustomField, never a whole-object deploy of Sundial_Customer__c.</description>
+        <externalId>true</externalId>
+        <label>Stripe Customer Id</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+</CustomObject>

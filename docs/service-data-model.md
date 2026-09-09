@@ -75,6 +75,37 @@ So `Sundial_Service_Line__c` (already built, re-parented) is the junction. The u
 
 Nothing in this model blocks scheduling, sending, or invoicing on the state of anything else. Paige's HCP complaint ("can't copy to job unless approved") is explicitly designed out; restrictions come later as per-tenant validation rules if Harmon ever asks.
 
+### 3.1a The customer is part of the same popup — never a detour through Sales **[Tim, 2026-09-09]**
+
+*New Estimate* and *New Job* (and, when they exist, *New Roofing Project* / *New Commercial
+Project*) open one popup that starts with a customer search (name / email / phone / address
+against the 31.6k hub). Pick an existing customer, **or** switch to "New customer" and type the
+basics only — first name, last name, street/city/state/zip, email, phone — and the customer is
+created in the same request as the estimate/job. Nobody goes to the Sales module to make a
+customer first.
+
+`Requested_Project_Types__c` (multi-select picklist on `Sundial_Customer__c`, already in the
+org) is the product-history tag and is **never shown in the popup**: a new customer created
+from Service gets it set to `Service`; an existing customer gets `Service` **added** to
+whatever is already selected (read → union → write, semicolon-joined). Roofing and Commercial
+do the same with their own value when those buttons are built. Customers, leads, and
+opportunities then sort by what Harmon has done for them.
+
+Rules the Lambda enforces:
+- **Soft duplicate guard before any create.** Exact email, phone (digits-only) or normalized
+  street+zip match returns `409 DUPLICATE_CANDIDATES` with the matches; the popup shows them
+  ("is it one of these?"). Creating anyway requires `confirmNew: true`. The hub is the
+  dedupe surface for HCP migration too, so this is the same key set (email primary).
+- The customer create goes through the **same validated path as `POST /sf/customer`**
+  (describe-driven field check, `Client__c` stamped from the token, blocklist) — the
+  estimate Lambda calls that helper, it does not hand-roll a second customer writer.
+- **Atomic from the user's view:** if the estimate/job create fails after the customer was
+  created, the response says so (`customerCreated: true, id`) rather than silently leaving
+  an orphan the user will re-create.
+- **[Get from Tim/Harmon]** the *Lead & Source* defaults for a service-originated customer:
+  `Stage__c` / `Status__c` / `Lead_Source__c` values. Not guessed — the Lambda sets only what
+  is configured per tenant.
+
 ### 3.2 After conversion, the estimate is the job's "Estimate" tab
 
 Adding work from the job screen writes lines to the same estimate. Field estimates from the PWA write lines with `Stage__c = Proposed` and `Added_By_Service_Call__c` set, so the office sees what the tech added and what the customer has and hasn't approved.
@@ -229,10 +260,10 @@ Each HCP job becomes Estimate + Job + Lines (from HCP invoice items; matched to 
 
 ## 10. Decided / recommended / open — the honest ledger
 
-**Decided (Tim, 2026-09-09):** seven-object shape; estimate can exist without a job, job never without an estimate; quick-create makes the estimate; price book is the source of standardized pricing; *Update* = clone with same Item_Code, old version inactive; kind-scoped discounts; markup % or amount hidden from the customer; deposit flat or %; two send buttons; Files + Photos sections; customer photo report module.
+**Decided (Tim, 2026-09-09):** seven-object shape; customer select-or-create inside the New Estimate / New Job popup with `Requested_Project_Types__c` tagged silently (§3.1a); estimate can exist without a job, job never without an estimate; quick-create makes the estimate; price book is the source of standardized pricing; *Update* = clone with same Item_Code, old version inactive; kind-scoped discounts; markup % or amount hidden from the customer; deposit flat or %; two send buttons; Files + Photos sections; customer photo report module.
 
 **Recommended (adopted unless Tim says otherwise):** lines live on the estimate (§3); version log instead of a version object (§3.4); templates as estimates (§4.3); split sell prices on items (§4.1); no-delete + reference-count edit lock on items (§4.2); Payment object (§5.6); job money as cross-object formulas (§5.2); money math in the Lambda, time in the Flow (§6); photo bookkeeping in the existing Supabase file-metadata pattern (§7); Bill-To on job only.
 
 **Get from Harmon:** category list and item codes for the price book (seeded from HCP export — Beth); how HCP taxed labor vs materials (Heather); which template is the quick-create default and its lines (Paige); estimate validity days; whether any estimate needs manager sign-off before sending; deposit rule of thumb (Paige said "quoted work with material" — ask for the threshold if any).
 
-**Tim to confirm:** one spare field on `Sundial_Customer__c` for `Stripe_Customer_Id__c`; the Stage 1 package has not been deployed (renames are free only while that is true).
+**Confirmed by Tim (2026-09-09):** `Stripe_Customer_Id__c` goes on `Sundial_Customer__c` (~100 spare fields); the Stage 1 package was never deployed, so the renames cost nothing. Built as `scripts/gen-service-objects.py` → `salesforce/service-objects/` v2 (7 objects, 201 fields), 7 cache tables, 3 workbooks.

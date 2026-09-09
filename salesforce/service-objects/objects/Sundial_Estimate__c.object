@@ -1,0 +1,786 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Estimate__c - the quote AND the living bill of work (D-072, docs/service-data-model.md).
+  Can exist without a job (proposals); every job has exactly one (Service_Job__c is the 1:1 pair,
+  set at conversion). Service Lines hang off THIS object, never the job. Money totals are
+  computed by the estimate Lambda on every line write and stored here (D-072.8); the job
+  reads them through cross-object formulas. Versions = append-only Version_Log__c JSON + a
+  PDF per send (no Version object). Templates are estimates with Is_Template__c and no customer.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Sundial_Customer__c</fullName>
+        <description>Required unless Is_Template__c (templates have no customer; enforced in code - a required lookup would block templates).</description>
+        <externalId>false</externalId>
+        <label>Sundial Customer</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Customer__c</referenceTo>
+        <relationshipLabel>Service Estimates</relationshipLabel>
+        <relationshipName>Service_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Service_Job__c</fullName>
+        <description>The 1:1 pair. Null while the estimate is a proposal with no job; set by Create Job / quick-create. One job per estimate is Lambda-enforced.</description>
+        <externalId>false</externalId>
+        <label>Service Job</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Job__c</referenceTo>
+        <relationshipLabel>Estimates</relationshipLabel>
+        <relationshipName>Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Estimates</relationshipLabel>
+        <relationshipName>Sundial_Estimates</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Customer_Name_at_Creation__c</fullName>
+        <description>Snapshot at record creation (standard snapshot pattern).</description>
+        <externalId>false</externalId>
+        <label>Customer Name at Creation</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Address_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Address at Creation</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Primary_Phone_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Phone at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Phone</type>
+    </fields>
+    <fields>
+        <fullName>Primary_Email_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Email at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Email</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Originating_Solar_Project__c</fullName>
+        <description>System being quoted on (no Asset object, D-065.1).</description>
+        <externalId>false</externalId>
+        <label>Originating Solar Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Solar__c</referenceTo>
+        <relationshipLabel>Service Estimates</relationshipLabel>
+        <relationshipName>Service_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Originating_Roofing_Project__c</fullName>
+        <externalId>false</externalId>
+        <label>Originating Roofing Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Roofing__c</referenceTo>
+        <relationshipLabel>Service Estimates</relationshipLabel>
+        <relationshipName>Service_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Originating_Commercial_Project__c</fullName>
+        <description>Phase 3 object - REMOVE from the package if Sundial_Commercial__c is absent (verify script flags it).</description>
+        <externalId>false</externalId>
+        <label>Originating Commercial Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Commercial__c</referenceTo>
+        <relationshipLabel>Service Estimates</relationshipLabel>
+        <relationshipName>Service_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Sold_By__c</fullName>
+        <description>Commission attribution (with Markup below). Blank = office/no commission.</description>
+        <externalId>false</externalId>
+        <label>Sold By</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_User__c</referenceTo>
+        <relationshipLabel>Sold Estimates</relationshipLabel>
+        <relationshipName>Sold_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Is_Template__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>True = a named line set (Paige's Fronius/removal-reinstall/EV templates). No customer, never sent; 'Add from template' clones its lines.</description>
+        <externalId>false</externalId>
+        <label>Is Template</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Template_Name__c</fullName>
+        <description>Display name in the template picker.</description>
+        <externalId>false</externalId>
+        <label>Template Name</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <description>Draft -&gt; Sent -&gt; (Viewed) -&gt; Approved | Declined | Expired; Invoiced when the job's invoice issues; Template never leaves Template. Re-sending after approval returns to Sent (Approved_Version__c keeps the last approved).</description>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Draft</fullName>
+                    <default>true</default>
+                    <label>Draft</label>
+                </value>
+                <value>
+                    <fullName>Sent</fullName>
+                    <default>false</default>
+                    <label>Sent</label>
+                </value>
+                <value>
+                    <fullName>Viewed</fullName>
+                    <default>false</default>
+                    <label>Viewed</label>
+                </value>
+                <value>
+                    <fullName>Approved</fullName>
+                    <default>false</default>
+                    <label>Approved</label>
+                </value>
+                <value>
+                    <fullName>Declined</fullName>
+                    <default>false</default>
+                    <label>Declined</label>
+                </value>
+                <value>
+                    <fullName>Expired</fullName>
+                    <default>false</default>
+                    <label>Expired</label>
+                </value>
+                <value>
+                    <fullName>Invoiced</fullName>
+                    <default>false</default>
+                    <label>Invoiced</label>
+                </value>
+                <value>
+                    <fullName>Template</fullName>
+                    <default>false</default>
+                    <label>Template</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Version__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Incremented on every Send. 0 = never sent.</description>
+        <externalId>false</externalId>
+        <label>Version</label>
+        <precision>5</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Version_Log__c</fullName>
+        <description>Append-only JSON, Lambda-written, one entry per send: {version, sentAt, sentBy, sentVia, total, lines:[{itemCode,itemVersion,desc,qty,unitPrice,kind}], pdfKey}. THIS is the version history - no Version object (D-072.5).</description>
+        <externalId>false</externalId>
+        <label>Version Log</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Last_Sent_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Last Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Last_Sent_Via__c</fullName>
+        <externalId>false</externalId>
+        <label>Last Sent Via</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Email</fullName>
+                    <default>false</default>
+                    <label>Email</label>
+                </value>
+                <value>
+                    <fullName>SMS</fullName>
+                    <default>false</default>
+                    <label>SMS</label>
+                </value>
+                <value>
+                    <fullName>Both</fullName>
+                    <default>false</default>
+                    <label>Both</label>
+                </value>
+                <value>
+                    <fullName>Manual</fullName>
+                    <default>false</default>
+                    <label>Manual</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Last_Viewed_At__c</fullName>
+        <description>Hosted page opened (token hit).</description>
+        <externalId>false</externalId>
+        <label>Last Viewed At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Approved_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Approved At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Approved_Version__c</fullName>
+        <description>Which sent version the customer approved.</description>
+        <externalId>false</externalId>
+        <label>Approved Version</label>
+        <precision>5</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Approved_Amount__c</fullName>
+        <description>Total of the approved version (frozen - Total__c keeps moving as work is added).</description>
+        <externalId>false</externalId>
+        <label>Approved Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Approval_Method__c</fullName>
+        <description>Online = accept button on the hosted page; Verbal = office logged it; Deposit Paid = paying the deposit is acceptance.</description>
+        <externalId>false</externalId>
+        <label>Approval Method</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Online</fullName>
+                    <default>false</default>
+                    <label>Online</label>
+                </value>
+                <value>
+                    <fullName>Verbal</fullName>
+                    <default>false</default>
+                    <label>Verbal</label>
+                </value>
+                <value>
+                    <fullName>Signed</fullName>
+                    <default>false</default>
+                    <label>Signed</label>
+                </value>
+                <value>
+                    <fullName>Deposit Paid</fullName>
+                    <default>false</default>
+                    <label>Deposit Paid</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Approved_By_Name__c</fullName>
+        <description>Typed name on the hosted page, or the office user for Verbal.</description>
+        <externalId>false</externalId>
+        <label>Approved By Name</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Declined_Reason__c</fullName>
+        <externalId>false</externalId>
+        <label>Declined Reason</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Valid_Until__c</fullName>
+        <description>Send date + tenant validity days (GET FROM HARMON: the number). Past this the status flips to Expired by the nightly job.</description>
+        <externalId>false</externalId>
+        <label>Valid Until</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Reminder_1_Sent_At__c</fullName>
+        <description>+3d reminder (tenant config).</description>
+        <externalId>false</externalId>
+        <label>Reminder 1 Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Reminder_2_Sent_At__c</fullName>
+        <description>+5d reminder; after this the estimate hands off to the NSA drip (D-065 amendment 1).</description>
+        <externalId>false</externalId>
+        <label>Reminder 2 Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Public_Token__c</fullName>
+        <description>Unguessable token for the customer-facing estimate page (accept + card authorization at the bottom - D-072.7). External ID so the page route resolves it in one query.</description>
+        <externalId>true</externalId>
+        <label>Public Token</label>
+        <length>64</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Public_Token_Expires_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Public Token Expires At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Labor_Subtotal__c</fullName>
+        <description>Sum of Labor-kind lines + labor portion of Product lines. Lambda-computed on every line write (D-072.8).</description>
+        <externalId>false</externalId>
+        <label>Labor Subtotal</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Material_Subtotal__c</fullName>
+        <description>Sum of Material-kind lines + material portion of Product lines.</description>
+        <externalId>false</externalId>
+        <label>Material Subtotal</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Fee_Subtotal__c</fullName>
+        <description>Sum of Fee-kind lines.</description>
+        <externalId>false</externalId>
+        <label>Fee Subtotal</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Subtotal__c</fullName>
+        <description>Labor + Material + Fee, before discount/markup/tax.</description>
+        <externalId>false</externalId>
+        <label>Subtotal</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Discount_Scope__c</fullName>
+        <description>Which subtotal the discount applies to (labor-only / material-only / both - D-065 amendment 4).</description>
+        <externalId>false</externalId>
+        <label>Discount Scope</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Labor</fullName>
+                    <default>false</default>
+                    <label>Labor</label>
+                </value>
+                <value>
+                    <fullName>Material</fullName>
+                    <default>false</default>
+                    <label>Material</label>
+                </value>
+                <value>
+                    <fullName>Both</fullName>
+                    <default>true</default>
+                    <label>Both</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Discount_Type__c</fullName>
+        <externalId>false</externalId>
+        <label>Discount Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Percent</fullName>
+                    <default>true</default>
+                    <label>Percent</label>
+                </value>
+                <value>
+                    <fullName>Amount</fullName>
+                    <default>false</default>
+                    <label>Amount</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Discount_Value__c</fullName>
+        <description>The percent (10 = 10%) or the dollar amount, per Discount_Type__c.</description>
+        <externalId>false</externalId>
+        <label>Discount Value</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Discount_Amount__c</fullName>
+        <description>Computed dollars off.</description>
+        <externalId>false</externalId>
+        <label>Discount Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Discount_Source__c</fullName>
+        <description>Service Plan = applied automatically from the customer's active plan; Manual = office entered.</description>
+        <externalId>false</externalId>
+        <label>Discount Source</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Manual</fullName>
+                    <default>true</default>
+                    <label>Manual</label>
+                </value>
+                <value>
+                    <fullName>Service Plan</fullName>
+                    <default>false</default>
+                    <label>Service Plan</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Markup_Type__c</fullName>
+        <description>Hidden from the customer - only the total shows. Tim's commission mechanism with Sold_By__c.</description>
+        <externalId>false</externalId>
+        <label>Markup Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Percent</fullName>
+                    <default>true</default>
+                    <label>Percent</label>
+                </value>
+                <value>
+                    <fullName>Amount</fullName>
+                    <default>false</default>
+                    <label>Amount</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Markup_Value__c</fullName>
+        <externalId>false</externalId>
+        <label>Markup Value</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Markup_Amount__c</fullName>
+        <description>Computed dollars added (never printed as a line).</description>
+        <externalId>false</externalId>
+        <label>Markup Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Tax_Rate__c</fullName>
+        <description>Resolved from the service-address city via the per-tenant AZ table - never a fixed default.</description>
+        <externalId>false</externalId>
+        <label>Tax Rate</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>Tax_Jurisdiction__c</fullName>
+        <description>City/rate label used, for the printed document.</description>
+        <externalId>false</externalId>
+        <label>Tax Jurisdiction</label>
+        <length>80</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Tax_Amount__c</fullName>
+        <description>Tax over Taxable lines after discount/markup allocation.</description>
+        <externalId>false</externalId>
+        <label>Tax Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Total__c</fullName>
+        <description>Subtotal - Discount + Markup + Tax. The number the customer sees.</description>
+        <externalId>false</externalId>
+        <label>Total</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Deposit_Required__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>When true the hosted page charges the deposit at acceptance (and saves the card).</description>
+        <externalId>false</externalId>
+        <label>Deposit Required</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Deposit_Type__c</fullName>
+        <externalId>false</externalId>
+        <label>Deposit Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Flat</fullName>
+                    <default>false</default>
+                    <label>Flat</label>
+                </value>
+                <value>
+                    <fullName>Percent</fullName>
+                    <default>true</default>
+                    <label>Percent</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Deposit_Value__c</fullName>
+        <externalId>false</externalId>
+        <label>Deposit Value</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Deposit_Amount__c</fullName>
+        <description>Computed from Deposit_Type/Value against Total.</description>
+        <externalId>false</externalId>
+        <label>Deposit Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Deposit_Paid_At__c</fullName>
+        <description>Mirrors the Deposit-type Service Payment.</description>
+        <externalId>false</externalId>
+        <label>Deposit Paid At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Scope_Summary__c</fullName>
+        <description>Customer-facing paragraph printed above the lines. AI-drafted from notes, office-edited.</description>
+        <externalId>false</externalId>
+        <label>Scope Summary</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Internal_Notes__c</fullName>
+        <description>Append-only stamped entries (D-065.8). Never printed.</description>
+        <externalId>false</externalId>
+        <label>Internal Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Created_In_Field__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>True when a tech created/extended it from the PWA (field estimate, D-065.7).</description>
+        <externalId>false</externalId>
+        <label>Created In Field</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Created_By_Service_Call__c</fullName>
+        <description>The visit during which the tech created the estimate.</description>
+        <externalId>false</externalId>
+        <label>Created By Service Call</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Call__c</referenceTo>
+        <relationshipLabel>Field Estimates</relationshipLabel>
+        <relationshipName>Field_Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <label>Service Estimate</label>
+    <nameField>
+        <displayFormat>EST-{00000}</displayFormat>
+        <label>Estimate Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Estimates</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

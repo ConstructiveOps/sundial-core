@@ -1,0 +1,134 @@
+{
+  "estimate": {
+    "sfObject": "Sundial_Estimate__c",
+    "cacheTable": "sundial_estimate_cache",
+    "parent": [
+      "Sundial_Customer__c",
+      "sundial_customer_sf_id"
+    ],
+    "search": [
+      [
+        "name",
+        "customer_name_at_creation",
+        "template_name"
+      ],
+      [
+        "Name",
+        "Customer_Name_at_Creation__c",
+        "Template_Name__c"
+      ]
+    ],
+    "delete": false,
+    "fields": 55,
+    "cached": 50
+  },
+  "job": {
+    "sfObject": "Sundial_Service_Job__c",
+    "cacheTable": "sundial_service_job_cache",
+    "parent": [
+      "Sundial_Customer__c",
+      "sundial_customer_sf_id"
+    ],
+    "search": [
+      [
+        "name",
+        "customer_name_at_creation",
+        "billing_reference"
+      ],
+      [
+        "Name",
+        "Customer_Name_at_Creation__c",
+        "Billing_Reference__c"
+      ]
+    ],
+    "delete": false,
+    "fields": 42,
+    "cached": 36
+  },
+  "servicecall": {
+    "sfObject": "Sundial_Service_Call__c",
+    "cacheTable": "sundial_service_call_cache",
+    "parent": [
+      "Sundial_Service_Job__c",
+      "sundial_service_job_sf_id"
+    ],
+    "search": null,
+    "delete": false,
+    "fields": 27,
+    "cached": 21
+  },
+  "pricebookitem": {
+    "sfObject": "Sundial_Price_Book_Item__c",
+    "cacheTable": "sundial_price_book_item_cache",
+    "parent": null,
+    "search": [
+      [
+        "name",
+        "item_code",
+        "description"
+      ],
+      [
+        "Name",
+        "Item_Code__c",
+        "Description__c"
+      ]
+    ],
+    "delete": false,
+    "fields": 19,
+    "cached": 17
+  },
+  "serviceline": {
+    "sfObject": "Sundial_Service_Line__c",
+    "cacheTable": "sundial_service_line_cache",
+    "parent": [
+      "Estimate__c",
+      "estimate_sf_id"
+    ],
+    "search": null,
+    "delete": true,
+    "fields": 20,
+    "cached": 20
+  },
+  "serviceinvoice": {
+    "sfObject": "Sundial_Service_Invoice__c",
+    "cacheTable": "sundial_service_invoice_cache",
+    "parent": [
+      "Service_Job__c",
+      "service_job_sf_id"
+    ],
+    "search": [
+      [
+        "name",
+        "billing_reference"
+      ],
+      [
+        "Name",
+        "Billing_Reference__c"
+      ]
+    ],
+    "delete": false,
+    "fields": 22,
+    "cached": 20
+  },
+  "servicepayment": {
+    "sfObject": "Sundial_Service_Payment__c",
+    "cacheTable": "sundial_service_payment_cache",
+    "parent": [
+      "Service_Job__c",
+      "service_job_sf_id"
+    ],
+    "search": [
+      [
+        "name",
+        "reference"
+      ],
+      [
+        "Name",
+        "Reference__c"
+      ]
+    ],
+    "delete": false,
+    "fields": 16,
+    "cached": 12
+  }
+}

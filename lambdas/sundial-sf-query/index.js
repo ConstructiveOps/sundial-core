@@ -76,6 +76,38 @@ const OBJECT_ALLOWLIST = {
   roofing: { sfObject: "Sundial_Roofing__c", cacheTable: "sundial_roofing_cache" },
   po: { sfObject: "Sundial_PO__c", cacheTable: "sundial_po_cache" },
   user: { sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
+  // Phase 2 Service Operations (D-072 - the seven-object model; supersedes the
+  // D-065 four). Inert until the objects exist in the org and the
+  // sql/sundial_*_cache.sql tables are applied - a missing cache table is skipped
+  // gracefully and a missing object 404s like any bad describe.
+  estimate: {
+    sfObject: "Sundial_Estimate__c",
+    cacheTable: "sundial_estimate_cache",
+  },
+  job: {
+    sfObject: "Sundial_Service_Job__c",
+    cacheTable: "sundial_service_job_cache",
+  },
+  servicecall: {
+    sfObject: "Sundial_Service_Call__c",
+    cacheTable: "sundial_service_call_cache",
+  },
+  pricebookitem: {
+    sfObject: "Sundial_Price_Book_Item__c",
+    cacheTable: "sundial_price_book_item_cache",
+  },
+  serviceline: {
+    sfObject: "Sundial_Service_Line__c",
+    cacheTable: "sundial_service_line_cache",
+  },
+  serviceinvoice: {
+    sfObject: "Sundial_Service_Invoice__c",
+    cacheTable: "sundial_service_invoice_cache",
+  },
+  servicepayment: {
+    sfObject: "Sundial_Service_Payment__c",
+    cacheTable: "sundial_service_payment_cache",
+  },
 };
 
 // A Salesforce Id is 15 or 18 case-sensitive alphanumerics. Used to shape-check
@@ -101,6 +133,13 @@ const CREATED_DATE_SOURCE = {
   roofing: ["CreatedDate"],
   po: ["CreatedDate"],
   user: ["CreatedDate"],
+  estimate: ["CreatedDate"],
+  job: ["CreatedDate"],
+  servicecall: ["CreatedDate"],
+  pricebookitem: ["CreatedDate"],
+  serviceline: ["CreatedDate"],
+  serviceinvoice: ["CreatedDate"],
+  servicepayment: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
 
@@ -185,6 +224,15 @@ function applyEnforceToQuery(q, enforce) {
 const PARENT_FILTER = {
   solar: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
   roofing: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
+  // Service (D-072): a customer's estimates and jobs; an estimate's lines; a job's
+  // calls, invoice, and payments. `pricebookitem` has no entry on purpose - it is a
+  // tenant-level catalog with no parent (list it, filter is_active in the caller).
+  estimate: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
+  job: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" },
+  servicecall: { sfField: "Sundial_Service_Job__c", cacheColumn: "sundial_service_job_sf_id" },
+  serviceline: { sfField: "Estimate__c", cacheColumn: "estimate_sf_id" },
+  serviceinvoice: { sfField: "Service_Job__c", cacheColumn: "service_job_sf_id" },
+  servicepayment: { sfField: "Service_Job__c", cacheColumn: "service_job_sf_id" },
 };
 
 // ?parentId= is shape-validated with the existing SF_ID_RE (defined above for the
@@ -211,6 +259,31 @@ const SEARCH_FIELDS = {
   roofing: {
     cache: ["project_name", "customer_name_at_creation"],
     sf: ["Project_Name__c", "Customer_Name_at_Creation__c"], // rep path unused for roofing
+  },
+  // Service (D-072). Jobs search by job number, customer snapshot, AND the partner's
+  // work-order number - "SunRun calls with THEIR number" is a named requirement
+  // (Billing_Reference__c is an External ID for the same reason). Estimates add the
+  // template name so the template picker is a search; the price book searches
+  // name + item code + description.
+  estimate: {
+    cache: ["name", "customer_name_at_creation", "template_name"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c"],
+  },
+  job: {
+    cache: ["name", "customer_name_at_creation", "billing_reference"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Billing_Reference__c"],
+  },
+  pricebookitem: {
+    cache: ["name", "item_code", "description"],
+    sf: ["Name", "Item_Code__c", "Description__c"],
+  },
+  serviceinvoice: {
+    cache: ["name", "billing_reference"],
+    sf: ["Name", "Billing_Reference__c"],
+  },
+  servicepayment: {
+    cache: ["name", "reference"],
+    sf: ["Name", "Reference__c"],
   },
 };
 

@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Line__c - the junction: estimate x price-book item (+ quantity, price/cost
+  snapshots, ad-hoc lines). Re-parented to Sundial_Estimate__c in D-072 (lines NEVER hang off
+  the job). References a specific item VERSION and snapshots what it said at add time. The only
+  service object with delete (removing a line while editing is a real row delete; sent
+  versions survive in the estimate's Version_Log__c).
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Estimate__c</fullName>
+        <description>Parent estimate (required).</description>
+        <externalId>false</externalId>
+        <label>Estimate</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Estimate__c</referenceTo>
+        <relationshipLabel>Service Lines</relationshipLabel>
+        <relationshipName>Service_Lines</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Price_Book_Item__c</fullName>
+        <description>The specific item VERSION this line was added from. Blank = ad-hoc line (the portal offers save-to-price-book).</description>
+        <externalId>false</externalId>
+        <label>Price Book Item</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Price_Book_Item__c</referenceTo>
+        <relationshipLabel>Service Lines</relationshipLabel>
+        <relationshipName>Service_Lines</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Lines</relationshipLabel>
+        <relationshipName>Sundial_Service_Lines</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Kind__c</fullName>
+        <description>Copied from the item; required for ad-hoc lines. Scopes discounts.</description>
+        <externalId>false</externalId>
+        <label>Kind</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Labor</fullName>
+                    <default>true</default>
+                    <label>Labor</label>
+                </value>
+                <value>
+                    <fullName>Material</fullName>
+                    <default>false</default>
+                    <label>Material</label>
+                </value>
+                <value>
+                    <fullName>Product</fullName>
+                    <default>false</default>
+                    <label>Product</label>
+                </value>
+                <value>
+                    <fullName>Fee</fullName>
+                    <default>false</default>
+                    <label>Fee</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Description__c</fullName>
+        <description>Customer-facing line text (snapshot of the item description, editable per line).</description>
+        <externalId>false</externalId>
+        <label>Description</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Quantity__c</fullName>
+        <defaultValue>1</defaultValue>
+        <externalId>false</externalId>
+        <label>Quantity</label>
+        <precision>10</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Unit_of_Measure__c</fullName>
+        <externalId>false</externalId>
+        <label>Unit of Measure</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Each</fullName>
+                    <default>true</default>
+                    <label>Each</label>
+                </value>
+                <value>
+                    <fullName>Hour</fullName>
+                    <default>false</default>
+                    <label>Hour</label>
+                </value>
+                <value>
+                    <fullName>Foot</fullName>
+                    <default>false</default>
+                    <label>Foot</label>
+                </value>
+                <value>
+                    <fullName>Lot</fullName>
+                    <default>false</default>
+                    <label>Lot</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Unit_Price__c</fullName>
+        <description>Snapshot of the item Price at add time; editable per line (Paige: 'sell it at 350').</description>
+        <externalId>false</externalId>
+        <label>Unit Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Unit_Labor_Price__c</fullName>
+        <description>Snapshot split - lets a labor-only discount act on Product lines.</description>
+        <externalId>false</externalId>
+        <label>Unit Labor Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Unit_Material_Price__c</fullName>
+        <description>Snapshot split.</description>
+        <externalId>false</externalId>
+        <label>Unit Material Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Unit_Labor_Cost__c</fullName>
+        <description>Snapshot for margin reporting.</description>
+        <externalId>false</externalId>
+        <label>Unit Labor Cost</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Unit_Material_Cost__c</fullName>
+        <description>Snapshot for margin reporting.</description>
+        <externalId>false</externalId>
+        <label>Unit Material Cost</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Price_Overridden__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Lambda-set when Unit Price differs from the item's price at add time (or was edited later).</description>
+        <externalId>false</externalId>
+        <label>Price Overridden</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Line_Total__c</fullName>
+        <description>Quantity x Unit Price. Live formula.</description>
+        <externalId>false</externalId>
+        <label>Line Total</label>
+        <formula>BLANKVALUE(Quantity__c,0)*BLANKVALUE(Unit_Price__c,0)</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Taxable__c</fullName>
+        <defaultValue>true</defaultValue>
+        <description>Snapshot from the item; feeds tax at totals time.</description>
+        <externalId>false</externalId>
+        <label>Taxable</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Stage__c</fullName>
+        <description>Proposed = added but not yet in an approved version (field estimates land here); Approved; Completed; Removed = struck after a send (kept for the printed history).</description>
+        <externalId>false</externalId>
+        <label>Stage</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Proposed</fullName>
+                    <default>true</default>
+                    <label>Proposed</label>
+                </value>
+                <value>
+                    <fullName>Approved</fullName>
+                    <default>false</default>
+                    <label>Approved</label>
+                </value>
+                <value>
+                    <fullName>Completed</fullName>
+                    <default>false</default>
+                    <label>Completed</label>
+                </value>
+                <value>
+                    <fullName>Removed</fullName>
+                    <default>false</default>
+                    <label>Removed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Sort_Order__c</fullName>
+        <description>Grid order.</description>
+        <externalId>false</externalId>
+        <label>Sort Order</label>
+        <precision>5</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Show_Unit_Price__c</fullName>
+        <defaultValue>true</defaultValue>
+        <description>Per-line display toggle; default from tenant config.</description>
+        <externalId>false</externalId>
+        <label>Show Unit Price</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Source__c</fullName>
+        <externalId>false</externalId>
+        <label>Source</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Price Book</fullName>
+                    <default>true</default>
+                    <label>Price Book</label>
+                </value>
+                <value>
+                    <fullName>Template</fullName>
+                    <default>false</default>
+                    <label>Template</label>
+                </value>
+                <value>
+                    <fullName>Ad hoc</fullName>
+                    <default>false</default>
+                    <label>Ad hoc</label>
+                </value>
+                <value>
+                    <fullName>Field</fullName>
+                    <default>false</default>
+                    <label>Field</label>
+                </value>
+                <value>
+                    <fullName>Migration</fullName>
+                    <default>false</default>
+                    <label>Migration</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Added_By_Service_Call__c</fullName>
+        <description>Set for field-added lines: which visit the tech was on.</description>
+        <externalId>false</externalId>
+        <label>Added By Service Call</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Call__c</referenceTo>
+        <relationshipLabel>Added Service Lines</relationshipLabel>
+        <relationshipName>Added_Service_Lines</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <label>Service Line</label>
+    <nameField>
+        <displayFormat>SL-{00000}</displayFormat>
+        <label>Line Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Lines</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

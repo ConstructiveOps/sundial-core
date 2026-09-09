@@ -1,0 +1,486 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Visit__c - the Service Call (UI label): one tech x one scheduled
+  appointment, with its own clock and GPS (D-065.2 - multi-tech jobs are parallel
+  records; D-027 dual-purpose design carries install visit types too).
+  The four parent lookups are deliberately NOT required here - the exactly-one rule
+  matching Visit_Type__c is enforced by a validation rule / Lambda guard added
+  separately, per the schema doc. Time fields are Lambda-written (the PWA has no
+  time-edit surface; corrections append to Clock_Intervals__c with actor + reason).
+  NOTE: the schema draft's Visit_Number__c is realized as the standard auto-number
+  Name field (SC-{00000}) - one number, not two. Draft's Notes__c / Work_Performed__c
+  are superseded by the append-only Work_Notes__c / Private_Notes__c pair (D-065.8).
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Visit_Type__c</fullName>
+        <description>Drives which parent lookup must be populated and which PWA tab renders the visit (D-027).</description>
+        <externalId>false</externalId>
+        <label>Visit Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Service</fullName>
+                    <default>true</default>
+                    <label>Service</label>
+                </value>
+                <value>
+                    <fullName>Solar Install</fullName>
+                    <default>false</default>
+                    <label>Solar Install</label>
+                </value>
+                <value>
+                    <fullName>Roofing Install</fullName>
+                    <default>false</default>
+                    <label>Roofing Install</label>
+                </value>
+                <value>
+                    <fullName>Commercial Install</fullName>
+                    <default>false</default>
+                    <label>Commercial Install</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Sundial_Service__c</fullName>
+        <description>Parent ticket - required (via validation) when Visit Type = Service.</description>
+        <externalId>false</externalId>
+        <label>Service Ticket</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service__c</referenceTo>
+        <relationshipLabel>Service Calls</relationshipLabel>
+        <relationshipName>Service_Calls</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Sundial_Solar__c</fullName>
+        <description>Parent - required (via validation) when Visit Type = Solar Install.</description>
+        <externalId>false</externalId>
+        <label>Solar Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Solar__c</referenceTo>
+        <relationshipLabel>Install Visits</relationshipLabel>
+        <relationshipName>Install_Visits</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Sundial_Roofing__c</fullName>
+        <description>Parent - required (via validation) when Visit Type = Roofing Install.</description>
+        <externalId>false</externalId>
+        <label>Roofing Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Roofing__c</referenceTo>
+        <relationshipLabel>Install Visits</relationshipLabel>
+        <relationshipName>Install_Visits</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Sundial_Commercial__c</fullName>
+        <description>Parent - required (via validation) when Visit Type = Commercial Install. REMOVE from package.xml if Sundial_Commercial__c does not exist in the org.</description>
+        <externalId>false</externalId>
+        <label>Commercial Project</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Commercial__c</referenceTo>
+        <relationshipLabel>Install Visits</relationshipLabel>
+        <relationshipName>Install_Visits</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Tech__c</fullName>
+        <description>ONE tech per Service Call. A multi-tech job is parallel records under the same ticket, each with its own clock (D-065.2).</description>
+        <externalId>false</externalId>
+        <label>Tech</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_User__c</referenceTo>
+        <relationshipLabel>Service Calls</relationshipLabel>
+        <relationshipName>Service_Calls</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Visit_Sub_Type__c</fullName>
+        <description>On-Site/Remote/Office Work for service; In-Field/Travel/Prep for installs.</description>
+        <externalId>false</externalId>
+        <label>Visit Sub Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>On-Site</fullName>
+                    <default>false</default>
+                    <label>On-Site</label>
+                </value>
+                <value>
+                    <fullName>Remote</fullName>
+                    <default>false</default>
+                    <label>Remote</label>
+                </value>
+                <value>
+                    <fullName>Office Work</fullName>
+                    <default>false</default>
+                    <label>Office Work</label>
+                </value>
+                <value>
+                    <fullName>In-Field</fullName>
+                    <default>false</default>
+                    <label>In-Field</label>
+                </value>
+                <value>
+                    <fullName>Travel</fullName>
+                    <default>false</default>
+                    <label>Travel</label>
+                </value>
+                <value>
+                    <fullName>Prep</fullName>
+                    <default>false</default>
+                    <label>Prep</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035).</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Calls</relationshipLabel>
+        <relationshipName>Sundial_Service_Calls</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Scheduled_Start__c</fullName>
+        <description>Set by the dispatch board (block drop / resize).</description>
+        <externalId>false</externalId>
+        <label>Scheduled Start</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Scheduled_End__c</fullName>
+        <description>Block length defaults from the ticket's service lines / service-type default.</description>
+        <externalId>false</externalId>
+        <label>Scheduled End</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <description>En Route = 'on my way' (texts the customer when notify is on; ends the PREVIOUS visit's clock and starts drive time on this one - matches how techs are paid).</description>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Scheduled</fullName>
+                    <default>true</default>
+                    <label>Scheduled</label>
+                </value>
+                <value>
+                    <fullName>En Route</fullName>
+                    <default>false</default>
+                    <label>En Route</label>
+                </value>
+                <value>
+                    <fullName>In Progress</fullName>
+                    <default>false</default>
+                    <label>In Progress</label>
+                </value>
+                <value>
+                    <fullName>Complete</fullName>
+                    <default>false</default>
+                    <label>Complete</label>
+                </value>
+                <value>
+                    <fullName>Cancelled</fullName>
+                    <default>false</default>
+                    <label>Cancelled</label>
+                </value>
+                <value>
+                    <fullName>No-Show</fullName>
+                    <default>false</default>
+                    <label>No-Show</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Actual_Start__c</fullName>
+        <description>FIRST clock-in (Lambda-set from the field sync; device tap-time, not sync-time).</description>
+        <externalId>false</externalId>
+        <label>Actual Start</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Actual_End__c</fullName>
+        <description>LAST clock-out. Re-clock-in on the same visit reopens it (interval appends).</description>
+        <externalId>false</externalId>
+        <label>Actual End</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Duration_Minutes__c</fullName>
+        <description>Sum of the intervals in Clock Intervals - NOT end minus start (lunch/parts-run gaps excluded). Feeds payroll AND billing.</description>
+        <externalId>false</externalId>
+        <label>Duration Minutes</label>
+        <precision>9</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Clock_Intervals__c</fullName>
+        <description>Append-only JSON interval log, Lambda-written: [{in, out, in_gps, out_gps, source}]. Office/manager corrections APPEND with actor + reason; the PWA has no time-edit surface (D-065.10).</description>
+        <externalId>false</externalId>
+        <label>Clock Intervals</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Clock_In_Latitude__c</fullName>
+        <description>GPS at first clock-in (null when no fix - never blocks the clock event).</description>
+        <externalId>false</externalId>
+        <label>Clock In Latitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Clock_In_Longitude__c</fullName>
+        <externalId>false</externalId>
+        <label>Clock In Longitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Clock_Out_Latitude__c</fullName>
+        <description>GPS at last clock-out.</description>
+        <externalId>false</externalId>
+        <label>Clock Out Latitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Clock_Out_Longitude__c</fullName>
+        <externalId>false</externalId>
+        <label>Clock Out Longitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Geofence_Verified__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>All clock events within the per-tenant radius of the service address OR the shop. TAG, not blocker - out-of-fence events are flagged, never refused (D-065.10).</description>
+        <externalId>false</externalId>
+        <label>Geofence Verified</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Type__c</fullName>
+        <description>OVERRIDE of the ticket's billing default for this visit (blank = inherit). Visit 1 to the customer, visit 2 to the manufacturer (RMA) is a real pattern.</description>
+        <externalId>false</externalId>
+        <label>Bill To Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Customer</fullName>
+                    <default>false</default>
+                    <label>Customer</label>
+                </value>
+                <value>
+                    <fullName>Internal Warranty</fullName>
+                    <default>false</default>
+                    <label>Internal Warranty</label>
+                </value>
+                <value>
+                    <fullName>Manufacturer</fullName>
+                    <default>false</default>
+                    <label>Manufacturer</label>
+                </value>
+                <value>
+                    <fullName>Leasing Partner</fullName>
+                    <default>false</default>
+                    <label>Leasing Partner</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Name__c</fullName>
+        <description>Override payer name for this visit.</description>
+        <externalId>false</externalId>
+        <label>Bill To Name</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Billing_Reference__c</fullName>
+        <description>Override partner PO/WO number for this visit's invoice.</description>
+        <externalId>false</externalId>
+        <label>Billing Reference</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Work_Notes__c</fullName>
+        <description>Append-only entries auto-stamped user + datetime (Welcome-Call log format; D-065.8). Customer-facing candidates - AI-summarized onto the invoice; authors edit their OWN entries only.</description>
+        <externalId>false</externalId>
+        <label>Work Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>10</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Private_Notes__c</fullName>
+        <description>Internal-only entries, same append-only stamped format. Never merges anywhere customer-visible.</description>
+        <externalId>false</externalId>
+        <label>Private Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>10</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Install_Milestones_Completed__c</fullName>
+        <description>Install visit types only; hidden on Service.</description>
+        <externalId>false</externalId>
+        <label>Install Milestones Completed</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Checklist_Template_Key__c</fullName>
+        <description>Per-tenant config key assigned at scheduling (e.g. inverter-rma). Templates live in tenant config, not Salesforce objects (D-065.9).</description>
+        <externalId>false</externalId>
+        <label>Checklist Template Key</label>
+        <length>80</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Checklist_State__c</fullName>
+        <description>Item completion snapshot (JSON). Required items gate Complete and gate En Route to the next visit.</description>
+        <externalId>false</externalId>
+        <label>Checklist State</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Photos_Count__c</fullName>
+        <description>Count of files at SUNDIAL/{visitId}/ (metadata-derived).</description>
+        <externalId>false</externalId>
+        <label>Photos Count</label>
+        <precision>4</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Cancel_Reason__c</fullName>
+        <description>Required (in code) when the dispatch board cancels a visit.</description>
+        <externalId>false</externalId>
+        <label>Cancel Reason</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Call</label>
+    <nameField>
+        <displayFormat>SC-{00000}</displayFormat>
+        <label>Call Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Calls</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

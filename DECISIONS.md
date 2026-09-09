@@ -3165,3 +3165,19 @@ The 2026-09-09 meeting settled three things the D-065 design had guessed differe
 - `docs/service-workflows.md` §2/§6/§7 and the two field workbooks are superseded where they conflict; the workbooks are regenerated from `docs/service-data-model.md`.
 - Migration doubles record volume (each HCP job → estimate + job + lines + invoice + payments); acceptable.
 - Get from Harmon before the price-book build: category list + item codes (Beth, from the HCP export), labor-vs-material tax treatment (Heather), the quick-create default template (Paige), estimate validity days, deposit threshold, any manager sign-off rule.
+
+### D-072 amendment (2026-09-09): the customer is created inside the project-creating popup, and tagged
+
+Tim, same day. **New Estimate / New Job** (and the future New Roofing Project / New Commercial
+Project) open one popup that either selects an existing `Sundial_Customer__c` or creates one
+from the basics (first, last, address, email, phone) in the same request — no detour through
+the Sales module. `Requested_Project_Types__c` (existing multipicklist) is set silently:
+`Service` on a new customer, `Service` union-added on an existing one; Roofing / Commercial do
+the same with their own value when built. This makes the field the product-history tag for
+sorting customers/leads/opportunities. Guardrails: soft duplicate check (email / phone /
+street+zip → 409 with candidates, `confirmNew` to override); the create reuses the
+`POST /sf/customer` validation path; a partial failure reports the created customer id rather
+than leaving a silent orphan. Nothing in the deploy package changes; the verify script now
+checks the "Service" picklist value exists. Open: Stage/Status/Lead_Source defaults for a
+service-originated customer (Tim). Detail: `docs/service-data-model.md` §3.1a.
+

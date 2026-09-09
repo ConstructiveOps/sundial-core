@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Invoice__c - the billing record, ONE per job (D-072.6; reissue after void =
+  '-2'). Created from the estimate's lines at Ready to Bill and FROZEN. Customers receive a
+  receipt + job report; partners receive this document (eventually generated in Acumatica -
+  D-065 amendment 3). Name is TEXT: the Lambda assigns the job number. No Stripe fields here -
+  money events are Sundial_Service_Payment__c rows.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Service_Job__c</fullName>
+        <description>Parent job (required).</description>
+        <externalId>false</externalId>
+        <label>Service Job</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Job__c</referenceTo>
+        <relationshipLabel>Service Invoices</relationshipLabel>
+        <relationshipName>Service_Invoices</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Invoices</relationshipLabel>
+        <relationshipName>Sundial_Service_Invoices</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Draft</fullName>
+                    <default>true</default>
+                    <label>Draft</label>
+                </value>
+                <value>
+                    <fullName>Issued</fullName>
+                    <default>false</default>
+                    <label>Issued</label>
+                </value>
+                <value>
+                    <fullName>Sent</fullName>
+                    <default>false</default>
+                    <label>Sent</label>
+                </value>
+                <value>
+                    <fullName>Partially Paid</fullName>
+                    <default>false</default>
+                    <label>Partially Paid</label>
+                </value>
+                <value>
+                    <fullName>Paid</fullName>
+                    <default>false</default>
+                    <label>Paid</label>
+                </value>
+                <value>
+                    <fullName>Void</fullName>
+                    <default>false</default>
+                    <label>Void</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Type__c</fullName>
+        <description>Frozen copy of the job's Bill To at issue.</description>
+        <externalId>false</externalId>
+        <label>Bill To Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Customer</fullName>
+                    <default>false</default>
+                    <label>Customer</label>
+                </value>
+                <value>
+                    <fullName>Internal Warranty</fullName>
+                    <default>false</default>
+                    <label>Internal Warranty</label>
+                </value>
+                <value>
+                    <fullName>Manufacturer</fullName>
+                    <default>false</default>
+                    <label>Manufacturer</label>
+                </value>
+                <value>
+                    <fullName>Leasing Partner</fullName>
+                    <default>false</default>
+                    <label>Leasing Partner</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Bill_To_Name__c</fullName>
+        <externalId>false</externalId>
+        <label>Bill To Name</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Billing_Reference__c</fullName>
+        <description>Partner PO/WO number, printed and searchable.</description>
+        <externalId>true</externalId>
+        <label>Billing Reference</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Subtotal__c</fullName>
+        <externalId>false</externalId>
+        <label>Subtotal</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Discount_Amount__c</fullName>
+        <externalId>false</externalId>
+        <label>Discount Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Tax_Rate__c</fullName>
+        <externalId>false</externalId>
+        <label>Tax Rate</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>3</scale>
+        <trackTrending>false</trackTrending>
+        <type>Percent</type>
+    </fields>
+    <fields>
+        <fullName>Tax_Amount__c</fullName>
+        <externalId>false</externalId>
+        <label>Tax Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Total__c</fullName>
+        <externalId>false</externalId>
+        <label>Total</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Paid_Amount__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Sum of Succeeded Service Payments (Payment - Refund); roll-up Flow.</description>
+        <externalId>false</externalId>
+        <label>Paid Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Balance__c</fullName>
+        <description>Total - Paid.</description>
+        <externalId>false</externalId>
+        <label>Balance</label>
+        <formula>BLANKVALUE(Total__c,0)-BLANKVALUE(Paid_Amount__c,0)</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Issued_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Issued At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Sent_At__c</fullName>
+        <description>Stamped on send / partner download.</description>
+        <externalId>false</externalId>
+        <label>Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Due_Date__c</fullName>
+        <description>Partner terms (tenant config); blank for card-on-file jobs.</description>
+        <externalId>false</externalId>
+        <label>Due Date</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Paid_At__c</fullName>
+        <description>When Balance reached zero.</description>
+        <externalId>false</externalId>
+        <label>Paid At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>PDF_S3_Key__c</fullName>
+        <description>SUNDIAL/{jobId}/{invoiceNumber}.pdf - appears in XFiles Pro + Dropbox automatically.</description>
+        <externalId>false</externalId>
+        <label>PDF S3 Key</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Acumatica_Ref__c</fullName>
+        <description>AR reference once the invoice exists in Acumatica (bridge: hand-entered; later: pushed).</description>
+        <externalId>true</externalId>
+        <label>Acumatica Ref</label>
+        <length>50</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Acumatica_Entered_At__c</fullName>
+        <description>Bridge-period stamp: Heather's weekly digest = invoices where this is null.</description>
+        <externalId>false</externalId>
+        <label>Acumatica Entered At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Voided_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Voided At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Void_Reason__c</fullName>
+        <externalId>false</externalId>
+        <label>Void Reason</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Invoice</label>
+    <nameField>
+        <label>Invoice Number</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Service Invoices</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

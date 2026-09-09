@@ -49,6 +49,55 @@ off the LIVE tenant first (GETs only). Suite 809 green.
 - [ ] **HARMON (data): five RSDC projects Salesforce does not know about** — R261075 (Gary Muehlenkamp), R261087 (Andre'a Clark), R261092 (Melvin Orantes Magana), R261094 (Elijah Johnson), R261095 (Brenda Klick). Four of the five people exist as customers with a null `Acumatica_Project_ID__c`; pushing one of those today would create a SECOND Acumatica project for the same job.
 - [ ] **Consider: uniqueness on `Acumatica_Project_ID__c`.** A duplicate is what made a correct template selection look like a bug for a fortnight. Cheap to add, and it would have prevented the whole investigation.
 
+## Phase 2 — data model v2 (D-072, 2026-09-09) — REWORK Stage 1 BEFORE deploying it
+
+Tim's post-9/9 structure is recorded in `docs/service-data-model.md` + D-072: estimates are records that can pre-date a job, every job has exactly one, lines hang off the estimate and price from a versioned price book, one job = one payer, plus a Payment object. **The Stage 1 package below must NOT be deployed as-is** — it is reworked to the v2 model first (renames are free only while nothing is in the org).
+
+- [ ] **TIM: confirm** (a) the Stage 1 package was never deployed (verify script shows four "NOT in the org"); (b) one spare field on `Sundial_Customer__c` for `Stripe_Customer_Id__c`; (c) the [Recommended] items in `service-data-model.md` §10 stand (lines on the estimate; Payment object; templates as estimates; split sell prices; money math in the Lambda; photo metadata in Supabase).
+- [ ] **Rework `salesforce/service-objects/`** to seven objects: rename `Sundial_Service__c`→`Sundial_Service_Job__c` (drop `Estimate Sent`/`Estimate Approved` statuses; add `Estimate__c` required lookup; Bill-To stays, Stripe fields leave), `Sundial_Service_Visit__c`→`Sundial_Service_Call__c` (drop `Bill_To_Override__c`); add `Sundial_Estimate__c`, `Sundial_Price_Book_Item__c`, `Sundial_Service_Payment__c`; re-parent `Sundial_Service_Line__c` to the estimate + snapshot/stage fields; slim `Sundial_Service_Invoice__c` (frozen amounts, `Acumatica_Entered_At__c`, no Stripe fields). Permission set: no delete on price-book items; delete only on Line. Update `README.md` + `verify-service-schema.mjs` (manifest is parsed from the package, so mostly free).
+- [ ] **Regenerate the two field workbooks** from `service-data-model.md` (plus new sheets: Estimate, Price Book Item, Payment) so the portal generator has the v2 source.
+- [ ] **Rework cache SQL + registries**: 7 tables (`sundial_estimate`, `sundial_service_job`, `sundial_service_call`, `sundial_price_book_item`, `sundial_service_line`, `sundial_service_invoice`, `sundial_service_payment`); allowlist keys `estimate`/`job`/`servicecall`/`pricebookitem`/`serviceline`/`serviceinvoice`/`servicepayment` in `sundial-sf-query` (PARENT_FILTER: estimate/job→customer, serviceline→estimate, servicecall/invoice/payment→job; SEARCH_FIELDS on job incl. `billing_reference`, on price book item `item_code`+name), `sundial-sf-update`, `sundial-cache-sync`, `lib/access.js` + `access.test.js` matrix (replace the four service columns with seven; price book item editable by Manager+, delete never).
+- [ ] **New Lambda `sundial-service-estimate`**: line CRUD with item snapshot, totals math (§6), send (version++, PDF, `Version_Log__c` append, hosted-page token), accept/decline, *Create Job*, quick-create (estimate + job), price-book *Update* clone + one-active-per-code guard + reference-count edit lock.
+- [ ] Get from Harmon (feeds the price-book build): HCP price-book export with categories → item codes (Beth); labor-vs-material tax treatment (Heather); quick-create default template lines (Paige); estimate validity days; deposit threshold; any manager sign-off rule.
+- [ ] Then the original deploy sequence below (verify → Check Only, now **8/8**: 7 objects + permission set → deploy → assign → SQL → Lambdas).
+
+### Stage 1 as originally built (2026-09-02) — superseded in part by the rework above
+
+All built this session; **nothing deployed yet** — deploy order is in `salesforce/service-objects/README.md`.
+
+- [x] **`salesforce/service-objects/` deploy package** — 4 new objects (`Sundial_Service__c` SVC-#, `Sundial_Service_Visit__c` SC-# "Service Call", `Sundial_Service_Line__c` SL-#, `Sundial_Service_Invoice__c` Text name), 97 fields, + `Sundial_Service_Objects` permission set (90 FLS grants; required fields carry none by SF rule; delete only on Line). Bill-To value is tenant-neutral **"Internal Warranty"**, never "Harmon Warranty". Visit parent lookups deliberately optional in metadata (validation rule ships with workflows build, so migration can bulk-load). XML validated.
+- [x] **`scripts/verify-service-schema.mjs`** — parses the package as its own manifest; pre-deploy: which objects exist + whether `Sundial_Commercial__c` resolves (absent ⇒ drop the 2 commercial lookups first); post-deploy: missing fields, type mismatches, integration-user FLS. Read-only.
+- [x] **4 cache tables** (`sql/sundial_service*.sql`) — roofing-cache pattern, 93 columns + 24 indexes total; **applied cleanly against a scratch Postgres 16** (syntax proven). Board-window + My-Queue + mark-paid-grid + `billing_reference` search indexes included.
+- [x] **Registry code additions** — `service`/`visit`/`serviceline`/`serviceinvoice` in: `sundial-sf-query` (OBJECT_ALLOWLIST, CREATED_DATE_SOURCE, PARENT_FILTER — service→customer, children→ticket; SEARCH_FIELDS incl. `billing_reference`), `sundial-sf-update` (allowlist), `sundial-cache-sync` (both), `lib/access.js` OBJECT_ACCESS (salesScopes **false** — office module; Technician scope comes deliberately with the PWA). All inert until objects + tables exist.
+- [x] **`lib/access.test.js` matrix extended** (4 new columns × 6 levels; "service" swapped out of the unknown-keys list) — **144/144 green** run on-device.
+- [ ] **TIM: run `npm test` on Windows before deploying.** In the Linux VM, 15 test FILES fail at import with `does not provide an export named …` — **pre-existing at clean HEAD in the VM** (its Node rejects the `exports:` mock.module option shape; your Windows Node accepts it), NOT from this change. Expect green on Windows; if not, stop and say so.
+- [ ] **TIM: housekeeping** — `git worktree prune` (a throwaway `wt` worktree stub is left registered in `.git/worktrees` from the clean-HEAD test; its files were VM-local and are gone). Then review + commit this session's files on a feature branch (e.g. `feature/service-objects-foundation`).
+- [ ] **TIM: deploy sequence** (README): `node scripts/verify-service-schema.mjs` → fix commercial lookups if flagged → zip contents → Workbench Check Only (expect 5/5) → deploy → assign permission set to integration user → re-run verify → apply the 4 SQL files in Supabase → `.\deploy.ps1 sundial-sf-query sundial-sf-update sundial-cache-sync` (access.js rides along in each bundle).
+- [ ] Next build steps (after deploy verifies): generator run for the portal detail configs from the field workbooks (harmon-crm), then `sundial-service-board` Lambda (dispatch read), then intake/ticket lifecycle routes.
+
+## Phase 2 — Service Operations design pass (2026-09-01)
+
+Design deliverables complete; see `docs/service-workflows.md`, `docs/dispatch-board-design.md`, `docs/pwa-architecture.md`, `docs/phase2-build-sequence.md`, field workbooks `docs/Sundial_Service_Fields_by_Section.xlsx` + `docs/Sundial_Service_Visit_Fields_by_Section.xlsx`, requirements in `docs/service-discovery-2026-08.md`, decisions in **D-065**.
+
+- [x] Discovery digest from the three HCP scoping transcripts (Ben; Beth/Paige; Larry), committed as `docs/service-discovery-2026-08.md`.
+- [x] `docs/service-workflows.md` — lifecycle/state model, four intake paths, triage, dispatch contract, multi-payer billing, field-work rules, per-tenant config inventory.
+- [x] **D-065** appended (ten design calls: no Asset, parallel visits, Flow roll-ups, estimate-as-states + `Sundial_Service_Line__c`, `Sundial_Service_Invoice__c` + Bill-To per visit, SetupIntent payments + AR-after-go-live, field estimates not collections, stamped append-only notes, checklists as config, manager-only time edits).
+- [x] Field workbooks for the generator (ticket + line + invoice sheets; visit). Blue = schema-draft carryover (**verify against a live describe before packaging** — service objects not confirmed in org), yellow = system-maintained.
+- [x] `docs/dispatch-board-design.md` — FullCalendar Premium data contract, `sundial-service-board` API, optimistic 409 concurrency, cache/Realtime plan, honest HCP parity table.
+- [x] `docs/pwa-architecture.md` — day pack + outbox/command sync with idempotency table, clock/GPS/geofence (tag not blocker), conflict policy, failure-mode catalog.
+- [x] `docs/phase2-build-sequence.md` — 5 stages, gates G1–G5 (G2 = Beth schedules a real week on the board — THE go/no-go), one-week whole-team cutover, HCP read-only 30 days.
+- [x] Lambda concurrency quota verified **1000** in us-west-1 (G2b root cause closed).
+- [~] **TIM (Stage 0 — start now, lead times):** buy FullCalendar Premium; get Harmon Stripe restricted keys + webhook secret from Julie → Secrets Manager; **provision Twilio + A2P 10DLC registration** (longest lead — Paige sending EIN/legal name/address 9/1; new 623 number approved); XFiles Pro config for `Sundial_Service__c` + `Sundial_Service_Visit__c` (`SUNDIAL/{record_id}/`).
+- [~] **TIM/MATT (Stage 0):** HCP export inventory — **UNBLOCKED 9/1**: Ben's login confirmed top-admin; customers/jobs CSV test exports running; price book via API query; still to inventory: invoices + **attachments**.
+- [x] **Punchlist meeting run 2026-09-01 (Paige + Beth)** — most board/billing answers locked (notify default OFF; reminders 3d/5d→NSA drip; invoice#=ticket#; warranty informational; price book as-is w/ Beth cleanup pass; AZ statewide tax; intake mailbox `solarservice@harmonelectric.net`; SiteCapture via Zapier). See `docs/service-discovery-2026-08.md` addendum + **D-065 amendment 2026-09-01** + updated `docs/service-meeting-punchlist.md`.
+- [ ] **NEW — Workstream S: Service Club e-commerce, PULLED FORWARD** (parallel track, can ship before the module): Stripe subscription purchase pages + team ping + webhook to SolarFacts' Zapier hook (reverse on cancel) + buy-a-truck-roll + line-kind-scoped plan discounts + plans report. See `docs/phase2-build-sequence.md` Workstream S. Deps: Stripe keys, SolarFacts intro (Paige).
+- [ ] **Chase list (Harmon):** Beth — partner/bill-to list, SiteCapture template mapping, sample partner invoices + work-order emails; Paige — EIN/legal/address, SolarFacts programmer intro; Ryan (IT) — forward solarservice@ mailbox when intake is ready. Still open: Larry's PWA items (gate/checklists/geofence), Julie/Heather items, gate dates.
+- [ ] Build the Salesforce deploy package from the two field workbooks (4 objects + FLS) after a live describe confirms what already exists.
+- [ ] Allowlist + cache tables + `PARENT_FILTER` for `service` / `visit` / `serviceline` / `serviceinvoice` (`sql/` files + registry entries).
+- [ ] Geocoding provider decision (AWS Location Service assumed) — needed for geofence (Stage 3), feeds travel-time hints later.
+- [ ] `docs/migration.md` after the export inventory lands.
+- [ ] When the Service module lands: `RECORD_PATHS` entry in `sundial-comment-notify` (already tracked in the @-mention section) + Dropbox-sync `/Sundial/Service/...` naming check.
+
 ## Portal testing hygiene (2026-08-24)
 
 - [x] **Designated portal test record created**: `Sundial_Customer__c`
@@ -969,6 +1018,22 @@ lands only after its server change is verified in prod. Branch per repo per phas
       `project_name` makes the cards render but decides nothing about the other 168 fields.
       Roofing needs real role columns in its workbook — a per-field review like Solar's —
       and that is a sheet exercise, not a code change. Do it BEFORE granting the module.
+
+- [x] **NS Adder Price fields granted to sales roles (2026-09-02).**
+      `NS_Adder_1..5_Price__c` added to `read` + `listColumns` for Sales Rep and Sales
+      Dealer on `customer` and `solar`. Regenerated from the updated workbooks; diff
+      verified field-by-field as exactly those ten entries, zero removals, roofing
+      untouched, all `edit` sets unchanged. The Markup / Material Cost / Labor Hours
+      inputs stay hidden for both roles — asserted 0 in either read set, not assumed.
+      Branch `feat/ns-adder-price-manifest`.
+  - [ ] **DEPLOY AFTER MERGE — the manifest is bundled INTO the Lambda, so a merge alone
+        changes nothing in production:**
+        `.deploy.ps1 sundial-sf-query` and `.deploy.ps1 sundial-sf-update`.
+        Those two and only those two: established by bundling every Lambda and grepping
+        for the new field name, not by reading imports.
+        Then `node scripts/verify-access-matrix.mjs` and
+        `node scripts/verify-field-manifest-live.mjs` (34/34; it is 32/34 until deployed,
+        failing exactly on `manifestVersion matches the deployed manifest`).
 
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that

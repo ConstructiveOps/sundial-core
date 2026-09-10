@@ -63,7 +63,7 @@ const FORWARD_TIMEOUT_MS = 8000;
 // Whitespace normalisation stays, and is now load-bearing rather than cosmetic: the
 // entry format is line-oriented and parsed back apart when trimming, so a newline
 // inside a call summary would corrupt the block structure.
-const ENTRY_MARKER = "── ";
+export const ENTRY_MARKER = "── ";
 
 // ---------------------------------------------------------------------------
 // Signature verification
@@ -384,6 +384,12 @@ function inVoicemail(call) {
 }
 
 /**
+ * What the `Recording:` line says when the call HAD audio but no archived object of
+ * ours has been confirmed. Deliberately names where the still-live URL actually is.
+ */
+export const RECORDING_UNAVAILABLE = "unavailable — see ledger/CloudWatch";
+
+/**
  * Build one result log ENTRY — a multi-line block, newest-first in the field.
  *
  *   ── 2026-08-19 14:32 MST · Attempt 2 · Result: Verified - Exceptions · call_id=…
@@ -443,9 +449,27 @@ export function buildResultLogEntry({
       CONFIRMATION_FLAGS.map(([key, label]) => `${label}=${analysis?.[key] === true ? "Y" : "N"}`).join(" ")
   );
 
-  // The Retell URL EXPIRES; the S3 key does not. Prefer the key and fall back to the
-  // URL so an entry written when archival failed still points somewhere.
-  const where = recordingKey || full(call?.recording_url) || "none";
+  // ONLY A CONFIRMED KEY IS EVER NAMED HERE.
+  //
+  // This line is the one durable pointer to the audio, read months later by someone
+  // deciding whether a customer really agreed to a contract term. A key that turns
+  // out not to exist is worse than no key at all: it reads as "the recording is
+  // filed" and sends the reader looking for a file nobody will find. Callers pass
+  // `recordingKey` only after the object has been confirmed present.
+  //
+  // The old fallback — printing the raw `recording_url` — is gone with it. That URL
+  // EXPIRES, so it was a pointer with a shelf life pretending to be a permanent one.
+  // It is still logged to CloudWatch on failure and still rides in the Zapier ledger
+  // row, which is exactly where this line now sends the reader.
+  //
+  // "none" and "unavailable" say different things and must not be merged: "none"
+  // means the call never produced audio (a no-answer), "unavailable" means it did and
+  // we do not have it.
+  const where = recordingKey
+    ? recordingKey
+    : full(call?.recording_url)
+      ? RECORDING_UNAVAILABLE
+      : "none";
   const duration = durationMmSs(call?.duration_ms);
   const tail = [`Recording: ${where}`];
   if (duration) tail.push(`Duration: ${duration}`);
@@ -598,13 +622,17 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
     now,
   });
 
+  // `verified`, not `ok`: a PUT that succeeded but could not be confirmed leaves the
+  // bytes in an unknown state, and an unknown state does not get named in the log.
+  const recordingKey = recording.ok && recording.verified ? (recording.key ?? null) : null;
+
   const entry = buildResultLogEntry({
     stamp: phoenixStamp(now),
     origin: `Attempt ${attemptNo}`,
     status,
     analysis,
     call,
-    recordingKey: recording.ok ? recording.key : null,
+    recordingKey,
   });
   // Capacity from the describe, not a constant — the field has been resized once.
   const nextLog = prependLogEntry(existingLog, entry, schema.fieldLength("welcomeCallLog"));
@@ -621,7 +649,7 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
         call_id: callId,
         outcome,
         recording_url: call?.recording_url ?? null,
-        recording_key: recording.ok ? recording.key ?? null : null,
+        recording_key: recordingKey,
         call_summary: call?.call_analysis?.call_summary ?? null,
       },
     });
@@ -637,7 +665,7 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
         forwarded: forwarded.ok,
         salesforce: "updated",
         welcomeCallStatus: status,
-        recording: recording.ok ? recording.key ?? null : null,
+        recording: recordingKey,
       },
     };
   } catch (e) {

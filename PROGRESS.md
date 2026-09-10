@@ -1,5 +1,105 @@
 # Sundial — Progress Log
 
+## 2026-09-10 — Welcome Call: orphan-match self-heals a missing recording
+
+Branch `feature/welcome-call-recording-heal` off `master`. `lambdas/sundial-welcome-call`
+(`recording.js`, `webhook.js`, `orphanMatch.js`). **Built, tested, DEPLOYED, and the
+affected customer repaired.** Suite **816 green** (welcome-call 113, was 101).
+
+### The bug was not where it looked
+
+Reported as: the recording for `a1P7y00000B4iaPEAR` /
+`call_a15c774e989eb4e8873b58de7d1` was never archived on call night, and the
+orphan-match backfill then logged a key for an object that does not exist.
+
+**CloudWatch says nothing in this Lambda failed.** The evidence, in order:
+
+| When (UTC) | What |
+|---|---|
+| 09-10 03:45:29 | webhook parked the orphan — `_orphan-welcome-calls/call_a15c….mp3`, **7,317,870 bytes** |
+| 09-10 18:12:50 | sweep copied it to `SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_a15c….mp3` |
+| 09-10 18:12:52 | `backfill=backfilled, status=Verified, holdingDeleted=true` — a correct, complete run |
+| 09-10 **18:13:34 → 18:13:56** | **`sundial-delete-file` fired ~9 times, ~2 s apart** |
+| 09-10 **18:13:56** | **delete marker on the recording** — 66 seconds after it was filed |
+| 09-10 18:14:11–17 | 10 fresh PDFs uploaded to the same prefix |
+
+Someone cleared that customer's Files tab in the portal and re-uploaded a document
+set. The recording went with it. The download never failed; the key the log named was
+true when it was written and stopped being true a minute later.
+
+The bucket has **versioning enabled**, so the original bytes were never actually lost —
+they sat as a non-current version under a delete marker the whole time.
+
+**What was genuinely broken is the recovery, not the capture.** The endpoint's only
+repair path was the holding object it deletes on success, so once that was gone a
+second sweep could only 404 — forever. That is the hole this closes.
+
+### Three changes
+
+1. **orphan-match repairs instead of 404ing.** With neither the holding object nor a
+   destination present, it re-reads the call from Retell — which mints a **fresh
+   `recording_url`**, so this works long after the webhook's original expired — and
+   uploads straight to the destination key. The key is rebuilt from the **call's own
+   `start_timestamp`**, not `now()`, so a repair lands on the name the log already
+   claims instead of filing one conversation twice. One Retell read serves both the
+   heal and the backfill.
+
+2. **No log line ever names an unverified key.** Every `Recording:` key is now
+   HEAD-confirmed before it is written, and an unconfirmed copy keeps its holding
+   object rather than deleting the only other copy. With nothing confirmed the line
+   reads `unavailable — see ledger/CloudWatch`. That **replaces the old fallback of
+   printing the raw `recording_url`** — which expires, making it a dead pointer dressed
+   up as a permanent one. `none` still means the call produced no audio; the two facts
+   are never merged.
+
+3. **Idempotency is file-aware.** The "log already has a `Result:` line for this
+   `call_id`" guard used to end the whole invocation — precisely what made this
+   customer unrepairable. A repeat run now skips only the status and log writes and
+   still checks for the recording, healing it if it is gone. A repair that produces a
+   key the log does not already name **appends a one-line correction**, never an edit:
+   entries are evidence, and rewriting one destroys the record of what the system
+   believed at the time. The correction deliberately carries no `Result:` segment, so
+   `alreadyProcessed` cannot mistake it for the result it corrects.
+
+Also: the recording download gets a **bounded retry** — 3 attempts, 3 s apart, inside a
+**30 s budget**, since Retell can answer `call_analyzed` before the CDN will serve the
+object. The budget is the real limit, not the count: the Lambda's ceiling is 60 s and
+the orphan path still owes a ledger forward and a Salesforce round-trip, so the loop
+refuses to start an attempt it cannot pay for. Three tries for a fast `403`/`404`,
+exactly one for a hung connection (a 20 s timeout has already spent the budget, and
+retrying it would trade a missing recording for a lost writeback). `400`/`401` never
+retry.
+
+### The repair
+
+One `orphan-match` invocation against the deployed fix:
+
+```
+healed: true
+key: SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_a15c774e989eb4e8873b58de7d1.mp3
+sizeBytes: 7317870      backfill: already_present
+metadata: already_registered    correction: already_correct
+```
+
+Same key the log already named, byte-for-byte the same size as the original capture, no
+duplicate Salesforce entry, no correction needed because the log was right again.
+Verified independently: `head-object` returns 7,317,870 bytes of `audio/mpeg`; the
+`sundial_file_metadata` row (category `Welcome Call Recording`, uploader
+`Wattson (system)`, `soft_deleted = false`) still stands from the original run; and the
+customer's `Welcome_Call_Log__c` holds exactly **one** entry for the call, naming that
+key.
+
+**Note for Tim:** a `…-call_a15c….wav` of identical size appeared under the same prefix
+at 18:47 (via `sundial-upload-file`), between the diagnosis and the deploy — a manual
+recovery running in parallel. It has no metadata row. The `.mp3` is the one Salesforce
+names; the `.wav` is a duplicate and safe to delete, but that call is yours.
+
+### Left open
+
+The portal Files tab can delete a compliance recording like any other document and
+nothing warns the user. The heal makes that recoverable; it does not make it hard. See
+TASKS.md.
+
 ## 2026-09-08 — Commission burden: the internal rep is burdened again (D-071)
 
 Part 3 of the September Acumatica batch, same branch `fix/sept-integration-tweaks`.

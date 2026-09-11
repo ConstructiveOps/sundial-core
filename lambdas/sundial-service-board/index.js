@@ -72,7 +72,7 @@ const PRIORITY_RANK = { Emergency: 0, High: 1, Standard: 2, Low: 3 };
 // hours the board shows, the timezone customer emails are written in.
 export const DEFAULTS = Object.freeze({
   callMinutes: 120,
-  maxWindowDays: 31,
+  maxWindowDays: 42, // the portal's month view is a fixed 6-week grid = 42 days
   timeZone: process.env.SERVICE_TIMEZONE || "America/Phoenix",
   brandName: process.env.SERVICE_BRAND_NAME || "",
 });

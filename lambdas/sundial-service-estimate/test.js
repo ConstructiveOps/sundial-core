@@ -525,6 +525,43 @@ test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versi
   assert.equal(g.body.totals.total, 540.07);
 });
 
+test("save an ad-hoc line to the price book: PATCH priceBookItemId links the line, adopts the item's split, keeps the price", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "L" });
+  const h = makeHandler(fake);
+  const e = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Replace 200A main breaker", kind: "Material", unitPrice: 340, quantity: 1 }] });
+  assert.equal(e.status, 201);
+  const line = fake.store.Sundial_Service_Line__c[0];
+  assert.equal(line.Source__c, "Ad hoc");
+  assert.equal(line.Price_Book_Item__c, undefined);
+
+  // The portal creates the item from the line, then links the line to it.
+  const item = await call(h, "POST", "/service/price-book-items", { name: "Replace 200A main breaker", itemCode: "MAT-MAIN-200", kind: "Material", materialPrice: 340, materialCost: 190, taxable: true });
+  assert.equal(item.status, 201);
+  const link = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: item.body.id });
+  assert.equal(link.status, 200);
+  assert.equal(link.body.priceBookItemId, item.body.id);
+  assert.equal(line.Price_Book_Item__c, item.body.id);
+  assert.equal(line.Source__c, "Price Book");
+  assert.equal(line.Unit_Price__c, 340, "the line's own price is kept");
+  assert.equal(line.Unit_Material_Price__c, 340);
+  assert.equal(line.Unit_Material_Cost__c, 190);
+  assert.equal(line.Taxable__c, true, "taxability comes from the item");
+  assert.equal(line.Price_Overridden__c, false, "saved at the item's own price → not an override");
+  assert.equal(line.Description__c, "Replace 200A main breaker");
+  const feed = fake.store.Sundial_Service_Line__c.length; // unchanged: no new line was created
+  assert.equal(feed, 1);
+
+  // Linking to a superseded version is refused; an unknown id too.
+  await call(h, "POST", `/service/price-book-items/${item.body.id}/new-version`, { materialPrice: 360 });
+  const stale = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: item.body.id });
+  assert.equal(stale.status, 400);
+  assert.equal(stale.body.code, "ITEM_NOT_ACTIVE");
+  const missing = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: "a0X000000000000AAA" });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.code, "ITEM_NOT_FOUND");
+});
+
 test("templates: add-template re-snapshots from the ACTIVE version, keeps quantity", async () => {
   const fake = fakeSalesforce();
   await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "T" });

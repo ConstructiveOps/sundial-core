@@ -31,10 +31,18 @@ Actual responses carry the Lambda's own CORS headers. Allowed origins:
 An allowed origin is echoed back; anything else falls back to `http://localhost:5173`,
 so an untrusted origin is never reflected.
 
+**Methods.** The `/service/*` and `/public/*` routes are wired with their own `OPTIONS`
+method to the Lambda (`scripts/wire-service-*-routes.ps1`), so for those the Lambda —
+not the gateway — answers the preflight, and its `Access-Control-Allow-Methods` must
+list every verb the portal uses. `lib/http.js` says `GET, POST, PATCH, PUT, DELETE,
+OPTIONS` (2026-09-11: it lacked PATCH, so every estimate money edit and every board
+drag failed in the browser as "Save failed." before reaching the API).
+
 ⚠️ **The allowlist lives in six places.** `lib/http.js` is bundled into
 `sundial-user-admin`, `sundial-list-files`, `sundial-list-related-files`,
-`sundial-upload-file`, `sundial-delete-file`, `sundial-budget`, and
-`sundial-acumatica-budget-push`; five Lambdas carry their own inline copy —
+`sundial-upload-file`, `sundial-delete-file`, `sundial-budget`,
+`sundial-acumatica-budget-push`, `sundial-service-estimate`, `sundial-service-public`
+and `sundial-service-board`; five Lambdas carry their own inline copy —
 `sundial-auth-proxy`, `sundial-sf-query`, `sundial-sf-update`,
 `sundial-acumatica-push`, `sundial-aurora-push`. Adding an origin means editing all
 six and redeploying all twelve. (Consolidation is logged as tech debt in TASKS.md.)
@@ -993,7 +1001,7 @@ Body: `customer` (above) — or `isTemplate: true` and no customer; `estimate: {
 
 ### Lines
 - `POST /service/estimates/{id}/lines` — one line object, or `{ lines: [...] }`. Catalog lines snapshot description / unit price / labor+material split / costs / taxable from the item and set `Price_Overridden__c` when `unitPrice` differs. Only the **active** version of an item can be added (`lineProblems` names the rest). → 201 `{ ids[], problems[], totals }`.
-- `PATCH /service/estimates/{id}/lines/{lineId}` — `description, quantity, unitPrice, stage (Proposed|Approved|Completed|Removed), sortOrder, showUnitPrice, taxable, kind`. **Lines are editable after they are added** — the line is the office's snapshot of the item. A price edit on a catalog line flips `Price_Overridden__c`. A money-affecting edit (price / quantity / kind / taxable) to an **Approved** line drops it to `Proposed` and the response carries `needsReapproval: true`; a no-op patch returns `unchanged: true`.
+- `PATCH /service/estimates/{id}/lines/{lineId}` — `description, quantity, unitPrice, stage (Proposed|Approved|Completed|Removed), sortOrder, showUnitPrice, taxable, kind`, and **`priceBookItemId`** — link the line to an ACTIVE catalog item ("save this ad-hoc line to the price book": the portal creates the item, then links the line). Linking sets `Price_Book_Item__c`, `Source__c = Price Book`, snapshots the item's labor/material price + cost split, unit and taxability, keeps the line's description / quantity / unit price, and recomputes `Price_Overridden__c` against the item; `400 ITEM_NOT_FOUND` / `ITEM_NOT_ACTIVE` otherwise. Response carries `priceBookItemId`. **Lines are editable after they are added** — the line is the office's snapshot of the item. A price edit on a catalog line flips `Price_Overridden__c`. A money-affecting edit (price / quantity / kind / taxable) to an **Approved** line drops it to `Proposed` and the response carries `needsReapproval: true`; a no-op patch returns `unchanged: true`.
 - `DELETE /service/estimates/{id}/lines/{lineId}` — real delete (sent versions survive in `Version_Log__c`).
 - `POST /service/estimates/{id}/add-template` `{ templateId }` → 201 `{ ids[], totals }`.
 - `POST /service/estimates/{id}/recalculate` — recompute from lines (the reconcile hook).
@@ -1031,7 +1039,7 @@ The board's backend (`docs/dispatch-board-design.md`). A service call is one tec
 
 **Job status follows the calls (the only automation, all in `settleJobStatus`):** first call scheduled → job `New | Triaging | Remote Investigation | Ready to Schedule | Awaiting Parts` becomes `Scheduled`; a call `In Progress` → job `Scheduled` becomes `In Progress`; the last open call `Complete`/`No-Show` → job becomes `Awaiting Office Review`; the last open call cancelled → job `Scheduled` drops back to `Ready to Schedule`. Each transition is its own `job_updated` activity row (`via: "dispatch"`).
 
-- `GET /service/board?from=<iso>&to=<iso>[&techId=]` → `{ window, techs:[{id,name,level}], techsSource, calls:[BoardCall], unscheduled:[TrayJob], defaults:{callMinutes,timeZone} }`. Window capped at 31 days (`400 WINDOW_TOO_WIDE`). **Techs** = active `Sundial_User__c` with `Access_Level__c = Technician` or `Default_Department__c = Service`; until the tenant marks anyone, every active user is a column and `techsSource` is `"all-users"` (the portal shows a banner). **Tray** = jobs whose status is one of the five unscheduled statuses, emergencies first then by age, 200 max. `BoardCall` = `{ id, number, jobId, jobNumber, jobStatus, customerId, customerName, address, phone, priority, serviceType, billToType, techId, techName, visitType, subType, start, end, status, cancelReason, actualStart, actualEnd, durationMinutes, workNotes, privateNotes, modstamp }`.
+- `GET /service/board?from=<iso>&to=<iso>[&techId=]` → `{ window, techs:[{id,name,level}], techsSource, calls:[BoardCall], unscheduled:[TrayJob], defaults:{callMinutes,timeZone} }`. Window capped at 42 days — the portal's month view is a fixed 6×7 grid (`400 WINDOW_TOO_WIDE`). **Techs** = active `Sundial_User__c` with `Access_Level__c = Technician` or `Default_Department__c = Service`; until the tenant marks anyone, every active user is a column and `techsSource` is `"all-users"` (the portal shows a banner). **Tray** = jobs whose status is one of the five unscheduled statuses, emergencies first then by age, 200 max. `BoardCall` = `{ id, number, jobId, jobNumber, jobStatus, customerId, customerName, address, phone, priority, serviceType, billToType, techId, techName, visitType, subType, start, end, status, cancelReason, actualStart, actualEnd, durationMinutes, workNotes, privateNotes, modstamp }`.
 - `GET /service/jobs/{id}/calls` → `{ jobId, jobStatus, calls, techs, defaults }` (the job page's card).
 - `POST /service/jobs/{id}/calls` `{ techId, start, end?, subType?, privateNotes?, notifyCustomer? }` → **201** `{ call, jobStatus, jobStatusChanged, notified, detail, recipient }`. `end` defaults to `start` + 120 min. `400` `TECH_REQUIRED | TECH_INVALID | START_REQUIRED | WINDOW_INVALID`; `409 JOB_CLOSED` when the job is Invoiced / Paid / Closed. Creates `Sundial_Service_Call__c` with `Visit_Type__c = Service`, `Status__c = Scheduled`, `Client__c` from the token.
 - `PATCH /service/calls/{id}` `{ start?, end?, techId?, status?, subType?, workNotes?, privateNotes?, notifyCustomer?, baseModstamp? }` → `{ call, changed:[fields], jobStatusChanged, notified, detail }`; `{ unchanged: true }` when nothing differed. Moving (start / end / techId) a call that is `In Progress` or `Complete` is **409 `CALL_ALREADY_STARTED`**. `status` accepts `Scheduled | En Route | In Progress | Complete | No-Show` — `Cancelled` is refused (`400 USE_CANCEL`) so a reason is always recorded. Marking `In Progress` stamps `Actual_Start__c`, `Complete` stamps `Actual_End__c`, when the PWA has not. Activity `service_call_updated` with `fields: { Field: { from, to } }`.

@@ -437,7 +437,7 @@ testing needs a designated test record, and the reason is sharper one level up.
 
 | | |
 |---|---|
-| **Users** | 10 ZZ TEST accounts, `tim+zz-*@constructiveoperations.com` (Supabase auth + `Sundial_User__c`) |
+| **Users** | 12 ZZ TEST accounts, `tim+zz-*@constructiveoperations.com` (Supabase auth + `Sundial_User__c`) — the ten access-model fixtures plus `zz-tech-2` / `zz-tech-3` for the dispatch board |
 | **Passwords** | Secrets Manager **`sundial/test-users`** — never in a file, never in a commit |
 | **Seed / reset** | `node scripts/seed-access-test-fixtures.mjs --apply` (idempotent, canary-first) |
 | **Records** | `ZZ PORTAL TEST 2` · `ZZ PORTAL TEST B` · `ZZ PORTAL TEST HARMON` + a Solar twin each, `ZZ PORTAL TEST ROOFING`, and the existing designated record stamped to `zz-rep-a1` |

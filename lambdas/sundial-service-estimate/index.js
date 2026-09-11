@@ -123,6 +123,7 @@ import {
   lineFromItem,
   adHocLine,
   linePatchFields,
+  linkLineToItem,
   cloneLineFields,
 } from "./pricebook.js";
 
@@ -788,12 +789,26 @@ export function createHandler(deps = {}) {
       const lines = await loadLines(est.Id, tenantId);
       const line = lines.find((l) => l.Id === lineId);
       if (!line) return notFound(cors);
-      const { fields, rejected, problems } = linePatchFields(body);
+      // `priceBookItemId` links the line to a catalog item (the "save to price book"
+      // flow creates the item first, then PATCHes the line with its id). It is handled
+      // apart from the plain field map because it re-snapshots several fields at once.
+      const { priceBookItemId, ...plain } = body && typeof body === "object" ? body : {};
+      const { fields, rejected, problems } = linePatchFields(plain);
       if (problems.length) return bad(cors, "LINE_INVALID", problems.join("; "));
+      let linkedItem = null;
+      if (priceBookItemId != null) {
+        linkedItem = await loadItem(String(priceBookItemId), tenantId);
+        if (!linkedItem) return bad(cors, "ITEM_NOT_FOUND", `Price book item ${priceBookItemId} was not found.`);
+        if (linkedItem.Is_Active__c !== true) {
+          return bad(cors, "ITEM_NOT_ACTIVE", `${linkedItem.Item_Code__c} v${linkedItem.Version__c} is not the active version.`);
+        }
+        // The plain edits win over the snapshot (a caller may link AND set a price).
+        Object.assign(fields, { ...linkLineToItem({ ...line, ...fields }, linkedItem), ...fields });
+      }
       if (!Object.keys(fields).length) return bad(cors, "NO_FIELDS", "Nothing to update.", { rejectedFields: rejected });
       // An edited price on a catalog line is an override; record it.
-      if (fields.Unit_Price__c != null && line.Price_Book_Item__c) {
-        const item = await loadItem(line.Price_Book_Item__c, tenantId);
+      if (fields.Unit_Price__c != null && (linkedItem || line.Price_Book_Item__c)) {
+        const item = linkedItem || (await loadItem(line.Price_Book_Item__c, tenantId));
         const itemPrice = Number(item?.Price__c ?? NaN);
         fields.Price_Overridden__c = !Number.isFinite(itemPrice) || Math.abs(itemPrice - fields.Unit_Price__c) > 0.004;
       }
@@ -817,8 +832,8 @@ export function createHandler(deps = {}) {
       }
       const { totals } = await recomputeAndStore(est, tenantId);
       await markStale(CACHE.line, [lineId], tenantId);
-      await act(ctx, { event: EVENTS.LINE_UPDATED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: fields.Description__c ?? line.Description__c ?? null, fields: diffFields(line, fields), needsReapproval: reapproval, total: totals.total } });
-      return jsonResponse(200, cors, { success: true, id: lineId, needsReapproval: reapproval, totals: totals.fields, rejectedFields: rejected });
+      await act(ctx, { event: EVENTS.LINE_UPDATED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: fields.Description__c ?? line.Description__c ?? null, fields: diffFields(line, fields), needsReapproval: reapproval, linkedItemCode: linkedItem?.Item_Code__c ?? null, total: totals.total } });
+      return jsonResponse(200, cors, { success: true, id: lineId, needsReapproval: reapproval, priceBookItemId: linkedItem?.Id ?? line.Price_Book_Item__c ?? null, totals: totals.fields, rejectedFields: rejected });
     },
 
     async deleteLine({ ctx, params }) {

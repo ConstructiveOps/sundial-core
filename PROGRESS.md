@@ -1,5 +1,59 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (later) — First live-test fixes: CORS on PATCH, price book from a line, board week/month, two more test techs
+
+Tim's first pass through the live portal turned up four things.
+
+**"Save failed." on tax rate / markup / discount** — every estimate money edit is a
+`PATCH`, and the browser's preflight was being refused: the shared
+`lib/http.js corsHeaders()` listed `GET, POST, DELETE, OPTIONS` (it was written for
+the file Lambdas, which never PATCH) and the service Lambdas reuse it. The fetch
+threw before it reached the API, the portal's `run()` saw a non-`ApiError` and printed
+its fallback. `Access-Control-Allow-Methods` is now `GET, POST, PATCH, PUT, DELETE,
+OPTIONS`. Nothing else changes — `sundial-sf-update` keeps its own inline header that
+already had PATCH. **Redeploy `sundial-service-estimate` and `sundial-service-board`**
+(line and call moves are PATCHes too; on the board the drag would have failed the same
+way).
+
+**Price book from a line (D-072.4 amendment).** The office should not have to leave an
+estimate to grow the book. Two paths, one popup — the existing `PriceBookItemModal`:
+(1) the price-book typeahead now ends with *Create "…" as a new price book item…*, the
+same select-or-create shape as the customer picker; the popup opens prefilled with the
+typed name and a suggested code, and on save the NEW item is added as a line. (2) An
+ad-hoc line gets a *Save to price book* link (and the ad-hoc form an *Add & save to
+book* button); the popup opens prefilled from the line (name, kind, the price in the
+right half by kind, taxable, unit); on save the line is **linked**, not duplicated —
+`PATCH …/lines/{lineId} { priceBookItemId }` sets `Price_Book_Item__c`, `Source__c =
+Price Book`, snapshots the item's labor/material price + cost split and taxability,
+keeps the line's own description / quantity / unit price, and recomputes
+`Price_Overridden__c` against the item (a line saved at its own price is not an
+override). `linkLineToItem()` in `pricebook.js`; inactive or unknown item → 400
+`ITEM_NOT_ACTIVE` / `ITEM_NOT_FOUND`. `createItem` / `newItemVersion` responses were
+already carrying `id`; the portal type now says so (`ItemSaved`). Tests: estimate 28
+(new: ad-hoc → item → link, and the two refusals); portal 2 new render tests
+(prefill from the line → create → PATCH link; picker create → add). Catalog cache is
+invalidated after either.
+
+**Dispatch board: week (default) and month views.** "Dispatchers need to see the whole
+schedule over at least a week." The page now has a Day / Week / Month toggle
+(remembered per browser). Week = one row per tech, seven day columns (Monday first), a
+chip per call in time order; month = a fixed 6×7 calendar of chips with a technician
+filter and *+N more* into the day; both are drop targets — a tray job dropped on a
+tech's day opens Schedule at 08:00 for that tech and day, a moved chip keeps its time of
+day and length. Day headers / day numbers open the day view there. Grids live in
+`components/service/BoardViews.tsx`; the date math in `boardDates.ts` (pure, tested
+through the page). Backend: `DEFAULTS.maxWindowDays` 31 → **42** so the 6-week grid is
+one read (`WINDOW_TOO_WIDE` still guards anything wider). Portal board tests 3 → 5
+(week default + 7-day window, week drops, month window / filter / open-day, the two
+day-view tests unchanged). 109/109 portal, 205/205 across the service + access suites.
+
+**Two more test techs.** `scripts/seed-access-test-fixtures.mjs` gains `zz-tech-2` and
+`zz-tech-3` (Technician, `Default_Department__c = Service`, so they match the board's
+picker on both rules). Same idempotent seeder: `node scripts/seed-access-test-fixtures.mjs
+--apply --users-only` creates the two Supabase users + `Sundial_User__c` rows, stores
+their passwords in `sundial/test-users`, and leaves the existing ten alone (it only
+writes `Default_Department__c` for fixtures that declare one). 12 ZZ users now.
+
 ## 2026-09-11 (late) — Service calls and the dispatch board (D-072 amendment 4)
 
 The part of the module the service team will live in. **New Lambda

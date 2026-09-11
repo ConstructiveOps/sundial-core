@@ -211,6 +211,31 @@ export function linePatchFields(body) {
   return { fields, rejected, problems: [] };
 }
 
+/**
+ * Link an existing line to a catalog item ("save this ad-hoc line to the price book",
+ * or re-point a line at an item). The LINE keeps its description, quantity and unit
+ * price — it is the thing the office already priced — and adopts the item's identity:
+ * kind, taxability, unit of measure, and the labor/material price + cost split the
+ * reports need. Price_Overridden__c is recomputed against the item's Price__c so a
+ * line saved at the item's own price is not flagged.
+ */
+export function linkLineToItem(line, item) {
+  const itemPrice = num(item.Price__c) ?? (num(item.Labor_Price__c) ?? 0) + (num(item.Material_Price__c) ?? 0);
+  const unitPrice = num(line.Unit_Price__c) ?? itemPrice;
+  return {
+    Price_Book_Item__c: item.Id,
+    Source__c: "Price Book",
+    Kind__c: item.Kind__c || line.Kind__c || "Labor",
+    Unit_of_Measure__c: item.Unit_of_Measure__c || line.Unit_of_Measure__c || "Each",
+    Unit_Labor_Price__c: num(item.Labor_Price__c),
+    Unit_Material_Price__c: num(item.Material_Price__c),
+    Unit_Labor_Cost__c: num(item.Labor_Cost__c),
+    Unit_Material_Cost__c: num(item.Material_Cost__c),
+    Taxable__c: item.Taxable__c === true,
+    Price_Overridden__c: Math.abs(unitPrice - itemPrice) > 0.004,
+  };
+}
+
 /** Clone a template's lines onto a working estimate (re-snapshotting is the caller's job). */
 export function cloneLineFields(line, { estimateId, tenantId, sortOffset = 0 }) {
   const f = {

@@ -188,8 +188,13 @@ All Sundial custom objects use the `Sundial_` prefix (e.g., `Sundial_User__c`, `
 | `Sundial_Solar__c` | Residential solar projects |
 | `Sundial_Roofing__c` | Roofing projects (residential or commercial roofing-only, or reroof component of solar projects) |
 | `Sundial_Commercial__c` | Commercial solar projects |
-| `Sundial_Service__c` | Service tickets (parent record for service work) |
-| `Sundial_Service_Visit__c` | Individual visits associated with a service ticket (child of `Sundial_Service__c`) |
+| `Sundial_Estimate__c` | Service estimate — the quote **and** the living bill of work; can exist without a job; every job has exactly one (D-072) |
+| `Sundial_Service_Job__c` | Service job (parent record for service work; was `Sundial_Service__c`). Bill-To lives here: one job = one payer |
+| `Sundial_Service_Call__c` | One tech × one appointment on a job: clock in/out, GPS, notes, photos (was `Sundial_Service_Visit__c`) |
+| `Sundial_Price_Book_Item__c` | Tenant-scoped, versioned price book (never edited in place once used — *Update* clones a new version with the same `Item_Code__c`) |
+| `Sundial_Service_Line__c` | Junction: estimate × price-book item (+ quantity, price/cost snapshots, ad-hoc lines) |
+| `Sundial_Service_Invoice__c` | One invoice per job (reissue = `-2`); amounts frozen from the estimate at billing |
+| `Sundial_Service_Payment__c` | One row per deposit / payment / refund (Stripe PaymentIntent id = idempotency key) |
 | `Sundial_PO__c` | Purchase orders mirrored to Acumatica |
 | `Sundial_PO_Credit__c` | Credit and return tracking against POs (solves the Acumatica gap) |
 
@@ -273,12 +278,16 @@ Queue-based, asynchronous-first design:
 
 Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/month). The HCP scheduler is a real dispatch board (FullCalendar-based with drag-and-drop, proportional time blocks, edge-drag resize, multi-tech timeline, travel-time suggestions, real-time GPS map). Sundial must match this capability or the service team will revolt.
 
-### Service Object Architecture
+### Service Object Architecture (v2 — D-072, 2026-09-09; full model in `docs/service-data-model.md`)
 
-- `Sundial_Service__c` (parent ticket) holds work order details, customer reference, system reference (Asset), billing, status, total time roll-up
-- `Sundial_Service_Visit__c` (child, many-to-one) holds per-visit time, tech, work performed, photos, clock in/out coordinates, geofence verification
-- Photos attach to visit AND ticket AND Asset AND customer using Salesforce native multi-record file linking
-- `Sundial_Service_Visit__c` is also used for non-service field work (solar install visits, roofing crew visits, commercial install visits) via a `Visit_Type__c` picklist field plus optional lookups to the project objects. The PWA displays different fields depending on context (service tab vs solar tab) but uses the same underlying object, same GPS, and same clock in/out functions.
+- **Seven objects:** `Sundial_Estimate__c` (EST-#) → `Sundial_Service_Job__c` (SVC-#, was `Sundial_Service__c`) → `Sundial_Service_Call__c` (SC-#, was `Sundial_Service_Visit__c`); `Sundial_Service_Line__c` hangs off the **estimate** and points at a versioned `Sundial_Price_Book_Item__c`; `Sundial_Service_Invoice__c` (one per job) and `Sundial_Service_Payment__c` (one per money event) hang off the job. No Asset object (D-065.1).
+- **Rules the code enforces, never bypass them:** (1) an estimate can exist without a job, a job never without an estimate — quick-create makes both; (2) lines live on the estimate only — the job's money fields are cross-object formulas; (3) one job = one payer — Bill-To on the job, a second payer is a second job; (4) price-book items are never deleted and never edited in place once a line references them — *Update* = clone with the same `Item_Code__c`, old version `Is_Active__c = false`, exactly one active version per code (Lambda-enforced); lines snapshot price/cost/description at add time regardless; (5) nothing blocks scheduling/sending/invoicing on another record's state — restrictions are per-tenant validation rules added only on request.
+- **Money math runs in the estimate Lambda** (kind subtotals → scoped discount → hidden markup → tax → total → deposit) and is stored; a nightly reconcile catches drift. **Time** roll-ups (service call → job) run on the Flow. Estimate versions = append-only `Version_Log__c` JSON + a PDF per send; templates are estimates with `Is_Template__c`.
+- **The hosted estimate page is the payment link** (accept + Stripe SetupIntent/deposit at the bottom). Customers get receipt + photo job report; partners get the invoice document.
+- `Sundial_Service_Call__c` is also used for non-service field work (solar/roofing/commercial visits) via `Visit_Type__c` plus optional project lookups (D-027). Files and photos use the Solar module's S3 pattern unchanged (`sfsolproj/SUNDIAL/{jobId}/…`, photos in the `photos/{serviceCallId}/` subfolder, XFiles Pro reads the same prefix, nothing stored in Salesforce); per-photo flags ride on the existing Supabase `sundial_file_metadata` row; photos default internal until flagged customer-visible.
+- **Every project-creating popup does customer select-or-create** (D-072 amendment): New Estimate / New Job — and New Roofing / New Commercial when built — search the customer hub first, or create the customer from the basics in the same request; never send the user to Sales to make a customer. The module silently tags `Sundial_Customer__c.Requested_Project_Types__c` with its value (`Service`, `Roofing`, `Commercial`): set on a new customer, union-added on an existing one. Soft duplicate guard (email / phone / street+zip) before any create; reuse the `POST /sf/customer` validation path.
+- **Every service write lands in the activity tracker** (D-072 amendment 2): `sundial_service_activity` in Supabase — event, actor, timestamp, old → new — written best-effort *after* the Salesforce write by `sundial-service-estimate` and `sundial-sf-update` through `lib/service-activity.js`; never a reason to fail the user's action. Keyed by job **and** estimate (pre-job history is re-keyed at Create Job). Lines are editable after they are added (the line is the office's snapshot); a money-affecting edit to an Approved line drops it to Proposed.
+- **The price book is tenant-scoped** (`Client__c` on every item) — never the standard Salesforce `Pricebook2`/`Product2`, which cannot be isolated per tenant.
 
 ### Key Workflows
 
@@ -290,7 +299,7 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
 - AI after-hours voice intake (Add-on service, not Phase 1)
 
 **Triage and scheduling:**
-- Office staff create `Sundial_Service__c` ticket
+- Office staff create a `Sundial_Service_Job__c` (quick-create also creates its `Sundial_Estimate__c`) — or start from an estimate and *Create Job* on acceptance
 - Remote troubleshooting attempted first (monitoring portals)
 - Quote truck roll / troubleshooting cost
 - Schedule via dispatch board (FullCalendar Premium Scheduler)
@@ -298,10 +307,10 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
 
 **Field work:**
 - Mobile PWA on tech iPhones (offline-capable via service workers + IndexedDB)
-- Clock in creates `Sundial_Service_Visit__c` with start time + GPS coordinates + geofence verification
+- Clock in opens the tech's `Sundial_Service_Call__c` interval with start time + GPS coordinates + geofence tag (never a blocker)
 - Clock out closes the visit with end time + GPS
 - Notes, photos, materials captured per visit
-- Multi-tech jobs handled by multiple `Sundial_Service_Visit__c` records under one parent ticket
+- Multi-tech jobs handled by parallel `Sundial_Service_Call__c` records (one tech × one appointment) under one parent job
 
 **Post-field:**
 - Office review of completed work
@@ -560,6 +569,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 - Tim prioritizes working software over perfect architecture
 - When in doubt, choose simpler and note future improvements
 - **Windows-specific:** Use PowerShell commands and Windows file paths. WSL 2 and Docker Desktop for Windows where relevant
+- **Always end a session's file changes with the exact git commands to commit them** (branch check, the explicit `git add` list, and the `git commit` with the attribution lines) — Tim runs them; never assume he will compose them (2026-09-11)
 
 ---
 
@@ -571,7 +581,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 Foundation build. Core Platform, Acumatica integration (full), Sundial_User__c, Sundial_Customer__c, Sundial_Solar__c, Sundial_Roofing__c, Sundial_PO__c, Sundial_PO_Credit__c. Sunbase data migration for residential and roofing. Dropbox documents migrated to S3 with sync-back established. Residential and roofing teams go live.
 
 **Phase 2 — Service Operations**
-Service module replacing Housecall Pro: Sundial_Service__c, Sundial_Service_Visit__c, dispatch board (FullCalendar Premium), mobile PWA with GPS and geofencing, Stripe payments, customer notifications, HCP data migration. Service team goes live, HCP decommissioned.
+Service module replacing Housecall Pro: the seven service objects (D-072 — estimate, job, service call, price book item, line, invoice, payment), dispatch board (FullCalendar Premium), mobile PWA with GPS and geofencing, Stripe payments, customer notifications, HCP data migration. Service team goes live, HCP decommissioned.
 
 **Phase 3 — Commercial Solar and Feature Improvements**
 Sundial_Commercial__c module, Sunbase commercial migration, Sunbase fully decommissioned. Feature improvements identified through Phase 1 and 2 use. Optional advanced capabilities: install scheduling state machine, service plan e-commerce, customer self-service booking, route optimization.
@@ -611,8 +621,8 @@ XFiles Pro requires manual per-object configuration in Salesforce for the file p
 - [ ] Configure XFiles Pro for `Sundial_Solar__c` with path pattern `SUNDIAL/{record_id}/`
 - [ ] Configure XFiles Pro for `Sundial_Roofing__c` with path pattern `SUNDIAL/{record_id}/`
 - [ ] Configure XFiles Pro for `Sundial_PO__c` with path pattern `SUNDIAL/{record_id}/`
-- [ ] Configure XFiles Pro for `Sundial_Service__c` (Phase 2, but can be done now)
-- [ ] Configure XFiles Pro for `Sundial_Service_Visit__c` (Phase 2)
+- [ ] Configure XFiles Pro for `Sundial_Service_Job__c` (Phase 2 — after the D-072 package deploys)
+- [ ] Configure XFiles Pro for `Sundial_Service_Call__c` and `Sundial_Estimate__c` (Phase 2)
 - [ ] Configure XFiles Pro for `Sundial_Commercial__c` (Phase 3, but can be done now)
 
 This is Tim's manual configuration step inside Salesforce; Claude Code does not need to do this. Once configured, files written by Sundial via Lambda to `SUNDIAL/{record_id}/...` will automatically appear in XFiles Pro on the corresponding Salesforce record, and vice versa.

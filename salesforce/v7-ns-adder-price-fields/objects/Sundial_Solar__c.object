@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v7 NS ADDER PRICE fields - 5 FORMULA fields for Sundial_Solar__c, additive only.
+  Reference: docs/integrations/acumatica-budget-rework-v2.md D19 / Total_Adder_Price__c.
+
+  Reps asked to SEE what each Non-Standard adder contributes to the adder total that
+  reduces their commission. Each field mirrors, verbatim, the corresponding NS term
+  inside Total_Adder_Price__c: Material x (1 + Markup) + Hours x 33 x 1.75.
+  Nothing writes them; they cannot drift from their inputs; layout-safe.
+
+  Additive: collision-checked 2026-09-02 - NS_Adder_n_Price__c exists nowhere in the
+  repo, the portal configs, or any prior package for either object.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>NS_Adder_1_Price__c</fullName>
+        <description>Rep-visible PRICE of Non-Standard Adder 1: Material Cost x (1 + Markup) + Labor Hours x 33 x 1.75. This term is copied VERBATIM from the NS block inside Total_Adder_Price__c (D19, v3 package), so the number a rep sees here is exactly what this adder deducts from Commission_Total__c - if one ever changes, change both. MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via the API). THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the commission model is defined against, not a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's commission. 1.75 is labor + 75% burden. Shows 0.00 when the block is unused (all inputs blank). NOT the same thing as the calc-written NS_Adder_1_Total__c snapshot field: this one is a live formula and can never be stale.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(NS_Adder_1_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_1_Markup_Percent__c,0))+BLANKVALUE(NS_Adder_1_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>What this non-standard adder adds to the total adder price deducted from commission: materials plus markup, plus labor at the standard rate. Live value - updates the moment an input changes.</inlineHelpText>
+        <label>NS Adder 1 Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_2_Price__c</fullName>
+        <description>Rep-visible PRICE of Non-Standard Adder 2: Material Cost x (1 + Markup) + Labor Hours x 33 x 1.75. This term is copied VERBATIM from the NS block inside Total_Adder_Price__c (D19, v3 package), so the number a rep sees here is exactly what this adder deducts from Commission_Total__c - if one ever changes, change both. MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via the API). THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the commission model is defined against, not a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's commission. 1.75 is labor + 75% burden. Shows 0.00 when the block is unused (all inputs blank). NOT the same thing as the calc-written NS_Adder_2_Total__c snapshot field: this one is a live formula and can never be stale.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(NS_Adder_2_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_2_Markup_Percent__c,0))+BLANKVALUE(NS_Adder_2_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>What this non-standard adder adds to the total adder price deducted from commission: materials plus markup, plus labor at the standard rate. Live value - updates the moment an input changes.</inlineHelpText>
+        <label>NS Adder 2 Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_3_Price__c</fullName>
+        <description>Rep-visible PRICE of Non-Standard Adder 3: Material Cost x (1 + Markup) + Labor Hours x 33 x 1.75. This term is copied VERBATIM from the NS block inside Total_Adder_Price__c (D19, v3 package), so the number a rep sees here is exactly what this adder deducts from Commission_Total__c - if one ever changes, change both. MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via the API). THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the commission model is defined against, not a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's commission. 1.75 is labor + 75% burden. Shows 0.00 when the block is unused (all inputs blank). NOT the same thing as the calc-written NS_Adder_3_Total__c snapshot field: this one is a live formula and can never be stale.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(NS_Adder_3_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_3_Markup_Percent__c,0))+BLANKVALUE(NS_Adder_3_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>What this non-standard adder adds to the total adder price deducted from commission: materials plus markup, plus labor at the standard rate. Live value - updates the moment an input changes.</inlineHelpText>
+        <label>NS Adder 3 Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_4_Price__c</fullName>
+        <description>Rep-visible PRICE of Non-Standard Adder 4: Material Cost x (1 + Markup) + Labor Hours x 33 x 1.75. This term is copied VERBATIM from the NS block inside Total_Adder_Price__c (D19, v3 package), so the number a rep sees here is exactly what this adder deducts from Commission_Total__c - if one ever changes, change both. MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via the API). THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the commission model is defined against, not a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's commission. 1.75 is labor + 75% burden. Shows 0.00 when the block is unused (all inputs blank). NOT the same thing as the calc-written NS_Adder_4_Total__c snapshot field: this one is a live formula and can never be stale.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(NS_Adder_4_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_4_Markup_Percent__c,0))+BLANKVALUE(NS_Adder_4_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>What this non-standard adder adds to the total adder price deducted from commission: materials plus markup, plus labor at the standard rate. Live value - updates the moment an input changes.</inlineHelpText>
+        <label>NS Adder 4 Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>NS_Adder_5_Price__c</fullName>
+        <description>Rep-visible PRICE of Non-Standard Adder 5: Material Cost x (1 + Markup) + Labor Hours x 33 x 1.75. This term is copied VERBATIM from the NS block inside Total_Adder_Price__c (D19, v3 package), so the number a rep sees here is exactly what this adder deducts from Commission_Total__c - if one ever changes, change both. MARKUP HAS NO /100: a formula reads a Percent field as a decimal already (25% = 0.25 here, 25 via the API). THE 33 IS HARDCODED, like the redlines: the Powerwall labor rate the commission model is defined against, not a per-job parameter - reading Battery_Labor_Rate__c would let one job's override change everybody's commission. 1.75 is labor + 75% burden. Shows 0.00 when the block is unused (all inputs blank). NOT the same thing as the calc-written NS_Adder_5_Total__c snapshot field: this one is a live formula and can never be stale.</description>
+        <externalId>false</externalId>
+        <formula>BLANKVALUE(NS_Adder_5_Material_Cost__c,0)*(1+BLANKVALUE(NS_Adder_5_Markup_Percent__c,0))+BLANKVALUE(NS_Adder_5_Labor_Hours__c,0)*33*1.75</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>What this non-standard adder adds to the total adder price deducted from commission: materials plus markup, plus labor at the standard rate. Live value - updates the moment an input changes.</inlineHelpText>
+        <label>NS Adder 5 Price</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

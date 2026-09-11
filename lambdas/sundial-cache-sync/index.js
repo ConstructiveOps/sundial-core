@@ -58,6 +58,38 @@ const OBJECT_ALLOWLIST = {
   roofing: { sfObject: "Sundial_Roofing__c", cacheTable: "sundial_roofing_cache" },
   po: { sfObject: "Sundial_PO__c", cacheTable: "sundial_po_cache" },
   user: { sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
+  // Phase 2 Service Operations (D-072 - the seven-object model; supersedes the
+  // D-065 four). Inert until the objects exist in the org and the
+  // sql/sundial_*_cache.sql tables are applied - a missing cache table is skipped
+  // gracefully and a missing object 404s like any bad describe.
+  estimate: {
+    sfObject: "Sundial_Estimate__c",
+    cacheTable: "sundial_estimate_cache",
+  },
+  job: {
+    sfObject: "Sundial_Service_Job__c",
+    cacheTable: "sundial_service_job_cache",
+  },
+  servicecall: {
+    sfObject: "Sundial_Service_Call__c",
+    cacheTable: "sundial_service_call_cache",
+  },
+  pricebookitem: {
+    sfObject: "Sundial_Price_Book_Item__c",
+    cacheTable: "sundial_price_book_item_cache",
+  },
+  serviceline: {
+    sfObject: "Sundial_Service_Line__c",
+    cacheTable: "sundial_service_line_cache",
+  },
+  serviceinvoice: {
+    sfObject: "Sundial_Service_Invoice__c",
+    cacheTable: "sundial_service_invoice_cache",
+  },
+  servicepayment: {
+    sfObject: "Sundial_Service_Payment__c",
+    cacheTable: "sundial_service_payment_cache",
+  },
 };
 
 const SF_API_VERSION = "v60.0";
@@ -76,6 +108,13 @@ const CREATED_DATE_SOURCE = {
   roofing: ["CreatedDate"],
   po: ["CreatedDate"],
   user: ["CreatedDate"],
+  estimate: ["CreatedDate"],
+  job: ["CreatedDate"],
+  servicecall: ["CreatedDate"],
+  pricebookitem: ["CreatedDate"],
+  serviceline: ["CreatedDate"],
+  serviceinvoice: ["CreatedDate"],
+  servicepayment: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
 

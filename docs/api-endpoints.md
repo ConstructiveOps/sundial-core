@@ -798,6 +798,8 @@ Quick reference of which Lambda handles which routes:
 | `sundial-acumatica-budget-push` | POST /projects/{recordId}/budget/push, POST /projects/{recordId}/budget/attributes-sync |
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
+| `sundial-service-estimate` | GET /service/jobs/{id}/activity, GET /service/estimates/{id}/{activity\|preview}, POST /service/estimates, GET+PATCH /service/estimates/{id}, POST /service/estimates/{id}/lines, PATCH+DELETE /service/estimates/{id}/lines/{lineId}, POST /service/estimates/{id}/{add-template\|recalculate\|send\|approve\|decline\|create-job}, POST /service/jobs, POST /service/price-book-items, PATCH /service/price-book-items/{id}, POST /service/price-book-items/{id}/{new-version\|deactivate} |
+| `sundial-service-public` | GET /public/estimates/{token}, POST /public/estimates/{token}/{accept\|decline} (no auth — the token is the credential) |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
 | `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
 | `sundial-comment-notify` | POST /webhooks/comment-mention (called by Postgres via pg_net) |
@@ -822,6 +824,9 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 
 | Variable | Lambda(s) | Required | Purpose |
 |---|---|---|---|
+| `SERVICE_PUBLIC_BASE_URL` | `sundial-service-estimate` | **Yes** (for the customer link) | The portal's public origin, e.g. `https://harmon.sundialcrm.com` (no trailing slash). `/send` builds the customer link as `{base}/estimate/{token}`. If unset, `/send` still records the version and returns `delivery: "recorded"` with `deliveryDetail` naming this variable — nothing is emailed because there is no link to email. **Per-tenant:** each fork's Vercel origin. |
+| `EMAIL_FROM` / `EMAIL_REPLY_TO` / `SES_REGION` / `EMAIL_CONFIG_SET` | `sundial-service-estimate` (in addition to the senders below) | `EMAIL_FROM` yes to send | Same values as the other senders — the estimate email goes through `lib/email.js`. The execution role already carries SES access (see the SES notes). |
+| `SERVICE_BRAND_NAME` | `sundial-service-public` | No | Company name printed at the top of the hosted estimate document (the `brand.companyName` slot). Until Harmon's identity block is captured, set it to `Harmon Electric`; the rest of the brand block (license line, contact, terms link, footer) is the next config step. |
 | `DESIGN_REQUEST_NOTIFY_TO` | `sundial-aurora-push`, `sundial-aurora-inbound` | **Yes** (for the email step) | The design manager who receives the Design Request notification **and** the signed-agreement / cancellation notifications. Accepts a comma- or semicolon-separated list. If unset, the work still succeeds and the result reports `no_recipient_configured`. |
 | `DESIGN_REQUEST_NOTIFY_CC` | `sundial-aurora-push`, `sundial-aurora-inbound` | No | The director (or anyone else) CC'd on those notifications. Same list format. When unset, **no Cc header is sent at all**. |
 | `AURORA_INBOUND_QUEUE_URL` | `sundial-aurora-webhook` | **Yes** | The SQS queue the Aurora doorbell enqueues to. If unset the doorbell returns **500 on purpose** so Aurora retries rather than the event being acked into a void. |
@@ -938,3 +943,92 @@ caller gets **403**, not 404. They are refused by the action gate before any rec
 considered, and get the same answer for every id — so there is no oracle, and 403 is the
 honest answer. A **sales** role still 404s there, because their refusal DOES depend on
 which record was asked for.
+
+---
+
+## Service module — estimates, jobs, price book (D-072) — `sundial-service-estimate`
+
+The WRITE side of the service data model (`docs/service-data-model.md`). Reads (lists,
+search, single records) stay on `GET /sf/{estimate|job|servicecall|pricebookitem|serviceline|serviceinvoice|servicepayment}`
+via `sundial-sf-query`. Every route below: Supabase bearer auth, tenant from the token,
+**tenant scope only** (`service.*` action keys in `lib/access.js`; sales and none scopes
+get **403 `ACTION_FORBIDDEN`** before any Salesforce call). Record ids outside the
+caller's tenant are **404** everywhere. Every write recomputes and stores the estimate's
+totals (`totals.js` — kind subtotals → scoped discount → hidden markup → tax → total →
+deposit) and marks the affected cache rows stale.
+
+### The customer block (New Estimate / New Job popup)
+
+Both `POST /service/estimates` and `POST /service/jobs` take:
+
+```json
+"customer": { "id": "a1P…" }
+"customer": { "new": { "firstName","lastName","street","city","state","postalCode","email","phone" }, "confirmNew": false }
+```
+
+- `id` → the customer is loaded tenant-scoped and `Requested_Project_Types__c` gets
+  `Service` **union-added** (skipped silently if already present).
+- `new` → name + (email or phone) required. A **soft duplicate sweep** (exact email, 10-digit
+  phone, zip + house number + street token) returns **409 `DUPLICATE_CANDIDATES`** with
+  `candidates:[{id,name,email,phone,address,reasons}]`; resend with `confirmNew: true` to
+  create anyway. The new customer gets `Requested_Project_Types__c = Service`, `State__c`
+  matched against the picklist (value or label; blank + warning if no match), `Client__c`
+  from the token. If the tag value is missing from the org's picklist the create still
+  succeeds and `warnings[]` says so.
+- Responses carry `customerId`, `customerCreated`, `warnings[]`. If the estimate/job
+  create fails AFTER a customer was created, the 502 body carries `customerCreated: true`
+  and the id — never a silent orphan.
+
+### `POST /service/estimates` → 201
+
+Body: `customer` (above) — or `isTemplate: true` and no customer; `estimate: { discountScope, discountType, discountValue, discountSource, markupType, markupValue, taxRate, taxJurisdiction, depositRequired, depositType, depositValue, scopeSummary, validUntil, soldById, templateName, originatingSolarId, originatingRoofingId, originatingCommercialId }` (all optional); `lines: [ { priceBookItemId, quantity?, unitPrice?, description? } | { description, kind, unitPrice, quantity?, taxable? } ]`; `templateId` (clone a template's lines, re-snapshotted from each item's **active** version). Response: `{ id, customerId, customerCreated, linesCreated, lineProblems[], totals{…__c}, rejectedFields[], warnings[] }`.
+
+### `GET /service/estimates/{id}` → `{ estimate, lines[], totals }` (live totals, computed on read).
+
+### `PATCH /service/estimates/{id}` — the `estimate:{}` keys above at top level. 409 `ESTIMATE_INVOICED` once billed. Unknown keys are reported in `rejectedFields`, not written.
+
+### Lines
+- `POST /service/estimates/{id}/lines` — one line object, or `{ lines: [...] }`. Catalog lines snapshot description / unit price / labor+material split / costs / taxable from the item and set `Price_Overridden__c` when `unitPrice` differs. Only the **active** version of an item can be added (`lineProblems` names the rest). → 201 `{ ids[], problems[], totals }`.
+- `PATCH /service/estimates/{id}/lines/{lineId}` — `description, quantity, unitPrice, stage (Proposed|Approved|Completed|Removed), sortOrder, showUnitPrice, taxable, kind`. **Lines are editable after they are added** — the line is the office's snapshot of the item. A price edit on a catalog line flips `Price_Overridden__c`. A money-affecting edit (price / quantity / kind / taxable) to an **Approved** line drops it to `Proposed` and the response carries `needsReapproval: true`; a no-op patch returns `unchanged: true`.
+- `DELETE /service/estimates/{id}/lines/{lineId}` — real delete (sent versions survive in `Version_Log__c`).
+- `POST /service/estimates/{id}/add-template` `{ templateId }` → 201 `{ ids[], totals }`.
+- `POST /service/estimates/{id}/recalculate` — recompute from lines (the reconcile hook).
+
+### Lifecycle
+- `POST /service/estimates/{id}/send` `{ via?: Email|SMS|Both|Manual, validDays?, to? }` → `Version__c + 1`, one entry appended to `Version_Log__c` (`{version, sentAt, sentBy, sentVia, total, lines[], pdfKey:null}`), `Status__c = Sent`, `Public_Token__c` (issued once, reused), `Public_Token_Expires_At__c`, `Valid_Until__c` (send + tenant validity days — **default 30 until Harmon confirms**). **Then it delivers (2026-09-11):** the customer link is `SERVICE_PUBLIC_BASE_URL` + `/estimate/{token}` and, for `via` Email/Both, it is emailed through `lib/email.js` (SES) to `to` → the customer's `Primary_Email__c` → the estimate's email snapshot, in that order. Response `{ version, total, publicToken, publicUrl, validUntil, delivery, recipient, deliveryDetail }` where `delivery` is `"email"` (SES accepted it for `recipient`) or `"recorded"` (version + link exist, nothing went out — `deliveryDetail` says why: base URL unset, `EMAIL_FROM` unset, no customer email, SES error, or SMS not live). The activity row carries the same fields. A delivery failure is **never** a failed request — the version is on the record either way and the office sends the link by hand. **SMS waits for Twilio; the PDF is the next increment.**
+- `POST /service/estimates/{id}/approve` `{ method?: Online|Verbal|Signed|Deposit Paid, name? }` → `Status Approved`, `Approved_Version/Amount/At/Method/By`, every `Proposed` line → `Approved`.
+- `POST /service/estimates/{id}/decline` `{ reason? }`.
+- `POST /service/estimates/{id}/create-job` `{ job: {…} }` → 201 `{ jobId, estimateId }`; 409 `ESTIMATE_HAS_JOB` if already converted. Job `Intake_Channel__c` defaults to `Estimate Conversion`.
+
+### `POST /service/jobs` (quick-create) → 201
+Body: `customer` (above) **or** `estimateId` (then it behaves as create-job); `job: { issueDescription, priority, serviceType, systemOwnership, intakeChannel, intakeDate, assignedToId, billToType, billToName, billingReference, originatingSolarId, originatingRoofingId, originatingCommercialId }`; plus `estimate`, `lines`, `templateId` as on estimate create. Creates the estimate, then the job (`Estimate__c` required), then links `Service_Job__c` back. If the job create fails the estimate is deleted (compensation) and the 502 reports `estimateRemoved`. Response `{ jobId, estimateId, customerId, customerCreated, linesCreated, totals, warnings }`.
+
+### Price book
+- `POST /service/price-book-items` `{ name, itemCode, kind: Labor|Material|Product|Fee, category?, description?, internalNotes?, unitOfMeasure?, defaultQuantity?, estimatedHours?, laborCost?, materialCost?, laborPrice?, materialPrice?, taxable? }` → 201 version 1. `itemCode` is upper-cased, spaces → `-`. 409 `ITEM_CODE_IN_USE` if an active version of that code exists.
+- `PATCH /service/price-book-items/{id}` — in-place edit, **only while no line references the version**; otherwise 409 `ITEM_IN_USE` (`referencingLines`). `itemCode` is never changed here.
+- `POST /service/price-book-items/{id}/new-version` `{ …edits }` — the **Update** button: clones with `Version__c + 1`, `Is_Active__c true`; the old version gets `Is_Active__c false` + `Superseded_By__c`. 409 `ITEM_NOT_ACTIVE` if called on a superseded version.
+- `POST /service/price-book-items/{id}/deactivate` — removes from the active list without a successor. **There is no delete**, by design.
+
+### Activity tracker (D-072 amendment 2)
+Every route above writes one row to `sundial_service_activity` after its Salesforce write (event, actor, timestamp, `details` with old → new). `sundial-sf-update` does the same for a generic `PATCH/POST /sf/{estimate|job|servicecall|serviceline|serviceinvoice|servicepayment|pricebookitem}` (`field_updated` / `record_created`, with the previous values read before the write).
+- `GET /service/jobs/{id}/activity?limit=200&before=<iso>` → `{ jobId, estimateId, activity: [ { id, event, record_type, record_sf_id, job_sf_id, estimate_sf_id, actor_user_sf_id, actor_name, details, at } ] }`, newest first. Includes the estimate's pre-job rows (re-keyed at Create Job).
+- `GET /service/estimates/{id}/activity` — same shape for one estimate.
+
+### Preview (read-only document)
+`GET /service/estimates/{id}/preview` → `{ html, title, version }`. The customer-facing estimate rendered by `lib/estimate-document.js` — the SAME renderer the hosted customer page, the PDF, and the email will use, so the office's preview is exactly what the customer gets. Self-contained HTML (inline CSS, no external assets); the portal shows it in a sandboxed iframe. Edits are never made in the preview. `mode: "preview"` watermarks the page and shows a disabled Approve placeholder where the customer's button + card form will sit. Brand block (company name, license line, contact, terms link, footer note) is tenant config — placeholder until Harmon's identity block is captured.
+- Events: `estimate_created | estimate_updated | estimate_sent | estimate_approved | estimate_declined | template_applied | line_added | line_updated | line_removed | job_created | job_updated | customer_created | customer_tagged | service_call_updated | field_updated | record_created | item_created | item_updated | item_new_version | item_deactivated` (+ `invoice_sent | invoice_issued | payment_recorded` reserved for the billing routes).
+
+### Errors
+`400` `CUSTOMER_REQUIRED | CUSTOMER_INVALID | LINE_INVALID | ITEM_INVALID | NO_FIELDS | INVALID_BODY | TEMPLATE_REQUIRED | ESTIMATE_NO_CUSTOMER`; `403` `ACTION_FORBIDDEN | NO_TENANT`; `404` `RECORD_NOT_FOUND | ROUTE_NOT_FOUND`; `409` `DUPLICATE_CANDIDATES | ESTIMATE_HAS_JOB | ESTIMATE_INVOICED | ITEM_CODE_IN_USE | ITEM_IN_USE | ITEM_NOT_ACTIVE`; `502` `SALESFORCE_ERROR` (`where` names the step, `message` carries Salesforce's text) `| ACTIVITY_READ_FAILED`.
+
+## Public — the customer's hosted estimate page (D-072.7) — `sundial-service-public`
+
+**No portal login.** These are the routes the customer's email link hits. The only credential is the token in the URL — 24 random bytes (base64url) minted once per estimate by `/send`, stored in `Sundial_Estimate__c.Public_Token__c` (External ID) with `Public_Token_Expires_At__c`. Authorization at the gateway is NONE (there is no bearer token to check); the Lambda answers **404** for any token it cannot resolve to exactly one non-template estimate (wrong and unknown look identical — the URL space cannot be probed for shape), **410** `LINK_EXPIRED` once the token has expired. Nothing here accepts a record id, tenant id, or field name from the caller; the tenant is read from the estimate's `Client__c` and stamped onto the activity row. The portal page is `harmon-crm` `/estimate/:token` (outside `ProtectedRoute`, plain `fetch`, no `Authorization` header).
+
+- `GET /public/estimates/{token}` → `{ html, title, number, status, version, total, depositAmount, depositRequired, validUntil, approvedAt, approvedByName, customerName, canAccept }`. `html` is `lib/estimate-document.js` in `customer` mode — the same renderer as the office preview. The first open of a `Sent` estimate flips it to `Viewed` and stamps `Last_Viewed_At__c` (best-effort; activity actor "Customer"). `canAccept` is true for `Sent | Viewed | Draft` with a version > 0.
+- `POST /public/estimates/{token}/accept` `{ name }` → **200** `{ success, …summary }` — `Status Approved`, `Approved_At/Version/Amount`, `Approval_Method__c = Online`, `Approved_By_Name__c = name`, every `Proposed` line → `Approved`; activity `estimate_approved` with actor `Customer: {name}`. **400** `NAME_REQUIRED` (the typed name is the e-signature); **200** `alreadyApproved: true` on a second accept (idempotent — never a second approval); **409** `ESTIMATE_NOT_OPEN` when the estimate is Declined / Invoiced / unsent. Card capture (Stripe SetupIntent / deposit) attaches to this step when Harmon's Stripe keys arrive.
+- `POST /public/estimates/{token}/decline` `{ reason? }` → `Status Declined`, `Declined_Reason__c`; **409** `ESTIMATE_NOT_OPEN` once Approved / Invoiced.
+- Errors: `404` `ESTIMATE_NOT_FOUND | ROUTE_NOT_FOUND`; `410` `LINK_EXPIRED`; `502` `SALESFORCE_ERROR`; `500` `server_error`. Every 4xx body carries a customer-safe `message` the page shows verbatim.
+
+Wire script: `scripts/wire-service-public-routes.ps1` (resources `/public/estimates/{token}` + `/accept` + `/decline`, invoke permission `apigw-service-public` on `…/*/*/public/*`).
+

@@ -2789,6 +2789,51 @@ is easy to reach twice — see PROGRESS 2026-08-31 for the two-shape proof.
 
 ---
 
+## D-065: Service Operations (Phase 2) design baseline
+
+**Date:** 2026-09-01
+**Status:** Accepted (design; nothing built yet)
+**Related:** D-003/D-018 (service objects), D-020/D-031 (partially superseded — Asset linkage), D-027 (dual-purpose visit), D-021 (price book), D-048 (doorbell pattern reused for intake), `docs/service-workflows.md` (the full design), `docs/service-discovery-2026-08.md` (requirements source, attributed to Harmon's team).
+
+### Context
+
+Phase 2 design was worked through with Tim against three recorded HCP scoping meetings with Harmon's service department (Ben Wollschlager; Paige King + Beth; Larry Aegerter). Several calls change or sharpen earlier ADRs; they are recorded together because they were made as one design pass. Rationale detail lives in `docs/service-workflows.md`; this entry is the authoritative record that the calls were made.
+
+### Decisions
+
+1. **No Asset object in Phase 2** (supersedes the Asset linkage in D-020/D-031). Tickets link `Sundial_Customer__c` (required) plus optional originating-project lookups; system specs read from the Solar record. There are no Asset records in the org (Sunbase migrated as Solar records), and Customer+Solar linkage delivers the history Harmon needs. Asset can be introduced later without disturbing this model.
+2. **Multi-tech work = parallel visit records** (closes the open decision in D-027/schema doc). A visit is one tech × one scheduled appointment with its own clock and GPS; ticket totals sum across visits. Per-tech time is Harmon's #1 pain across three years of service apps, and visit time feeds payroll. Re-clock-in on the same appointment reopens the visit; intervals append to a Lambda-written JSON log (`Clock_Intervals__c`), with first-in/last-out/duration mirrored to dedicated fields.
+3. **Roll-ups via record-triggered Flow on the visit** (the D-027 lookup trade-off's repayment). Migration bulk-loads write totals directly; a nightly reconcile recomputes as a drift net. Apex rejected (first Apex in org, test burden); Lambda-only rejected (misses out-of-band edits).
+4. **Estimates are ticket states, not a module.** `Status__c` gains `Estimate Sent` / `Estimate Approved` / `Ready to Schedule`; a new `Resolution__c` records terminal disposition (incl. `Resolved Remotely – No Charge` — HCP's won/lost-only wrecks Harmon's KPIs). New object **`Sundial_Service_Line__c`**: price-book-driven lines that carry estimate → work order → invoice without retyping (Tim approved 2026-09-01).
+5. **Billing is multi-payer.** New object **`Sundial_Service_Invoice__c`** (Tim approved 2026-09-01): one ticket → 0..n invoices; Bill-To (`Customer` / `Harmon Warranty` / `Manufacturer` / `Leasing Partner` / `Other`) defaults on the ticket and overrides per visit; `Billing_Reference__c` (partner work-order number) is indexed and printed on invoices; partner invoices are PDF-download (portal upload), never emailed. Ticket-level Stripe/invoice fields from the schema draft move to the invoice object.
+6. **Payments = SetupIntent + off-session charge, never auth-and-capture.** Card-network holds expire in 5–7 days — shorter than an `Awaiting Parts` ticket. Stripe webhook (doorbell → SQS → worker, shared-secret/signature, fail closed) marks invoices paid. **Acumatica AR push lands after service go-live** (bridge: bulk mark-paid grid; a read-only scheduled Acumatica payment check may come earlier). Harmon uses its own existing Stripe account (Julie); cards vaulted in HCP's embedded Stripe do not transfer — card re-onboarding is a rollout task.
+7. **Techs get field estimates, not collections, at launch.** Field invoicing/payment is built behind a per-tenant flag, off at launch (office: "our techs are not bill collectors"; owner wants sales-forward techs eventually — enabling later is config, not construction).
+8. **Notes are append-only stamped entries** (user + timestamp, edit-own-only) in two long-text fields (`Work_Notes__c` customer-facing candidates, `Private_Notes__c` internal), Welcome-Call-log entry format precedent. An AI summary of work notes into the invoice's customer-facing paragraph is in scope as a stretch (office edits before send).
+9. **Checklist templates are per-tenant config, not Salesforce objects** (Tim approved 2026-09-01). Templates live in tenant config; completed state snapshots onto the visit. Keeps object count flat per the standing preference.
+10. **Time corrections are office/manager-only.** The PWA exposes no time editing (HCP lets techs edit their own hours; both service managers want that gone). Geofence is a **tag, not a blocker** — clock events record location and a verified flag (service address or shop within per-tenant radius); out-of-fence clock-ins are flagged, never refused.
+
+### Consequences
+
+- Four Phase 2 blockers, not three: FullCalendar Premium, Harmon Stripe keys, HCP export (Ben's login available; API included on the MAX plan), **and Twilio** (+ A2P 10DLC registration lead time) for schedule/on-my-way/estimate-reminder SMS. All SMS degrades to SES email until Twilio is live.
+- D-013's premise is stale: Harmon upgraded SiteCapture and API access now exists. Phase 2 ships only a deep link; real integration is a later increment.
+- New per-tenant config surface (geofence radius, shop locations, board hours/granularity, notify defaults, reminder cadence, tax table, Bill-To partner list, checklist templates, field-collection flag, drive-time rule) — inventoried in `docs/service-workflows.md` §12 so none of it lands hardcoded.
+- PO-from-ticket is a cheap early win: `Sundial_PO__c.Linked_Service_Ticket__c` + the Phase 1 Acumatica PO push already exist; Phase 2 adds only the portal affordance.
+- Open: partner/vendor representation for Bill-To (ties to the standing vendor-model decision, and to the D-064 access model for any rep-visible service surfaces); invoice numbering vs Acumatica AR (Heather/Julie); checklist template content, reminder cadence, geofence radius (Harmon).
+
+### D-065 amendment (2026-09-01): punchlist answers locked in; Service Club e-commerce pulled forward; customer receipts, not invoices
+
+From the fourth scoping meeting (Paige + Beth, 2026-09-01), with Tim and Matt on the call. Details and attribution: `docs/service-discovery-2026-08.md` addendum.
+
+1. **Config values locked:** notify-customer default **OFF** (opt-in per scheduling action); estimate reminders **+3d and +5d then stop**, stale estimates hand off to **Nonstop Automation's drip** (internal CC rejected); invoice number = ticket number, one sequential series, no department prefixes (matches HCP's job=invoice numbering); tax scope AZ-statewide with office self-serve add-a-city; price book migrates as-is after Beth ticks removals on an exported sheet (solar + EV items only).
+2. **Warranty is informational, not automated.** Terms are layered and era-dependent (current: 5-yr labor / 10-yr workmanship; ~20–25-yr roof/stanchions; **2-yr on service work**; older installs shorter). The ticket shows known terms from the linked project; the office makes the warranty-vs-billable call. No warranty rules engine.
+3. **Customer deliverable = receipt + job report; partner deliverable = invoice document.** Customers pay up front/on completion and rarely want invoices; the pretty document is the estimate. `Sundial_Service_Invoice__c` stays as the billing record and partner document. **Direction for the AR push (priority raised):** generate partner invoices *in* Acumatica and pull the PDF onto the ticket's Files tab — today every HCP invoice is manually duplicated into Acumatica (AR + payments live there), producing 505 phantom open invoices; that double-entry is the thing to kill. Deposits (rare, e.g. removal/reinstall paid ahead) handled explicitly in the AR design.
+4. **Plan discounts are line-kind-scoped** (labor / material / both, selectable) — HCP's whole-job-only discounting forced inflated markups. Implemented against `Sundial_Service_Line__c.Kind__c`.
+5. **Service Club e-commerce is pulled forward as a parallel workstream** (was Phase 3): plan purchase online via Stripe subscription → team ping → **webhook to SolarFacts' existing Zapier catch-hook** (monitoring signup link to the customer; reverse trigger on cancel/decline); plus buy-a-truck-roll online and a "call me" request. Nearly independent of the HCP cutover, so it can ship early. See `docs/phase2-build-sequence.md` Workstream S. **Member self-service portal** is the new top-of-future-scope item — evaluate Stripe's hosted customer portal before building custom.
+6. **SiteCapture integration path = Zapier, not direct API** (Tim). Upgrade confirmed done; Beth supplies the template → job-type mapping.
+7. **Intake mailbox identified:** `solarservice@harmonelectric.net` (M365 shared mailbox); Ryan (IT) will forward into Sundial intake when ready. SolarFacts' daily monitoring digest routes there too, eventually feeding monitoring-alert auto-tickets.
+
+---
+
 ## D-066: Layer-1 writes customer address and parent account at create
 
 **Date:** 2026-09-08
@@ -3089,3 +3134,71 @@ one place.
   recalculates on its own; those projects carry the D21 burden until they are re-pushed.
   Identifying and re-pushing them is a data task, listed in TASKS.md, not something this
   change does.
+
+## D-072: Service module data model v2 — estimates are records, jobs always have one, pricing comes from a versioned price book
+
+**Date:** 2026-09-09
+**Status:** Accepted (design; Stage 1 package to be reworked before its first deploy — nothing from D-065's object layout has been deployed)
+**Supersedes:** D-065 decisions 4 and 5 (estimates-as-ticket-states; multi-payer invoices with per-visit Bill-To override); D-065.3 for **money** roll-ups (time roll-ups unchanged). Object renames: `Sundial_Service__c` → `Sundial_Service_Job__c`, `Sundial_Service_Visit__c` → `Sundial_Service_Call__c`.
+**Related:** D-021 (price book), D-027 (dual-purpose visit — stands), D-035 (tenant isolation — the price book is tenant-scoped), D-065 + its 2026-09-01 amendment (everything not named above stands), `docs/service-data-model.md` (the full model — authoritative), 2026-09-09 meeting (Paige, Beth, Matt, Tim).
+
+### Context
+
+The 2026-09-09 meeting settled three things the D-065 design had guessed differently: Paige needs estimates that exist **before** any job (proposals she may not win), Matt and Paige agreed that **every job carries an estimate that lives and grows until it becomes the invoice**, and Matt ruled that **one job has one payer** (a second payer at an address is a second job — replacing HCP's "segments"). Tim then proposed the object structure recorded here; Claude's review added the junction, versioning, payment, and math-placement details.
+
+### Decisions
+
+1. **Seven objects.** `Sundial_Estimate__c` (EST-#), `Sundial_Service_Job__c` (SVC-#), `Sundial_Service_Call__c` (SC-#), `Sundial_Price_Book_Item__c` (versioned catalog, tenant-scoped), `Sundial_Service_Line__c` (junction estimate × item, re-parented from the ticket), `Sundial_Service_Invoice__c` (one per job, `-2` on reissue), and new `Sundial_Service_Payment__c` (PAY-# — one row per deposit / payment / refund / adjustment, Stripe PaymentIntent id as the idempotency key). No Asset (D-065.1 stands), no Version object, no Template object.
+2. **An estimate can exist without a job; a job never exists without an estimate** (Tim). Quick-creating a job creates its estimate in the same transaction (optionally pre-loaded from the tenant's default template). *Create Job* on a job-less estimate links the pair 1:1. Nothing blocks scheduling, sending, or invoicing on any other state — HCP's approve-before-job rule is designed out; restrictions come later as per-tenant validation rules only if asked.
+3. **Lines belong to the estimate, never the job.** One living set of lines; after conversion the job's "Estimate" tab *is* the estimate. Field estimates add lines with `Stage = Proposed`. Job money fields are cross-object formulas onto the estimate — no sync.
+4. **Pricing is a versioned price book.** Items carry a stable `Item_Code__c`; *Update* clones to a new version with the same code and deactivates the old (Tim). Items are never deleted; in-place edit is allowed only until a line references the version. Lines point at a specific version **and** snapshot description/price/cost — history survives both ways. Items carry split sell prices (`Labor_Price__c` / `Material_Price__c`, `Price__c` = sum) so labor-only / material-only discounts (D-065 amendment 4) have something to act on, plus `Taxable__c` and `Estimated_Hours__c`.
+5. **Templates are estimates** (`Is_Template__c`, no customer); "add from template" clones their lines. Estimate **versions are a JSON log + PDF per send** (`Version_Log__c`, append-only), not records.
+6. **One job = one payer.** Bill-To (`Bill_To_Type__c` / partner / `Billing_Reference__c`) lives on the job only; the customer record carries no default; the service call's override is removed. Invoice = the estimate's lines frozen at `Ready to Bill`; invoice number = job number (amendment 1 stands).
+7. **The hosted estimate page is the payment link** — accept + Stripe SetupIntent (or deposit charge) at the bottom of the estimate; no bare card-capture links. Sending the estimate is the pre-appointment card capture Paige asked for.
+8. **Money math runs in the line-write Lambda** (subtotal by kind → scoped discount → markup → tax → total → deposit) with a nightly reconcile; **time** roll-ups stay on the Flow per D-065.3. Markup (% or amount, hidden from the customer) and `Sold_By__c` on the estimate are the commission mechanism Tim asked for.
+9. **Files and photos follow the Solar module's S3 pattern unchanged** — `sfsolproj/SUNDIAL/{jobId}/…` for files, `SUNDIAL/{jobId}/photos/{serviceCallId}/…` for photos, `SUNDIAL/{estimateId}/estimate-v{n}.pdf` for sent estimates; XFiles Pro reads the same prefix; nothing is stored in Salesforce. Per-photo flags (customer-visible, caption, GPS, pair, service call) are a Supabase side table on the existing `sundial_file_metadata` row, per `docs/file-storage.md`. Photos default internal until flagged customer-visible.
+
+### Consequences
+
+- The built-not-deployed Stage 1 package (objects, permission set, 4 SQL files, allowlist/registry entries, access matrix, field workbooks) is **reworked, not deployed** — renames are free only while that remains true (Tim to confirm before the rework lands).
+- `Stripe_Customer_Id__c` moves to `Sundial_Customer__c` (one field — Tim confirms the customer object's spare-field budget; fallback is per-job card capture).
+- `docs/service-workflows.md` §2/§6/§7 and the two field workbooks are superseded where they conflict; the workbooks are regenerated from `docs/service-data-model.md`.
+- Migration doubles record volume (each HCP job → estimate + job + lines + invoice + payments); acceptable.
+- Get from Harmon before the price-book build: category list + item codes (Beth, from the HCP export), labor-vs-material tax treatment (Heather), the quick-create default template (Paige), estimate validity days, deposit threshold, any manager sign-off rule.
+
+### D-072 amendment (2026-09-09): the customer is created inside the project-creating popup, and tagged
+
+Tim, same day. **New Estimate / New Job** (and the future New Roofing Project / New Commercial
+Project) open one popup that either selects an existing `Sundial_Customer__c` or creates one
+from the basics (first, last, address, email, phone) in the same request — no detour through
+the Sales module. `Requested_Project_Types__c` (existing multipicklist) is set silently:
+`Service` on a new customer, `Service` union-added on an existing one; Roofing / Commercial do
+the same with their own value when built. This makes the field the product-history tag for
+sorting customers/leads/opportunities. Guardrails: soft duplicate check (email / phone /
+street+zip → 409 with candidates, `confirmNew` to override); the create reuses the
+`POST /sf/customer` validation path; a partial failure reports the created customer id rather
+than leaving a silent orphan. Nothing in the deploy package changes; the verify script now
+checks the "Service" picklist value exists. Open: Stage/Status/Lead_Source defaults for a
+service-originated customer (Tim). Detail: `docs/service-data-model.md` §3.1a.
+
+### D-072 amendment 2 (2026-09-11): activity tracker on the job; lines stay editable after they are added
+
+Tim, before the estimate Lambda's first deploy. **(a) Activity tracker.** Every field
+update, line add/edit/remove, estimate or invoice send, approval, job creation, and
+price-book change writes one row — event, actor (Sundial user id + name), timestamp,
+`details` JSON (fields with old → new, version, line id) — to the Supabase table
+`sundial_service_activity` (`lib/service-activity.js`), keyed by both job and estimate so
+a pre-job estimate's history is re-keyed to the job at Create Job. Supabase, not
+Salesforce, because CLAUDE.md already designates it for audit logs (unbounded, queryable,
+zero SF API cost per event, Realtime-capable). Written best-effort after the Salesforce
+write by `sundial-service-estimate` (all routes) and by `sundial-sf-update` (generic
+PATCH/POST on service object keys, with a pre-read so old values are captured). Read via
+`GET /service/jobs/{id}/activity` and `/service/estimates/{id}/activity`. Known gap:
+changes made outside Sundial; Field History Tracking is the backstop if needed.
+**(b) Editable lines.** Confirmed as designed: the line is the office's snapshot of the
+price-book item and description / quantity / unit price / taxable / kind are editable
+per estimate (`PATCH …/lines/{lineId}`), `Price_Overridden__c` flags a divergent price,
+and the activity row records old → new. Added rule: a money-affecting edit to an
+**Approved** line drops it to `Proposed` for re-approval on the next send;
+description-only edits do not. Package unchanged; one new SQL file; `sundial-sf-update`
+redeploy. Detail: `docs/service-data-model.md` §5.4, §11.

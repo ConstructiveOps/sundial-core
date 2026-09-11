@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Payment__c - one row per money event on a job (D-072.1): deposit, final
+  payment, refund, adjustment; card via Stripe, or check / partner remittance recorded by the
+  office. Stripe_Payment_Intent_Id__c is UNIQUE - the webhook worker's idempotency key, so a
+  redelivered event can never double-record. Heather's weekly digest and Beth's reports read
+  these rows.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Service_Job__c</fullName>
+        <description>Required.</description>
+        <externalId>false</externalId>
+        <label>Service Job</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Service_Job__c</referenceTo>
+        <relationshipLabel>Service Payments</relationshipLabel>
+        <relationshipName>Service_Payments</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Invoice__c</fullName>
+        <description>Optional - deposits pre-date the invoice; the Lambda back-fills it at issue.</description>
+        <externalId>false</externalId>
+        <label>Invoice</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Invoice__c</referenceTo>
+        <relationshipLabel>Service Payments</relationshipLabel>
+        <relationshipName>Service_Payments</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Payments</relationshipLabel>
+        <relationshipName>Sundial_Service_Payments</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Type__c</fullName>
+        <externalId>false</externalId>
+        <label>Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Deposit</fullName>
+                    <default>false</default>
+                    <label>Deposit</label>
+                </value>
+                <value>
+                    <fullName>Payment</fullName>
+                    <default>true</default>
+                    <label>Payment</label>
+                </value>
+                <value>
+                    <fullName>Refund</fullName>
+                    <default>false</default>
+                    <label>Refund</label>
+                </value>
+                <value>
+                    <fullName>Adjustment</fullName>
+                    <default>false</default>
+                    <label>Adjustment</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Method__c</fullName>
+        <externalId>false</externalId>
+        <label>Method</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Card</fullName>
+                    <default>true</default>
+                    <label>Card</label>
+                </value>
+                <value>
+                    <fullName>Check</fullName>
+                    <default>false</default>
+                    <label>Check</label>
+                </value>
+                <value>
+                    <fullName>ACH</fullName>
+                    <default>false</default>
+                    <label>ACH</label>
+                </value>
+                <value>
+                    <fullName>Partner Remittance</fullName>
+                    <default>false</default>
+                    <label>Partner Remittance</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Amount__c</fullName>
+        <description>Positive for money in; Refund rows are also positive (Type says the direction).</description>
+        <externalId>false</externalId>
+        <label>Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Pending</fullName>
+                    <default>true</default>
+                    <label>Pending</label>
+                </value>
+                <value>
+                    <fullName>Succeeded</fullName>
+                    <default>false</default>
+                    <label>Succeeded</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+                <value>
+                    <fullName>Refunded</fullName>
+                    <default>false</default>
+                    <label>Refunded</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Stripe_Payment_Intent_Id__c</fullName>
+        <description>UNIQUE external ID - webhook idempotency key.</description>
+        <externalId>true</externalId>
+        <label>Stripe Payment Intent Id</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>true</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Charge_Id__c</fullName>
+        <externalId>false</externalId>
+        <label>Stripe Charge Id</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Refund_Id__c</fullName>
+        <externalId>false</externalId>
+        <label>Stripe Refund Id</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Failure_Reason__c</fullName>
+        <description>Stripe decline text for the office.</description>
+        <externalId>false</externalId>
+        <label>Failure Reason</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Received_At__c</fullName>
+        <description>When the money actually landed (webhook time, or the check date the office enters).</description>
+        <externalId>false</externalId>
+        <label>Received At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Reference__c</fullName>
+        <description>Check number / partner remittance id.</description>
+        <externalId>false</externalId>
+        <label>Reference</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Recorded_By__c</fullName>
+        <description>Office user for manual entries; blank for webhook rows.</description>
+        <externalId>false</externalId>
+        <label>Recorded By</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_User__c</referenceTo>
+        <relationshipLabel>Recorded Service Payments</relationshipLabel>
+        <relationshipName>Recorded_Service_Payments</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Acumatica_Applied_At__c</fullName>
+        <description>When Heather applied it against the AR invoice (bridge) / when the push did.</description>
+        <externalId>false</externalId>
+        <label>Acumatica Applied At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Notes__c</fullName>
+        <externalId>false</externalId>
+        <label>Notes</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Payment</label>
+    <nameField>
+        <displayFormat>PAY-{00000}</displayFormat>
+        <label>Payment Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Payments</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>Private</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

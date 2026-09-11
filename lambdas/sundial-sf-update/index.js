@@ -50,6 +50,38 @@ const OBJECT_ALLOWLIST = {
   roofing: { sfObject: "Sundial_Roofing__c", cacheTable: "sundial_roofing_cache" },
   po: { sfObject: "Sundial_PO__c", cacheTable: "sundial_po_cache" },
   user: { sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
+  // Phase 2 Service Operations (D-072 - the seven-object model; supersedes the
+  // D-065 four). Inert until the objects exist in the org and the
+  // sql/sundial_*_cache.sql tables are applied - a missing cache table is skipped
+  // gracefully and a missing object 404s like any bad describe.
+  estimate: {
+    sfObject: "Sundial_Estimate__c",
+    cacheTable: "sundial_estimate_cache",
+  },
+  job: {
+    sfObject: "Sundial_Service_Job__c",
+    cacheTable: "sundial_service_job_cache",
+  },
+  servicecall: {
+    sfObject: "Sundial_Service_Call__c",
+    cacheTable: "sundial_service_call_cache",
+  },
+  pricebookitem: {
+    sfObject: "Sundial_Price_Book_Item__c",
+    cacheTable: "sundial_price_book_item_cache",
+  },
+  serviceline: {
+    sfObject: "Sundial_Service_Line__c",
+    cacheTable: "sundial_service_line_cache",
+  },
+  serviceinvoice: {
+    sfObject: "Sundial_Service_Invoice__c",
+    cacheTable: "sundial_service_invoice_cache",
+  },
+  servicepayment: {
+    sfObject: "Sundial_Service_Payment__c",
+    cacheTable: "sundial_service_payment_cache",
+  },
 };
 
 const SF_API_VERSION = "v60.0";
@@ -78,6 +110,52 @@ import {
   escapeSoqlValue,
 } from "../../lib/access.js";
 import { fieldsFor } from "../../lib/field-manifest/index.js";
+// Service module activity tracker (D-072 amendment 2): a PATCH/POST on a service object
+// through this generic route is logged like every write the estimate Lambda makes, so a
+// field edited from the job's detail page shows up in the job's feed. Best-effort.
+import {
+  recordActivity,
+  SERVICE_ACTIVITY_KEYS,
+  EVENTS as ACTIVITY_EVENTS,
+  diffFields,
+} from "../../lib/service-activity.js";
+
+/**
+ * For a service object, read the CURRENT values of the fields about to change plus the
+ * job/estimate references, so the activity row can carry old → new. One extra query per
+ * service PATCH; null (and no activity) for every other object. Never throws.
+ */
+async function readBeforeForActivity(objectKey, entry, recordId, tenantId, fieldNames) {
+  const spec = SERVICE_ACTIVITY_KEYS[objectKey];
+  if (!spec) return null;
+  const refs = [spec.jobField, spec.estimateField].filter((f) => f && f !== "Id");
+  const select = [...new Set(["Id", "Name", ...fieldNames, ...refs])].join(", ");
+  try {
+    const rows = await sfQuery(
+      `SELECT ${select} FROM ${entry.sfObject} WHERE Id = '${soqlEscapeString(recordId)}' ` +
+        `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+    );
+    return rows?.[0] ?? null;
+  } catch (e) {
+    console.error("activity pre-read failed:", e?.message || String(e));
+    return null;
+  }
+}
+
+function activityRefs(objectKey, record, recordId) {
+  const spec = SERVICE_ACTIVITY_KEYS[objectKey];
+  const get = (path) => {
+    if (!path || !record) return null;
+    if (path === "Id") return recordId;
+    return path.split(".").reduce((o, k) => (o == null ? null : o[k.replace(/__r$/, "__r")]), record) ?? null;
+  };
+  return { recordType: spec.recordType, jobSfId: get(spec.jobField), estimateSfId: get(spec.estimateField), event: spec.event };
+}
+
+function activityActor(identity) {
+  const u = identity?.user ?? {};
+  return { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null };
+}
 
 /**
  * Fields a SALES role may never write, whatever the manifest says (§3.4 step 4).
@@ -641,6 +719,9 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
     clean[dealerKey] = derived.dealerId;
   }
 
+  // 4b) Service objects: capture the values about to change, for the activity row.
+  const before = await readBeforeForActivity(objectKey, entry, recordId, tenantId, Object.keys(clean));
+
   // 5) PATCH to Salesforce (success is 204 No Content).
   const resp = await sfWrite(
     "PATCH",
@@ -664,6 +745,22 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
     if (error) console.error("cache stale-flag error (update):", error.message);
   } catch (e) {
     console.error("cache stale-flag threw (update):", e?.message || String(e));
+  }
+
+  // 7) Activity tracker (service objects only). Best-effort, after the write.
+  if (SERVICE_ACTIVITY_KEYS[objectKey]) {
+    const refs = activityRefs(objectKey, before, recordId);
+    await recordActivity(getSupabaseClient, {
+      tenantId,
+      tenantSlug: identity?.tenantSlug ?? null,
+      event: refs.event,
+      recordType: refs.recordType,
+      recordSfId: recordId,
+      jobSfId: refs.jobSfId,
+      estimateSfId: refs.estimateSfId,
+      actor: activityActor(identity),
+      details: { via: "sf-update", name: before?.Name ?? null, fields: diffFields(before || {}, clean) },
+    });
   }
 
   return jsonResponse(200, cors, {
@@ -749,6 +846,22 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
     /* fall through with null id */
   }
   const newId = created?.id ?? null;
+
+  // Activity tracker (service objects only). Best-effort, after the write.
+  if (newId && SERVICE_ACTIVITY_KEYS[objectKey]) {
+    const refs = activityRefs(objectKey, payload, newId);
+    await recordActivity(getSupabaseClient, {
+      tenantId,
+      tenantSlug: identity?.tenantSlug ?? null,
+      event: ACTIVITY_EVENTS.RECORD_CREATED,
+      recordType: refs.recordType,
+      recordSfId: newId,
+      jobSfId: refs.jobSfId,
+      estimateSfId: refs.estimateSfId,
+      actor: activityActor(identity),
+      details: { via: "sf-update", fields: Object.keys(payload).filter((k) => k !== "Client__c") },
+    });
+  }
 
   // KNOWN LIMITATION (intentional, not solved here): there is no cache row to
   // invalidate for a brand-new record. Because list reads are cache-first and may

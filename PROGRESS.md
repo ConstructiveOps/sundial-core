@@ -1,5 +1,122 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (evening) — Send delivers, and the customer gets a page (D-072.7)
+
+The estimate loop closes. **`/send`** on `sundial-service-estimate` now builds the customer
+link (`SERVICE_PUBLIC_BASE_URL` + `/estimate/{token}`) and emails it through `lib/email.js`
+(SES) — to `body.to`, else the customer's `Primary_Email__c`, else the estimate's email
+snapshot. Delivery is reported, never assumed: `delivery: "email"` + `recipient` when SES
+accepted it, `delivery: "recorded"` + `deliveryDetail` when it could not go out (no base
+URL, `EMAIL_FROM` unset, no customer email, SES error, SMS not live). The version is on the
+record either way, and the activity row carries the same fields, so "did the customer get
+it?" is answerable from the feed. `fields.js` now holds `ESTIMATE_SELECT` so the two
+Lambdas share one field list.
+
+**New Lambda `sundial-service-public`** — the hosted estimate page's backend, no login:
+`GET /public/estimates/{token}` (exactly-one-match or 404; 410 once expired; first open
+flips Sent → Viewed with actor "Customer"; renders `lib/estimate-document.js` in customer
+mode), `POST …/accept { name }` (Approved / Online / `Approved_By_Name__c`, Proposed lines
+→ Approved, activity actor `Customer: {name}`; a second accept is a 200 that says
+`alreadyApproved`, never a second approval; 409 once Declined / Invoiced), `POST …/decline`.
+The tenant is read from the estimate's `Client__c`; nothing in the request names a record,
+tenant, or field. `scripts/wire-service-public-routes.ps1` wires
+`/public/estimates/{token}` + `/accept` + `/decline`. Tests: estimate 27/27 (new: send
+delivery — emailed, not-configured, no-email paths), public 5/5.
+
+**Portal (harmon-crm):** `/estimate/:token` — public route outside `ProtectedRoute`, plain
+`fetch` with no bearer token, the document in a `sandbox=""` iframe, approve-with-typed-name
+/ decline outside the iframe, expired / not-found / already-approved / declined states,
+Harmon logo + `clientConfig.clientName`. The estimate page's Send toast now says "Version
+n emailed to …" or "recorded, but no email went out — {why}", and a **Copy customer link**
+button appears once a token exists. `service-api.ts` types `SendResult`. 3 new render
+tests; 102/102; tsc / build / lint clean on the new files.
+
+Docs: `docs/api-endpoints.md` (send delivery, new Public section, Lambda map, three env
+vars), TASKS.md (Tim's stand-up steps). Still next: PDF per send, Stripe on accept, SMS.
+
+## 2026-09-11 (later) — Service module portal screens (harmon-crm) + the estimate preview renderer
+
+The backend was ahead of the screens, so the Service module got its UI. In **harmon-crm**:
+`src/lib/service-api.ts` (typed client for every `/service/*` route, sharing `authedFetch`),
+`SfObject`/`ModuleKey` extended with the seven service keys, the nav item flipped from
+"Soon" to live (gated on the `job` module), routes for `/service`, `/service/jobs/:id`,
+`/service/estimates`, `/service/estimates/:id`, `/service/price-book`. Components:
+`CustomerPicker` (search the hub or type a new customer; renders the server's duplicate
+candidates as one-click picks with "Create anyway"), `NewServiceModal` (one popup, two
+modes — estimate, or quick-create job), `PriceBookSearch` (typeahead over the active
+catalog), `PriceBookItemModal` (create / edit / Update-as-new-version, with the
+ITEM_IN_USE 409 turned into the new-version path), `PreviewModal` (sandboxed iframe of
+the server-rendered document, Close + Send), `ActivityFeed`. Pages: the three lists
+(shared `ServiceListShell` with tabs), `EstimateDetailPage` (the editor — inline-editable
+description / qty / price per line, kind select, remove, ad-hoc form, add-from-template,
+pricing panel for discount / markup / tax / deposit, live totals, Preview, Send, Mark
+approved, Declined, Create job / Open job), `ServiceJobDetailPage` (status + editable
+facts via the generic PATCH so they land in the activity tracker; estimate summary card).
+`tsc -b` clean, `vite build` clean, vitest 99/99. Note: the repo's
+`react-hooks/set-state-in-effect` lint rule already fails on the existing Roofing pages;
+the new pages follow the same load-in-effect pattern and are not gated on it.
+
+In **sundial-core**: `lib/estimate-document.js` — the ONE renderer for the customer-facing
+estimate (preview now; hosted page, PDF, email next), pure and self-contained, brand block
+injected per tenant (placeholder until Harmon's identity block arrives); `GET
+/service/estimates/{id}/preview` on the estimate Lambda; the wire script gained the two
+activity GETs it was missing plus preview. Tests 26/26. Tim's preview/send rule is
+honoured exactly: the preview is read-only, edits happen on the estimate.
+
+
+## 2026-09-11 — Service module: activity tracker + editable lines (D-072 amendment 2), before the estimate Lambda's first deploy
+
+Two asks from Tim, both landed in the repo before anything shipped. **Activity tracker:**
+new `lib/service-activity.js` + `sql/sundial_service_activity.sql` (Supabase — the
+CLAUDE.md home for audit logs; unbounded, queryable, no SF API cost). Every route in
+`sundial-service-estimate` writes a row (event, actor id + name, timestamp, `details` with
+old → new / version / line id); `sundial-sf-update` writes `field_updated` /
+`record_created` for generic PATCH/POST on the seven service keys, with a one-query
+pre-read so previous values are captured. Rows are keyed by job AND estimate; Create Job
+re-keys the estimate's earlier rows so the job feed begins at the first quote. Customer
+created/tagged events from the popup are deferred until the estimate/job exists so they
+land on the job's feed. Two read routes: `GET /service/jobs/{id}/activity`,
+`GET /service/estimates/{id}/activity`. Best-effort by the standing rule; failures log
+the full row. **Editable lines:** already routed (`PATCH …/lines/{lineId}`) — confirmed
+and documented as design: the line is the office's snapshot. Added one rule: a
+money-affecting edit to an Approved line drops it to Proposed (`needsReapproval: true`);
+description-only edits do not; a no-op patch returns `unchanged`. Tests 24/24 with the
+fake Supabase now holding an activity table; access 162/162. Not deployed — Tim's steps in
+TASKS.md (one new SQL file, `sundial-sf-update` redeploy alongside the new Lambda).
+
+## 2026-09-10 — Service module: seven objects DEPLOYED; `sundial-service-estimate` Lambda built (D-072)
+
+**Deployed by Tim (2026-09-09/10):** the D-072 package (`salesforce/service-objects/` — 7 objects,
+201 fields, `Sundial_Customer__c.Stripe_Customer_Id__c`, `Sundial_Service_Objects` permission set,
+assigned to the integration user), the seven `sql/*_cache.sql` tables in Supabase, and
+`sundial-sf-query` / `sundial-sf-update` / `sundial-cache-sync` with the new allowlist keys.
+Two things the first Check Only taught: required lookups need `Restrict` (not `SetNull`) as
+their delete constraint, and `scripts/zip-package.mjs` had to learn whole-object packages.
+Both are fixed at the source (generator + zip script), not by hand.
+
+**Built this session, not yet deployed:** `lambdas/sundial-service-estimate/` — the write
+side of the service model. Four files: `totals.js` (pure money math, exact cents),
+`customer.js` (select-or-create + duplicate matcher + `Requested_Project_Types__c` tagging),
+`pricebook.js` (item versioning + item→line snapshot), `index.js` (router + 17 routes,
+injectable deps). `test.js` drives the real router through an in-memory Salesforce — **24/24
+green**, no module mocking, so it runs identically on Windows. `lib/access.js` gains four
+tenant-only action keys (`service.estimate.write/send`, `service.job.create`,
+`service.pricebook.write`); `lib/access.test.js` still 162/162. Routes documented in
+`docs/api-endpoints.md`; wiring script `scripts/wire-service-estimate-routes.ps1`.
+
+**What the Lambda enforces that metadata cannot:** every job has exactly one estimate
+(quick-create makes both, compensates if the job create fails); lines live on the estimate;
+only the active price-book version can be added to a line; templates re-snapshot from the
+active version of each item (never resurrect a superseded price); one active version per
+`Item_Code__c`; in-place item edits only while unreferenced; totals recomputed on every
+write; send = version++ with an append-only `Version_Log__c` entry and a reusable public
+token; approve stamps the approved version/amount and promotes Proposed lines.
+
+**Deliberately not in this increment:** the email/SMS send and PDF render (send records and
+returns the token), the public hosted-estimate page (own Lambda, token auth), the AZ city
+tax table (`taxRate` is set per estimate), invoices and payments, the `service.*` allowlist
+entries in `lib/file-access.js` for the Files tab on the new objects.
+
 ## 2026-09-10 — Welcome Call: orphan-match self-heals a missing recording
 
 Branch `feature/welcome-call-recording-heal` off `master`. `lambdas/sundial-welcome-call`

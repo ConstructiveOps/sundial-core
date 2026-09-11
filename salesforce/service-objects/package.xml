@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-objects v2 - the seven Service Operations objects (Phase 2, D-072), one new field
+  on Sundial_Customer__c, and the integration-user permission set.
+
+  BEFORE DEPLOYING: run  node scripts/verify-service-schema.mjs
+  - If any of the seven objects ALREADY EXISTS, stop and reconcile (whole-object deploy).
+  - If Sundial_Commercial__c is absent, remove the three commercial lookups first
+    (Originating_Commercial_Project__c on estimate + job, Sundial_Commercial__c on the call)
+    AND their fieldPermissions entries - a lookup to a missing object fails the whole deploy.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
+  Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
+  Single Package -> CHECK ONLY first, expect 9/9 components (7 objects + 1 field + 1
+  permission set), then deploy for real. Then assign the permission set, re-run verify.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Estimate__c</members>
+        <members>Sundial_Service_Job__c</members>
+        <members>Sundial_Service_Call__c</members>
+        <members>Sundial_Price_Book_Item__c</members>
+        <members>Sundial_Service_Line__c</members>
+        <members>Sundial_Service_Invoice__c</members>
+        <members>Sundial_Service_Payment__c</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>Sundial_Customer__c.Stripe_Customer_Id__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Objects</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

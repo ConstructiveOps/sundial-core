@@ -109,6 +109,11 @@ function validateManifest(root, files) {
   }
 
   const declaredFields = declared.get("CustomField") ?? new Set();
+  // WHOLE-OBJECT packages (D-072 service-objects): a CustomObject member carries every
+  // field in its .object file implicitly, so those fields are covered without a
+  // CustomField entry. Only fields on objects NOT declared as CustomObject must appear
+  // as CustomField members (the single Sundial_Customer__c field, for example).
+  const declaredObjects = declared.get("CustomObject") ?? new Set();
 
   // Fields actually present in the object files being zipped.
   const present = new Set();
@@ -122,10 +127,18 @@ function validateManifest(root, files) {
     perFile.push({ objName, count: names.length });
   }
 
-  const missingFromManifest = [...present].filter((x) => !declaredFields.has(x)).sort();
+  const missingFromManifest = [...present]
+    .filter((x) => !declaredFields.has(x) && !declaredObjects.has(x.split(".")[0]))
+    .sort();
   const missingFromContents = [...declaredFields].filter((x) => !present.has(x)).sort();
 
   const otherTypes = [...declared.entries()].filter(([t]) => t !== "CustomField");
+  // Whole-object members must have a file, or the deploy silently ships nothing for them.
+  for (const obj of declaredObjects) {
+    if (!files.some((f) => f.rel.split(path.sep).join("/") === `objects/${obj}.object`)) {
+      missingFromContents.push(`${obj} (CustomObject - no objects/${obj}.object file)`);
+    }
+  }
 
   return { declaredFields, present, perFile, missingFromManifest, missingFromContents, otherTypes };
 }

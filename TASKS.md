@@ -49,6 +49,60 @@ off the LIVE tenant first (GETs only). Suite 809 green.
 - [ ] **HARMON (data): five RSDC projects Salesforce does not know about** — R261075 (Gary Muehlenkamp), R261087 (Andre'a Clark), R261092 (Melvin Orantes Magana), R261094 (Elijah Johnson), R261095 (Brenda Klick). Four of the five people exist as customers with a null `Acumatica_Project_ID__c`; pushing one of those today would create a SECOND Acumatica project for the same job.
 - [ ] **Consider: uniqueness on `Acumatica_Project_ID__c`.** A duplicate is what made a correct template selection look like a bug for a fortnight. Cheap to add, and it would have prevented the whole investigation.
 
+## Phase 2 — Service module build (D-072) — objects DEPLOYED 2026-09-10; estimate Lambda built
+
+- [x] **Salesforce + Supabase + registries deployed (Tim, 9/9–9/10):** 7 objects (Check Only → deploy, `Restrict` on required lookups), permission set assigned, 7 cache tables applied, `sundial-sf-query` / `sundial-sf-update` / `sundial-cache-sync` redeployed. Generator: `scripts/gen-service-objects.py` (flag `--no-commercial`); `scripts/zip-package.mjs` handles whole-object packages. Walkthrough: `salesforce/service-objects/DEPLOY-WALKTHROUGH.md`.
+- [x] **`lambdas/sundial-service-estimate/` built** — 17 routes (estimates, lines, templates, send/approve/decline, create-job, quick-create jobs, price-book create/edit/new-version/deactivate), customer select-or-create with duplicate guard + `Requested_Project_Types__c` tagging, totals math, 24/24 tests; `lib/access.js` + 4 `service.*` actions (162/162). Docs: `docs/api-endpoints.md` Service section.
+- [x] **Activity tracker + editable lines (Tim, 9/11; D-072 amendment 2)** — `lib/service-activity.js` + `sql/sundial_service_activity.sql`; every estimate-Lambda route logs event/actor/timestamp/old→new; `sundial-sf-update` logs generic PATCH/POST on service keys (pre-reads old values); `GET /service/jobs/{id}/activity` + `/service/estimates/{id}/activity`; pre-job estimate rows re-keyed at Create Job. Line edits after add confirmed (already routed); money edits to an Approved line → Proposed (`needsReapproval`). Tests 24/24, access 162/162.
+- [ ] **TIM: stand up the Lambda + routes** — (1) Supabase SQL Editor: run `sql/sundial_service_activity.sql` (new table; optional: Database → Replication → add it for Realtime); (2) Lambda console → Create function `sundial-service-estimate`, same runtime/architecture/execution role/timeout/memory as `sundial-sf-update` (copy its configuration; no env vars needed); (3) `.\deploy.ps1 sundial-service-estimate`; (4) `.\deploy.ps1 sundial-sf-update` (activity logging on generic PATCH/POST); (5) `.\scripts\wire-service-estimate-routes.ps1` (creates the routes incl. the two activity GETs; prompts before the prod API deploy); (6) `npm test` on Windows; (7) commit on the feature branch.
+- [ ] **TIM: XFiles Pro** for `Sundial_Service_Job__c`, `Sundial_Service_Call__c`, `Sundial_Estimate__c` if not done during the walkthrough.
+- [ ] **Get from Tim/Harmon:** estimate validity days (code default 30); quick-create default template + its lines (Paige); Lead & Source defaults (`Stage__c` / `Status__c` / `Lead_Source__c`) for a service-originated customer; labor-vs-material tax treatment (Heather); price-book categories + item codes from the HCP export (Beth).
+- [x] **Portal — Service module screens (harmon-crm, 2026-09-11):** Jobs / Estimates / Price Book lists with search + filters, New Estimate + New Job popup (customer select-or-create with the duplicate prompt, template pick, job basics), the estimate editor (editable line grid, price-book typeahead, ad-hoc lines, add-from-template, pricing panel, totals, **Preview** read-only document, Send / Mark approved / Declined / Create job, activity feed), the job page (status + editable facts through `PATCH /sf/job`, estimate summary card with Open / Preview, activity feed), templates managed from the Estimates list. `tsc` clean, vite build clean, 99/99 portal tests.
+- [x] **Backend — `GET /service/estimates/{id}/preview`** + `lib/estimate-document.js` (one renderer for preview / hosted page / PDF / email — Tim's "see the final product before sending"). Wire script now also creates the two activity GETs (they were missing from the first run — re-run it). Tests 26/26.
+- [ ] **TIM:** `.\deploy.ps1 sundial-service-estimate` → `.\scripts\wire-service-estimate-routes.ps1` (adds preview + activity routes; idempotent) → in harmon-crm: `npm run build`, commit, push `main` (Vercel deploys).
+- [ ] **Get from Harmon for the document:** company identity block (legal name per entity, ROC numbers, address, phone, email), the re-hosted T&C link, the Service Club footer blurb, logo — `DEFAULT_BRAND` in `lib/estimate-document.js` lists the slots.
+- [x] **Send delivery + the customer's hosted estimate page (2026-09-11, D-072.7):** `/send` now builds the link (`SERVICE_PUBLIC_BASE_URL` + `/estimate/{token}`) and emails it through `lib/email.js` (SES), reporting `delivery: email | recorded` + `deliveryDetail` so a non-send is visible, never silent. New Lambda `lambdas/sundial-service-public` — `GET /public/estimates/{token}` (marks Viewed, renders customer mode), `POST …/accept { name }` (Approved / Online, Proposed lines → Approved, idempotent), `POST …/decline`; 404 unknown, 410 expired, tenant read from the estimate. `scripts/wire-service-public-routes.ps1`. Portal: `/estimate/:token` (public, sandboxed iframe, approve-with-name / decline, expired + approved states), Send toast now says emailed-to-whom or why-not, "Copy customer link" on the estimate page. Tests: estimate 27, public 5, portal 102.
+- [ ] **TIM: stand up the public page** — (1) Lambda console → Create function **`sundial-service-public`**, same runtime / architecture / execution role / timeout / memory as `sundial-sf-update`; env var `SERVICE_BRAND_NAME = Harmon Electric`; (2) on **`sundial-service-estimate`** add env vars `SERVICE_PUBLIC_BASE_URL` (the portal's URL, no trailing slash), `EMAIL_FROM`, `EMAIL_REPLY_TO`, `SES_REGION`, `EMAIL_CONFIG_SET` (same values as `sundial-aurora-push`); (3) `.\deploy.ps1 sundial-service-estimate` and `.\deploy.ps1 sundial-service-public`; (4) `.\scripts\wire-service-public-routes.ps1`; (5) harmon-crm `npm run build`, commit, push `main`; (6) test with the ZZ test customer only: Send from an estimate → open the link from the toast / Copy customer link → approve with a name → the estimate shows Approved (Online) and the activity feed shows `Customer: <name>`.
+- [ ] **Next (Claude):** estimate PDF render → `SUNDIAL/{estimateId}/estimate-v{n}.pdf` and `Version_Log__c[].pdfKey` (attach to the email); Stripe SetupIntent / deposit on the accept step when keys arrive; SMS via Twilio; `lib/file-access.js` allowlist entries (`estimate`, `job`, `servicecall`) so the Files tab works on the new objects; portal detail configs from the three workbooks (harmon-crm); `sundial-service-board` (dispatch read); invoice issue + payments (`Sundial_Service_Invoice__c` / `_Payment__c` routes) + Stripe webhook worker.
+- [ ] Nightly reconcile job (recompute estimate totals from lines; flag drift) — EventBridge schedule, later.
+
+### Stage 1 as originally built (2026-09-02) — SUPERSEDED by the v2 rework above (kept for the record)
+
+All built this session; **nothing deployed yet** — deploy order is in `salesforce/service-objects/README.md`.
+
+- [x] **`salesforce/service-objects/` deploy package** — 4 new objects (`Sundial_Service__c` SVC-#, `Sundial_Service_Visit__c` SC-# "Service Call", `Sundial_Service_Line__c` SL-#, `Sundial_Service_Invoice__c` Text name), 97 fields, + `Sundial_Service_Objects` permission set (90 FLS grants; required fields carry none by SF rule; delete only on Line). Bill-To value is tenant-neutral **"Internal Warranty"**, never "Harmon Warranty". Visit parent lookups deliberately optional in metadata (validation rule ships with workflows build, so migration can bulk-load). XML validated.
+- [x] **`scripts/verify-service-schema.mjs`** — parses the package as its own manifest; pre-deploy: which objects exist + whether `Sundial_Commercial__c` resolves (absent ⇒ drop the 2 commercial lookups first); post-deploy: missing fields, type mismatches, integration-user FLS. Read-only.
+- [x] **4 cache tables** (`sql/sundial_service*.sql`) — roofing-cache pattern, 93 columns + 24 indexes total; **applied cleanly against a scratch Postgres 16** (syntax proven). Board-window + My-Queue + mark-paid-grid + `billing_reference` search indexes included.
+- [x] **Registry code additions** — `service`/`visit`/`serviceline`/`serviceinvoice` in: `sundial-sf-query` (OBJECT_ALLOWLIST, CREATED_DATE_SOURCE, PARENT_FILTER — service→customer, children→ticket; SEARCH_FIELDS incl. `billing_reference`), `sundial-sf-update` (allowlist), `sundial-cache-sync` (both), `lib/access.js` OBJECT_ACCESS (salesScopes **false** — office module; Technician scope comes deliberately with the PWA). All inert until objects + tables exist.
+- [x] **`lib/access.test.js` matrix extended** (4 new columns × 6 levels; "service" swapped out of the unknown-keys list) — **144/144 green** run on-device.
+- [ ] **TIM: run `npm test` on Windows before deploying.** In the Linux VM, 15 test FILES fail at import with `does not provide an export named …` — **pre-existing at clean HEAD in the VM** (its Node rejects the `exports:` mock.module option shape; your Windows Node accepts it), NOT from this change. Expect green on Windows; if not, stop and say so.
+- [ ] **TIM: housekeeping** — `git worktree prune` (a throwaway `wt` worktree stub is left registered in `.git/worktrees` from the clean-HEAD test; its files were VM-local and are gone). Then review + commit this session's files on a feature branch (e.g. `feature/service-objects-foundation`).
+- [ ] **TIM: deploy sequence** (README): `node scripts/verify-service-schema.mjs` → fix commercial lookups if flagged → zip contents → Workbench Check Only (expect 5/5) → deploy → assign permission set to integration user → re-run verify → apply the 4 SQL files in Supabase → `.\deploy.ps1 sundial-sf-query sundial-sf-update sundial-cache-sync` (access.js rides along in each bundle).
+- [ ] Next build steps (after deploy verifies): generator run for the portal detail configs from the field workbooks (harmon-crm), then `sundial-service-board` Lambda (dispatch read), then intake/ticket lifecycle routes.
+
+## Phase 2 — Service Operations design pass (2026-09-01)
+
+Design deliverables complete; see `docs/service-workflows.md`, `docs/dispatch-board-design.md`, `docs/pwa-architecture.md`, `docs/phase2-build-sequence.md`, field workbooks `docs/Sundial_Service_Fields_by_Section.xlsx` + `docs/Sundial_Service_Visit_Fields_by_Section.xlsx`, requirements in `docs/service-discovery-2026-08.md`, decisions in **D-065**.
+
+- [x] Discovery digest from the three HCP scoping transcripts (Ben; Beth/Paige; Larry), committed as `docs/service-discovery-2026-08.md`.
+- [x] `docs/service-workflows.md` — lifecycle/state model, four intake paths, triage, dispatch contract, multi-payer billing, field-work rules, per-tenant config inventory.
+- [x] **D-065** appended (ten design calls: no Asset, parallel visits, Flow roll-ups, estimate-as-states + `Sundial_Service_Line__c`, `Sundial_Service_Invoice__c` + Bill-To per visit, SetupIntent payments + AR-after-go-live, field estimates not collections, stamped append-only notes, checklists as config, manager-only time edits).
+- [x] Field workbooks for the generator (ticket + line + invoice sheets; visit). Blue = schema-draft carryover (**verify against a live describe before packaging** — service objects not confirmed in org), yellow = system-maintained.
+- [x] `docs/dispatch-board-design.md` — FullCalendar Premium data contract, `sundial-service-board` API, optimistic 409 concurrency, cache/Realtime plan, honest HCP parity table.
+- [x] `docs/pwa-architecture.md` — day pack + outbox/command sync with idempotency table, clock/GPS/geofence (tag not blocker), conflict policy, failure-mode catalog.
+- [x] `docs/phase2-build-sequence.md` — 5 stages, gates G1–G5 (G2 = Beth schedules a real week on the board — THE go/no-go), one-week whole-team cutover, HCP read-only 30 days.
+- [x] Lambda concurrency quota verified **1000** in us-west-1 (G2b root cause closed).
+- [~] **TIM (Stage 0 — start now, lead times):** buy FullCalendar Premium; get Harmon Stripe restricted keys + webhook secret from Julie → Secrets Manager; **provision Twilio + A2P 10DLC registration** (longest lead — Paige sending EIN/legal name/address 9/1; new 623 number approved); XFiles Pro config for `Sundial_Service__c` + `Sundial_Service_Visit__c` (`SUNDIAL/{record_id}/`).
+- [~] **TIM/MATT (Stage 0):** HCP export inventory — **UNBLOCKED 9/1**: Ben's login confirmed top-admin; customers/jobs CSV test exports running; price book via API query; still to inventory: invoices + **attachments**.
+- [x] **Punchlist meeting run 2026-09-01 (Paige + Beth)** — most board/billing answers locked (notify default OFF; reminders 3d/5d→NSA drip; invoice#=ticket#; warranty informational; price book as-is w/ Beth cleanup pass; AZ statewide tax; intake mailbox `solarservice@harmonelectric.net`; SiteCapture via Zapier). See `docs/service-discovery-2026-08.md` addendum + **D-065 amendment 2026-09-01** + updated `docs/service-meeting-punchlist.md`.
+- [ ] **NEW — Workstream S: Service Club e-commerce, PULLED FORWARD** (parallel track, can ship before the module): Stripe subscription purchase pages + team ping + webhook to SolarFacts' Zapier hook (reverse on cancel) + buy-a-truck-roll + line-kind-scoped plan discounts + plans report. See `docs/phase2-build-sequence.md` Workstream S. Deps: Stripe keys, SolarFacts intro (Paige).
+- [ ] **Chase list (Harmon):** Beth — partner/bill-to list, SiteCapture template mapping, sample partner invoices + work-order emails; Paige — EIN/legal/address, SolarFacts programmer intro; Ryan (IT) — forward solarservice@ mailbox when intake is ready. Still open: Larry's PWA items (gate/checklists/geofence), Julie/Heather items, gate dates.
+- [ ] Build the Salesforce deploy package from the two field workbooks (4 objects + FLS) after a live describe confirms what already exists.
+- [ ] Allowlist + cache tables + `PARENT_FILTER` for `service` / `visit` / `serviceline` / `serviceinvoice` (`sql/` files + registry entries).
+- [ ] Geocoding provider decision (AWS Location Service assumed) — needed for geofence (Stage 3), feeds travel-time hints later.
+- [ ] `docs/migration.md` after the export inventory lands.
+- [ ] When the Service module lands: `RECORD_PATHS` entry in `sundial-comment-notify` (already tracked in the @-mention section) + Dropbox-sync `/Sundial/Service/...` naming check.
+
 ## Portal testing hygiene (2026-08-24)
 
 - [x] **Designated portal test record created**: `Sundial_Customer__c`
@@ -971,6 +1025,22 @@ lands only after its server change is verified in prod. Branch per repo per phas
       `project_name` makes the cards render but decides nothing about the other 168 fields.
       Roofing needs real role columns in its workbook — a per-field review like Solar's —
       and that is a sheet exercise, not a code change. Do it BEFORE granting the module.
+
+- [x] **NS Adder Price fields granted to sales roles (2026-09-02).**
+      `NS_Adder_1..5_Price__c` added to `read` + `listColumns` for Sales Rep and Sales
+      Dealer on `customer` and `solar`. Regenerated from the updated workbooks; diff
+      verified field-by-field as exactly those ten entries, zero removals, roofing
+      untouched, all `edit` sets unchanged. The Markup / Material Cost / Labor Hours
+      inputs stay hidden for both roles — asserted 0 in either read set, not assumed.
+      Branch `feat/ns-adder-price-manifest`.
+  - [ ] **DEPLOY AFTER MERGE — the manifest is bundled INTO the Lambda, so a merge alone
+        changes nothing in production:**
+        `.deploy.ps1 sundial-sf-query` and `.deploy.ps1 sundial-sf-update`.
+        Those two and only those two: established by bundling every Lambda and grepping
+        for the new field name, not by reading imports.
+        Then `node scripts/verify-access-matrix.mjs` and
+        `node scripts/verify-field-manifest-live.mjs` (34/34; it is 32/34 until deployed,
+        failing exactly on `manifestVersion matches the deployed manifest`).
 
 - [ ] **Close out the workbook fork (§4.2).** The two sheets are committed in BOTH repos
       and byte-identical. sundial-core's copy is the source of truth — the manifest that

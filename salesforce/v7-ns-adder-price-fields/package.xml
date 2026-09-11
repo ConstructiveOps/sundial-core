@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v7 NS ADDER PRICE fields - 10 FORMULA fields (5 x 2 objects), additive only.
+
+  DEPLOY THE PREBUILT ZIP (v7-ns-adder-price-fields.zip - built on Linux, forward-slash
+  entries, Workbench-safe; no re-zipping needed). Workbench -> Migration -> Deploy ->
+  Single Package. RUN CHECK ONLY FIRST - that compiles the formulas.
+
+  If you ever DO need to rebuild the zip: Windows Explorer "Send to > Compressed
+  (zipped) folder" on this folder's CONTENTS (package.xml at the zip root).
+  NEVER PowerShell 5.1 Compress-Archive - backslash entries break Workbench.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.NS_Adder_1_Price__c</members>
+        <members>Sundial_Customer__c.NS_Adder_2_Price__c</members>
+        <members>Sundial_Customer__c.NS_Adder_3_Price__c</members>
+        <members>Sundial_Customer__c.NS_Adder_4_Price__c</members>
+        <members>Sundial_Customer__c.NS_Adder_5_Price__c</members>
+        <members>Sundial_Solar__c.NS_Adder_1_Price__c</members>
+        <members>Sundial_Solar__c.NS_Adder_2_Price__c</members>
+        <members>Sundial_Solar__c.NS_Adder_3_Price__c</members>
+        <members>Sundial_Solar__c.NS_Adder_4_Price__c</members>
+        <members>Sundial_Solar__c.NS_Adder_5_Price__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

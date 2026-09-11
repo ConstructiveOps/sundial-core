@@ -21,6 +21,14 @@
 //   POST   /service/price-book-items/{id}/deactivate
 //   GET    /service/estimates/{id}/preview          read-only rendered document (what the customer sees)
 //   GET    /service/jobs/{id}/activity              the job's activity feed (newest first)
+//   GET    /service/jobs/{id}/street-view           the house: Google Street View still, fetched once, cached in S3
+//   POST   /service/jobs/{id}/invoice               issue the job's invoice (estimate lines frozen)   ┐
+//   GET    /service/jobs/{id}/invoice               the job's current invoice + payments             │
+//   GET    /service/invoices/{id}                   one invoice + payments                           │ invoice.js
+//   GET    /service/invoices/{id}/preview           the invoice document (HTML)                      │
+//   POST   /service/invoices/{id}/payments          record a check / ACH / remittance / refund       │
+//   POST   /service/invoices/{id}/send              email the PDF to the payer                       │
+//   POST   /service/invoices/{id}/void              void with a reason (reissue = "-2")              ┘
 //   GET    /service/estimates/{id}/activity         an estimate's feed (pre-job history)
 //
 // RULES ENFORCED HERE (the metadata cannot): every job has exactly one estimate and an
@@ -71,6 +79,7 @@ import {
   soqlEscapeString,
 } from "../../lib/salesforce.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
+import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
@@ -128,6 +137,7 @@ import {
 } from "./pricebook.js";
 
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
+import { createInvoiceHandlers } from "./invoice.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
@@ -205,6 +215,8 @@ const CACHE = Object.freeze({
   line: "sundial_service_line_cache",
   item: "sundial_price_book_item_cache",
   customer: "sundial_customer_cache",
+  invoice: "sundial_service_invoice_cache",
+  payment: "sundial_service_payment_cache",
 });
 
 
@@ -311,6 +323,14 @@ const ROUTES = [
   ["POST", /^\/service\/price-book-items\/([^/]+)\/deactivate\/?$/, "deactivateItem"],
   ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "getJobInvoice"],
+  ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
+  ["GET", /^\/service\/invoices\/([^/]+)\/?$/, "getInvoice"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/payments\/?$/, "recordPayment"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/send\/?$/, "sendInvoice"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/void\/?$/, "voidInvoice"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
 ];
 
@@ -328,6 +348,16 @@ export function matchRoute(method, path) {
 // ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
+// --- Street View (data-model §5.2, the 9/9 ask) ----------------------------------
+// The Google key lives in Secrets Manager (`sundial/google-maps` → { apiKey }), never in
+// the browser or an env var. The still is fetched ONCE per job and cached in S3 next to
+// the job's files; the job remembers the key. "NONE" in the field means Google was
+// asked and has no imagery for the address, so the page stops asking.
+export const STREET_VIEW_SECRET = "sundial/google-maps";
+export const STREET_VIEW_NONE = "NONE";
+export const STREET_VIEW_SIZE = "640x400";
+export const streetViewKey = (jobId) => buildKey(jobId, "street-view.jpg");
+
 export function createHandler(deps = {}) {
   const d = {
     resolveIdentity: realResolveIdentity,
@@ -346,6 +376,8 @@ export function createHandler(deps = {}) {
       s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
+    getSecret: realGetSecret,
+    fetchUrl: (url) => fetch(url),
     ...deps,
   };
 
@@ -1301,7 +1333,84 @@ export function createHandler(deps = {}) {
       if (error) return jsonResponse(502, cors, { error: "activity_read_failed", code: "ACTIVITY_READ_FAILED", message: error });
       return jsonResponse(200, cors, { estimateId: est.Id, jobId: est.Service_Job__c ?? null, activity: rows });
     },
+
+    // --- Street View --------------------------------------------------------------------
+    // { status: "ready", url } | { status: "none" } (no imagery) | { status: "unconfigured" }
+    // (no secret yet) | { status: "no_address" }. `?refresh=1` re-asks Google (address fixed).
+    async jobStreetView({ ctx, params, query }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(
+        `SELECT Id, Address_at_Creation__c, Street_View_Image_Key__c FROM ${JOB_SF_OBJECT} ` +
+          `WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const job = rows?.[0];
+      if (!job) return notFound(cors);
+      const refresh = query?.refresh === "1" || query?.refresh === "true";
+      const current = job.Street_View_Image_Key__c || null;
+      if (!refresh && current === STREET_VIEW_NONE) return jsonResponse(200, cors, { status: "none" });
+      if (!refresh && current) return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(current), key: current, cached: true });
+
+      const address = (job.Address_at_Creation__c || "").trim();
+      if (!address) return jsonResponse(200, cors, { status: "no_address" });
+
+      let apiKey = null;
+      try {
+        apiKey = (await d.getSecret(STREET_VIEW_SECRET))?.apiKey || null;
+      } catch (e) {
+        if (!/ResourceNotFound/i.test(e?.name || e?.message || "")) console.error("street-view secret", e?.message);
+      }
+      if (!apiKey) return jsonResponse(200, cors, { status: "unconfigured" });
+
+      // 1. Metadata first (free): is there an outdoor panorama for this address?
+      const q = `location=${encodeURIComponent(address)}&source=outdoor&key=${encodeURIComponent(apiKey)}`;
+      let meta;
+      try {
+        const r = await d.fetchUrl(`https://maps.googleapis.com/maps/api/streetview/metadata?${q}`);
+        meta = await r.json();
+      } catch (e) {
+        console.error("street-view metadata", e?.message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: "Google did not answer." });
+      }
+      if (meta?.status !== "OK") {
+        if (meta?.status === "ZERO_RESULTS" || meta?.status === "NOT_FOUND") {
+          await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Street_View_Image_Key__c: STREET_VIEW_NONE });
+          return jsonResponse(200, cors, { status: "none" });
+        }
+        console.error("street-view metadata status", meta?.status, meta?.error_message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: `Google said ${meta?.status || "nothing"}.` });
+      }
+      // 2. The still itself, by panorama id so it is the outdoor one metadata found.
+      const key = streetViewKey(job.Id);
+      try {
+        const img = await d.fetchUrl(
+          `https://maps.googleapis.com/maps/api/streetview?size=${STREET_VIEW_SIZE}&pano=${encodeURIComponent(meta.pano_id)}&fov=80&key=${encodeURIComponent(apiKey)}`
+        );
+        if (!img.ok) throw new Error(`HTTP ${img.status}`);
+        const bytes = Buffer.from(await img.arrayBuffer());
+        await d.putObject({ key, body: bytes, contentType: "image/jpeg" });
+      } catch (e) {
+        console.error("street-view image", e?.message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: "Couldn't fetch the image." });
+      }
+      await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Street_View_Image_Key__c: key });
+      return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(key), key, cached: false, panoLocation: meta.location ?? null });
+    },
   };
+
+  /** The payer's email for a customer-billed document: the customer's current one, else the snapshot. */
+  async function customerEmailFor(job, tenantId) {
+    if (job?.Sundial_Customer__c) {
+      const cust = await d.sfQuery(
+        `SELECT ${CUSTOMER_EMAIL_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Sundial_Customer__c)}' ` +
+          `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const e = strOrNull(cust?.[0]?.Primary_Email__c);
+      if (e) return e;
+    }
+    return strOrNull(job?.Primary_Email_at_Creation__c);
+  }
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
   const ACTION_FOR = {
@@ -1313,7 +1422,9 @@ export function createHandler(deps = {}) {
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: "service.estimate.write", estimateActivity: "service.estimate.write",
-    previewEstimate: "service.estimate.write",
+    previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write",
+    getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
+    issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
   };
 
   return async function handler(event) {

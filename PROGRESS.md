@@ -1,5 +1,64 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (night) — Invoices and payments (D-072 amendment 5); the house on the job page; taller week board
+
+**Invoices + payments** close the loop the module has been building toward: estimate →
+job → calls → **invoice → paid**. New `lambdas/sundial-service-estimate/invoice.js`
+(deployed inside the estimate Lambda — one function, one wire script): `POST
+/service/jobs/{id}/invoice` issues the job's invoice from the estimate's non-removed
+lines, money frozen from `computeTotals` (subtotal, discount, tax rate/amount, total),
+Bill-To frozen from the job, number = job number (`-2`, `-3` after voids), due date from
+`dueDate` or `netDays`; deposits already on the job with no invoice are back-filled onto
+it and count at once; the estimate goes `Invoiced` (its PATCH now refuses), the job goes
+`Invoiced` (or straight to `Paid` when the deposits cover it); the PDF lands at
+`SUNDIAL/{jobId}/{invoiceNumber}.pdf` with a Files-tab row. Proposed lines are billed but
+reported in `warnings` — nothing blocks invoicing on approval state (D-072 rule 5). `POST
+…/invoices/{id}/payments` records a check / ACH / partner remittance / refund /
+adjustment (Succeeded on write, `Recorded_By__c` = the office user); `…/send` emails a
+FRESH PDF (balance and PAID watermark as of now; "Receipt for …" once paid) to the
+customer, or to a partner address the office types; `…/void` needs a reason, unhooks the
+payments (kept on the job), reopens the estimate to Approved / Sent / Draft and puts the
+job back at `Ready to Bill`. `GET /service/jobs/{id}/invoice` is the job page's read
+(current invoice + its payments + history + `canIssue` / `issueBlocker`);
+`GET /service/invoices/{id}[/preview]`.
+
+**One function settles the money.** `settleMoney()` re-sums Succeeded rows (Payment +
+Deposit + Adjustment − Refund) and writes `Paid_Amount__c`, the invoice's status
+(Issued / Sent / Partially Paid / Paid, `Paid_At__c`) and the job's `Payment_Status__c`
+plus its `Invoiced ↔ Paid` transition — after every payment row and at issue. No roll-up
+Flow; the design's Flow was never built and the rules (refunds reopen, failed rows do not
+count, deposits roll on) belong in tested code. `service.invoice.write` is a new action
+(→ **redeploy `sundial-auth-proxy`**). The invoice document is `buildInvoiceModel()` in
+`lib/estimate-document.js` — same model shape, so the HTML and PDF painters are unchanged
+apart from `docLabel` / `customerLabel` ("Invoice", "Bill to"), Paid to date / Balance
+due rows, PAID / VOID watermark. Activity: `invoice_issued | invoice_sent |
+invoice_voided | payment_recorded` (+ `job_updated` via `invoice`). Tests: estimate 31
+(helpers: summary / statuses / numbering / validation; lifecycle: issue with a prior
+deposit → locked estimate → preview → send with PDF → check pays it → refund reopens →
+void → reissue as -2 carrying the money). Wire script extended (`wire-service-estimate-
+routes.ps1`: jobs/{id}/invoice + street-view, invoices/{id} + preview / payments / send /
+void).
+
+**Portal:** the job page gains an **Invoice** card (Issue with net days → number, status,
+total / paid / balance, due, PDF link, Preview (same document), Send invoice / Send
+receipt, Record payment (dialog prefilled with the balance), Void with a reason, the
+payments list, history after a void, Issue again) and an **Invoices** tab (`/service/
+invoices`: Open (unpaid) by default, status filter, "Not in Acumatica" for Heather's
+bridge digest; rows open the job). `PreviewModal` now takes `invoiceId | estimateId` and
+its state is request-tagged (lint-clean). 3 render tests; 112/112.
+
+**The house (Street View, the 9/9 ask).** `GET /service/jobs/{id}/street-view` — the
+Google key in Secrets Manager `sundial/google-maps`, never the browser; metadata first
+(free, outdoor only), the still by panorama id, stored once at
+`SUNDIAL/{jobId}/street-view.jpg` and remembered on `Street_View_Image_Key__c` (`NONE` =
+asked, nothing there). `StreetViewCard` on the job page: image → Google Maps; "no
+imagery" / "not set up yet" / "no address" states; a refresh button re-asks after an
+address fix. Test pins: unconfigured writes nothing, one metadata + one image fetch,
+cached on the second read, NONE remembered, cross-tenant 404.
+
+**Week board ~3× taller.** Rows are 15rem (were 5rem) with two-line chips (time range +
+customer; job number · service type · address), so a full day of calls reads as a list.
+
 ## 2026-09-11 (later) — First live-test fixes: CORS on PATCH, price book from a line, board week/month, two more test techs
 
 Tim's first pass through the live portal turned up four things.

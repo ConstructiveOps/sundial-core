@@ -15,6 +15,7 @@ import {
   itemFieldsFromBody, newVersionFields, lineFromItem, adHocLine, linePatchFields, inPlaceEditable,
 } from "./pricebook.js";
 import { createHandler, matchRoute, PROJECT_TYPE_TAG } from "./index.js";
+import { paidSummary, invoiceStatusFor, jobPaymentStatusFor, nextInvoiceName, paymentFieldsFromBody, invoicePdfKey } from "./invoice.js";
 import { renderEstimateDocument } from "../../lib/estimate-document.js";
 
 const TENANT = "a1W7y000007AszBEAS";
@@ -197,9 +198,10 @@ test("matchRoute strips a stage prefix and captures ids", () => {
 });
 
 function fakeSalesforce() {
-  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [] };
+  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [] };
   let seq = 0;
   const calls = { creates: [], updates: [], deletes: [], queries: [] };
+  const fetches = [];
   const newId = (obj) => `${obj.slice(8, 11).toUpperCase()}${String(++seq).padStart(15, "0")}`.slice(0, 18);
 
   function evalCond(rec, cond) {
@@ -247,6 +249,9 @@ function fakeSalesforce() {
     calls.creates.push({ obj, fields: { ...fields } });
     const rec = { Id: newId(obj), ...fields };
     if (obj === "Sundial_Price_Book_Item__c") rec.Price__c = (Number(fields.Labor_Price__c) || 0) + (Number(fields.Material_Price__c) || 0);
+    // Autonumber names the org assigns (the invoice number is the job number).
+    if (obj === "Sundial_Service_Job__c" && !rec.Name) rec.Name = `SVC-${String(store[obj].length + 1).padStart(5, "0")}`;
+    if (obj === "Sundial_Service_Payment__c" && !rec.Name) rec.Name = `PAY-${String(store[obj].length + 1).padStart(5, "0")}`;
     store[obj].push(rec);
     return { ok: true, id: rec.Id };
   };
@@ -320,7 +325,7 @@ function fakeSalesforce() {
       select: () => chain(table, "select"),
     }),
   });
-  return { store, calls, stale, activity, emails: [], puts: [], deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  return { store, calls, stale, activity, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -348,10 +353,24 @@ function makeHandler(fake, identityOverrides = {}) {
       if (fake.putFails) throw new Error("s3 down");
       fake.puts.push({ key, bytes: body.byteLength, contentType });
     },
+    getSecret: async (name) => {
+      if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
+      const e = new Error("not found");
+      e.name = "ResourceNotFoundException";
+      throw e;
+    },
+    fetchUrl: async (url) => {
+      fake.fetches.push(url);
+      if (url.includes("/streetview/metadata")) {
+        const status = fake.streetViewStatus ?? "OK";
+        return { ok: true, json: async () => (status === "OK" ? { status, pano_id: "PANO1", location: { lat: 33.4, lng: -112.0 } } : { status }) };
+      }
+      return { ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff]).buffer };
+    },
   });
 }
-const call = (h, method, path, body) =>
-  h({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer x", origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined })
+const call = (h, method, path, body, query) =>
+  h({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer x", origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined, queryStringParameters: query })
     .then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
 
 test("quick-create job with a NEW customer: customer tagged Service, estimate + job linked 1:1, lines snapshotted, totals stored", async () => {
@@ -747,3 +766,202 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   assert.equal(fake.emails.at(-1).attachments.length, 0);
 });
 
+
+test("street view: unconfigured without the secret; fetched once by pano id, cached in S3 + on the job; NONE remembered; refresh re-asks", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Sv", Primary_Phone__c: "602-555-0009", Street__c: "1 Palm Ln", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id } });
+  assert.equal(j.status, 201);
+  const jobId = fake.store.Sundial_Service_Job__c[0].Id;
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.ok(job.Address_at_Creation__c, "the job carries the snapshot address the lookup uses");
+
+  // No Google key in Secrets Manager yet → the page shows the setup hint, nothing written.
+  const u = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(u.status, 200);
+  assert.equal(u.body.status, "unconfigured");
+  assert.equal(fake.fetches.length, 0);
+
+  fake.googleKey = "K";
+  const first = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.status, "ready");
+  assert.equal(first.body.cached, false);
+  assert.equal(fake.fetches.length, 2, "metadata, then the still");
+  assert.ok(fake.fetches[0].includes("/streetview/metadata?location="));
+  assert.ok(fake.fetches[0].includes("source=outdoor"));
+  assert.ok(fake.fetches[1].includes("pano=PANO1"), "the still is the outdoor panorama metadata found");
+  assert.equal(fake.puts.at(-1).key, `SUNDIAL/${jobId}/street-view.jpg`);
+  assert.equal(fake.puts.at(-1).contentType, "image/jpeg");
+  assert.equal(job.Street_View_Image_Key__c, `SUNDIAL/${jobId}/street-view.jpg`);
+  assert.ok(first.body.url.endsWith(`/SUNDIAL/${jobId}/street-view.jpg`));
+
+  // Second read: served from the job, Google not asked again.
+  const second = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(second.body.cached, true);
+  assert.equal(fake.fetches.length, 2);
+
+  // No imagery → NONE remembered; the next read does not ask Google either.
+  fake.streetViewStatus = "ZERO_RESULTS";
+  const none = await call(h, "GET", `/service/jobs/${jobId}/street-view`, null, { refresh: "1" });
+  assert.equal(none.body.status, "none");
+  assert.equal(job.Street_View_Image_Key__c, "NONE");
+  assert.equal(fake.fetches.length, 3);
+  const noneAgain = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(noneAgain.body.status, "none");
+  assert.equal(fake.fetches.length, 3);
+
+  // Cross-tenant / unknown job is a 404, never a Google call.
+  const nf = await call(h, "GET", `/service/jobs/a0X000000000000AAA/street-view`);
+  assert.equal(nf.status, 404);
+  assert.equal(fake.fetches.length, 3);
+});
+
+test("invoice helpers: money summary, statuses, numbering, payment validation", () => {
+  const rows = [
+    { Type__c: "Deposit", Amount__c: 100, Status__c: "Succeeded" },
+    { Type__c: "Payment", Amount__c: 300.5, Status__c: "Succeeded" },
+    { Type__c: "Refund", Amount__c: 50, Status__c: "Succeeded" },
+    { Type__c: "Payment", Amount__c: 999, Status__c: "Failed" },
+  ];
+  assert.deepEqual(paidSummary(rows), { paid: 350.5, deposits: 100, refunds: 50 });
+  assert.equal(invoiceStatusFor("Issued", 500, 0), "Issued");
+  assert.equal(invoiceStatusFor("Issued", 500, 350.5), "Partially Paid");
+  assert.equal(invoiceStatusFor("Sent", 500, 500), "Paid");
+  assert.equal(invoiceStatusFor("Paid", 500, 450), "Partially Paid", "a refund reopens it");
+  assert.equal(invoiceStatusFor("Paid", 500, 0), "Issued", "a full refund goes back to Issued");
+  assert.equal(invoiceStatusFor("Void", 500, 500), "Void");
+  assert.equal(jobPaymentStatusFor({ paid: 0, deposits: 0, refunds: 0 }, 500, true), "None");
+  assert.equal(jobPaymentStatusFor({ paid: 100, deposits: 100, refunds: 0 }, 0, false), "Deposit Paid");
+  assert.equal(jobPaymentStatusFor({ paid: 350.5, deposits: 100, refunds: 50 }, 500, true), "Partially Paid");
+  assert.equal(jobPaymentStatusFor({ paid: 500, deposits: 0, refunds: 0 }, 500, true), "Paid");
+  assert.equal(jobPaymentStatusFor({ paid: -50, deposits: 0, refunds: 50 }, 500, true), "Refunded");
+  assert.equal(nextInvoiceName("SVC-00012", 0), "SVC-00012");
+  assert.equal(nextInvoiceName("SVC-00012", 1), "SVC-00012-2");
+  assert.equal(invoicePdfKey("a0J1", "SVC-00012-2"), "SUNDIAL/a0J1/SVC-00012-2.pdf");
+  const ctx = { jobId: "J", invoiceId: "I", tenantId: TENANT, userId: USER, now: new Date("2026-09-12T00:00:00Z") };
+  assert.deepEqual(paymentFieldsFromBody({ amount: -5 }, ctx).problems, ["amount must be a positive number (Refund rows are positive too — the type says the direction)"]);
+  assert.ok(paymentFieldsFromBody({ amount: 5, type: "Bribe" }, ctx).problems[0].startsWith("type must be"));
+  const ok = paymentFieldsFromBody({ amount: "125.129", method: "Check", reference: "1044", receivedAt: "2026-09-11" }, ctx).fields;
+  assert.equal(ok.Amount__c, 125.13);
+  assert.equal(ok.Status__c, "Succeeded");
+  assert.equal(ok.Recorded_By__c, USER);
+  assert.equal(ok.Received_At__c, "2026-09-11T00:00:00.000Z");
+  assert.equal(ok.Reference__c, "1044");
+});
+
+test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payments settle job + invoice, send emails the PDF, void reopens and reissues as -2", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { taxRate: 8.6 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }, { description: "Breaker", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(j.status, 201);
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+
+  // Before: nothing to show, but the job can be invoiced.
+  const before = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(before.status, 200);
+  assert.equal(before.body.invoice, null);
+  assert.equal(before.body.canIssue, true);
+
+  // A deposit taken before the invoice exists (no Invoice__c yet).
+  await fake.deps.sfCreateRecord("Sundial_Service_Payment__c", { Client__c: TENANT, Service_Job__c: job.Id, Type__c: "Deposit", Method__c: "Card", Amount__c: 100, Status__c: "Succeeded", Received_At__c: "2026-09-09T00:00:00Z" });
+
+  // Issue: labor 275 + material 100 = 375; tax 8.6% of 100 = 8.60 → 383.60
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, { netDays: 30 });
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Name, job.Name, "invoice number = job number");
+  assert.equal(inv.Status__c, "Partially Paid", "the deposit already counts");
+  assert.equal(inv.Total__c, 383.6);
+  assert.equal(inv.Tax_Amount__c, 8.6);
+  assert.equal(inv.Paid_Amount__c, 100);
+  assert.equal(inv.Due_Date__c, "2026-10-10");
+  assert.equal(inv.Bill_To_Type__c, "Customer");
+  assert.equal(iss.body.balance, 283.6);
+  assert.equal(fake.store.Sundial_Service_Payment__c[0].Invoice__c, inv.Id, "the deposit was back-filled onto the invoice");
+  assert.equal(est.Status__c, "Invoiced");
+  assert.equal(job.Status__c, "Invoiced");
+  assert.equal(job.Payment_Status__c, "Partially Paid");
+  assert.equal(inv.PDF_S3_Key__c, `SUNDIAL/${job.Id}/${job.Name}.pdf`);
+  assert.ok(fake.puts.some((p) => p.key === inv.PDF_S3_Key__c && p.contentType === "application/pdf"));
+  assert.ok(iss.body.warnings.some((w) => /never approved/.test(w)), "Proposed lines are flagged, not refused");
+
+  // The estimate is now locked; a second issue is refused.
+  const locked = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 9 });
+  assert.equal(locked.status, 409);
+  assert.equal(locked.body.code, "ESTIMATE_INVOICED");
+  const again = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(again.status, 409);
+  assert.equal(again.body.code, "INVOICE_EXISTS");
+
+  // Preview reads as an invoice, not an estimate.
+  const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.equal(pv.status, 200);
+  assert.ok(pv.body.html.includes("<div>Invoice</div>"));
+  assert.ok(pv.body.html.includes("Bill to"));
+  assert.ok(pv.body.html.includes("Balance due"));
+  assert.ok(pv.body.html.includes("$283.60"));
+
+  // Send: emails the customer with the PDF attached; Issued → Sent.
+  const sent = await call(h, "POST", `/service/invoices/${inv.Id}/send`, {});
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.delivery, "email");
+  assert.equal(sent.body.recipient, "ivy@example.com");
+  assert.equal(fake.emails.at(-1).attachments[0].fileName, `${job.Name}.pdf`);
+  assert.ok(/283\.60 due/.test(fake.emails.at(-1).subject));
+  assert.equal(inv.Status__c, "Partially Paid", "money status wins over Sent");
+  assert.ok(inv.Sent_At__c);
+
+  // A check for the balance: invoice Paid, job Paid.
+  const pay = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { method: "Check", amount: 283.6, reference: "1044" });
+  assert.equal(pay.status, 201);
+  assert.equal(pay.body.balance, 0);
+  assert.equal(inv.Status__c, "Paid");
+  assert.ok(inv.Paid_At__c);
+  assert.equal(job.Status__c, "Paid");
+  assert.equal(job.Payment_Status__c, "Paid");
+  // A refund reopens it.
+  const ref = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { type: "Refund", method: "Check", amount: 83.6 });
+  assert.equal(ref.status, 201);
+  assert.equal(inv.Status__c, "Partially Paid");
+  assert.equal(inv.Paid_At__c, null);
+  assert.equal(job.Status__c, "Invoiced");
+  assert.equal(ref.body.balance, 83.6);
+  const badPay = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { amount: 0 });
+  assert.equal(badPay.status, 400);
+
+  // Void: reason required; payments unhook; estimate reopens (Approved? no — Draft, never sent); job back to Ready to Bill.
+  const noReason = await call(h, "POST", `/service/invoices/${inv.Id}/void`, {});
+  assert.equal(noReason.body.code, "REASON_REQUIRED");
+  const v = await call(h, "POST", `/service/invoices/${inv.Id}/void`, { reason: "Wrong tax rate" });
+  assert.equal(v.status, 200);
+  assert.equal(inv.Status__c, "Void");
+  assert.equal(inv.Void_Reason__c, "Wrong tax rate");
+  assert.ok(fake.store.Sundial_Service_Payment__c.every((p) => !p.Invoice__c), "money stays on the job, unhooked");
+  assert.equal(est.Status__c, "Draft");
+  assert.equal(job.Status__c, "Ready to Bill");
+  assert.equal(job.Payment_Status__c, "Partially Paid");
+  const onVoid = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { amount: 5 });
+  assert.equal(onVoid.status, 409);
+
+  // Fix the estimate, reissue as -2; the money rides along.
+  const fix = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 0 });
+  assert.equal(fix.status, 200);
+  const re = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(re.status, 201);
+  const inv2 = fake.store.Sundial_Service_Invoice__c[1];
+  assert.equal(inv2.Name, `${job.Name}-2`);
+  assert.equal(inv2.Total__c, 375);
+  assert.equal(inv2.Paid_Amount__c, 300, "100 deposit + 283.60 − 83.60 refund");
+  assert.equal(re.body.balance, 75);
+  const cur = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(cur.body.invoice.Id, inv2.Id);
+  assert.equal(cur.body.history.length, 2);
+  assert.equal(cur.body.payments.length, 3);
+
+  const evs = fake.activity.map((a) => a.event);
+  assert.ok(evs.includes("invoice_issued") && evs.includes("invoice_sent") && evs.includes("payment_recorded") && evs.includes("invoice_voided"));
+});

@@ -12,7 +12,10 @@
       POST   /service/estimates/{id}/add-template | recalculate | send | approve | decline | create-job
       GET    /service/estimates/{id}/activity | preview
       POST   /service/jobs
-      GET    /service/jobs/{id}/activity
+      GET    /service/jobs/{id}/activity | street-view | invoice
+      POST   /service/jobs/{id}/invoice
+      GET    /service/invoices/{id} | /service/invoices/{id}/preview
+      POST   /service/invoices/{id}/payments | send | void
       POST   /service/price-book-items
       PATCH  /service/price-book-items/{id}
       POST   /service/price-book-items/{id}/new-version | deactivate
@@ -103,8 +106,26 @@ Write-Host "==> /service/jobs/{id}/activity : GET, OPTIONS" -ForegroundColor Cya
 $jobId = Ensure-Resource $jobs "{id}"
 $jobAct = Ensure-Resource $jobId "activity"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobAct $m }
+Write-Host "==> /service/jobs/{id}/street-view : GET, OPTIONS" -ForegroundColor Cyan
+$jobSv = Ensure-Resource $jobId "street-view"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobSv $m }
+Write-Host "==> /service/jobs/{id}/invoice : GET, POST, OPTIONS" -ForegroundColor Cyan
+$jobInv = Ensure-Resource $jobId "invoice"
+foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobInv $m }
 Write-Host "==> /service/jobs : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobs $m }
+Write-Host "==> /service/invoices/{id} : GET, OPTIONS" -ForegroundColor Cyan
+$invoices = Ensure-Resource $service "invoices"
+$invId    = Ensure-Resource $invoices "{id}"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invId $m }
+Write-Host "==> /service/invoices/{id}/preview : GET, OPTIONS" -ForegroundColor Cyan
+$invPv = Ensure-Resource $invId "preview"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invPv $m }
+foreach ($action in @("payments", "send", "void")) {
+    Write-Host "==> /service/invoices/{id}/$action : POST, OPTIONS" -ForegroundColor Cyan
+    $r = Ensure-Resource $invId $action
+    foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
+}
 Write-Host "==> /service/price-book-items : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $items $m }
 Write-Host "==> /service/price-book-items/{id} : PATCH, OPTIONS" -ForegroundColor Cyan

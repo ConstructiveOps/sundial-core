@@ -1,5 +1,39 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (evening) — Send delivers, and the customer gets a page (D-072.7)
+
+The estimate loop closes. **`/send`** on `sundial-service-estimate` now builds the customer
+link (`SERVICE_PUBLIC_BASE_URL` + `/estimate/{token}`) and emails it through `lib/email.js`
+(SES) — to `body.to`, else the customer's `Primary_Email__c`, else the estimate's email
+snapshot. Delivery is reported, never assumed: `delivery: "email"` + `recipient` when SES
+accepted it, `delivery: "recorded"` + `deliveryDetail` when it could not go out (no base
+URL, `EMAIL_FROM` unset, no customer email, SES error, SMS not live). The version is on the
+record either way, and the activity row carries the same fields, so "did the customer get
+it?" is answerable from the feed. `fields.js` now holds `ESTIMATE_SELECT` so the two
+Lambdas share one field list.
+
+**New Lambda `sundial-service-public`** — the hosted estimate page's backend, no login:
+`GET /public/estimates/{token}` (exactly-one-match or 404; 410 once expired; first open
+flips Sent → Viewed with actor "Customer"; renders `lib/estimate-document.js` in customer
+mode), `POST …/accept { name }` (Approved / Online / `Approved_By_Name__c`, Proposed lines
+→ Approved, activity actor `Customer: {name}`; a second accept is a 200 that says
+`alreadyApproved`, never a second approval; 409 once Declined / Invoiced), `POST …/decline`.
+The tenant is read from the estimate's `Client__c`; nothing in the request names a record,
+tenant, or field. `scripts/wire-service-public-routes.ps1` wires
+`/public/estimates/{token}` + `/accept` + `/decline`. Tests: estimate 27/27 (new: send
+delivery — emailed, not-configured, no-email paths), public 5/5.
+
+**Portal (harmon-crm):** `/estimate/:token` — public route outside `ProtectedRoute`, plain
+`fetch` with no bearer token, the document in a `sandbox=""` iframe, approve-with-typed-name
+/ decline outside the iframe, expired / not-found / already-approved / declined states,
+Harmon logo + `clientConfig.clientName`. The estimate page's Send toast now says "Version
+n emailed to …" or "recorded, but no email went out — {why}", and a **Copy customer link**
+button appears once a token exists. `service-api.ts` types `SendResult`. 3 new render
+tests; 102/102; tsc / build / lint clean on the new files.
+
+Docs: `docs/api-endpoints.md` (send delivery, new Public section, Lambda map, three env
+vars), TASKS.md (Tim's stand-up steps). Still next: PDF per send, Stripe on accept, SMS.
+
 ## 2026-09-11 (later) — Service module portal screens (harmon-crm) + the estimate preview renderer
 
 The backend was ahead of the screens, so the Service module got its UI. In **harmon-crm**:

@@ -45,10 +45,17 @@
 // stamps Client__c from the token. Access: tenant scope only (alwaysEnforcedAccess —
 // the module is new, so there is no previous behaviour a switch would preserve).
 //
-// NOT HERE (deliberately, next increments): PDF rendering + the email/SMS send itself
-// (send records the version and returns the hosted URL; the notification worker sends),
-// the public hosted-estimate page (unauthenticated token route → its own Lambda), the
-// AZ city tax table (Tax_Rate__c is set per estimate for now), invoices/payments.
+// SEND DELIVERS (2026-09-11): /send records the version, mints the hosted token, builds
+// the customer link (SERVICE_PUBLIC_BASE_URL + /estimate/{token}) and emails it through
+// lib/email.js (SES; EMAIL_FROM / EMAIL_REPLY_TO / EMAIL_CONFIG_SET). Every way the
+// email can NOT go out (no base URL, SES not configured, no customer email, SES error)
+// comes back as delivery "recorded" + deliveryDetail so the office knows to send the
+// link by hand — the version is on the record either way. SMS waits for Twilio.
+// The customer side of that link is lambdas/sundial-service-public (view / accept /
+// decline by token, no login).
+//
+// NOT HERE (deliberately, next increments): the PDF per send, SMS, the AZ city tax
+// table (Tax_Rate__c is set per estimate for now), invoices/payments.
 //
 // Dependencies are injectable (createHandler) so test.js drives the real router with
 // recorded Salesforce calls and no module mocking.
@@ -64,6 +71,7 @@ import {
   soqlEscapeString,
 } from "../../lib/salesforce.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
+import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import {
@@ -108,8 +116,8 @@ import {
   cloneLineFields,
 } from "./pricebook.js";
 
-export const ESTIMATE_SF_OBJECT = "Sundial_Estimate__c";
-export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
+import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
+export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
 // Sundial product category, not a Harmon value — Roofing / Commercial pass their own.
@@ -122,6 +130,46 @@ export const DEFAULTS = Object.freeze({
   publicTokenDays: 45,
 });
 
+// Where the customer-facing estimate page lives (the portal's public /estimate/{token}
+// route, harmon-crm). Per-deployment config, not a credential — env var like
+// EMAIL_FROM. Unset ⇒ Send records the version and returns the token but sends no
+// email (the response says so), rather than emailing a link that goes nowhere.
+export const PUBLIC_BASE_URL = (process.env.SERVICE_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+export function publicEstimateUrl(token, baseUrl = PUBLIC_BASE_URL) {
+  return baseUrl && token ? `${baseUrl}/estimate/${encodeURIComponent(token)}` : null;
+}
+
+/** The customer email for an estimate send: what the customer record says today. */
+const CUSTOMER_EMAIL_SELECT = "Id, Primary_Email__c, Name";
+
+/** Plain, deliverable email — the link is the point; the document lives on the page. */
+export function buildEstimateEmail({ est, total, url, brandName, validUntil }) {
+  const number = est.Name || "Estimate";
+  const who = brandName ? ` from ${brandName}` : "";
+  const money = Number.isFinite(Number(total)) ? Number(total).toLocaleString("en-US", { style: "currency", currency: "USD" }) : "";
+  const subject = `Your estimate ${number}${who}${money ? ` — ${money}` : ""}`;
+  const validLine = validUntil ? `This estimate is valid through ${validUntil}.` : "";
+  const text = [
+    `Hello${est.Customer_Name_at_Creation__c ? ` ${est.Customer_Name_at_Creation__c}` : ""},`,
+    "",
+    `Your estimate ${number}${who} is ready${money ? ` (${money})` : ""}.`,
+    `View and approve it here: ${url}`,
+    "",
+    validLine,
+    "Approving lets us get the work scheduled. Questions? Just reply to this email.",
+  ].filter((l) => l !== null).join("\n");
+  const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const html = `<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;max-width:560px">
+  <p>Hello${est.Customer_Name_at_Creation__c ? ` ${esc(est.Customer_Name_at_Creation__c)}` : ""},</p>
+  <p>Your estimate <strong>${esc(number)}</strong>${esc(who)} is ready${money ? ` (<strong>${esc(money)}</strong>)` : ""}.</p>
+  <p style="margin:24px 0"><a href="${esc(url)}" style="background:#1F3864;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">View and approve your estimate</a></p>
+  ${validLine ? `<p style="color:#52525b">${esc(validLine)}</p>` : ""}
+  <p style="color:#52525b">Approving lets us get the work scheduled. Questions? Just reply to this email.</p>
+  <p style="color:#a1a1aa;font-size:12px">If the button doesn't work, copy this link: ${esc(url)}</p>
+</div>`;
+  return { subject, text, html };
+}
+
 const CACHE = Object.freeze({
   estimate: "sundial_estimate_cache",
   job: "sundial_service_job_cache",
@@ -130,18 +178,6 @@ const CACHE = Object.freeze({
   customer: "sundial_customer_cache",
 });
 
-export const ESTIMATE_SELECT =
-  "Id, Name, Sundial_Customer__c, Service_Job__c, Client__c, Status__c, Version__c, Version_Log__c, " +
-  "Is_Template__c, Template_Name__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
-  "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Originating_Solar_Project__c, " +
-  "Originating_Roofing_Project__c, Originating_Commercial_Project__c, Sold_By__c, " +
-  "Discount_Scope__c, Discount_Type__c, Discount_Value__c, Discount_Amount__c, Discount_Source__c, " +
-  "Markup_Type__c, Markup_Value__c, Markup_Amount__c, Tax_Rate__c, Tax_Jurisdiction__c, Tax_Amount__c, " +
-  "Labor_Subtotal__c, Material_Subtotal__c, Fee_Subtotal__c, Subtotal__c, Total__c, " +
-  "Deposit_Required__c, Deposit_Type__c, Deposit_Value__c, Deposit_Amount__c, Deposit_Paid_At__c, " +
-  "Approved_At__c, Approved_Version__c, Approved_Amount__c, Approval_Method__c, Approved_By_Name__c, " +
-  "Declined_Reason__c, Valid_Until__c, Last_Sent_At__c, Last_Sent_Via__c, Public_Token__c, " +
-  "Public_Token_Expires_At__c, Scope_Summary__c, Created_In_Field__c, Created_By_Service_Call__c";
 
 // Estimate fields the office may PATCH directly (money inputs, not money outputs).
 const ESTIMATE_PATCHABLE = Object.freeze({
@@ -272,6 +308,9 @@ export function createHandler(deps = {}) {
     sfDeleteRecord: realSfDeleteRecord,
     describeObject: realDescribeObject,
     getSupabaseClient: realGetSupabaseClient,
+    sendEmail: realSendEmail,
+    isEmailConfigured: realIsEmailConfigured,
+    publicBaseUrl: PUBLIC_BASE_URL,
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
     ...deps,
@@ -843,17 +882,55 @@ export function createHandler(deps = {}) {
         return sfError(cors, e, "estimate send");
       }
       await markStale(CACHE.estimate, [est.Id], tenantId);
-      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, total: totals.total, validUntil: fields.Valid_Until__c ?? est.Valid_Until__c ?? null, lineCount: entry.lines.length } });
+
+      // Delivery. Email now (SES, lib/email.js); SMS when Twilio lands — until then an
+      // SMS/Both send is recorded and the office texts the link by hand. Every failure
+      // mode is reported, never silent: the version is already recorded either way.
+      const url = publicEstimateUrl(token, d.publicBaseUrl);
+      const validUntilOut = fields.Valid_Until__c ?? est.Valid_Until__c ?? null;
+      let delivery = "recorded";
+      let deliveryDetail = null;
+      let recipient = null;
+      if (via === "Email" || via === "Both") {
+        if (!url) deliveryDetail = "SERVICE_PUBLIC_BASE_URL is not set on this Lambda, so no link could be built.";
+        else if (!d.isEmailConfigured()) deliveryDetail = "EMAIL_FROM is not set on this Lambda (SES not wired).";
+        else {
+          let email = strOrNull(body?.to);
+          if (!email && est.Sundial_Customer__c) {
+            const cust = await d.sfQuery(
+              `SELECT ${CUSTOMER_EMAIL_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Sundial_Customer__c)}' ` +
+                `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+            );
+            email = strOrNull(cust?.[0]?.Primary_Email__c) || strOrNull(est.Primary_Email_at_Creation__c);
+          }
+          if (!email) deliveryDetail = "The customer has no email address on file.";
+          else {
+            const brandName = ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
+            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName, validUntil: validUntilOut });
+            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text });
+            if (sent.ok) {
+              delivery = "email";
+              recipient = email;
+            } else deliveryDetail = `Email failed: ${sent.error}`;
+          }
+        }
+      }
+      if (via === "SMS" || via === "Both") {
+        deliveryDetail = [deliveryDetail, "SMS is not live yet — text the link by hand."].filter(Boolean).join(" ");
+      }
+
+      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length } });
       return jsonResponse(200, cors, {
         success: true,
         id: est.Id,
         version,
         total: totals.total,
         publicToken: token,
-        validUntil: fields.Valid_Until__c ?? est.Valid_Until__c,
-        // The hosted page + the email/SMS itself are the next increment; the caller
-        // gets what it needs to build the link today.
-        delivery: "recorded",
+        publicUrl: url,
+        validUntil: validUntilOut,
+        delivery, // "email" (sent) | "recorded" (version bumped, nothing went out — see deliveryDetail)
+        recipient,
+        deliveryDetail,
       });
     },
 

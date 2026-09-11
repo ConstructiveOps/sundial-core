@@ -305,7 +305,7 @@ function fakeSalesforce() {
       select: () => chain(table, "select"),
     }),
   });
-  return { store, calls, stale, activity, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  return { store, calls, stale, activity, emails: [], deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -321,6 +321,12 @@ function makeHandler(fake, identityOverrides = {}) {
     resolveIdentity: async () => identity,
     now: () => new Date("2026-09-10T12:00:00Z"),
     randomToken: () => "TOKEN123",
+    sendEmail: async (msg) => {
+      fake.emails.push(msg);
+      return fake.emailFails ? { ok: false, error: "boom" } : { ok: true, messageId: "m1" };
+    },
+    isEmailConfigured: () => fake.emailConfigured !== false,
+    publicBaseUrl: fake.publicBaseUrl ?? "https://portal.example.com",
   });
 }
 const call = (h, method, path, body) =>
@@ -610,5 +616,44 @@ test("GET …/preview returns the rendered document for a tenant-owned estimate,
   assert.equal(p.body.title, fake.store.Sundial_Estimate__c[0].Name ?? "Estimate");
   const nf = await call(h, "GET", "/service/estimates/000000000000000000/preview");
   assert.equal(nf.status, 404);
+});
+
+test("send: emails the customer the link, records delivery; degrades honestly with no email / no base URL / SES failure", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Em", Primary_Email__c: "em@example.com" });
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  const s1 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s1.status, 200);
+  assert.equal(s1.body.delivery, "email");
+  assert.equal(s1.body.recipient, "em@example.com");
+  assert.equal(s1.body.publicUrl, "https://portal.example.com/estimate/TOKEN123");
+  assert.equal(fake.emails.length, 1);
+  assert.ok(fake.emails[0].subject.includes("$275.00"));
+  assert.ok(fake.emails[0].html.includes("https://portal.example.com/estimate/TOKEN123"));
+  assert.ok(fake.emails[0].text.includes("/estimate/TOKEN123"));
+  const sentRow = fake.activity.find((a) => a.event === "estimate_sent");
+  assert.equal(sentRow.details.delivery, "email");
+
+  // Explicit recipient override wins; SMS is recorded only.
+  const s2 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", via: "Both" });
+  assert.equal(s2.body.recipient, "other@example.com");
+  assert.ok(s2.body.deliveryDetail.includes("SMS is not live"));
+
+  // SES failure: version still bumps, delivery says recorded + why.
+  fake.emailFails = true;
+  const s3 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s3.body.version, 3);
+  assert.equal(s3.body.delivery, "recorded");
+  assert.ok(s3.body.deliveryDetail.includes("boom"));
+
+  // No base URL configured: nothing goes out, and it says so.
+  fake.emailFails = false;
+  fake.publicBaseUrl = "";
+  const h2 = makeHandler(fake);
+  const s4 = await call(h2, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s4.body.delivery, "recorded");
+  assert.ok(s4.body.deliveryDetail.includes("SERVICE_PUBLIC_BASE_URL"));
+  assert.equal(s4.body.publicUrl, null);
 });
 

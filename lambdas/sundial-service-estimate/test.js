@@ -271,9 +271,13 @@ function fakeSalesforce() {
         ]
       : [],
   });
-  // A PostgREST-shaped stub over two things: stale flags, and the activity table.
+  // A PostgREST-shaped stub over three things: stale flags, the activity table, and
+  // the file-metadata table (the estimate PDF registers a row there on send).
   const stale = [];
   const activity = [];
+  const files = [];
+  store.sundial_file_metadata = files;
+  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : null);
   function chain(table, op, patch) {
     const filters = [];
     const q = {
@@ -283,14 +287,16 @@ function fakeSalesforce() {
       in(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
       order(col, { ascending } = {}) { q._order = { col, ascending }; return q; },
       limit(n) { q._limit = n; return q; },
+      maybeSingle() { const r = run(); return Promise.resolve({ data: r.data?.[0] ?? null, error: r.error }); },
       then(resolve) { resolve(run()); },
     };
     function run() {
-      if (table !== "sundial_service_activity") {
+      const src = tableRows(table);
+      if (!src) {
         if (op === "update") stale.push({ table, patch });
         return { data: [], error: null };
       }
-      let rows = activity.filter((r) => filters.every((f) => f(r)));
+      let rows = src.filter((r) => filters.every((f) => f(r)));
       if (op === "update") { rows.forEach((r) => Object.assign(r, patch)); return { error: null }; }
       if (q._order) rows = [...rows].sort((a, b) => (a[q._order.col] < b[q._order.col] ? 1 : -1) * (q._order.ascending ? -1 : 1));
       if (q._limit) rows = rows.slice(0, q._limit);
@@ -300,12 +306,21 @@ function fakeSalesforce() {
   }
   const getSupabaseClient = async () => ({
     from: (table) => ({
-      insert: async (row) => { if (table === "sundial_service_activity") activity.push({ id: activity.length + 1, ...row }); return { error: null }; },
+      insert: (row) => {
+        const src = tableRows(table);
+        const stored = src ? { id: src.length + 1, ...row } : null;
+        if (src) src.push(stored);
+        // Both shapes the code uses: `await insert(row)` and `insert(row).select("id").maybeSingle()`.
+        return {
+          then: (resolve) => resolve({ error: null }),
+          select: () => ({ maybeSingle: async () => ({ data: stored ? { id: stored.id } : null, error: null }) }),
+        };
+      },
       update: (patch) => chain(table, "update", patch),
       select: () => chain(table, "select"),
     }),
   });
-  return { store, calls, stale, activity, emails: [], deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  return { store, calls, stale, activity, emails: [], puts: [], deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -327,6 +342,12 @@ function makeHandler(fake, identityOverrides = {}) {
     },
     isEmailConfigured: () => fake.emailConfigured !== false,
     publicBaseUrl: fake.publicBaseUrl ?? "https://portal.example.com",
+    brandName: "Test Electric",
+    // The PDF is rendered for real (pdf-lib) — only the S3 put is recorded.
+    putObject: async ({ key, body, contentType }) => {
+      if (fake.putFails) throw new Error("s3 down");
+      fake.puts.push({ key, bytes: body.byteLength, contentType });
+    },
   });
 }
 const call = (h, method, path, body) =>
@@ -635,6 +656,25 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   const sentRow = fake.activity.find((a) => a.event === "estimate_sent");
   assert.equal(sentRow.details.delivery, "email");
 
+  // The PDF of this version: rendered, stored with the estimate's files, attached to
+  // the email, recorded in the version log and the activity row.
+  const estId = c.body.id;
+  assert.equal(s1.body.pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  assert.ok(s1.body.pdfUrl.endsWith(`/SUNDIAL/${estId}/estimate-v1.pdf`));
+  assert.equal(fake.puts.length, 1);
+  assert.equal(fake.puts[0].contentType, "application/pdf");
+  assert.ok(fake.puts[0].bytes > 1000);
+  assert.equal(fake.emails[0].attachments.length, 1);
+  assert.ok(fake.emails[0].attachments[0].fileName.endsWith("-v1.pdf"));
+  assert.equal(Buffer.from(fake.emails[0].attachments[0].content.slice(0, 5)).toString(), "%PDF-");
+  const rec = fake.store.Sundial_Estimate__c.find((r) => r.Id === estId);
+  assert.equal(JSON.parse(rec.Version_Log__c)[0].pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  assert.equal(sentRow.details.pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  const metaRows = fake.store.sundial_file_metadata || [];
+  assert.equal(metaRows.length, 1);
+  assert.equal(metaRows[0].category, "Estimate");
+  assert.equal(metaRows[0].sf_record_id, estId);
+
   // Explicit recipient override wins; SMS is recorded only.
   const s2 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", via: "Both" });
   assert.equal(s2.body.recipient, "other@example.com");
@@ -655,5 +695,18 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   assert.equal(s4.body.delivery, "recorded");
   assert.ok(s4.body.deliveryDetail.includes("SERVICE_PUBLIC_BASE_URL"));
   assert.equal(s4.body.publicUrl, null);
+
+  // S3 down: the send still goes through — email without the attachment, pdfKey null,
+  // and the office is told.
+  fake.publicBaseUrl = "https://portal.example.com";
+  fake.putFails = true;
+  const h3 = makeHandler(fake);
+  const s5 = await call(h3, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s5.status, 200);
+  assert.equal(s5.body.version, 5);
+  assert.equal(s5.body.delivery, "email");
+  assert.equal(s5.body.pdfKey, null);
+  assert.ok(s5.body.deliveryDetail.includes("PDF could not be generated"));
+  assert.equal(fake.emails.at(-1).attachments.length, 0);
 });
 

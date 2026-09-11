@@ -1,6 +1,6 @@
 // sundial-service-public — the CUSTOMER-facing estimate page's backend (D-072.7).
 //
-//   GET  /public/estimates/{token}            the rendered document + status (marks Viewed)
+//   GET  /public/estimates/{token}            the rendered document + status + PDF link (marks Viewed)
 //   POST /public/estimates/{token}/accept     { name }   → Approved (method Online)
 //   POST /public/estimates/{token}/decline    { reason } → Declined
 //
@@ -35,6 +35,7 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord } from "../sundial-service-estimate/totals.js";
 import { LINE_SELECT, LINE_SF_OBJECT } from "../sundial-service-estimate/pricebook.js";
 import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate/fields.js";
+import { publicUrlForKey } from "../../lib/file-access.js";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
 
@@ -58,9 +59,26 @@ function notFound(cors) {
   return jsonResponse(404, cors, { error: "not_found", code: "ESTIMATE_NOT_FOUND" });
 }
 
+/**
+ * The PDF of the version the customer is looking at: the version log's entry for
+ * Version__c carries the S3 key the send wrote (null when that send's PDF failed).
+ * Public-read bucket, same URL the office's Files tab uses.
+ */
+export function currentPdfUrl(est) {
+  try {
+    const log = est.Version_Log__c ? JSON.parse(est.Version_Log__c) : [];
+    const v = Number(est.Version__c) || 0;
+    const entry = Array.isArray(log) ? log.find((e) => Number(e?.version) === v) : null;
+    return entry?.pdfKey ? publicUrlForKey(entry.pdfKey) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The parts of the estimate the customer page may see (never the internal fields). */
 function publicSummary(est, totals) {
   return {
+    pdfUrl: currentPdfUrl(est),
     number: est.Name ?? null,
     status: est.Status__c ?? null,
     version: Number(est.Version__c) || 0,

@@ -328,3 +328,17 @@ Alerts on:
 - Dropbox sync DLQ messages (immediate investigation)
 - Bucket size approaching configured threshold
 - Unusually high access volume from a single tenant (possible runaway query)
+
+## Service module files (D-072, 2026-09-11)
+
+Same pattern, three more record types. The object keys `estimate`, `job`, `servicecall` are on the file-route allowlist (`lib/file-access.js`) with tenant-scope action rows in `lib/access.js`.
+
+| Folder | What lands there | Written by |
+|---|---|---|
+| `SUNDIAL/{estimateId}/estimate-v{n}.pdf` | The PDF of every sent version — the exact document the customer received (rendered from the same model as the hosted page). Metadata row: category `Estimate`, uploader `Sundial (estimate send)`. Deterministic key: a retry of the same version overwrites. | `sundial-service-estimate` `/send` |
+| `SUNDIAL/{estimateId}/…` | Anything the office uploads on the estimate page's Files panel. | portal upload |
+| `SUNDIAL/{jobId}/…` | Job documents (permits, manufacturer RMAs, partner work orders). | portal upload |
+| `SUNDIAL/{jobId}/photos/{serviceCallId}/…` | Field photos per service call (next increment: the tech PWA). Per-photo flags (customer-visible, report-included) ride on the `sundial_file_metadata` row. | tech PWA |
+
+The job page shows two panels — the job's own folder and the estimate's — so "which version did the customer approve?" is answered without leaving the job. The customer's hosted page links the current version's PDF (`pdfUrl`) from the public-read URL, the same one the Files tab uses.
+

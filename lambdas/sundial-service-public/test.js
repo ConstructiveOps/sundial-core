@@ -17,6 +17,8 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
     Address_at_Creation__c: "123 N Main St, Phoenix, AZ 85001", Tax_Rate__c: 8.6, Deposit_Required__c: true,
     Deposit_Type__c: "Percent", Deposit_Value__c: 25, Valid_Until__c: "2026-10-12", Approved_At__c: approvedAt,
     Service_Job__c: "SVC000000000000001", Is_Template__c: false,
+    // The send wrote v1's PDF; a later version without one must NOT fall back to it.
+    Version_Log__c: JSON.stringify([{ version: 1, pdfKey: "SUNDIAL/EST000000000000001/estimate-v1.pdf" }, { version: 2, pdfKey: null }]),
   };
   const lines = [
     { Id: "SL1", Estimate__c: est.Id, Client__c: TENANT, Description__c: "Standard service call", Kind__c: "Labor", Quantity__c: 1, Unit_Price__c: 275, Line_Total__c: 275, Taxable__c: false, Stage__c: "Proposed" },
@@ -63,6 +65,11 @@ test("view: renders the customer document, marks Sent → Viewed once, reports c
   assert.equal(r.body.number, "EST-00042");
   assert.equal(r.body.status, "Viewed");
   assert.equal(r.body.canAccept, true);
+  assert.equal(r.body.pdfUrl, "https://sfsolproj.s3.us-west-1.amazonaws.com/SUNDIAL/EST000000000000001/estimate-v1.pdf");
+  // Version 2's send had no PDF → no link, and never v1's stale one.
+  const f2 = fake({ version: 2 });
+  const r2 = await call(createHandler({ ...f2.deps, now: () => NOW }), "GET", `/public/estimates/${TOKEN}`);
+  assert.equal(r2.body.pdfUrl, null);
   assert.equal(r.body.total, 405.32); // 395 + 8.6% of 120
   assert.equal(r.body.depositAmount, 101.33);
   assert.equal(f.est.Status__c, "Viewed");

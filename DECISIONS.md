@@ -3202,3 +3202,28 @@ and the activity row records old → new. Added rule: a money-affecting edit to 
 **Approved** line drops it to `Proposed` for re-approval on the next send;
 description-only edits do not. Package unchanged; one new SQL file; `sundial-sf-update`
 redeploy. Detail: `docs/service-data-model.md` §5.4, §11.
+
+### D-072 amendment 3 (2026-09-11): the estimate document is one model with two painters; the PDF is a file on the estimate
+
+The PDF per send (D-072.5) is built. **How:** `lib/estimate-document.js` now exports
+`buildEstimateModel()` — every row, label, total and note the customer sees, as plain
+data — and two painters draw it: `renderEstimateDocument()` (HTML: office preview,
+hosted page, email) and `lib/estimate-pdf.js` (PDF via pdf-lib). Anything that decides
+*what* is shown lives in the model, so the PDF the customer files away cannot disagree
+with the page they approved; only typography differs. **Why pdf-lib and not an
+HTML-to-PDF engine:** pure JavaScript bundles into the single-file esbuild artifact
+`deploy.ps1` produces; a headless browser needs a Lambda layer, a bigger memory setting
+and a cold start Tim would have to operate. The cost is hand-drawn layout (wrapping,
+page flow) and standard Helvetica — acceptable for an estimate. **Where:** each Send
+writes `SUNDIAL/{estimateId}/estimate-v{n}.pdf` (deterministic — a retry overwrites),
+registers a `sundial_file_metadata` row (category `Estimate`), records the key in
+`Version_Log__c[].pdfKey`, attaches the bytes to the customer email
+(`Content.Simple.Attachments` — still `ses:SendEmail`, no raw-mail permission), and
+returns `pdfKey` / `pdfUrl`. The public page exposes the current version's PDF as a
+download link. **Failure posture:** a PDF that cannot render or store never blocks the
+send — `pdfKey` is null, the email goes without the attachment, and `deliveryDetail`
+says so; the hosted link is the document of record. **Files tab:** `lib/file-access.js`'s
+allowlist gains `estimate`, `job`, `servicecall`, and `lib/access.js` gains the matching
+`files.<key>.{list,related,upload,delete}` rows (tenant scope). Found while doing it:
+`roofing` and `po` had allowlist entries but no action rows, so their Files tabs
+answered 403 to everyone — rows added, and a test now pins the two lists together.

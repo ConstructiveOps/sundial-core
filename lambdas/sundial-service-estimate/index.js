@@ -73,7 +73,17 @@ import {
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
-import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
+import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
+import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
+import {
+  buildKey,
+  publicUrlForKey,
+  registerFileMetadata,
+  findFileMetadataByKey,
+  S3_BUCKET,
+  S3_REGION,
+} from "../../lib/file-access.js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   EVENTS,
   recordActivity,
@@ -137,6 +147,24 @@ export const DEFAULTS = Object.freeze({
 export const PUBLIC_BASE_URL = (process.env.SERVICE_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 export function publicEstimateUrl(token, baseUrl = PUBLIC_BASE_URL) {
   return baseUrl && token ? `${baseUrl}/estimate/${encodeURIComponent(token)}` : null;
+}
+
+// Company name on the document + the email. Same env var the public Lambda reads, so
+// the office preview, the customer page, the PDF and the email all say the same name.
+// Falls back to the tenant slug (capitalised) until it is set.
+export const BRAND_NAME = process.env.SERVICE_BRAND_NAME || "";
+
+// The PDF of each sent version lives with the estimate's files (D-072.5):
+//   SUNDIAL/{estimateId}/estimate-v{n}.pdf
+// Deterministic key: a retry of the same version overwrites in place, never piles up.
+export function estimatePdfKey(estimateId, version) {
+  return buildKey(estimateId, `estimate-v${version}.pdf`);
+}
+
+let _s3 = null;
+function s3() {
+  if (!_s3) _s3 = new S3Client({ region: S3_REGION });
+  return _s3;
 }
 
 /** The customer email for an estimate send: what the customer record says today. */
@@ -311,10 +339,22 @@ export function createHandler(deps = {}) {
     sendEmail: realSendEmail,
     isEmailConfigured: realIsEmailConfigured,
     publicBaseUrl: PUBLIC_BASE_URL,
+    brandName: BRAND_NAME,
+    renderPdf: realRenderEstimatePdf,
+    putObject: async ({ key, body, contentType }) =>
+      s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
     ...deps,
   };
+
+  // Brand block for the document. Per-tenant config when that surface lands
+  // (service-workflows.md §12); until then SERVICE_BRAND_NAME, else the tenant slug, so
+  // the layout can be reviewed. The identity block is a GET-FROM-HARMON item.
+  const brandFor = (ctx) => ({
+    ...DEFAULT_BRAND,
+    companyName: d.brandName || (ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : ""),
+  });
 
   // --- describe cache (picklist guards) ------------------------------------------
   const describeCache = new Map();
@@ -836,6 +876,44 @@ export function createHandler(deps = {}) {
       const now = d.now();
       const version = (Number(est.Version__c) || 0) + 1;
       const via = ["Email", "SMS", "Both", "Manual"].includes(body?.via) ? body.via : "Email";
+      const validDays = Number(body?.validDays) > 0 ? Number(body.validDays) : DEFAULTS.validDays;
+      const validUntil = new Date(now.getTime() + validDays * 86400000);
+      const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
+      const token = est.Public_Token__c || d.randomToken();
+      const url = publicEstimateUrl(token, d.publicBaseUrl);
+      const fields = {
+        Version__c: version,
+        Status__c: "Sent",
+        Last_Sent_At__c: now.toISOString(),
+        Last_Sent_Via__c: via,
+        Public_Token__c: token,
+        Public_Token_Expires_At__c: tokenExpires.toISOString(),
+      };
+      if (!est.Valid_Until__c || body?.validDays) fields.Valid_Until__c = validUntil.toISOString().slice(0, 10);
+      const validUntilOut = fields.Valid_Until__c ?? est.Valid_Until__c ?? null;
+
+      // The PDF of THIS version (D-072.5): rendered from the same model as the page,
+      // stored at SUNDIAL/{estimateId}/estimate-v{n}.pdf so it sits in the estimate's
+      // Files tab, and attached to the email below. Best-effort: a PDF failure is
+      // reported (pdfKey null + deliveryDetail), never a reason to refuse the send —
+      // the customer still gets the link, which is the document of record.
+      const brand = brandFor(ctx);
+      const docEstimate = { ...est, ...fields, Valid_Until__c: validUntilOut };
+      let pdfBytes = null;
+      let pdfKey = null;
+      let pdfError = null;
+      try {
+        const model = buildEstimateModel({ estimate: docEstimate, lines, totals, brand, options: { mode: "customer", acceptUrl: url || undefined } });
+        pdfBytes = await d.renderPdf(model);
+        const key = estimatePdfKey(est.Id, version);
+        await d.putObject({ key, body: pdfBytes, contentType: "application/pdf" });
+        pdfKey = key;
+      } catch (e) {
+        pdfError = e?.message || String(e);
+        console.error(`estimate send: PDF failed for ${est.Id} v${version}: ${pdfError}`);
+        pdfBytes = null;
+      }
+
       const entry = {
         version,
         sentAt: now.toISOString(),
@@ -852,7 +930,7 @@ export function createHandler(deps = {}) {
             kind: l.Kind__c,
             stage: l.Stage__c,
           })),
-        pdfKey: null, // the render worker fills this in when PDF generation lands
+        pdfKey,
       };
       let log = [];
       try {
@@ -862,20 +940,7 @@ export function createHandler(deps = {}) {
         log = [];
       }
       log.push(entry);
-      const validDays = Number(body?.validDays) > 0 ? Number(body.validDays) : DEFAULTS.validDays;
-      const validUntil = new Date(now.getTime() + validDays * 86400000);
-      const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
-      const token = est.Public_Token__c || d.randomToken();
-      const fields = {
-        Version__c: version,
-        Version_Log__c: JSON.stringify(log),
-        Status__c: "Sent",
-        Last_Sent_At__c: now.toISOString(),
-        Last_Sent_Via__c: via,
-        Public_Token__c: token,
-        Public_Token_Expires_At__c: tokenExpires.toISOString(),
-      };
-      if (!est.Valid_Until__c || body?.validDays) fields.Valid_Until__c = validUntil.toISOString().slice(0, 10);
+      fields.Version_Log__c = JSON.stringify(log);
       try {
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, fields);
       } catch (e) {
@@ -883,11 +948,34 @@ export function createHandler(deps = {}) {
       }
       await markStale(CACHE.estimate, [est.Id], tenantId);
 
+      // Files-tab metadata row for the PDF — best-effort, after the record is updated
+      // (the object is already in S3, and the Files tab lists S3 directly anyway).
+      if (pdfKey) {
+        try {
+          const supabase = await d.getSupabaseClient();
+          if (!(await findFileMetadataByKey(supabase, pdfKey))) {
+            await registerFileMetadata(supabase, {
+              s3Key: pdfKey,
+              fileName: `estimate-v${version}.pdf`,
+              tenantId,
+              sfRecordId: est.Id,
+              sfObjectType: ESTIMATE_SF_OBJECT,
+              uploadedByUserId: userId ?? null,
+              uploadedByUserName: "Sundial (estimate send)",
+              fileSizeBytes: pdfBytes?.byteLength ?? null,
+              mimeType: "application/pdf",
+              category: "Estimate",
+              subfolder: null,
+            });
+          }
+        } catch (e) {
+          console.error(`estimate send: file metadata register failed for ${pdfKey}: ${e?.message || e}`);
+        }
+      }
+
       // Delivery. Email now (SES, lib/email.js); SMS when Twilio lands — until then an
       // SMS/Both send is recorded and the office texts the link by hand. Every failure
       // mode is reported, never silent: the version is already recorded either way.
-      const url = publicEstimateUrl(token, d.publicBaseUrl);
-      const validUntilOut = fields.Valid_Until__c ?? est.Valid_Until__c ?? null;
       let delivery = "recorded";
       let deliveryDetail = null;
       let recipient = null;
@@ -905,9 +993,11 @@ export function createHandler(deps = {}) {
           }
           if (!email) deliveryDetail = "The customer has no email address on file.";
           else {
-            const brandName = ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
-            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName, validUntil: validUntilOut });
-            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text });
+            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut });
+            const attachments = pdfBytes
+              ? [{ fileName: `${est.Name || "estimate"}-v${version}.pdf`, contentType: "application/pdf", content: pdfBytes }]
+              : [];
+            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
             if (sent.ok) {
               delivery = "email";
               recipient = email;
@@ -918,8 +1008,11 @@ export function createHandler(deps = {}) {
       if (via === "SMS" || via === "Both") {
         deliveryDetail = [deliveryDetail, "SMS is not live yet — text the link by hand."].filter(Boolean).join(" ");
       }
+      if (pdfError) {
+        deliveryDetail = [deliveryDetail, "The PDF could not be generated for this version (the link still works)."].filter(Boolean).join(" ");
+      }
 
-      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length } });
+      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length, pdfKey } });
       return jsonResponse(200, cors, {
         success: true,
         id: est.Id,
@@ -928,6 +1021,8 @@ export function createHandler(deps = {}) {
         publicToken: token,
         publicUrl: url,
         validUntil: validUntilOut,
+        pdfKey,
+        pdfUrl: pdfKey ? publicUrlForKey(pdfKey) : null,
         delivery, // "email" (sent) | "recorded" (version bumped, nothing went out — see deliveryDetail)
         recipient,
         deliveryDetail,
@@ -1170,8 +1265,7 @@ export function createHandler(deps = {}) {
       // Brand block: per-tenant config when that surface lands (service-workflows.md
       // §12). Until then the document renders with the tenant slug as the name so the
       // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.
-      const brand = { ...DEFAULT_BRAND, companyName: ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "" };
-      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, options: { mode: "preview" } });
+      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand: brandFor(ctx), options: { mode: "preview" } });
       return jsonResponse(200, cors, { html, title, version: Number(est.Version__c) || 0 });
     },
 

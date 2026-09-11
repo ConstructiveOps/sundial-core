@@ -1,5 +1,53 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (night) — The estimate PDF, and a Files tab on the service objects (D-072 amendment 3)
+
+The document now has **one model and two painters.** `lib/estimate-document.js` exports
+`buildEstimateModel()` — every row, label, total, note and the "new" tag as plain data —
+and paints HTML from it; the new `lib/estimate-pdf.js` paints the same model to PDF with
+pdf-lib (pure JS, so it bundles into the single-file esbuild artifact; no headless
+browser, no layer). Hand-drawn layout: Letter, wrapped descriptions, rows flow across
+pages with the table header repeated, totals block, the approve link, footer notes, page
+numbers when there is more than one page. Characters the standard fonts cannot encode
+(an emoji in a description) are replaced, never thrown on.
+
+**`/send` now:** renders this version's PDF, puts it at
+`SUNDIAL/{estimateId}/estimate-v{n}.pdf` (deterministic key), registers the
+`sundial_file_metadata` row (category `Estimate`), stores the key in
+`Version_Log__c[].pdfKey`, attaches the bytes to the customer email as
+`{EST-number}-v{n}.pdf`, records `pdfKey` on the activity row, and returns
+`pdfKey` / `pdfUrl`. `lib/email.js` gained `attachments` on `Content.Simple.Attachments`
+— SES builds the MIME, so it stays a `ses:SendEmail` call. Failure posture: a PDF that
+will not render or store leaves `pdfKey: null`, the email goes without the attachment,
+and `deliveryDetail` says so; the send never fails for it. The company name on the
+document and the email now comes from `SERVICE_BRAND_NAME` (same variable the public
+Lambda reads), falling back to the tenant slug. The public GET returns `pdfUrl` for the
+version being viewed, from the log — never an older version's file.
+
+**The vanishing Service tab (found by Tim tonight):** the sidebar shows a module only
+when `/auth/me` lists it, and `/auth/me` is served by `sundial-auth-proxy`, which bakes
+in its own copy of `lib/access.js` at deploy time. The copy deployed in August predates
+the service objects, so its module list never had `job` and the portal hid the link
+(the pages themselves work — the other Lambdas were redeployed). Fix: redeploy the auth
+proxy. Rule recorded in TASKS.md: a change to `lib/access.js` means redeploying
+`sundial-auth-proxy` as well.
+
+**Files tab:** `lib/file-access.js`'s allowlist gains `estimate`, `job`, `servicecall`;
+`lib/access.js` gains `files.<key>.{list,related,upload,delete}` rows (tenant scope).
+**Found on the way:** `roofing` and `po` were on the allowlist with no action rows, and
+`assertActionOnRecord` denies an unknown action by design — so the Roofing Files tab has
+been 403 for everyone since the access model shipped. Rows added; a new test pins every
+allowlist key to its action rows so the two lists cannot drift again. No new routes —
+the four file Lambdas just need redeploying to pick up the shared lib.
+
+Tests: estimate 27/27 (send test now covers the PDF, the attachment, the metadata row,
+and S3-down), public 5/5, `lib/estimate-pdf.test.js` 3/3, access 164/164. Portal
+(harmon-crm): Files panel on the estimate page and two on the job page (job folder +
+estimate documents), *Download PDF* on the customer page, Send toast mentions the
+attachment; 102/102, tsc / lint / build clean. Docs: DECISIONS D-072 amendment 3,
+api-endpoints (send, public, file object keys), file-storage (service section), CLAUDE.md
+both repos.
+
 ## 2026-09-11 (evening) — Send delivers, and the customer gets a page (D-072.7)
 
 The estimate loop closes. **`/send`** on `sundial-service-estimate` now builds the customer

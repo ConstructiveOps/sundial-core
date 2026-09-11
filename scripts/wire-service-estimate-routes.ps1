@@ -10,7 +10,9 @@
       PATCH  /service/estimates/{id}/lines/{lineId}
       DELETE /service/estimates/{id}/lines/{lineId}
       POST   /service/estimates/{id}/add-template | recalculate | send | approve | decline | create-job
+      GET    /service/estimates/{id}/activity | preview
       POST   /service/jobs
+      GET    /service/jobs/{id}/activity
       POST   /service/price-book-items
       PATCH  /service/price-book-items/{id}
       POST   /service/price-book-items/{id}/new-version | deactivate
@@ -92,6 +94,15 @@ foreach ($action in @("add-template", "recalculate", "send", "approve", "decline
     $r = Ensure-Resource $estId $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
 }
+foreach ($action in @("activity", "preview")) {
+    Write-Host "==> /service/estimates/{id}/$action : GET, OPTIONS" -ForegroundColor Cyan
+    $r = Ensure-Resource $estId $action
+    foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m }
+}
+Write-Host "==> /service/jobs/{id}/activity : GET, OPTIONS" -ForegroundColor Cyan
+$jobId = Ensure-Resource $jobs "{id}"
+$jobAct = Ensure-Resource $jobId "activity"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobAct $m }
 Write-Host "==> /service/jobs : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobs $m }
 Write-Host "==> /service/price-book-items : POST, OPTIONS" -ForegroundColor Cyan

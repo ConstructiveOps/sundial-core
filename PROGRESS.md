@@ -1,5 +1,35 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (later) — Service module portal screens (harmon-crm) + the estimate preview renderer
+
+The backend was ahead of the screens, so the Service module got its UI. In **harmon-crm**:
+`src/lib/service-api.ts` (typed client for every `/service/*` route, sharing `authedFetch`),
+`SfObject`/`ModuleKey` extended with the seven service keys, the nav item flipped from
+"Soon" to live (gated on the `job` module), routes for `/service`, `/service/jobs/:id`,
+`/service/estimates`, `/service/estimates/:id`, `/service/price-book`. Components:
+`CustomerPicker` (search the hub or type a new customer; renders the server's duplicate
+candidates as one-click picks with "Create anyway"), `NewServiceModal` (one popup, two
+modes — estimate, or quick-create job), `PriceBookSearch` (typeahead over the active
+catalog), `PriceBookItemModal` (create / edit / Update-as-new-version, with the
+ITEM_IN_USE 409 turned into the new-version path), `PreviewModal` (sandboxed iframe of
+the server-rendered document, Close + Send), `ActivityFeed`. Pages: the three lists
+(shared `ServiceListShell` with tabs), `EstimateDetailPage` (the editor — inline-editable
+description / qty / price per line, kind select, remove, ad-hoc form, add-from-template,
+pricing panel for discount / markup / tax / deposit, live totals, Preview, Send, Mark
+approved, Declined, Create job / Open job), `ServiceJobDetailPage` (status + editable
+facts via the generic PATCH so they land in the activity tracker; estimate summary card).
+`tsc -b` clean, `vite build` clean, vitest 99/99. Note: the repo's
+`react-hooks/set-state-in-effect` lint rule already fails on the existing Roofing pages;
+the new pages follow the same load-in-effect pattern and are not gated on it.
+
+In **sundial-core**: `lib/estimate-document.js` — the ONE renderer for the customer-facing
+estimate (preview now; hosted page, PDF, email next), pure and self-contained, brand block
+injected per tenant (placeholder until Harmon's identity block arrives); `GET
+/service/estimates/{id}/preview` on the estimate Lambda; the wire script gained the two
+activity GETs it was missing plus preview. Tests 26/26. Tim's preview/send rule is
+honoured exactly: the preview is read-only, edits happen on the estimate.
+
+
 ## 2026-09-11 — Service module: activity tracker + editable lines (D-072 amendment 2), before the estimate Lambda's first deploy
 
 Two asks from Tim, both landed in the repo before anything shipped. **Activity tracker:**

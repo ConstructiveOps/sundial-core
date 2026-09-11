@@ -19,6 +19,7 @@
 //   PATCH  /service/price-book-items/{id}           in-place edit (only while unreferenced)
 //   POST   /service/price-book-items/{id}/new-version   the "Update" clone
 //   POST   /service/price-book-items/{id}/deactivate
+//   GET    /service/estimates/{id}/preview          read-only rendered document (what the customer sees)
 //   GET    /service/jobs/{id}/activity              the job's activity feed (newest first)
 //   GET    /service/estimates/{id}/activity         an estimate's feed (pre-job history)
 //
@@ -64,6 +65,7 @@ import {
 } from "../../lib/salesforce.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
+import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import {
   EVENTS,
   recordActivity,
@@ -242,6 +244,7 @@ const ROUTES = [
   ["PATCH", /^\/service\/price-book-items\/([^/]+)\/?$/, "patchItem"],
   ["POST", /^\/service\/price-book-items\/([^/]+)\/new-version\/?$/, "newItemVersion"],
   ["POST", /^\/service\/price-book-items\/([^/]+)\/deactivate\/?$/, "deactivateItem"],
+  ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
 ];
@@ -1080,6 +1083,21 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, cors, { success: true, id: item.Id });
     },
 
+    // --- preview (read-only; the same renderer the hosted page / PDF / email use) ------
+    async previewEstimate({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const est = await loadEstimate(params[0], tenantId);
+      if (!est) return notFound(cors);
+      const lines = await loadLines(est.Id, tenantId);
+      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
+      // Brand block: per-tenant config when that surface lands (service-workflows.md
+      // §12). Until then the document renders with the tenant slug as the name so the
+      // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.
+      const brand = { ...DEFAULT_BRAND, companyName: ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "" };
+      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, options: { mode: "preview" } });
+      return jsonResponse(200, cors, { html, title, version: Number(est.Version__c) || 0 });
+    },
+
     // --- activity feeds -----------------------------------------------------------------
     async jobActivity({ ctx, params, query }) {
       const { tenantId, cors } = ctx;
@@ -1109,6 +1127,7 @@ export function createHandler(deps = {}) {
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: "service.estimate.write", estimateActivity: "service.estimate.write",
+    previewEstimate: "service.estimate.write",
   };
 
   return async function handler(event) {

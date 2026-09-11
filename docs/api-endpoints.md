@@ -798,7 +798,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-acumatica-budget-push` | POST /projects/{recordId}/budget/push, POST /projects/{recordId}/budget/attributes-sync |
 | `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
-| `sundial-service-estimate` | GET /service/jobs/{id}/activity, GET /service/estimates/{id}/activity, POST /service/estimates, GET+PATCH /service/estimates/{id}, POST /service/estimates/{id}/lines, PATCH+DELETE /service/estimates/{id}/lines/{lineId}, POST /service/estimates/{id}/{add-template\|recalculate\|send\|approve\|decline\|create-job}, POST /service/jobs, POST /service/price-book-items, PATCH /service/price-book-items/{id}, POST /service/price-book-items/{id}/{new-version\|deactivate} |
+| `sundial-service-estimate` | GET /service/jobs/{id}/activity, GET /service/estimates/{id}/{activity\|preview}, POST /service/estimates, GET+PATCH /service/estimates/{id}, POST /service/estimates/{id}/lines, PATCH+DELETE /service/estimates/{id}/lines/{lineId}, POST /service/estimates/{id}/{add-template\|recalculate\|send\|approve\|decline\|create-job}, POST /service/jobs, POST /service/price-book-items, PATCH /service/price-book-items/{id}, POST /service/price-book-items/{id}/{new-version\|deactivate} |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
 | `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
 | `sundial-comment-notify` | POST /webhooks/comment-mention (called by Postgres via pg_net) |
@@ -1009,6 +1009,9 @@ Body: `customer` (above) **or** `estimateId` (then it behaves as create-job); `j
 Every route above writes one row to `sundial_service_activity` after its Salesforce write (event, actor, timestamp, `details` with old → new). `sundial-sf-update` does the same for a generic `PATCH/POST /sf/{estimate|job|servicecall|serviceline|serviceinvoice|servicepayment|pricebookitem}` (`field_updated` / `record_created`, with the previous values read before the write).
 - `GET /service/jobs/{id}/activity?limit=200&before=<iso>` → `{ jobId, estimateId, activity: [ { id, event, record_type, record_sf_id, job_sf_id, estimate_sf_id, actor_user_sf_id, actor_name, details, at } ] }`, newest first. Includes the estimate's pre-job rows (re-keyed at Create Job).
 - `GET /service/estimates/{id}/activity` — same shape for one estimate.
+
+### Preview (read-only document)
+`GET /service/estimates/{id}/preview` → `{ html, title, version }`. The customer-facing estimate rendered by `lib/estimate-document.js` — the SAME renderer the hosted customer page, the PDF, and the email will use, so the office's preview is exactly what the customer gets. Self-contained HTML (inline CSS, no external assets); the portal shows it in a sandboxed iframe. Edits are never made in the preview. `mode: "preview"` watermarks the page and shows a disabled Approve placeholder where the customer's button + card form will sit. Brand block (company name, license line, contact, terms link, footer note) is tenant config — placeholder until Harmon's identity block is captured.
 - Events: `estimate_created | estimate_updated | estimate_sent | estimate_approved | estimate_declined | template_applied | line_added | line_updated | line_removed | job_created | job_updated | customer_created | customer_tagged | service_call_updated | field_updated | record_created | item_created | item_updated | item_new_version | item_deactivated` (+ `invoice_sent | invoice_issued | payment_recorded` reserved for the billing routes).
 
 ### Errors

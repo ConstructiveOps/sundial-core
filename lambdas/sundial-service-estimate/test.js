@@ -15,6 +15,7 @@ import {
   itemFieldsFromBody, newVersionFields, lineFromItem, adHocLine, linePatchFields, inPlaceEditable,
 } from "./pricebook.js";
 import { createHandler, matchRoute, PROJECT_TYPE_TAG } from "./index.js";
+import { renderEstimateDocument } from "../../lib/estimate-document.js";
 
 const TENANT = "a1W7y000007AszBEAS";
 const OTHER_TENANT = "a1W7y000007OTHER00";
@@ -572,3 +573,42 @@ test("job create failure after the estimate was created compensates and reports"
   assert.equal(r.body.estimateRemoved, true);
   assert.equal(fake.store.Sundial_Estimate__c.length, 0);
 });
+
+test("renderEstimateDocument: escapes, hides markup, shows discount/tax/deposit rows, preview watermark", () => {
+  const { html, title } = renderEstimateDocument({
+    estimate: { Name: "EST-00007", Version__c: 2, Customer_Name_at_Creation__c: "O'Brien <Bob>", Scope_Summary__c: "Replace inverter", Discount_Source__c: "Service Plan", Deposit_Required__c: true, Tax_Jurisdiction__c: "Phoenix" },
+    lines: [
+      { Description__c: "Labor <b>", Quantity__c: 1.5, Unit_of_Measure__c: "Hour", Unit_Price__c: 200, Line_Total__c: 300, Stage__c: "Approved" },
+      { Description__c: "Gone", Quantity__c: 1, Unit_Price__c: 999, Line_Total__c: 999, Stage__c: "Removed" },
+    ],
+    totals: { subtotal: 300, discountAmount: 30, markupAmount: 50, taxAmount: 10, total: 330, depositAmount: 82.5 },
+    brand: { companyName: "Acme Solar", licenseLine: "ROC #1" },
+    options: { mode: "preview" },
+  });
+  assert.equal(title, "EST-00007 v2");
+  assert.ok(html.includes("O&#39;Brien &lt;Bob&gt;"));
+  assert.ok(html.includes("Labor &lt;b&gt;"));
+  assert.ok(!html.includes("Gone"), "removed lines are not printed");
+  assert.ok(!/markup/i.test(html), "markup is never printed");
+  assert.ok(html.includes("Service plan discount"));
+  assert.ok(html.includes("Tax (Phoenix)"));
+  assert.ok(html.includes("Deposit due to schedule"));
+  assert.ok(html.includes("PREVIEW"));
+  assert.ok(html.includes("1.50 Hour"));
+  assert.ok(html.includes("Acme Solar") && html.includes("ROC #1"));
+});
+
+test("GET …/preview returns the rendered document for a tenant-owned estimate, 404 otherwise", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Pv" });
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  const p = await call(h, "GET", `/service/estimates/${c.body.id}/preview`);
+  assert.equal(p.status, 200);
+  assert.ok(p.body.html.includes("Truck roll"));
+  assert.ok(p.body.html.includes("$275.00"));
+  assert.equal(p.body.title, fake.store.Sundial_Estimate__c[0].Name ?? "Estimate");
+  const nf = await call(h, "GET", "/service/estimates/000000000000000000/preview");
+  assert.equal(nf.status, 404);
+});
+

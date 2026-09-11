@@ -4,6 +4,14 @@
 > of Phase 2: HCP's scheduler is a real dispatch board, and Sundial must match what the
 > service team actually uses daily or the module fails on adoption.
 >
+> **Status (2026-09-11):** build order §9 steps 1–4 are LIVE — `lambdas/sundial-service-board`
+> + the portal's hand-built `/service/dispatch` (day view, tray drop, drag to move, click
+> for progress / reschedule / cancel, Realtime refetch) and email notify per action. Two
+> deliberate departures, recorded in DECISIONS.md D-072 amendment 4: the board reads
+> Salesforce fresh (not cache-first), and FullCalendar Premium is the later upgrade, not
+> the first build. Object names below predate D-072 (`Sundial_Service__c` → job,
+> `Sundial_Service_Visit__c` → `Sundial_Service_Call__c`, "visit" routes → `/service/calls`).
+>
 > **References:** `docs/service-workflows.md` §5 (workflow contract),
 > `docs/service-discovery-2026-08.md` (what Beth/Larry actually use),
 > `docs/caching-architecture.md` (cache + realtime + always-fresh rules), DECISIONS.md

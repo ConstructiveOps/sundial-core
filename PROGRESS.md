@@ -1,5 +1,50 @@
 # Sundial — Progress Log
 
+## 2026-09-11 (late) — Service calls and the dispatch board (D-072 amendment 4)
+
+The part of the module the service team will live in. **New Lambda
+`sundial-service-board`:** `GET /service/board?from&to` returns the techs, every call in
+the window and the unscheduled tray in one read; `POST /service/jobs/{id}/calls`
+schedules a tech (end defaults to +2 h); `PATCH /service/calls/{id}` moves / reassigns /
+progresses / annotates; `POST /service/calls/{id}/cancel` needs a reason. Every read and
+write is straight from Salesforce — the scheduling path has no cache in it, on purpose
+(D-072 amendment 4 explains the departure from the design doc). Concurrency is the
+design's optimistic model: mutations carry `baseModstamp`, a fresh read that disagrees
+is `409 CALL_CONFLICT` with the current state and nothing written; a call that has
+started can't be moved (`409 CALL_ALREADY_STARTED`).
+
+**Job status follows the calls**, in one function: first call scheduled → `Scheduled`; a
+call `In Progress` → job `In Progress`; last open call complete → `Awaiting Office
+Review`; last open call cancelled → back to `Ready to Schedule`. Each transition is a
+`job_updated` activity row with `via: "dispatch"`, next to the call's own
+`service_call_created | updated | cancelled` rows (two new events in
+`lib/service-activity.js`). After every write: cache rows flagged stale, one Realtime
+broadcast on `tenant:{id}:sundial_service:list` (HTTP, `lib/realtime.js`), and — when
+the dispatcher ticked the box — a customer email with the window in the tenant's
+timezone (`SERVICE_TIMEZONE`, default Phoenix), reported as `notified` / `detail` and
+never blocking. Techs = users marked `Technician` or in the `Service` department; every
+active user with a banner until someone is marked. Actions `service.board.read` /
+`service.call.write` (tenant). Tests 6/6 over an in-memory Salesforce with the two
+relationship joins. `scripts/wire-service-board-routes.ps1`.
+
+**Portal (harmon-crm):** `/service/dispatch` — a hand-built day board: one column per
+tech, 30-minute slots 6a–7p, blocks sized to their window and coloured by status, the
+unscheduled tray on the left (emergencies first). Drag a tray card onto a column → the
+Schedule dialog opens prefilled with that tech and slot; drag a block → PATCH with the
+same length, new tech / time, and the block's modstamp; click a block → progress
+buttons, work notes, reschedule by form, cancel with a reason, "add another tech". A 409
+becomes a toast and a refetch. Refetch on window focus and on the Realtime broadcast.
+Dispatch tab in the Service sub-nav; the job page gains a **Service calls** card with the
+same dialogs. `CallModals.tsx` (dialogs), `callTime.ts` (helpers), `JobCallsCard.tsx`,
+`DispatchBoardPage.tsx`; typed `board / jobCalls / createCall / patchCall / cancelCall`
+in `service-api.ts`. 3 render tests (columns + tray, tray drop → prefilled dialog →
+POST, block drag → PATCH with modstamp + 409 toast); 105/105, tsc / lint / build clean.
+
+FullCalendar Premium (edge-drag resize, week timeline) is the later front-end swap on
+this same API. Docs: DECISIONS D-072 amendment 4, api-endpoints "Dispatch board",
+dispatch-board-design.md status note, CLAUDE.md bullet both repos, TASKS (Tim's stand-up
+steps + the get-from-Harmon list).
+
 ## 2026-09-11 (night) — The estimate PDF, and a Files tab on the service objects (D-072 amendment 3)
 
 The document now has **one model and two painters.** `lib/estimate-document.js` exports

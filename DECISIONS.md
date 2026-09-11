@@ -3227,3 +3227,30 @@ allowlist gains `estimate`, `job`, `servicecall`, and `lib/access.js` gains the 
 `files.<key>.{list,related,upload,delete}` rows (tenant scope). Found while doing it:
 `roofing` and `po` had allowlist entries but no action rows, so their Files tabs
 answered 403 to everyone — rows added, and a test now pins the two lists together.
+
+### D-072 amendment 4 (2026-09-11): the dispatch board ships hand-built on the API contract FullCalendar will use; the board is always fresh; job status follows the calls
+
+**Built:** `lambdas/sundial-service-board` (board read, schedule, move / reassign /
+progress, cancel) and the portal's `/service/dispatch` day board + the job page's calls
+card. **Three decisions inside it.** (1) **Hand-built board first, FullCalendar Premium
+later.** The license is still pending and Beth's daily flow (tray → column drop, move a
+block, click for progress / cancel) does not need edge-drag resize or the week timeline
+to be usable. The API contract (`GET /service/board`, `POST …/calls`, `PATCH
+/service/calls/{id}` with `baseModstamp`, `cancel`) is the one design §3 specified for
+FullCalendar, so swapping the front end later changes no server code. (2) **The board is
+always fresh, reads included** — a deliberate narrowing of design §5's "cache-first
+reads". The volume (7 techs × ~10 calls a day) makes the cache a saving of nothing, and
+a dispatcher whose move snaps back because a cache row lagged stops trusting the board
+on day one. Optimistic concurrency stays exactly as designed: `baseModstamp` in, `409
+CALL_CONFLICT` with the current state out, nothing written. (3) **Job status follows the
+calls, in one function.** Scheduling the first call moves an unscheduled job to
+`Scheduled`; a call going `In Progress` moves the job; the last open call completing
+moves it to `Awaiting Office Review`; the last open call cancelled drops it back to
+`Ready to Schedule`. Each is its own `job_updated` activity row. Anything more
+opinionated is a per-tenant rule added on request (D-072 rule 5). **Techs** = users
+marked `Technician` or in the `Service` department; every active user until then, with
+a banner, so the board is usable before the users are curated. **Customer notify** =
+SES email per action when the dispatcher ticks the box (SMS when Twilio lands),
+best-effort and reported, never blocking. Detail: `docs/api-endpoints.md` "Dispatch
+board"; `docs/dispatch-board-design.md` remains the target design.
+

@@ -85,7 +85,12 @@ def field_xml(f):
         p += [f"        <length>{kw.get('length', 32768)}</length>", "        <trackTrending>false</trackTrending>",
               "        <type>LongTextArea</type>", f"        <visibleLines>{kw.get('visibleLines', 5)}</visibleLines>"]
     elif t == "Lookup":
-        p += ["        <deleteConstraint>SetNull</deleteConstraint>", f"        <referenceTo>{kw['refTo']}</referenceTo>",
+        # Salesforce refuses SetNull on a REQUIRED lookup ("must specify either cascade
+        # delete or restrict delete for required lookup foreign key" - hit on the first
+        # Check Only). Restrict, never Cascade: deleting a parent must fail loudly, not
+        # silently take its children with it.
+        constraint = "Restrict" if kw.get("required") else "SetNull"
+        p += [f"        <deleteConstraint>{constraint}</deleteConstraint>", f"        <referenceTo>{kw['refTo']}</referenceTo>",
               f"        <relationshipLabel>{esc(kw.get('relLabel', f.label + 's'))}</relationshipLabel>",
               f"        <relationshipName>{kw['relName']}</relationshipName>", f"        <required>{req}</required>",
               "        <trackTrending>false</trackTrending>", "        <type>Lookup</type>"]

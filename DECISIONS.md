@@ -3181,3 +3181,24 @@ than leaving a silent orphan. Nothing in the deploy package changes; the verify 
 checks the "Service" picklist value exists. Open: Stage/Status/Lead_Source defaults for a
 service-originated customer (Tim). Detail: `docs/service-data-model.md` §3.1a.
 
+### D-072 amendment 2 (2026-09-11): activity tracker on the job; lines stay editable after they are added
+
+Tim, before the estimate Lambda's first deploy. **(a) Activity tracker.** Every field
+update, line add/edit/remove, estimate or invoice send, approval, job creation, and
+price-book change writes one row — event, actor (Sundial user id + name), timestamp,
+`details` JSON (fields with old → new, version, line id) — to the Supabase table
+`sundial_service_activity` (`lib/service-activity.js`), keyed by both job and estimate so
+a pre-job estimate's history is re-keyed to the job at Create Job. Supabase, not
+Salesforce, because CLAUDE.md already designates it for audit logs (unbounded, queryable,
+zero SF API cost per event, Realtime-capable). Written best-effort after the Salesforce
+write by `sundial-service-estimate` (all routes) and by `sundial-sf-update` (generic
+PATCH/POST on service object keys, with a pre-read so old values are captured). Read via
+`GET /service/jobs/{id}/activity` and `/service/estimates/{id}/activity`. Known gap:
+changes made outside Sundial; Field History Tracking is the backstop if needed.
+**(b) Editable lines.** Confirmed as designed: the line is the office's snapshot of the
+price-book item and description / quantity / unit price / taxable / kind are editable
+per estimate (`PATCH …/lines/{lineId}`), `Price_Overridden__c` flags a divergent price,
+and the activity row records old → new. Added rule: a money-affecting edit to an
+**Approved** line drops it to `Proposed` for re-approval on the next send;
+description-only edits do not. Package unchanged; one new SQL file; `sundial-sf-update`
+redeploy. Detail: `docs/service-data-model.md` §5.4, §11.

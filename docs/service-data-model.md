@@ -198,6 +198,15 @@ As built (clock intervals, GPS, geofence tag, `Work_Notes__c` / `Private_Notes__
 
 ### 5.4 `Sundial_Service_Line__c` (SL-#) — re-parented
 
+**Lines are editable after they are added (Tim, 2026-09-11).** The line IS the office's
+copy of the price-book item: description, quantity, unit price, taxable, kind can all be
+changed for this one estimate without touching the catalog ("more descriptive for a unique
+case", "a different price for just this job"). `Price_Overridden__c` flags a price that
+differs from the item; the activity tracker (§11) records old → new for every edit. One
+rule rides on top: a **money-affecting** edit (price / quantity / kind / taxable) to a line
+the customer has already **Approved** drops that line back to `Proposed`, so the change goes
+out for approval on the next send; a description-only edit leaves it Approved.
+
 `Estimate__c` (required — **replaces** the ticket lookup), `Price_Book_Item__c` (optional), `Kind__c`, `Description__c` (snapshot, editable), `Quantity__c`, `Unit_of_Measure__c`, `Unit_Price__c` (snapshot, editable), `Unit_Labor_Price__c`, `Unit_Material_Price__c`, `Unit_Labor_Cost__c`, `Unit_Material_Cost__c` (snapshots for margin), `Price_Overridden__c` (Lambda-set when Unit_Price ≠ item price at add), `Line_Total__c` (formula), `Taxable__c` (snapshot), `Stage__c` (Proposed / Approved / Completed / Removed), `Sort_Order__c`, `Show_Unit_Price__c`, `Source__c` (Price Book / Template / Ad hoc / Field / Migration), `Added_By_Service_Call__c`, `Client__c`. Delete permitted (only object with delete, as before).
 
 ### 5.5 `Sundial_Service_Invoice__c` — one per job
@@ -258,7 +267,35 @@ Each HCP job becomes Estimate + Job + Lines (from HCP invoice items; matched to 
 
 ---
 
+## 11. Activity tracker **[Tim, 2026-09-11]**
+
+Every job carries a feed of what happened to it: **event, who, when**, plus a small
+`details` object (which fields, old → new, version numbers, line ids). It lives in
+**Supabase** — `sundial_service_activity` (`sql/sundial_service_activity.sql`,
+`lib/service-activity.js`) — because CLAUDE.md already puts audit logs there: unbounded,
+queryable, no Salesforce API cost per event, and Supabase Realtime can push new rows to an
+open job page. A Salesforce long-text log would cap at 131 KB; a Salesforce object would
+cost an API call per keystroke.
+
+Rows are keyed by **both** `job_sf_id` and `estimate_sf_id`. An estimate that pre-dates its
+job logs with a null job id; *Create Job* back-fills the job id onto those rows, so the
+job's feed starts at the first quote. Two writers, one helper: `sundial-service-estimate`
+(every route — estimate created/updated/sent/approved/declined, line added/updated/removed,
+template applied, job created, customer created/tagged, price-book item events) and
+`sundial-sf-update` (a generic PATCH/POST on any service object key logs `field_updated` /
+`record_created` with the changed fields and their previous values — so a field edited on
+the job's detail page is tracked too). Writes are best-effort *after* the Salesforce write
+(the standing rule: a logging failure never fails the user's action; it is logged with the
+full row). Read via `GET /service/jobs/{id}/activity` and `GET /service/estimates/{id}/activity`.
+
+Honest gap: edits made outside Sundial (a Flow, Tim in the Salesforce UI, a data script)
+are not seen. If that ever matters, Salesforce Field History Tracking on the job is the
+backstop. Invoice sent / issued and payment recorded are in the vocabulary now and get
+written when those routes are built.
+
 ## 10. Decided / recommended / open — the honest ledger
+
+**Decided (Tim, 2026-09-11):** activity tracker on the job (§11, Supabase); lines editable after add, with the approved-line re-approval rule (§5.4).
 
 **Decided (Tim, 2026-09-09):** seven-object shape; customer select-or-create inside the New Estimate / New Job popup with `Requested_Project_Types__c` tagged silently (§3.1a); estimate can exist without a job, job never without an estimate; quick-create makes the estimate; price book is the source of standardized pricing; *Update* = clone with same Item_Code, old version inactive; kind-scoped discounts; markup % or amount hidden from the customer; deposit flat or %; two send buttons; Files + Photos sections; customer photo report module.
 

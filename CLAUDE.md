@@ -286,6 +286,7 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
 - **The hosted estimate page is the payment link** (accept + Stripe SetupIntent/deposit at the bottom). Customers get receipt + photo job report; partners get the invoice document.
 - `Sundial_Service_Call__c` is also used for non-service field work (solar/roofing/commercial visits) via `Visit_Type__c` plus optional project lookups (D-027). Files and photos use the Solar module's S3 pattern unchanged (`sfsolproj/SUNDIAL/{jobId}/…`, photos in the `photos/{serviceCallId}/` subfolder, XFiles Pro reads the same prefix, nothing stored in Salesforce); per-photo flags ride on the existing Supabase `sundial_file_metadata` row; photos default internal until flagged customer-visible.
 - **Every project-creating popup does customer select-or-create** (D-072 amendment): New Estimate / New Job — and New Roofing / New Commercial when built — search the customer hub first, or create the customer from the basics in the same request; never send the user to Sales to make a customer. The module silently tags `Sundial_Customer__c.Requested_Project_Types__c` with its value (`Service`, `Roofing`, `Commercial`): set on a new customer, union-added on an existing one. Soft duplicate guard (email / phone / street+zip) before any create; reuse the `POST /sf/customer` validation path.
+- **Every service write lands in the activity tracker** (D-072 amendment 2): `sundial_service_activity` in Supabase — event, actor, timestamp, old → new — written best-effort *after* the Salesforce write by `sundial-service-estimate` and `sundial-sf-update` through `lib/service-activity.js`; never a reason to fail the user's action. Keyed by job **and** estimate (pre-job history is re-keyed at Create Job). Lines are editable after they are added (the line is the office's snapshot); a money-affecting edit to an Approved line drops it to Proposed.
 - **The price book is tenant-scoped** (`Client__c` on every item) — never the standard Salesforce `Pricebook2`/`Product2`, which cannot be isolated per tenant.
 
 ### Key Workflows
@@ -568,6 +569,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 - Tim prioritizes working software over perfect architecture
 - When in doubt, choose simpler and note future improvements
 - **Windows-specific:** Use PowerShell commands and Windows file paths. WSL 2 and Docker Desktop for Windows where relevant
+- **Always end a session's file changes with the exact git commands to commit them** (branch check, the explicit `git add` list, and the `git commit` with the attribution lines) — Tim runs them; never assume he will compose them (2026-09-11)
 
 ---
 

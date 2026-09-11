@@ -23,7 +23,7 @@
         <description>Required - every job belongs to a customer (D-065.1: no Asset; history from this link + originating-project lookups).</description>
         <externalId>false</externalId>
         <label>Sundial Customer</label>
-        <deleteConstraint>SetNull</deleteConstraint>
+        <deleteConstraint>Restrict</deleteConstraint>
         <referenceTo>Sundial_Customer__c</referenceTo>
         <relationshipLabel>Service Jobs</relationshipLabel>
         <relationshipName>Service_Jobs</relationshipName>
@@ -36,7 +36,7 @@
         <description>REQUIRED: the job's living estimate (D-072.2). Quick-create makes it in the same transaction; Create Job links an existing one.</description>
         <externalId>false</externalId>
         <label>Estimate</label>
-        <deleteConstraint>SetNull</deleteConstraint>
+        <deleteConstraint>Restrict</deleteConstraint>
         <referenceTo>Sundial_Estimate__c</referenceTo>
         <relationshipLabel>Service Jobs</relationshipLabel>
         <relationshipName>Service_Jobs</relationshipName>
@@ -49,7 +49,7 @@
         <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
         <externalId>false</externalId>
         <label>Client</label>
-        <deleteConstraint>SetNull</deleteConstraint>
+        <deleteConstraint>Restrict</deleteConstraint>
         <referenceTo>Sundial_Tenant__c</referenceTo>
         <relationshipLabel>Service Jobs</relationshipLabel>
         <relationshipName>Sundial_Service_Jobs</relationshipName>

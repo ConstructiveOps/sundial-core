@@ -122,7 +122,7 @@
         <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
         <externalId>false</externalId>
         <label>Client</label>
-        <deleteConstraint>SetNull</deleteConstraint>
+        <deleteConstraint>Restrict</deleteConstraint>
         <referenceTo>Sundial_Tenant__c</referenceTo>
         <relationshipLabel>Service Calls</relationshipLabel>
         <relationshipName>Sundial_Service_Calls</relationshipName>

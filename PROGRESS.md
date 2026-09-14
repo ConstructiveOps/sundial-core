@@ -1,5 +1,16 @@
 # Sundial — Progress Log
 
+## 2026-09-12 — Street View: aim the camera at the house
+
+Tim's first look at the card on his own address showed the house across the street.
+Cause: the still was requested by panorama id (`pano=`), which returns that panorama at
+its **default heading** — the direction the camera car was driving — not toward the
+address. Requesting by `location=` (the address, `source=outdoor`) makes Google pick the
+nearest outdoor panorama *and* point the camera at the address. The metadata check stays
+as it was (it is what tells us "no imagery here" without spending an image request). Test
+pins that the image URL carries `location=` and never `pano=`. Existing jobs that already
+cached the wrong view: the card's refresh button (`?refresh=1`) re-fetches.
+
 ## 2026-09-11 (night) — Invoices and payments (D-072 amendment 5); the house on the job page; taller week board
 
 **Invoices + payments** close the loop the module has been building toward: estimate →

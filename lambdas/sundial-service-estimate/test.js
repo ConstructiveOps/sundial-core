@@ -791,7 +791,8 @@ test("street view: unconfigured without the secret; fetched once by pano id, cac
   assert.equal(fake.fetches.length, 2, "metadata, then the still");
   assert.ok(fake.fetches[0].includes("/streetview/metadata?location="));
   assert.ok(fake.fetches[0].includes("source=outdoor"));
-  assert.ok(fake.fetches[1].includes("pano=PANO1"), "the still is the outdoor panorama metadata found");
+  assert.ok(fake.fetches[1].includes("/streetview?") && fake.fetches[1].includes("location=") && fake.fetches[1].includes("source=outdoor"), "the still is asked for by ADDRESS so Google aims the camera at the house");
+  assert.ok(!fake.fetches[1].includes("pano="), "never by panorama id — that shows the camera car's heading, i.e. the house across the street");
   assert.equal(fake.puts.at(-1).key, `SUNDIAL/${jobId}/street-view.jpg`);
   assert.equal(fake.puts.at(-1).contentType, "image/jpeg");
   assert.equal(job.Street_View_Image_Key__c, `SUNDIAL/${jobId}/street-view.jpg`);

@@ -1380,11 +1380,15 @@ export function createHandler(deps = {}) {
         console.error("street-view metadata status", meta?.status, meta?.error_message);
         return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: `Google said ${meta?.status || "nothing"}.` });
       }
-      // 2. The still itself, by panorama id so it is the outdoor one metadata found.
+      // 2. The still itself — requested by ADDRESS, not by panorama id. Asked for a pano
+      //    id, Google shows that panorama's default heading (the way the camera car was
+      //    facing), which on a residential street is the house across the road. Asked
+      //    for a location, Google picks the nearest outdoor panorama AND aims the camera
+      //    at the address (2026-09-12: Tim's own house came out as the neighbour's).
       const key = streetViewKey(job.Id);
       try {
         const img = await d.fetchUrl(
-          `https://maps.googleapis.com/maps/api/streetview?size=${STREET_VIEW_SIZE}&pano=${encodeURIComponent(meta.pano_id)}&fov=80&key=${encodeURIComponent(apiKey)}`
+          `https://maps.googleapis.com/maps/api/streetview?size=${STREET_VIEW_SIZE}&${q}&fov=80&pitch=0`
         );
         if (!img.ok) throw new Error(`HTTP ${img.status}`);
         const bytes = Buffer.from(await img.arrayBuffer());

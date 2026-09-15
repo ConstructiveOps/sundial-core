@@ -1084,3 +1084,51 @@ test("labor billing: billable calls become Labor lines (Source Time), edits rewr
   assert.ok(fake.activity.some((a) => a.event === "labor_billed"));
   void estId; void j;
 });
+
+test("tech app: POST /service/tech/calls/{id}/estimate-lines adds Proposed 'Field' lines tagged with the call; only the call's own tech (or the office) may", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Field" });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Jake", Last_Name__c: "Dorsey" });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Larry", Last_Name__c: "Ng" });
+  await fake.deps.sfCreateRecord("Sundial_Price_Book_Item__c", { Client__c: TENANT, Name: "Breaker 20A", Item_Code__c: "BRK-20", Version__c: 1, Is_Active__c: true, Kind__c: "Material", Material_Price__c: 45, Default_Quantity__c: 1, Taxable__c: true });
+  const [jake, larry] = fake.store.Sundial_User__c;
+  const item = fake.store.Sundial_Price_Book_Item__c[0];
+  const office = makeHandler(fake);
+  await call(office, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Diagnostic", kind: "Labor", unitPrice: 275 }] });
+  const jobId = fake.store.Sundial_Service_Job__c[0].Id;
+  const estId = fake.store.Sundial_Estimate__c[0].Id;
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-1", Sundial_Service_Job__c: jobId, Tech__c: jake.Id, Status__c: "In Progress" });
+  const callId = fake.store.Sundial_Service_Call__c[0].Id;
+  const asTech = (u) => makeHandler(fake, { user: { id: u.Id, firstName: u.First_Name__c, lastName: u.Last_Name__c }, access: { level: "Technician", scope: "tech", userId: u.Id, tenantId: TENANT } });
+
+  // Jake adds a catalog item (qty 2) and an ad-hoc line in one go
+  const r = await call(asTech(jake), "POST", `/service/tech/calls/${callId}/estimate-lines`, { lines: [{ priceBookItemId: item.Id, quantity: 2 }, { description: "Extra conduit run", kind: "Labor", unitPrice: 120, stage: "Approved", source: "Ad hoc" }] });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.estimateId, estId);
+  assert.equal(r.body.lines.length, 2);
+  assert.deepEqual(r.body.lines.map((l) => l.stage), ["Proposed", "Proposed"], "a tech can never approve; stage/source in the body are ignored");
+  const lines = fake.store.Sundial_Service_Line__c.filter((l) => l.Estimate__c === estId);
+  assert.equal(lines.length, 3);
+  const field = lines.filter((l) => l.Source__c === "Field");
+  assert.equal(field.length, 2);
+  assert.ok(field.every((l) => l.Added_By_Service_Call__c === callId && l.Stage__c === "Proposed"));
+  assert.ok(field.every((l) => l.Sort_Order__c > 10), "appended after the office's lines");
+  assert.equal(field[0].Quantity__c, 2);
+  assert.equal(field[0].Unit_Price__c, 45);
+  assert.equal(r.body.totals.Total__c, 275 + 90 + 120 + 0, JSON.stringify(r.body.totals)); // no tax rate on this estimate
+  assert.ok(fake.activity.some((a) => a.event === "line_added" && a.details.source === "Field" && a.details.callId === callId && a.details.via === "tech"));
+
+  // Larry has no call on this job → 404; the office may act
+  const larryR = await call(asTech(larry), "POST", `/service/tech/calls/${callId}/estimate-lines`, { description: "x", kind: "Labor", unitPrice: 1 });
+  assert.equal(larryR.status, 404);
+  const officeR = await call(office, "POST", `/service/tech/calls/${callId}/estimate-lines`, { description: "Office-added on behalf", kind: "Fee", unitPrice: 10 });
+  assert.equal(officeR.status, 201);
+  // a bad line is reported, not silently dropped
+  const badR = await call(asTech(jake), "POST", `/service/tech/calls/${callId}/estimate-lines`, { description: "", kind: "Labor" });
+  assert.equal(badR.status, 400);
+  assert.equal(badR.body.code, "LINE_INVALID");
+  // an invoiced estimate is locked
+  await fake.deps.sfUpdateRecord("Sundial_Estimate__c", estId, { Status__c: "Invoiced" });
+  const locked = await call(asTech(jake), "POST", `/service/tech/calls/${callId}/estimate-lines`, { description: "late", kind: "Labor", unitPrice: 1 });
+  assert.equal(locked.body.code, "ESTIMATE_INVOICED");
+});

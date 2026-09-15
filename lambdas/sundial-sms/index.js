@@ -38,14 +38,25 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { broadcast as realBroadcast, recordChannel } from "../../lib/realtime.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
-import { digitsOf, last10, mediaFrom, parseFormBody, prettyPhone, requestUrls, sendSms as realSendSms, toE164, validateSignature } from "./twilio.js";
+import { digitsOf, last10, mediaFrom, parseFormBody, prettyPhone, requestUrls, sendSms as realSendSms, toE164, validateSignature } from "../../lib/twilio.js";
+import {
+  SMS_TABLE,
+  TWILIO_SECRET_NAME,
+  MAX_BODY_CHARS,
+  createSmsSender,
+  customerPhoneFor,
+  fromNumberFor,
+  messageToView,
+  tenantSlugForNumber,
+  twilioConfigFrom,
+} from "../../lib/sms-send.js";
 
-export const SMS_TABLE = "sundial_sms_messages";
-export const TWILIO_SECRET_NAME = "sundial/twilio";
+// The send itself (secret, tenant→number, row, broadcast) lives in lib/sms-send.js so the
+// dispatch board's "on my way" text is the same code path. Re-exported for test.js.
+export { SMS_TABLE, TWILIO_SECRET_NAME, MAX_BODY_CHARS, fromNumberFor, messageToView, tenantSlugForNumber, twilioConfigFrom };
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const TENANT_SF_OBJECT = "Sundial_Tenant__c";
-export const MAX_BODY_CHARS = 1600; // Twilio's ceiling for a concatenated SMS
 export const CLOSED_JOB_STATUSES = Object.freeze(["Closed", "Cancelled"]);
 const SECRET_TTL_MS = 5 * 60 * 1000;
 const THREAD_LIMIT = 500;
@@ -75,53 +86,6 @@ export function matchRoute(method, path) {
   return null;
 }
 
-/** What the portal sees for one row. */
-export function messageToView(r) {
-  return {
-    id: r.id,
-    direction: r.direction,
-    jobId: r.job_sf_id ?? null,
-    from: r.from_number,
-    to: r.to_number,
-    fromPretty: prettyPhone(r.from_number),
-    toPretty: prettyPhone(r.to_number),
-    body: r.body ?? "",
-    media: Array.isArray(r.media) ? r.media : [],
-    status: r.status,
-    errorCode: r.error_code ?? null,
-    sentByName: r.sent_by_name ?? null,
-    at: r.created_at,
-    updatedAt: r.updated_at ?? null,
-  };
-}
-
-/** Resolve the Twilio config from the secret (+ env for the non-credential knobs). */
-export function twilioConfigFrom(secret, env = process.env) {
-  const s = secret && typeof secret === "object" ? secret : {};
-  const tenantNumbers = {};
-  for (const [slug, num] of Object.entries(s.tenantNumbers || {})) {
-    const e = toE164(num);
-    if (e) tenantNumbers[String(slug).toLowerCase()] = e;
-  }
-  return {
-    accountSid: str(s.accountSid ?? s.account_sid),
-    authToken: str(s.authToken ?? s.auth_token),
-    fromNumber: toE164(s.fromNumber ?? s.from_number) ?? null,
-    tenantNumbers,
-    defaultTenant: (str(env.SMS_DEFAULT_TENANT) ?? str(s.defaultTenant ?? s.default_tenant) ?? "").toLowerCase() || null,
-    webhookBase: str(env.SMS_WEBHOOK_BASE) ?? null,
-  };
-}
-export function fromNumberFor(cfg, tenantSlug) {
-  return cfg.tenantNumbers[String(tenantSlug ?? "").toLowerCase()] ?? cfg.fromNumber ?? null;
-}
-/** Which tenant slug owns the number a text was sent to. */
-export function tenantSlugForNumber(cfg, toNumber) {
-  const to = toE164(toNumber);
-  for (const [slug, num] of Object.entries(cfg.tenantNumbers)) if (num === to) return slug;
-  return cfg.defaultTenant;
-}
-
 function str(v) {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
@@ -139,20 +103,16 @@ export function createHandler(deps = {}) {
     ...deps,
   };
 
-  let secretCache = null;
-  async function config() {
-    if (secretCache && Date.now() - secretCache.at < SECRET_TTL_MS) return secretCache.cfg;
-    let secret = {};
-    try {
-      secret = (await d.getSecret(TWILIO_SECRET_NAME)) || {};
-    } catch (e) {
-      console.error("sms: cannot read", TWILIO_SECRET_NAME, e?.message);
-      return twilioConfigFrom({}, d.env); // no creds → sends refuse, webhooks fail closed
-    }
-    const cfg = twilioConfigFrom(secret, d.env);
-    secretCache = { cfg, at: Date.now() };
-    return cfg;
-  }
+  const sender = createSmsSender({
+    getSecret: d.getSecret,
+    getSupabaseClient: d.getSupabaseClient,
+    sfQuery: d.sfQuery,
+    broadcast: d.broadcast,
+    sendSms: d.sendSms,
+    now: d.now,
+    env: d.env,
+  });
+  const config = sender.config;
 
   const tenantIdCache = new Map(); // slug → { id, at }
   async function tenantIdForSlug(slug) {
@@ -170,17 +130,6 @@ export function createHandler(deps = {}) {
       `SELECT ${JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
     );
     return rows?.[0] ?? null;
-  }
-  /** The customer's CURRENT phone wins over the job's snapshot (same rule as email). */
-  async function customerPhoneFor(job, tenantId) {
-    if (job?.Sundial_Customer__c) {
-      const rows = await d.sfQuery(
-        `SELECT Id, Primary_Phone__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Sundial_Customer__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
-      );
-      const e = toE164(rows?.[0]?.Primary_Phone__c);
-      if (e) return e;
-    }
-    return toE164(job?.Primary_Phone_at_Creation__c);
   }
   async function listThread(tenantId, jobId) {
     const supabase = await d.getSupabaseClient();
@@ -249,7 +198,7 @@ export function createHandler(deps = {}) {
       if (!job) return jsonResponse(404, cors, { error: "not_found", code: "JOB_NOT_FOUND" });
       const cfg = await config();
       const from = fromNumberFor(cfg, ctx.tenantSlug ?? job.Client__r?.Name);
-      const to = await customerPhoneFor(job, tenantId);
+      const to = await customerPhoneFor(d.sfQuery, job, tenantId);
       const messages = await listThread(tenantId, job.Id);
       return jsonResponse(200, cors, {
         jobId: job.Id,
@@ -273,44 +222,18 @@ export function createHandler(deps = {}) {
       if (text.length > MAX_BODY_CHARS) return jsonResponse(400, cors, { error: "bad_request", code: "BODY_TOO_LONG", message: `Keep it under ${MAX_BODY_CHARS} characters.` });
       const job = await loadJob(params[0], tenantId);
       if (!job) return jsonResponse(404, cors, { error: "not_found", code: "JOB_NOT_FOUND" });
-      const cfg = await config();
-      const from = fromNumberFor(cfg, ctx.tenantSlug ?? job.Client__r?.Name);
-      if (!cfg.accountSid || !cfg.authToken || !from) {
-        return jsonResponse(503, cors, { error: "not_configured", code: "SMS_NOT_CONFIGURED", message: "Texting isn't set up for this tenant yet." });
-      }
-      const to = body?.to != null && body.to !== "" ? toE164(body.to) : await customerPhoneFor(job, tenantId);
-      if (!to) return jsonResponse(400, cors, { error: "bad_request", code: "NO_PHONE", message: "This job has no mobile number to text. Add one on the customer." });
-
-      const statusCallback = cfg.webhookBase ? `${cfg.webhookBase.replace(/\/+$/, "")}/sms/status` : null;
-      const sent = await d.sendSms({ accountSid: cfg.accountSid, authToken: cfg.authToken }, { from, to, body: text, statusCallback });
-
-      const row = {
-        client_sf_id: tenantId,
-        tenant_id: ctx.tenantSlug ?? job.Client__r?.Name ?? null,
-        direction: "out",
-        job_sf_id: job.Id,
-        customer_sf_id: job.Sundial_Customer__c ?? null,
-        from_number: from,
-        to_number: to,
+      const r = await sender.sendText({
+        tenantId,
+        tenantSlug: ctx.tenantSlug ?? job.Client__r?.Name ?? null,
+        job,
+        to: body?.to != null && body.to !== "" ? String(body.to) : null,
         body: text,
-        status: sent.ok ? sent.status || "queued" : "failed",
-        error_code: sent.ok ? null : sent.code ?? null,
-        provider_sid: sent.ok ? sent.sid : null,
-        sent_by_user_sf_id: ctx.userId,
-        sent_by_name: ctx.actor?.name ?? null,
-        created_at: d.now().toISOString(),
-        updated_at: d.now().toISOString(),
-      };
-      const supabase = await d.getSupabaseClient();
-      const { data, error } = await supabase.from(SMS_TABLE).insert(row).select().single();
-      if (error) console.error("sms insert error:", error.message);
-      const view = data ? messageToView(data) : messageToView({ ...row, id: null });
-      await announce(tenantId, job.Id, { kind: "sent", message: view });
-      if (!sent.ok) {
-        console.warn("sms send failed:", sent.code, sent.error);
-        return jsonResponse(502, cors, { error: "send_failed", code: "SMS_SEND_FAILED", message: `The text was not sent (${sent.error}).`, message_row: view });
-      }
-      return jsonResponse(200, cors, { success: true, message: view });
+        sentBy: { id: ctx.userId, name: ctx.actor?.name ?? null },
+      });
+      if (r.ok) return jsonResponse(200, cors, { success: true, message: r.message });
+      if (r.code === "NOT_CONFIGURED") return jsonResponse(503, cors, { error: "not_configured", code: "SMS_NOT_CONFIGURED", message: r.error });
+      if (r.code === "SEND_FAILED") return jsonResponse(502, cors, { error: "send_failed", code: "SMS_SEND_FAILED", message: r.error, message_row: r.message });
+      return jsonResponse(400, cors, { error: "bad_request", code: r.code, message: r.error });
     },
 
     // --- GET /service/sms/unmatched --------------------------------------------------

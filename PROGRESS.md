@@ -1,5 +1,62 @@
 # Sundial — Progress Log
 
+## 2026-09-16 — The technician app: /tech in the portal, the clock, on-my-way texts, photos, the offline queue (D-072 amendment 7)
+
+**Access.** `lib/access.js` gains scope **`tech`** (`Access_Level__c = Technician`) with exactly one
+action, **`service.tech.self`**; `canReadObject` / `rowFilter` / `userFilter` deny it outright,
+so a tech's token reaches the `/service/tech/*` routes and nothing else. `access.test.js`
+165/165 (four expectations updated: Technician was `own`).
+
+**Backend — `lambdas/sundial-service-board/tech.js`** (mounted by `index.js`; `docs/pwa-architecture.md`):
+`GET /service/tech/day` (the tech's calls that day in the tenant timezone + anything they are
+mid-way through + unscheduled assignments; DST-safe day bounds), `GET /service/tech/calls/{id}`
+(call + other techs on the job + S3 photo listing + read-only estimate), `POST …/status` — the
+**clock engine** on `Clock_Intervals__c` (append-only; on-my-way opens `en_route` and closes the
+tech's other clocks; clock-in continues it or opens `on_site`; complete runs the **checklist
+gate** then closes and derives `Actual_Start/End__c` + `Duration_Minutes__c`; no-show needs a
+note; reopen adds an interval and the job goes back to In Progress via the new `reopened`
+trigger in `settleJobStatus`), the **"on my way" text** (skipped with a reason when there is no
+mobile), the **geofence tag** (lazy Google geocode written to the job's `Geocode_*`; within
+`SERVICE_GEOFENCE_METERS` of the job or `SERVICE_SHOP_LATLNG` → `Geofence_Verified__c`; never
+blocks), tap-time validation (`AT_OUT_OF_ORDER` etc.) and `eventId` idempotency; `POST …/notes`
+(stamped, append-only, replay-safe), `POST …/checklist` (the generic default list; auto items
+read off the record), `POST …/photos` (presigned PUT into `SUNDIAL/{jobId}/photos/{callId}/`)
++ `…/photos/confirm` (metadata row on the job, `Photos_Count__c` from the listing),
+`GET …/photos`, `GET /service/tech/price-book?q=`. Ownership: the call's tech or tenant scope,
+else 404. New injectable deps `getSecret`, `fetchUrl`, `sendSms`, `presignPut`, `listPhotos`,
+`env`; ctx gains `scope`. `EVENTS` gains `service_call_clock | _note | _photo`.
+`lambdas/sundial-service-estimate` gains `POST /service/tech/calls/{id}/estimate-lines`
+(Proposed, `Source__c = Field`, tagged with the call, appended after the office's lines).
+
+**`lib/sms-send.js`** — the send half of `sundial-sms` (secret cache, tenant→number, Twilio
+call, `sundial_sms_messages` row, broadcast) extracted into a shared `createSmsSender`, with
+`customerPhoneFor` alongside; `sundial-sms/index.js` now calls it, and `lib/twilio.js` moved
+out of the sms folder (a re-export shim stays). `sundial-sms/test.js` added to `npm test`.
+`scripts/wire-service-tech-routes.ps1`. Tests: board 7 → **14** (helpers; the day; the call
+page; the whole field day on-my-way → clock-in → gated complete → notes / photo / ticks →
+complete → reopen + no-show; no-phone / skipped / custom text; geocode paths; price book),
+estimate 33 → **34**, sms 14.
+
+**Portal — `src/tech/`.** `/tech` (own `TechLayout`: header with offline / "N to send" /
+failed-tap discard, bottom bar), **Today** (day cards, prev / next day, directions + call
+links, the on-the-clock call pinned; cached copy shown when offline), the **call page**
+(who / where / issue; the buttons for this moment — On my way with a "text the customer"
+toggle, Clock in, No-show with a note, Complete, Reopen; live clock; checklist with the two
+automatic items; stamped notes, work vs private; camera / photo picker with thumbnails; the
+read-only estimate with "Add something I found" — price-book search or typed line, Proposed;
+who else is on the job). `offline.ts`: the queue (`localStorage`), `sendOrQueue` (send now,
+queue on network / 5xx / 429 / 401, throw on a real refusal), ordered `replay` with failed
+actions kept and discardable, `queuePhoto` with bytes in IndexedDB (`photoStore.ts`) and a
+resumable presign → PUT → confirm; `techView.withPending` paints queued taps onto the local
+copy. `public/manifest.webmanifest`, `public/sw.js` (shell only, registered from `/tech`),
+`public/icons/tech-*.png` (from the favicon). `App.tsx`: a Technician (`access.scope ===
+'tech'`) is redirected to `/tech` from every office route; `AccessScope` gains `tech`. Tests:
+121 → **137** (`offline.test.ts` 7, `techView.test.ts` 4, `TechCallPage.test.tsx` 4);
+`tsc` + `vite build` clean; `eslint` clean on the new files.
+
+**Tim's steps** are in TASKS.md ("TIM: deploy the tech app"): four Lambda deploys, the
+Geocoding API on the Google key, two optional env vars, the wire script, push `main`.
+
 ## 2026-09-15 — Labor billing, "schedule later" calls, price-book filters, the Communications panel with texting (D-072 amendment 6)
 
 **HCP price book prepared for import.** `scripts/build-pricebook-import.mjs` turns the two

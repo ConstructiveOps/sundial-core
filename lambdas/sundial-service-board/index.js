@@ -6,6 +6,7 @@
 //   POST  /service/jobs/{id}/calls               schedule a tech onto a job (tray drop)
 //   PATCH /service/calls/{id}                    move / resize / reassign / status / notes
 //   POST  /service/calls/{id}/cancel             { reason } → Cancelled
+//   /service/tech/*                              the technician app — see tech.js
 //
 // A service call is ONE tech × ONE appointment on a job (D-072). Multi-tech jobs are
 // parallel calls under the same job, so "add a tech" is just another POST.
@@ -27,6 +28,7 @@
 //   a call goes In Progress       job Scheduled → In Progress
 //   last open call Complete       job In Progress/Scheduled → Awaiting Office Review
 //   last open call Cancelled      job Scheduled → Ready to Schedule
+//   a tech reopens a Complete     job Awaiting Office Review → In Progress
 // Nothing else on the job is touched; anything more opinionated is a per-tenant rule
 // added on request (D-072 rule 5).
 //
@@ -51,6 +53,9 @@ import { broadcast as realBroadcast, recordChannel } from "../../lib/realtime.js
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
+import { getSecret as realGetSecret } from "../../lib/secrets.js";
+import { createSmsSender } from "../../lib/sms-send.js";
+import { createTechHandlers, realListPhotos, realPresignPut } from "./tech.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -237,6 +242,16 @@ const ROUTES = [
   ["POST", /^\/service\/jobs\/([^/]+)\/calls\/?$/, "createCall"],
   ["PATCH", /^\/service\/calls\/([^/]+)\/?$/, "patchCall"],
   ["POST", /^\/service\/calls\/([^/]+)\/cancel\/?$/, "cancelCall"],
+  // The technician app (tech.js). Order matters: "photos/confirm" before "photos".
+  ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
+  ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
+  ["GET", /^\/service\/tech\/calls\/([^/]+)\/?$/, "techCall"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/status\/?$/, "techStatus"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/notes\/?$/, "techNote"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/checklist\/?$/, "techChecklist"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/photos\/confirm\/?$/, "techPhotoConfirm"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/photos\/?$/, "techPhotoPresign"],
+  ["GET", /^\/service\/tech\/calls\/([^/]+)\/photos\/?$/, "techPhotos"],
 ];
 export function matchRoute(method, path) {
   const p = (path || "").replace(/^\/[^/]+(?=\/service\/)/, "");
@@ -253,6 +268,15 @@ const ACTION_FOR = Object.freeze({
   createCall: "service.call.write",
   patchCall: "service.call.write",
   cancelCall: "service.call.write",
+  techDay: "service.tech.self",
+  techPriceBook: "service.tech.self",
+  techCall: "service.tech.self",
+  techStatus: "service.tech.self",
+  techNote: "service.tech.self",
+  techChecklist: "service.tech.self",
+  techPhotoConfirm: "service.tech.self",
+  techPhotoPresign: "service.tech.self",
+  techPhotos: "service.tech.self",
 });
 
 function bad(cors, code, message, extra = {}) {
@@ -284,9 +308,17 @@ export function createHandler(deps = {}) {
     sendEmail: realSendEmail,
     isEmailConfigured: realIsEmailConfigured,
     broadcast: realBroadcast,
+    getSecret: realGetSecret,
+    fetchUrl: (url, init) => fetch(url, { signal: AbortSignal.timeout(8000), ...(init || {}) }),
+    sendSms: undefined, // lib/twilio.js's real send unless a test injects one
+    presignPut: realPresignPut,
+    listPhotos: realListPhotos,
     now: () => new Date(),
+    env: process.env,
     ...deps,
   };
+  // The tech's "on my way" text goes through the same sender as the office's panel.
+  const sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, broadcast: d.broadcast, now: d.now, env: d.env, ...(d.sendSms ? { sendSms: d.sendSms } : {}) });
 
   // --- side effects, all best-effort ---------------------------------------------
   async function markStale(table, ids, tenantId) {
@@ -392,6 +424,7 @@ export function createHandler(deps = {}) {
     if (trigger === "in_progress" && job.Status__c === "Scheduled") next = "In Progress";
     if (trigger === "complete" && open.length === 0 && ["Scheduled", "In Progress"].includes(job.Status__c)) next = "Awaiting Office Review";
     if (trigger === "cancelled" && open.length === 0 && job.Status__c === "Scheduled") next = "Ready to Schedule";
+    if (trigger === "reopened" && job.Status__c === "Awaiting Office Review") next = "In Progress";
     if (!next || next === job.Status__c) return null;
     try {
       await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Status__c: next, Status_Changed_At__c: d.now().toISOString() });
@@ -665,6 +698,14 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, cors, { success: true, call: shaped, jobStatusChanged, ...notify });
     },
   };
+  Object.assign(
+    H,
+    createTechHandlers(d, {
+      CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
+      callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms,
+      jsonResponse, bad, notFound, sfError,
+    })
+  );
 
   return async function handler(event) {
     const method = httpMethod(event);
@@ -701,6 +742,7 @@ export function createHandler(deps = {}) {
         tenantId,
         tenantSlug: identity?.tenantSlug ?? null,
         userId: u.id ?? null,
+        scope: identity?.access?.scope ?? null,
         actor: { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null },
         cors,
       };

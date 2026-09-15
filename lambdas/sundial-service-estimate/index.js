@@ -141,7 +141,7 @@ import {
 
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
 import { createInvoiceHandlers } from "./invoice.js";
-import { createLaborHandlers } from "./labor.js";
+import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
@@ -340,6 +340,7 @@ const ROUTES = [
   ["POST", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "saveLabor"],
   ["POST", /^\/service\/labor\/default-rate\/?$/, "setDefaultRate"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
+  ["POST", /^\/service\/tech\/calls\/([^/]+)\/estimate-lines\/?$/, "techAddLines"], // the tech app (service.tech.self)
 ];
 
 export function matchRoute(method, path) {
@@ -818,6 +819,54 @@ export function createHandler(deps = {}) {
         await act(ctx, { event: EVENTS.LINE_ADDED, recordType: "serviceline", recordSfId: id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: l.Description__c ?? null, kind: l.Kind__c ?? null, quantity: l.Quantity__c ?? null, unitPrice: l.Unit_Price__c ?? null, priceBookItemId: l.Price_Book_Item__c ?? null, source: l.Source__c ?? null, total: totals.total } });
       }
       return jsonResponse(201, cors, { success: true, ids: result.createdIds, problems: result.problems, totals: totals.fields });
+    },
+
+    /**
+     * POST /service/tech/calls/{id}/estimate-lines — a tech adds work found on site
+     * (D-072 amendment 7). Every line lands as Proposed, Source "Field", tagged with
+     * the call that found it; the office reviews and the customer approves as usual.
+     * The tech may only add to the estimate of a job they have a call on (tenant scope
+     * may act for any tech); anything else is a 404, never a hint.
+     */
+    async techAddLines({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const calls = await d.sfQuery(
+        `SELECT Id, Tech__c, Status__c, Sundial_Service_Job__c FROM ${CALL_SF_OBJECT} WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const call = calls?.[0];
+      if (!call || !(ctx.scope === "tenant" || (ctx.userId && call.Tech__c === ctx.userId))) return notFound(cors);
+      if (call.Status__c === "Cancelled") return jsonResponse(409, cors, { error: "cancelled", code: "CALL_CANCELLED", message: "This call was cancelled by the office." });
+      const job = call.Sundial_Service_Job__c ? await loadJob(call.Sundial_Service_Job__c, tenantId) : null;
+      if (!job?.Estimate__c) return jsonResponse(409, cors, { error: "no_estimate", code: "NO_ESTIMATE", message: "This job has no estimate yet — ask the office to create one." });
+      const est = await loadEstimate(job.Estimate__c, tenantId);
+      if (!est) return notFound(cors);
+      if (est.Status__c === "Invoiced") return jsonResponse(409, cors, { error: "locked", code: "ESTIMATE_INVOICED", message: "This job is already invoiced; the office can add a change order." });
+      const specs = (Array.isArray(body?.lines) ? body.lines : [body]).map((spec) => ({
+        ...(spec && typeof spec === "object" ? spec : {}),
+        stage: "Proposed",
+        source: "Field",
+        addedByServiceCallId: call.Id,
+        sortOrder: undefined, // appended after what is there
+      }));
+      const existing = await loadLines(est.Id, tenantId);
+      const offset = existing.reduce((m, l) => Math.max(m, Number(l.Sort_Order__c) || 0), 0);
+      let result;
+      try {
+        result = await addLinesToEstimate(est.Id, tenantId, specs.map((sp, i) => ({ ...sp, sortOrder: offset + (i + 1) * 10 })));
+      } catch (e) {
+        return sfError(cors, e, "field line create");
+      }
+      if (!result.createdIds.length) return bad(cors, "LINE_INVALID", "No line could be added.", { problems: result.problems });
+      const { totals, lines: after } = await recomputeAndStore(est, tenantId);
+      await markStale(CACHE.line, result.createdIds, tenantId);
+      const created = [];
+      for (const id of result.createdIds) {
+        const l = after.find((x) => x.Id === id) || {};
+        created.push({ id, description: l.Description__c ?? null, kind: l.Kind__c ?? null, quantity: l.Quantity__c ?? null, unitPrice: l.Unit_Price__c ?? null, lineTotal: l.Line_Total__c ?? null, stage: l.Stage__c ?? null, addedByThisCall: true });
+        await act(ctx, { event: EVENTS.LINE_ADDED, recordType: "serviceline", recordSfId: id, estimateSfId: est.Id, jobSfId: job.Id, details: { description: l.Description__c ?? null, kind: l.Kind__c ?? null, quantity: l.Quantity__c ?? null, unitPrice: l.Unit_Price__c ?? null, priceBookItemId: l.Price_Book_Item__c ?? null, source: "Field", callId: call.Id, total: totals.total, via: "tech" } });
+      }
+      return jsonResponse(201, cors, { success: true, estimateId: est.Id, lines: created, problems: result.problems, totals: totals.fields });
     },
 
     async patchLine({ ctx, params, body }) {
@@ -1439,6 +1488,7 @@ export function createHandler(deps = {}) {
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
+    techAddLines: "service.tech.self",
   };
 
   return async function handler(event) {
@@ -1477,6 +1527,7 @@ export function createHandler(deps = {}) {
         tenantId,
         tenantSlug: identity?.tenantSlug ?? null,
         userId: u.id ?? null,
+        scope: identity?.access?.scope ?? null,
         actor: { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null },
         cors,
       };

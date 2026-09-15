@@ -38,7 +38,7 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { broadcast as realBroadcast, recordChannel } from "../../lib/realtime.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
-import { digitsOf, last10, mediaFrom, parseFormBody, prettyPhone, requestUrl, sendSms as realSendSms, toE164, validateSignature } from "./twilio.js";
+import { digitsOf, last10, mediaFrom, parseFormBody, prettyPhone, requestUrls, sendSms as realSendSms, toE164, validateSignature } from "./twilio.js";
 
 export const SMS_TABLE = "sundial_sms_messages";
 export const TWILIO_SECRET_NAME = "sundial/twilio";
@@ -333,7 +333,7 @@ export function createHandler(deps = {}) {
       const slug = tenantSlugForNumber(cfg, params.To);
       const tenantId = await tenantIdForSlug(slug);
       if (!tenantId) {
-        console.warn("sms inbound: no tenant for the To number (…" + digitsOf(params.To).slice(-4) + ")");
+        console.warn(`sms inbound: no tenant for the To number (…${digitsOf(params.To).slice(-4)}); slug=${slug ?? "none"} — set defaultTenant / tenantNumbers in sundial/twilio and check Sundial_Tenant__c.Name`);
         return twiml(200); // acknowledged, nothing to do; Twilio must not retry
       }
       const from = toE164(params.From);
@@ -361,7 +361,7 @@ export function createHandler(deps = {}) {
         console.error("sms inbound insert error:", error.message);
         return twiml(500); // let Twilio retry
       }
-      console.log(`sms inbound: tenant ${slug} matched=${match.how} job=${match.jobId ?? "-"}`);
+      console.log(`sms inbound: sid ${params.MessageSid} tenant ${slug} (${tenantId}) matched=${match.how} job=${match.jobId ?? "-"} stored=${data?.length ? "new" : "duplicate"}`);
       if (data?.[0]) await announce(tenantId, match.jobId, { kind: "received", message: messageToView(data[0]) });
       return twiml(200);
     },
@@ -403,9 +403,12 @@ export function createHandler(deps = {}) {
         return jsonResponse(401, cors, { error: "unauthorized" });
       }
       const params = parseFormBody(event);
-      const url = requestUrl(event, headers, cfg.webhookBase);
-      if (!validateSignature(cfg.authToken, url, params, headers["x-twilio-signature"])) {
-        console.warn("sms webhook rejected: bad or missing X-Twilio-Signature for", url.replace(/\?.*$/, ""));
+      const urls = requestUrls(event, headers, cfg.webhookBase);
+      const signature = headers["x-twilio-signature"];
+      if (!urls.some((url) => validateSignature(cfg.authToken, url, params, signature))) {
+        // The URL spellings tried are logged (no secrets in them) — a mismatch here is
+        // nearly always the console URL vs SMS_WEBHOOK_BASE, and this line says which.
+        console.warn(`sms webhook rejected: ${signature ? "invalid" : "missing"} X-Twilio-Signature; tried ${urls.map((u) => u.replace(/\?.*$/, "")).join(" | ")}; params ${Object.keys(params).length}`);
         return jsonResponse(401, cors, { error: "unauthorized" });
       }
       try {

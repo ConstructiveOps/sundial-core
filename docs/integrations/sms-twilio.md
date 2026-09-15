@@ -43,11 +43,24 @@ Test with the ZZ test job and your own mobile before pointing any real customer 
 - The auth token is never logged; neither is a message body or a full phone number (last four digits only, in the tenant-routing warning).
 - `sundial_sms_messages` has RLS on with `anon` and `authenticated` revoked: the browser cannot read it; the Lambda (service role) filters on `client_sf_id` on every read.
 
-## When it does not work
+## When a reply does not show up — read Twilio's side first
+
+Twilio keeps a record of every webhook it fired (or did not). **Console → Monitor → Logs →
+Messaging → click the inbound message → "Request Inspector"** (sometimes a "Webhooks"
+section). That one screen sorts the failure into three bins:
+
+| What the inspector shows | What it means | Fix |
+|---|---|---|
+| No webhook request at all | Twilio never called us. Almost always the number sits in a **Messaging Service** (A2P 10DLC registration puts it there) and the *service's* inbound setting — not the number's — decides: "Defer to sender's webhook" uses the number's URL; "Send a webhook" uses the service's own; "Drop the message" drops it. | Messaging → Services → the service → Integration → either *Defer to sender's webhook* or put the inbound URL on the service itself. |
+| Request sent, response **401** | Our signature check refused it (URL spelling / auth token). | The Lambda log line `sms webhook rejected … tried …` lists every URL spelling it accepted; compare with the one in the console. Since 2026-09-15 the gateway's own host is accepted alongside `SMS_WEBHOOK_BASE`, so only a genuinely different path or a wrong `authToken` in the secret still fails. |
+| Request sent, response **403 / 404** `Missing Authentication Token` | The route is not deployed on the API. | `.\scripts\wire-sms-routes.ps1` (and answer `y` to the deploy prompt). |
+| Request sent, response **200**, still nothing on the page | We took it. The Lambda log says where it went: `sms inbound: … matched=none` = stored without a job (see `GET /service/sms/unmatched`); `no tenant for the To number` = `defaultTenant` / `tenantNumbers` in the secret does not name a `Sundial_Tenant__c.Name`. | Fix the secret (re-read within five minutes) or check the phone on the job / customer. A refresh of the job page reloads the thread; the live update needs the Realtime broadcast endpoint enabled on the Supabase project. |
+| Request sent, response **500** | The Supabase insert failed — usually `sql/sundial_sms_messages.sql` not applied. | Run it; Twilio retries a 5xx on its own. |
+
+Other symptoms:
 
 | Symptom | Look at |
 |---|---|
-| Every inbound is 401 | `SMS_WEBHOOK_BASE` vs the URL in the Twilio console (scheme, host, `/prod`, no trailing slash). The log line names the URL the Lambda rebuilt. |
 | "Texting isn't set up yet" in the portal | The secret is missing `accountSid` / `authToken`, or the role cannot read it. |
 | "No sending number is configured" | Neither `tenantNumbers[slug]` nor `fromNumber` is set. |
 | Sent but status stays "Sending…" | The status callback is not reaching `/sms/status` — same URL checks; or Twilio rejected the callback URL (must be https). |

@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHandler, matchRoute, twilioConfigFrom, fromNumberFor, tenantSlugForNumber, messageToView } from "./index.js";
-import { expectedSignature, toE164, last10, prettyPhone, requestUrl, parseFormBody, mediaFrom } from "./twilio.js";
+import { expectedSignature, toE164, last10, prettyPhone, requestUrl, requestUrls, parseFormBody, mediaFrom } from "./twilio.js";
 
 const TENANT = "a1W7y000007AszBEAS";
 const USER = "a0U000000000001";
@@ -168,6 +168,16 @@ test("routes + request URL + form parsing", () => {
   const ev = { requestContext: { path: "/prod/sms/inbound", stage: "prod" }, headers: { Host: "x.execute-api.us-west-1.amazonaws.com" } };
   assert.equal(requestUrl(ev, { host: "x.execute-api.us-west-1.amazonaws.com" }), "https://x.execute-api.us-west-1.amazonaws.com/prod/sms/inbound");
   assert.equal(requestUrl(ev, {}, "https://api.example.com/prod/"), "https://api.example.com/prod/sms/inbound");
+  // Every honest spelling is a candidate: the operator's base, the gateway's own host,
+  // and a trailing-slash twin of each — but always this request's path.
+  assert.deepEqual(requestUrls(ev, { host: "x.execute-api.us-west-1.amazonaws.com" }, "https://sms.example.com/prod"), [
+    "https://sms.example.com/prod/sms/inbound",
+    "https://sms.example.com/prod/sms/inbound/",
+    "https://x.execute-api.us-west-1.amazonaws.com/prod/sms/inbound",
+    "https://x.execute-api.us-west-1.amazonaws.com/prod/sms/inbound/",
+    "https://x.execute-api.us-west-1.amazonaws.com/sms/inbound",
+    "https://x.execute-api.us-west-1.amazonaws.com/sms/inbound/",
+  ]);
   assert.deepEqual(parseFormBody({ body: "From=%2B16025551212&Body=hi+there" }), { From: "+16025551212", Body: "hi there" });
   assert.deepEqual(parseFormBody({ body: Buffer.from("A=1").toString("base64"), isBase64Encoded: true }), { A: "1" });
   assert.deepEqual(mediaFrom({ NumMedia: "1", MediaUrl0: "https://m/1", MediaContentType0: "image/jpeg" }), [{ url: "https://m/1", contentType: "image/jpeg" }]);
@@ -272,6 +282,21 @@ test("signature gate: unsigned and wrongly signed posts are 401; an unreadable s
   assert.equal(fake.store.sms.length, 0);
   const closed = makeFake({ secretFails: true });
   assert.equal((await twilioPost(closed.handler, "/sms/inbound", params)).statusCode, 401);
+});
+
+test("signature gate: a post signed for the gateway's own URL passes even when SMS_WEBHOOK_BASE names a different domain; a different path still fails", async () => {
+  const fake = makeFake();
+  fake.deps.env = { SMS_WEBHOOK_BASE: "https://sms.example.com/prod" };
+  fake.handler = createHandler(fake.deps);
+  seedJob(fake);
+  const params = { From: "+16025551212", To: "+14805550100", Body: "hi", MessageSid: "SMx1" };
+  // twilioPost signs for https://api.example.com/prod/sms/inbound = the request's own host + stage path.
+  assert.equal((await twilioPost(fake.handler, "/sms/inbound", params)).statusCode, 200);
+  assert.equal(fake.store.sms.length, 1);
+  // Same signature replayed against the status route (different path) is refused.
+  const body = new URLSearchParams(params).toString();
+  const r = await fake.handler({ httpMethod: "POST", path: "/sms/status", requestContext: { path: "/prod/sms/status", stage: "prod" }, headers: { host: "api.example.com", "x-twilio-signature": expectedSignature(AUTH_TOKEN, "https://api.example.com/prod/sms/inbound", params) }, body });
+  assert.equal(r.statusCode, 401);
 });
 
 test("inbound: a reply to a text we sent lands on that job; broadcast; redelivery is idempotent; TwiML reply is empty", async () => {

@@ -83,19 +83,34 @@ export function parseFormBody(event) {
  * default API Gateway domain.
  */
 export function requestUrl(event, headers, webhookBase = null) {
-  const path = event?.requestContext?.path || event?.rawPath || event?.path || "";
+  return requestUrls(event, headers, webhookBase)[0];
+}
+
+/**
+ * Every spelling of the request URL Twilio could have signed, most likely first. The
+ * signature is over the URL EXACTLY as pasted into the Twilio console, and the two
+ * honest ways to spell the same endpoint (the operator's SMS_WEBHOOK_BASE and the
+ * gateway's own host + stage path) can differ by a trailing slash or a custom domain —
+ * so the caller tries each rather than failing on a spelling. The set is tiny and
+ * every candidate is still an https URL for THIS request's path, so nothing is
+ * weakened: a forged request still has to carry a valid HMAC for one of them.
+ */
+export function requestUrls(event, headers, webhookBase = null) {
+  const rawPath = event?.requestContext?.path || event?.rawPath || event?.path || "";
+  const stage = event?.requestContext?.stage;
+  const stageless = stage && rawPath.startsWith(`/${stage}/`) ? rawPath.slice(stage.length + 1) : rawPath;
   const qs = event?.rawQueryString || (event?.queryStringParameters ? new URLSearchParams(event.queryStringParameters).toString() : "");
-  let base;
-  if (webhookBase) {
-    // Strip the stage from the request path when the base already carries it.
-    const stage = event?.requestContext?.stage;
-    const p = stage && path.startsWith(`/${stage}/`) ? path.slice(stage.length + 1) : path;
-    base = `${webhookBase.replace(/\/+$/, "")}${p}`;
-  } else {
-    const host = headers?.["host"] || event?.requestContext?.domainName || "";
-    base = `https://${host}${path}`;
+  const host = headers?.["host"] || event?.requestContext?.domainName || "";
+  const out = [];
+  if (webhookBase) out.push(`${webhookBase.replace(/\/+$/, "")}${stageless}`);
+  if (host) {
+    out.push(`https://${host}${rawPath}`);
+    if (stageless !== rawPath) out.push(`https://${host}${stageless}`); // custom domain with the stage mapped away
   }
-  return qs ? `${base}?${qs}` : base;
+  const withQs = qs ? out.map((u) => `${u}?${qs}`) : out;
+  // A trailing-slash variant of each, since the console accepts either spelling.
+  const all = withQs.flatMap((u) => (u.includes("?") ? [u] : [u, `${u}/`]));
+  return [...new Set(all)];
 }
 
 /** Inbound MMS attachments: MediaUrl0..N with their content types. */

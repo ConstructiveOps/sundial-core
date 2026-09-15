@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_User__c - DELTA 2026-09-15 (D-072 amendment 6): only the fields listed in this
+  package's package.xml. Generated from scripts/gen-service-objects.py; the full object
+  lives in salesforce/service-objects/. Never convert to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Hourly_Bill_Rate__c</fullName>
+        <description>What the CUSTOMER is charged per hour when this tech's completed service-call hours are billed directly (D-072 amendment 6). Not a pay rate. Blank = the office types a rate per call. Deployed as a single CustomField, never a whole-object deploy of Sundial_User__c.</description>
+        <externalId>false</externalId>
+        <label>Hourly Bill Rate</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

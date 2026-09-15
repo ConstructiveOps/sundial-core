@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Line__c - DELTA 2026-09-15 (D-072 amendment 6): only the fields listed in this
+  package's package.xml. Generated from scripts/gen-service-objects.py; the full object
+  lives in salesforce/service-objects/. Never convert to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Source__c</fullName>
+        <description>Time = a billable service call's hours (Added By Service Call points at the call; the labor screen owns the line).</description>
+        <externalId>false</externalId>
+        <label>Source</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Price Book</fullName>
+                    <default>true</default>
+                    <label>Price Book</label>
+                </value>
+                <value>
+                    <fullName>Template</fullName>
+                    <default>false</default>
+                    <label>Template</label>
+                </value>
+                <value>
+                    <fullName>Ad hoc</fullName>
+                    <default>false</default>
+                    <label>Ad hoc</label>
+                </value>
+                <value>
+                    <fullName>Field</fullName>
+                    <default>false</default>
+                    <label>Field</label>
+                </value>
+                <value>
+                    <fullName>Migration</fullName>
+                    <default>false</default>
+                    <label>Migration</label>
+                </value>
+                <value>
+                    <fullName>Time</fullName>
+                    <default>false</default>
+                    <label>Time</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+</CustomObject>

@@ -1,5 +1,281 @@
 # Sundial — Progress Log
 
+## 2026-09-15 — Labor billing, "schedule later" calls, price-book filters, the Communications panel with texting (D-072 amendment 6)
+
+**HCP price book prepared for import.** `scripts/build-pricebook-import.mjs` turns the two
+Housecall Pro exports into `salesforce/pricebook-import/Sundial_Price_Book_Item__c.csv`
+(219 rows: 162 active, 57 inactive — every `$0`-price-and-cost row comes in inactive so
+old estimates can still resolve it but nothing bills for nothing), with generated codes
+(`SVC-ELEC-0012`, `MAT-INV-0003`), the HCP uuid in `HCP_Id__c` as the DataLoader upsert
+key, and Job Type / Service Type / Category filled from the export's categories. README
+has the DataLoader steps; `review.csv` is the human-readable check.
+
+**Salesforce delta (`salesforce/service-delta-2026-09-15/`, field-only package):** Service
+Call gains `Unscheduled` status, `Billable_to_Customer__c`, `Billable_Hours__c`,
+`Bill_Rate__c`; Price Book Item gains `Job_Type__c`, `Service_Type__c` (unrestricted, so
+the office can add values from the portal); Line `Source__c` gains `Time`; Sundial User
+gains `Hourly_Bill_Rate__c`. `sql/2026-09-15_service_delta.sql` adds the matching cache
+columns (describe-driven sync picks them up — no registry edit).
+
+**Direct labor billing** (`labor.js` inside the estimate Lambda). Techs' real clocked time
+on Complete calls can be billed to the customer by the hour, per call, opt-in — and when
+it is not, nothing about hours reaches the estimate or invoice, per Tim's rule. On = one
+Labor line per billable call (`Source__c = Time`), hours rounded UP to the quarter hour
+from the clock (or the office's number), rate from the call or the tech's default. One
+request (`POST /service/jobs/{id}/labor`) carries the whole decision and creates /
+updates / deletes the Time lines; locked once the invoice is issued. Portal: **Labor
+billing** card on the job page with inline hours / rate, "apply to all", "save as X's
+default", staged totals, one Save.
+
+**Calls can be created without a time.** "Schedule later" on the job page's Schedule
+form creates the call `Unscheduled` (tech optional); the dispatch tray shows it as its
+own dashed card (with its tech), the job steps out of the jobs tray so nothing is listed
+twice, and dropping the card on the board opens Schedule prefilled and PATCHes THAT call
+(notes and tech ride along). Job status is untouched until the call is actually
+scheduled.
+
+**Price Book list** gains Job Type / Service Type / Category dropdowns (standard values
+plus whatever the records carry) and the two columns; the item popup gains the two
+selects and an open Category box with suggestions. **Summary of work** on the job page
+edits `Customer_Summary__c`, which the invoice document now prints (falling back to the
+estimate's scope). **Activity log** is collapsed by default and fetches only when opened.
+
+**Communications replaces Comments on the job page.** One newest-first timeline: team
+notes with @-tagging (the mention composer was pulled out of `CommentThread` into
+`useMentionComposer` + `MentionUi` + `comments-data` so both surfaces share it; the
+mention email's link map gains `job` → `/service/jobs/{id}`), customer texts both ways
+with delivery status, and the short list of activity events people actually watch
+(estimate sent / approved / declined, invoice issued / sent / voided, payment recorded,
+calls created / cancelled, stage changes). Texting is the new **`lambdas/sundial-sms`**:
+Twilio on Constructive Ops' account with the *number* per tenant in Secrets Manager
+`sundial/twilio` (Harmon starts on the shared A2P line; its own number is a secret edit
+later), rows in Supabase `sundial_sms_messages` (browser access revoked), the inbound and
+status webhooks gated by Twilio's request signature (constant-time, fail closed), a reply
+matched to the conversation we started first and the phone snapshot second, unmatched
+texts kept. Realtime broadcast per job so an open page sees the reply. Action
+`service.sms.send`. Runbook: `docs/integrations/sms-twilio.md`.
+
+Tests: estimate 33, board 7, sms 13, access 163, pdf 3; portal 121/121, tsc + build clean.
+(`sundial-comment-notify`'s suite needs Windows Node for `mock.module` — one map entry and
+one label source changed; expect green on Tim's machine.)
+
+## 2026-09-12 — Street View: aim the camera at the house
+
+Tim's first look at the card on his own address showed the house across the street.
+Cause: the still was requested by panorama id (`pano=`), which returns that panorama at
+its **default heading** — the direction the camera car was driving — not toward the
+address. Requesting by `location=` (the address, `source=outdoor`) makes Google pick the
+nearest outdoor panorama *and* point the camera at the address. The metadata check stays
+as it was (it is what tells us "no imagery here" without spending an image request). Test
+pins that the image URL carries `location=` and never `pano=`. Existing jobs that already
+cached the wrong view: the card's refresh button (`?refresh=1`) re-fetches.
+
+## 2026-09-11 (night) — Invoices and payments (D-072 amendment 5); the house on the job page; taller week board
+
+**Invoices + payments** close the loop the module has been building toward: estimate →
+job → calls → **invoice → paid**. New `lambdas/sundial-service-estimate/invoice.js`
+(deployed inside the estimate Lambda — one function, one wire script): `POST
+/service/jobs/{id}/invoice` issues the job's invoice from the estimate's non-removed
+lines, money frozen from `computeTotals` (subtotal, discount, tax rate/amount, total),
+Bill-To frozen from the job, number = job number (`-2`, `-3` after voids), due date from
+`dueDate` or `netDays`; deposits already on the job with no invoice are back-filled onto
+it and count at once; the estimate goes `Invoiced` (its PATCH now refuses), the job goes
+`Invoiced` (or straight to `Paid` when the deposits cover it); the PDF lands at
+`SUNDIAL/{jobId}/{invoiceNumber}.pdf` with a Files-tab row. Proposed lines are billed but
+reported in `warnings` — nothing blocks invoicing on approval state (D-072 rule 5). `POST
+…/invoices/{id}/payments` records a check / ACH / partner remittance / refund /
+adjustment (Succeeded on write, `Recorded_By__c` = the office user); `…/send` emails a
+FRESH PDF (balance and PAID watermark as of now; "Receipt for …" once paid) to the
+customer, or to a partner address the office types; `…/void` needs a reason, unhooks the
+payments (kept on the job), reopens the estimate to Approved / Sent / Draft and puts the
+job back at `Ready to Bill`. `GET /service/jobs/{id}/invoice` is the job page's read
+(current invoice + its payments + history + `canIssue` / `issueBlocker`);
+`GET /service/invoices/{id}[/preview]`.
+
+**One function settles the money.** `settleMoney()` re-sums Succeeded rows (Payment +
+Deposit + Adjustment − Refund) and writes `Paid_Amount__c`, the invoice's status
+(Issued / Sent / Partially Paid / Paid, `Paid_At__c`) and the job's `Payment_Status__c`
+plus its `Invoiced ↔ Paid` transition — after every payment row and at issue. No roll-up
+Flow; the design's Flow was never built and the rules (refunds reopen, failed rows do not
+count, deposits roll on) belong in tested code. `service.invoice.write` is a new action
+(→ **redeploy `sundial-auth-proxy`**). The invoice document is `buildInvoiceModel()` in
+`lib/estimate-document.js` — same model shape, so the HTML and PDF painters are unchanged
+apart from `docLabel` / `customerLabel` ("Invoice", "Bill to"), Paid to date / Balance
+due rows, PAID / VOID watermark. Activity: `invoice_issued | invoice_sent |
+invoice_voided | payment_recorded` (+ `job_updated` via `invoice`). Tests: estimate 31
+(helpers: summary / statuses / numbering / validation; lifecycle: issue with a prior
+deposit → locked estimate → preview → send with PDF → check pays it → refund reopens →
+void → reissue as -2 carrying the money). Wire script extended (`wire-service-estimate-
+routes.ps1`: jobs/{id}/invoice + street-view, invoices/{id} + preview / payments / send /
+void).
+
+**Portal:** the job page gains an **Invoice** card (Issue with net days → number, status,
+total / paid / balance, due, PDF link, Preview (same document), Send invoice / Send
+receipt, Record payment (dialog prefilled with the balance), Void with a reason, the
+payments list, history after a void, Issue again) and an **Invoices** tab (`/service/
+invoices`: Open (unpaid) by default, status filter, "Not in Acumatica" for Heather's
+bridge digest; rows open the job). `PreviewModal` now takes `invoiceId | estimateId` and
+its state is request-tagged (lint-clean). 3 render tests; 112/112.
+
+**The house (Street View, the 9/9 ask).** `GET /service/jobs/{id}/street-view` — the
+Google key in Secrets Manager `sundial/google-maps`, never the browser; metadata first
+(free, outdoor only), the still by panorama id, stored once at
+`SUNDIAL/{jobId}/street-view.jpg` and remembered on `Street_View_Image_Key__c` (`NONE` =
+asked, nothing there). `StreetViewCard` on the job page: image → Google Maps; "no
+imagery" / "not set up yet" / "no address" states; a refresh button re-asks after an
+address fix. Test pins: unconfigured writes nothing, one metadata + one image fetch,
+cached on the second read, NONE remembered, cross-tenant 404.
+
+**Week board ~3× taller.** Rows are 15rem (were 5rem) with two-line chips (time range +
+customer; job number · service type · address), so a full day of calls reads as a list.
+
+## 2026-09-11 (later) — First live-test fixes: CORS on PATCH, price book from a line, board week/month, two more test techs
+
+Tim's first pass through the live portal turned up four things.
+
+**"Save failed." on tax rate / markup / discount** — every estimate money edit is a
+`PATCH`, and the browser's preflight was being refused: the shared
+`lib/http.js corsHeaders()` listed `GET, POST, DELETE, OPTIONS` (it was written for
+the file Lambdas, which never PATCH) and the service Lambdas reuse it. The fetch
+threw before it reached the API, the portal's `run()` saw a non-`ApiError` and printed
+its fallback. `Access-Control-Allow-Methods` is now `GET, POST, PATCH, PUT, DELETE,
+OPTIONS`. Nothing else changes — `sundial-sf-update` keeps its own inline header that
+already had PATCH. **Redeploy `sundial-service-estimate` and `sundial-service-board`**
+(line and call moves are PATCHes too; on the board the drag would have failed the same
+way).
+
+**Price book from a line (D-072.4 amendment).** The office should not have to leave an
+estimate to grow the book. Two paths, one popup — the existing `PriceBookItemModal`:
+(1) the price-book typeahead now ends with *Create "…" as a new price book item…*, the
+same select-or-create shape as the customer picker; the popup opens prefilled with the
+typed name and a suggested code, and on save the NEW item is added as a line. (2) An
+ad-hoc line gets a *Save to price book* link (and the ad-hoc form an *Add & save to
+book* button); the popup opens prefilled from the line (name, kind, the price in the
+right half by kind, taxable, unit); on save the line is **linked**, not duplicated —
+`PATCH …/lines/{lineId} { priceBookItemId }` sets `Price_Book_Item__c`, `Source__c =
+Price Book`, snapshots the item's labor/material price + cost split and taxability,
+keeps the line's own description / quantity / unit price, and recomputes
+`Price_Overridden__c` against the item (a line saved at its own price is not an
+override). `linkLineToItem()` in `pricebook.js`; inactive or unknown item → 400
+`ITEM_NOT_ACTIVE` / `ITEM_NOT_FOUND`. `createItem` / `newItemVersion` responses were
+already carrying `id`; the portal type now says so (`ItemSaved`). Tests: estimate 28
+(new: ad-hoc → item → link, and the two refusals); portal 2 new render tests
+(prefill from the line → create → PATCH link; picker create → add). Catalog cache is
+invalidated after either.
+
+**Dispatch board: week (default) and month views.** "Dispatchers need to see the whole
+schedule over at least a week." The page now has a Day / Week / Month toggle
+(remembered per browser). Week = one row per tech, seven day columns (Monday first), a
+chip per call in time order; month = a fixed 6×7 calendar of chips with a technician
+filter and *+N more* into the day; both are drop targets — a tray job dropped on a
+tech's day opens Schedule at 08:00 for that tech and day, a moved chip keeps its time of
+day and length. Day headers / day numbers open the day view there. Grids live in
+`components/service/BoardViews.tsx`; the date math in `boardDates.ts` (pure, tested
+through the page). Backend: `DEFAULTS.maxWindowDays` 31 → **42** so the 6-week grid is
+one read (`WINDOW_TOO_WIDE` still guards anything wider). Portal board tests 3 → 5
+(week default + 7-day window, week drops, month window / filter / open-day, the two
+day-view tests unchanged). 109/109 portal, 205/205 across the service + access suites.
+
+**Two more test techs.** `scripts/seed-access-test-fixtures.mjs` gains `zz-tech-2` and
+`zz-tech-3` (Technician, `Default_Department__c = Service`, so they match the board's
+picker on both rules). Same idempotent seeder: `node scripts/seed-access-test-fixtures.mjs
+--apply --users-only` creates the two Supabase users + `Sundial_User__c` rows, stores
+their passwords in `sundial/test-users`, and leaves the existing ten alone (it only
+writes `Default_Department__c` for fixtures that declare one). 12 ZZ users now.
+
+## 2026-09-11 (late) — Service calls and the dispatch board (D-072 amendment 4)
+
+The part of the module the service team will live in. **New Lambda
+`sundial-service-board`:** `GET /service/board?from&to` returns the techs, every call in
+the window and the unscheduled tray in one read; `POST /service/jobs/{id}/calls`
+schedules a tech (end defaults to +2 h); `PATCH /service/calls/{id}` moves / reassigns /
+progresses / annotates; `POST /service/calls/{id}/cancel` needs a reason. Every read and
+write is straight from Salesforce — the scheduling path has no cache in it, on purpose
+(D-072 amendment 4 explains the departure from the design doc). Concurrency is the
+design's optimistic model: mutations carry `baseModstamp`, a fresh read that disagrees
+is `409 CALL_CONFLICT` with the current state and nothing written; a call that has
+started can't be moved (`409 CALL_ALREADY_STARTED`).
+
+**Job status follows the calls**, in one function: first call scheduled → `Scheduled`; a
+call `In Progress` → job `In Progress`; last open call complete → `Awaiting Office
+Review`; last open call cancelled → back to `Ready to Schedule`. Each transition is a
+`job_updated` activity row with `via: "dispatch"`, next to the call's own
+`service_call_created | updated | cancelled` rows (two new events in
+`lib/service-activity.js`). After every write: cache rows flagged stale, one Realtime
+broadcast on `tenant:{id}:sundial_service:list` (HTTP, `lib/realtime.js`), and — when
+the dispatcher ticked the box — a customer email with the window in the tenant's
+timezone (`SERVICE_TIMEZONE`, default Phoenix), reported as `notified` / `detail` and
+never blocking. Techs = users marked `Technician` or in the `Service` department; every
+active user with a banner until someone is marked. Actions `service.board.read` /
+`service.call.write` (tenant). Tests 6/6 over an in-memory Salesforce with the two
+relationship joins. `scripts/wire-service-board-routes.ps1`.
+
+**Portal (harmon-crm):** `/service/dispatch` — a hand-built day board: one column per
+tech, 30-minute slots 6a–7p, blocks sized to their window and coloured by status, the
+unscheduled tray on the left (emergencies first). Drag a tray card onto a column → the
+Schedule dialog opens prefilled with that tech and slot; drag a block → PATCH with the
+same length, new tech / time, and the block's modstamp; click a block → progress
+buttons, work notes, reschedule by form, cancel with a reason, "add another tech". A 409
+becomes a toast and a refetch. Refetch on window focus and on the Realtime broadcast.
+Dispatch tab in the Service sub-nav; the job page gains a **Service calls** card with the
+same dialogs. `CallModals.tsx` (dialogs), `callTime.ts` (helpers), `JobCallsCard.tsx`,
+`DispatchBoardPage.tsx`; typed `board / jobCalls / createCall / patchCall / cancelCall`
+in `service-api.ts`. 3 render tests (columns + tray, tray drop → prefilled dialog →
+POST, block drag → PATCH with modstamp + 409 toast); 105/105, tsc / lint / build clean.
+
+FullCalendar Premium (edge-drag resize, week timeline) is the later front-end swap on
+this same API. Docs: DECISIONS D-072 amendment 4, api-endpoints "Dispatch board",
+dispatch-board-design.md status note, CLAUDE.md bullet both repos, TASKS (Tim's stand-up
+steps + the get-from-Harmon list).
+
+## 2026-09-11 (night) — The estimate PDF, and a Files tab on the service objects (D-072 amendment 3)
+
+The document now has **one model and two painters.** `lib/estimate-document.js` exports
+`buildEstimateModel()` — every row, label, total, note and the "new" tag as plain data —
+and paints HTML from it; the new `lib/estimate-pdf.js` paints the same model to PDF with
+pdf-lib (pure JS, so it bundles into the single-file esbuild artifact; no headless
+browser, no layer). Hand-drawn layout: Letter, wrapped descriptions, rows flow across
+pages with the table header repeated, totals block, the approve link, footer notes, page
+numbers when there is more than one page. Characters the standard fonts cannot encode
+(an emoji in a description) are replaced, never thrown on.
+
+**`/send` now:** renders this version's PDF, puts it at
+`SUNDIAL/{estimateId}/estimate-v{n}.pdf` (deterministic key), registers the
+`sundial_file_metadata` row (category `Estimate`), stores the key in
+`Version_Log__c[].pdfKey`, attaches the bytes to the customer email as
+`{EST-number}-v{n}.pdf`, records `pdfKey` on the activity row, and returns
+`pdfKey` / `pdfUrl`. `lib/email.js` gained `attachments` on `Content.Simple.Attachments`
+— SES builds the MIME, so it stays a `ses:SendEmail` call. Failure posture: a PDF that
+will not render or store leaves `pdfKey: null`, the email goes without the attachment,
+and `deliveryDetail` says so; the send never fails for it. The company name on the
+document and the email now comes from `SERVICE_BRAND_NAME` (same variable the public
+Lambda reads), falling back to the tenant slug. The public GET returns `pdfUrl` for the
+version being viewed, from the log — never an older version's file.
+
+**The vanishing Service tab (found by Tim tonight):** the sidebar shows a module only
+when `/auth/me` lists it, and `/auth/me` is served by `sundial-auth-proxy`, which bakes
+in its own copy of `lib/access.js` at deploy time. The copy deployed in August predates
+the service objects, so its module list never had `job` and the portal hid the link
+(the pages themselves work — the other Lambdas were redeployed). Fix: redeploy the auth
+proxy. Rule recorded in TASKS.md: a change to `lib/access.js` means redeploying
+`sundial-auth-proxy` as well.
+
+**Files tab:** `lib/file-access.js`'s allowlist gains `estimate`, `job`, `servicecall`;
+`lib/access.js` gains `files.<key>.{list,related,upload,delete}` rows (tenant scope).
+**Found on the way:** `roofing` and `po` were on the allowlist with no action rows, and
+`assertActionOnRecord` denies an unknown action by design — so the Roofing Files tab has
+been 403 for everyone since the access model shipped. Rows added; a new test pins every
+allowlist key to its action rows so the two lists cannot drift again. No new routes —
+the four file Lambdas just need redeploying to pick up the shared lib.
+
+Tests: estimate 27/27 (send test now covers the PDF, the attachment, the metadata row,
+and S3-down), public 5/5, `lib/estimate-pdf.test.js` 3/3, access 164/164. Portal
+(harmon-crm): Files panel on the estimate page and two on the job page (job folder +
+estimate documents), *Download PDF* on the customer page, Send toast mentions the
+attachment; 102/102, tsc / lint / build clean. Docs: DECISIONS D-072 amendment 3,
+api-endpoints (send, public, file object keys), file-storage (service section), CLAUDE.md
+both repos.
+
 ## 2026-09-11 (evening) — Send delivers, and the customer gets a page (D-072.7)
 
 The estimate loop closes. **`/send`** on `sundial-service-estimate` now builds the customer
@@ -117,6 +393,105 @@ returns the token), the public hosted-estimate page (own Lambda, token auth), th
 tax table (`taxRate` is set per estimate), invoices and payments, the `service.*` allowlist
 entries in `lib/file-access.js` for the Files tab on the new objects.
 
+## 2026-09-10 — Welcome Call: orphan-match self-heals a missing recording
+
+Branch `feature/welcome-call-recording-heal` off `master`. `lambdas/sundial-welcome-call`
+(`recording.js`, `webhook.js`, `orphanMatch.js`). **Built, tested, DEPLOYED, and the
+affected customer repaired.** Suite **816 green** (welcome-call 113, was 101).
+
+### The bug was not where it looked
+
+Reported as: the recording for `a1P7y00000B4iaPEAR` /
+`call_a15c774e989eb4e8873b58de7d1` was never archived on call night, and the
+orphan-match backfill then logged a key for an object that does not exist.
+
+**CloudWatch says nothing in this Lambda failed.** The evidence, in order:
+
+| When (UTC) | What |
+|---|---|
+| 09-10 03:45:29 | webhook parked the orphan — `_orphan-welcome-calls/call_a15c….mp3`, **7,317,870 bytes** |
+| 09-10 18:12:50 | sweep copied it to `SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_a15c….mp3` |
+| 09-10 18:12:52 | `backfill=backfilled, status=Verified, holdingDeleted=true` — a correct, complete run |
+| 09-10 **18:13:34 → 18:13:56** | **`sundial-delete-file` fired ~9 times, ~2 s apart** |
+| 09-10 **18:13:56** | **delete marker on the recording** — 66 seconds after it was filed |
+| 09-10 18:14:11–17 | 10 fresh PDFs uploaded to the same prefix |
+
+Someone cleared that customer's Files tab in the portal and re-uploaded a document
+set. The recording went with it. The download never failed; the key the log named was
+true when it was written and stopped being true a minute later.
+
+The bucket has **versioning enabled**, so the original bytes were never actually lost —
+they sat as a non-current version under a delete marker the whole time.
+
+**What was genuinely broken is the recovery, not the capture.** The endpoint's only
+repair path was the holding object it deletes on success, so once that was gone a
+second sweep could only 404 — forever. That is the hole this closes.
+
+### Three changes
+
+1. **orphan-match repairs instead of 404ing.** With neither the holding object nor a
+   destination present, it re-reads the call from Retell — which mints a **fresh
+   `recording_url`**, so this works long after the webhook's original expired — and
+   uploads straight to the destination key. The key is rebuilt from the **call's own
+   `start_timestamp`**, not `now()`, so a repair lands on the name the log already
+   claims instead of filing one conversation twice. One Retell read serves both the
+   heal and the backfill.
+
+2. **No log line ever names an unverified key.** Every `Recording:` key is now
+   HEAD-confirmed before it is written, and an unconfirmed copy keeps its holding
+   object rather than deleting the only other copy. With nothing confirmed the line
+   reads `unavailable — see ledger/CloudWatch`. That **replaces the old fallback of
+   printing the raw `recording_url`** — which expires, making it a dead pointer dressed
+   up as a permanent one. `none` still means the call produced no audio; the two facts
+   are never merged.
+
+3. **Idempotency is file-aware.** The "log already has a `Result:` line for this
+   `call_id`" guard used to end the whole invocation — precisely what made this
+   customer unrepairable. A repeat run now skips only the status and log writes and
+   still checks for the recording, healing it if it is gone. A repair that produces a
+   key the log does not already name **appends a one-line correction**, never an edit:
+   entries are evidence, and rewriting one destroys the record of what the system
+   believed at the time. The correction deliberately carries no `Result:` segment, so
+   `alreadyProcessed` cannot mistake it for the result it corrects.
+
+Also: the recording download gets a **bounded retry** — 3 attempts, 3 s apart, inside a
+**30 s budget**, since Retell can answer `call_analyzed` before the CDN will serve the
+object. The budget is the real limit, not the count: the Lambda's ceiling is 60 s and
+the orphan path still owes a ledger forward and a Salesforce round-trip, so the loop
+refuses to start an attempt it cannot pay for. Three tries for a fast `403`/`404`,
+exactly one for a hung connection (a 20 s timeout has already spent the budget, and
+retrying it would trade a missing recording for a lost writeback). `400`/`401` never
+retry.
+
+### The repair
+
+One `orphan-match` invocation against the deployed fix:
+
+```
+healed: true
+key: SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_a15c774e989eb4e8873b58de7d1.mp3
+sizeBytes: 7317870      backfill: already_present
+metadata: already_registered    correction: already_correct
+```
+
+Same key the log already named, byte-for-byte the same size as the original capture, no
+duplicate Salesforce entry, no correction needed because the log was right again.
+Verified independently: `head-object` returns 7,317,870 bytes of `audio/mpeg`; the
+`sundial_file_metadata` row (category `Welcome Call Recording`, uploader
+`Wattson (system)`, `soft_deleted = false`) still stands from the original run; and the
+customer's `Welcome_Call_Log__c` holds exactly **one** entry for the call, naming that
+key.
+
+**Note for Tim:** a `…-call_a15c….wav` of identical size appeared under the same prefix
+at 18:47 (via `sundial-upload-file`), between the diagnosis and the deploy — a manual
+recovery running in parallel. It has no metadata row. The `.mp3` is the one Salesforce
+names; the `.wav` is a duplicate and safe to delete, but that call is yours.
+
+### Left open
+
+The portal Files tab can delete a compliance recording like any other document and
+nothing warns the user. The heal makes that recoverable; it does not make it hard. See
+TASKS.md.
 
 ## 2026-09-08 — Commission burden: the internal rep is burdened again (D-071)
 

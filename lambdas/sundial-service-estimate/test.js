@@ -15,6 +15,8 @@ import {
   itemFieldsFromBody, newVersionFields, lineFromItem, adHocLine, linePatchFields, inPlaceEditable,
 } from "./pricebook.js";
 import { createHandler, matchRoute, PROJECT_TYPE_TAG } from "./index.js";
+import { paidSummary, invoiceStatusFor, jobPaymentStatusFor, nextInvoiceName, paymentFieldsFromBody, invoicePdfKey } from "./invoice.js";
+import { clockMinutes, roundUpQuarterHours, laborRow, parseLaborEntry } from "./labor.js";
 import { renderEstimateDocument } from "../../lib/estimate-document.js";
 
 const TENANT = "a1W7y000007AszBEAS";
@@ -197,9 +199,10 @@ test("matchRoute strips a stage prefix and captures ids", () => {
 });
 
 function fakeSalesforce() {
-  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [] };
+  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [], Sundial_Service_Call__c: [], Sundial_User__c: [] };
   let seq = 0;
   const calls = { creates: [], updates: [], deletes: [], queries: [] };
+  const fetches = [];
   const newId = (obj) => `${obj.slice(8, 11).toUpperCase()}${String(++seq).padStart(15, "0")}`.slice(0, 18);
 
   function evalCond(rec, cond) {
@@ -241,12 +244,16 @@ function fakeSalesforce() {
     const obj = soql.match(/FROM (\w+)/)[1];
     let where = (soql.split(" WHERE ")[1] || "").replace(/\s+(ORDER BY|LIMIT).*$/, "").trim();
     const rows = store[obj].filter((r) => (where ? evalWhere(r, where) : true));
-    return rows.map((r) => ({ ...r }));
+    // The one relationship the labor routes read: a call's Tech__r (name + bill rate).
+    return rows.map((r) => (obj === "Sundial_Service_Call__c" && r.Tech__c ? { ...r, Tech__r: store.Sundial_User__c.find((u) => u.Id === r.Tech__c) ?? null } : { ...r }));
   };
   const sfCreateRecord = async (obj, fields) => {
     calls.creates.push({ obj, fields: { ...fields } });
     const rec = { Id: newId(obj), ...fields };
     if (obj === "Sundial_Price_Book_Item__c") rec.Price__c = (Number(fields.Labor_Price__c) || 0) + (Number(fields.Material_Price__c) || 0);
+    // Autonumber names the org assigns (the invoice number is the job number).
+    if (obj === "Sundial_Service_Job__c" && !rec.Name) rec.Name = `SVC-${String(store[obj].length + 1).padStart(5, "0")}`;
+    if (obj === "Sundial_Service_Payment__c" && !rec.Name) rec.Name = `PAY-${String(store[obj].length + 1).padStart(5, "0")}`;
     store[obj].push(rec);
     return { ok: true, id: rec.Id };
   };
@@ -271,9 +278,13 @@ function fakeSalesforce() {
         ]
       : [],
   });
-  // A PostgREST-shaped stub over two things: stale flags, and the activity table.
+  // A PostgREST-shaped stub over three things: stale flags, the activity table, and
+  // the file-metadata table (the estimate PDF registers a row there on send).
   const stale = [];
   const activity = [];
+  const files = [];
+  store.sundial_file_metadata = files;
+  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : null);
   function chain(table, op, patch) {
     const filters = [];
     const q = {
@@ -283,14 +294,16 @@ function fakeSalesforce() {
       in(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
       order(col, { ascending } = {}) { q._order = { col, ascending }; return q; },
       limit(n) { q._limit = n; return q; },
+      maybeSingle() { const r = run(); return Promise.resolve({ data: r.data?.[0] ?? null, error: r.error }); },
       then(resolve) { resolve(run()); },
     };
     function run() {
-      if (table !== "sundial_service_activity") {
+      const src = tableRows(table);
+      if (!src) {
         if (op === "update") stale.push({ table, patch });
         return { data: [], error: null };
       }
-      let rows = activity.filter((r) => filters.every((f) => f(r)));
+      let rows = src.filter((r) => filters.every((f) => f(r)));
       if (op === "update") { rows.forEach((r) => Object.assign(r, patch)); return { error: null }; }
       if (q._order) rows = [...rows].sort((a, b) => (a[q._order.col] < b[q._order.col] ? 1 : -1) * (q._order.ascending ? -1 : 1));
       if (q._limit) rows = rows.slice(0, q._limit);
@@ -300,12 +313,21 @@ function fakeSalesforce() {
   }
   const getSupabaseClient = async () => ({
     from: (table) => ({
-      insert: async (row) => { if (table === "sundial_service_activity") activity.push({ id: activity.length + 1, ...row }); return { error: null }; },
+      insert: (row) => {
+        const src = tableRows(table);
+        const stored = src ? { id: src.length + 1, ...row } : null;
+        if (src) src.push(stored);
+        // Both shapes the code uses: `await insert(row)` and `insert(row).select("id").maybeSingle()`.
+        return {
+          then: (resolve) => resolve({ error: null }),
+          select: () => ({ maybeSingle: async () => ({ data: stored ? { id: stored.id } : null, error: null }) }),
+        };
+      },
       update: (patch) => chain(table, "update", patch),
       select: () => chain(table, "select"),
     }),
   });
-  return { store, calls, stale, activity, emails: [], deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  return { store, calls, stale, activity, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -327,10 +349,30 @@ function makeHandler(fake, identityOverrides = {}) {
     },
     isEmailConfigured: () => fake.emailConfigured !== false,
     publicBaseUrl: fake.publicBaseUrl ?? "https://portal.example.com",
+    brandName: "Test Electric",
+    // The PDF is rendered for real (pdf-lib) — only the S3 put is recorded.
+    putObject: async ({ key, body, contentType }) => {
+      if (fake.putFails) throw new Error("s3 down");
+      fake.puts.push({ key, bytes: body.byteLength, contentType });
+    },
+    getSecret: async (name) => {
+      if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
+      const e = new Error("not found");
+      e.name = "ResourceNotFoundException";
+      throw e;
+    },
+    fetchUrl: async (url) => {
+      fake.fetches.push(url);
+      if (url.includes("/streetview/metadata")) {
+        const status = fake.streetViewStatus ?? "OK";
+        return { ok: true, json: async () => (status === "OK" ? { status, pano_id: "PANO1", location: { lat: 33.4, lng: -112.0 } } : { status }) };
+      }
+      return { ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff]).buffer };
+    },
   });
 }
-const call = (h, method, path, body) =>
-  h({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer x", origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined })
+const call = (h, method, path, body, query) =>
+  h({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer x", origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined, queryStringParameters: query })
     .then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
 
 test("quick-create job with a NEW customer: customer tagged Service, estimate + job linked 1:1, lines snapshotted, totals stored", async () => {
@@ -504,6 +546,43 @@ test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versi
   assert.equal(g.body.totals.total, 540.07);
 });
 
+test("save an ad-hoc line to the price book: PATCH priceBookItemId links the line, adopts the item's split, keeps the price", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "L" });
+  const h = makeHandler(fake);
+  const e = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Replace 200A main breaker", kind: "Material", unitPrice: 340, quantity: 1 }] });
+  assert.equal(e.status, 201);
+  const line = fake.store.Sundial_Service_Line__c[0];
+  assert.equal(line.Source__c, "Ad hoc");
+  assert.equal(line.Price_Book_Item__c, undefined);
+
+  // The portal creates the item from the line, then links the line to it.
+  const item = await call(h, "POST", "/service/price-book-items", { name: "Replace 200A main breaker", itemCode: "MAT-MAIN-200", kind: "Material", materialPrice: 340, materialCost: 190, taxable: true });
+  assert.equal(item.status, 201);
+  const link = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: item.body.id });
+  assert.equal(link.status, 200);
+  assert.equal(link.body.priceBookItemId, item.body.id);
+  assert.equal(line.Price_Book_Item__c, item.body.id);
+  assert.equal(line.Source__c, "Price Book");
+  assert.equal(line.Unit_Price__c, 340, "the line's own price is kept");
+  assert.equal(line.Unit_Material_Price__c, 340);
+  assert.equal(line.Unit_Material_Cost__c, 190);
+  assert.equal(line.Taxable__c, true, "taxability comes from the item");
+  assert.equal(line.Price_Overridden__c, false, "saved at the item's own price → not an override");
+  assert.equal(line.Description__c, "Replace 200A main breaker");
+  const feed = fake.store.Sundial_Service_Line__c.length; // unchanged: no new line was created
+  assert.equal(feed, 1);
+
+  // Linking to a superseded version is refused; an unknown id too.
+  await call(h, "POST", `/service/price-book-items/${item.body.id}/new-version`, { materialPrice: 360 });
+  const stale = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: item.body.id });
+  assert.equal(stale.status, 400);
+  assert.equal(stale.body.code, "ITEM_NOT_ACTIVE");
+  const missing = await call(h, "PATCH", `/service/estimates/${e.body.id}/lines/${line.Id}`, { priceBookItemId: "a0X000000000000AAA" });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.code, "ITEM_NOT_FOUND");
+});
+
 test("templates: add-template re-snapshots from the ACTIVE version, keeps quantity", async () => {
   const fake = fakeSalesforce();
   await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "T" });
@@ -635,6 +714,25 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   const sentRow = fake.activity.find((a) => a.event === "estimate_sent");
   assert.equal(sentRow.details.delivery, "email");
 
+  // The PDF of this version: rendered, stored with the estimate's files, attached to
+  // the email, recorded in the version log and the activity row.
+  const estId = c.body.id;
+  assert.equal(s1.body.pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  assert.ok(s1.body.pdfUrl.endsWith(`/SUNDIAL/${estId}/estimate-v1.pdf`));
+  assert.equal(fake.puts.length, 1);
+  assert.equal(fake.puts[0].contentType, "application/pdf");
+  assert.ok(fake.puts[0].bytes > 1000);
+  assert.equal(fake.emails[0].attachments.length, 1);
+  assert.ok(fake.emails[0].attachments[0].fileName.endsWith("-v1.pdf"));
+  assert.equal(Buffer.from(fake.emails[0].attachments[0].content.slice(0, 5)).toString(), "%PDF-");
+  const rec = fake.store.Sundial_Estimate__c.find((r) => r.Id === estId);
+  assert.equal(JSON.parse(rec.Version_Log__c)[0].pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  assert.equal(sentRow.details.pdfKey, `SUNDIAL/${estId}/estimate-v1.pdf`);
+  const metaRows = fake.store.sundial_file_metadata || [];
+  assert.equal(metaRows.length, 1);
+  assert.equal(metaRows[0].category, "Estimate");
+  assert.equal(metaRows[0].sf_record_id, estId);
+
   // Explicit recipient override wins; SMS is recorded only.
   const s2 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", via: "Both" });
   assert.equal(s2.body.recipient, "other@example.com");
@@ -655,5 +753,334 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   assert.equal(s4.body.delivery, "recorded");
   assert.ok(s4.body.deliveryDetail.includes("SERVICE_PUBLIC_BASE_URL"));
   assert.equal(s4.body.publicUrl, null);
+
+  // S3 down: the send still goes through — email without the attachment, pdfKey null,
+  // and the office is told.
+  fake.publicBaseUrl = "https://portal.example.com";
+  fake.putFails = true;
+  const h3 = makeHandler(fake);
+  const s5 = await call(h3, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s5.status, 200);
+  assert.equal(s5.body.version, 5);
+  assert.equal(s5.body.delivery, "email");
+  assert.equal(s5.body.pdfKey, null);
+  assert.ok(s5.body.deliveryDetail.includes("PDF could not be generated"));
+  assert.equal(fake.emails.at(-1).attachments.length, 0);
 });
 
+
+test("street view: unconfigured without the secret; fetched once by pano id, cached in S3 + on the job; NONE remembered; refresh re-asks", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Sv", Primary_Phone__c: "602-555-0009", Street__c: "1 Palm Ln", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id } });
+  assert.equal(j.status, 201);
+  const jobId = fake.store.Sundial_Service_Job__c[0].Id;
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.ok(job.Address_at_Creation__c, "the job carries the snapshot address the lookup uses");
+
+  // No Google key in Secrets Manager yet → the page shows the setup hint, nothing written.
+  const u = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(u.status, 200);
+  assert.equal(u.body.status, "unconfigured");
+  assert.equal(fake.fetches.length, 0);
+
+  fake.googleKey = "K";
+  const first = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.status, "ready");
+  assert.equal(first.body.cached, false);
+  assert.equal(fake.fetches.length, 2, "metadata, then the still");
+  assert.ok(fake.fetches[0].includes("/streetview/metadata?location="));
+  assert.ok(fake.fetches[0].includes("source=outdoor"));
+  assert.ok(fake.fetches[1].includes("/streetview?") && fake.fetches[1].includes("location=") && fake.fetches[1].includes("source=outdoor"), "the still is asked for by ADDRESS so Google aims the camera at the house");
+  assert.ok(!fake.fetches[1].includes("pano="), "never by panorama id — that shows the camera car's heading, i.e. the house across the street");
+  assert.equal(fake.puts.at(-1).key, `SUNDIAL/${jobId}/street-view.jpg`);
+  assert.equal(fake.puts.at(-1).contentType, "image/jpeg");
+  assert.equal(job.Street_View_Image_Key__c, `SUNDIAL/${jobId}/street-view.jpg`);
+  assert.ok(first.body.url.endsWith(`/SUNDIAL/${jobId}/street-view.jpg`));
+
+  // Second read: served from the job, Google not asked again.
+  const second = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(second.body.cached, true);
+  assert.equal(fake.fetches.length, 2);
+
+  // No imagery → NONE remembered; the next read does not ask Google either.
+  fake.streetViewStatus = "ZERO_RESULTS";
+  const none = await call(h, "GET", `/service/jobs/${jobId}/street-view`, null, { refresh: "1" });
+  assert.equal(none.body.status, "none");
+  assert.equal(job.Street_View_Image_Key__c, "NONE");
+  assert.equal(fake.fetches.length, 3);
+  const noneAgain = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(noneAgain.body.status, "none");
+  assert.equal(fake.fetches.length, 3);
+
+  // Cross-tenant / unknown job is a 404, never a Google call.
+  const nf = await call(h, "GET", `/service/jobs/a0X000000000000AAA/street-view`);
+  assert.equal(nf.status, 404);
+  assert.equal(fake.fetches.length, 3);
+});
+
+test("invoice helpers: money summary, statuses, numbering, payment validation", () => {
+  const rows = [
+    { Type__c: "Deposit", Amount__c: 100, Status__c: "Succeeded" },
+    { Type__c: "Payment", Amount__c: 300.5, Status__c: "Succeeded" },
+    { Type__c: "Refund", Amount__c: 50, Status__c: "Succeeded" },
+    { Type__c: "Payment", Amount__c: 999, Status__c: "Failed" },
+  ];
+  assert.deepEqual(paidSummary(rows), { paid: 350.5, deposits: 100, refunds: 50 });
+  assert.equal(invoiceStatusFor("Issued", 500, 0), "Issued");
+  assert.equal(invoiceStatusFor("Issued", 500, 350.5), "Partially Paid");
+  assert.equal(invoiceStatusFor("Sent", 500, 500), "Paid");
+  assert.equal(invoiceStatusFor("Paid", 500, 450), "Partially Paid", "a refund reopens it");
+  assert.equal(invoiceStatusFor("Paid", 500, 0), "Issued", "a full refund goes back to Issued");
+  assert.equal(invoiceStatusFor("Void", 500, 500), "Void");
+  assert.equal(jobPaymentStatusFor({ paid: 0, deposits: 0, refunds: 0 }, 500, true), "None");
+  assert.equal(jobPaymentStatusFor({ paid: 100, deposits: 100, refunds: 0 }, 0, false), "Deposit Paid");
+  assert.equal(jobPaymentStatusFor({ paid: 350.5, deposits: 100, refunds: 50 }, 500, true), "Partially Paid");
+  assert.equal(jobPaymentStatusFor({ paid: 500, deposits: 0, refunds: 0 }, 500, true), "Paid");
+  assert.equal(jobPaymentStatusFor({ paid: -50, deposits: 0, refunds: 50 }, 500, true), "Refunded");
+  assert.equal(nextInvoiceName("SVC-00012", 0), "SVC-00012");
+  assert.equal(nextInvoiceName("SVC-00012", 1), "SVC-00012-2");
+  assert.equal(invoicePdfKey("a0J1", "SVC-00012-2"), "SUNDIAL/a0J1/SVC-00012-2.pdf");
+  const ctx = { jobId: "J", invoiceId: "I", tenantId: TENANT, userId: USER, now: new Date("2026-09-12T00:00:00Z") };
+  assert.deepEqual(paymentFieldsFromBody({ amount: -5 }, ctx).problems, ["amount must be a positive number (Refund rows are positive too — the type says the direction)"]);
+  assert.ok(paymentFieldsFromBody({ amount: 5, type: "Bribe" }, ctx).problems[0].startsWith("type must be"));
+  const ok = paymentFieldsFromBody({ amount: "125.129", method: "Check", reference: "1044", receivedAt: "2026-09-11" }, ctx).fields;
+  assert.equal(ok.Amount__c, 125.13);
+  assert.equal(ok.Status__c, "Succeeded");
+  assert.equal(ok.Recorded_By__c, USER);
+  assert.equal(ok.Received_At__c, "2026-09-11T00:00:00.000Z");
+  assert.equal(ok.Reference__c, "1044");
+});
+
+test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payments settle job + invoice, send emails the PDF, void reopens and reissues as -2", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { taxRate: 8.6 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }, { description: "Breaker", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(j.status, 201);
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+
+  // Before: nothing to show, but the job can be invoiced.
+  const before = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(before.status, 200);
+  assert.equal(before.body.invoice, null);
+  assert.equal(before.body.canIssue, true);
+
+  // A deposit taken before the invoice exists (no Invoice__c yet).
+  await fake.deps.sfCreateRecord("Sundial_Service_Payment__c", { Client__c: TENANT, Service_Job__c: job.Id, Type__c: "Deposit", Method__c: "Card", Amount__c: 100, Status__c: "Succeeded", Received_At__c: "2026-09-09T00:00:00Z" });
+
+  // Issue: labor 275 + material 100 = 375; tax 8.6% of 100 = 8.60 → 383.60
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, { netDays: 30 });
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Name, job.Name, "invoice number = job number");
+  assert.equal(inv.Status__c, "Partially Paid", "the deposit already counts");
+  assert.equal(inv.Total__c, 383.6);
+  assert.equal(inv.Tax_Amount__c, 8.6);
+  assert.equal(inv.Paid_Amount__c, 100);
+  assert.equal(inv.Due_Date__c, "2026-10-10");
+  assert.equal(inv.Bill_To_Type__c, "Customer");
+  assert.equal(iss.body.balance, 283.6);
+  assert.equal(fake.store.Sundial_Service_Payment__c[0].Invoice__c, inv.Id, "the deposit was back-filled onto the invoice");
+  assert.equal(est.Status__c, "Invoiced");
+  assert.equal(job.Status__c, "Invoiced");
+  assert.equal(job.Payment_Status__c, "Partially Paid");
+  assert.equal(inv.PDF_S3_Key__c, `SUNDIAL/${job.Id}/${job.Name}.pdf`);
+  assert.ok(fake.puts.some((p) => p.key === inv.PDF_S3_Key__c && p.contentType === "application/pdf"));
+  assert.ok(iss.body.warnings.some((w) => /never approved/.test(w)), "Proposed lines are flagged, not refused");
+
+  // The estimate is now locked; a second issue is refused.
+  const locked = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 9 });
+  assert.equal(locked.status, 409);
+  assert.equal(locked.body.code, "ESTIMATE_INVOICED");
+  const again = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(again.status, 409);
+  assert.equal(again.body.code, "INVOICE_EXISTS");
+
+  // Preview reads as an invoice, not an estimate.
+  const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.equal(pv.status, 200);
+  assert.ok(pv.body.html.includes("<div>Invoice</div>"));
+  assert.ok(pv.body.html.includes("Bill to"));
+  assert.ok(pv.body.html.includes("Balance due"));
+  assert.ok(pv.body.html.includes("$283.60"));
+
+  // Send: emails the customer with the PDF attached; Issued → Sent.
+  const sent = await call(h, "POST", `/service/invoices/${inv.Id}/send`, {});
+  assert.equal(sent.status, 200);
+  assert.equal(sent.body.delivery, "email");
+  assert.equal(sent.body.recipient, "ivy@example.com");
+  assert.equal(fake.emails.at(-1).attachments[0].fileName, `${job.Name}.pdf`);
+  assert.ok(/283\.60 due/.test(fake.emails.at(-1).subject));
+  assert.equal(inv.Status__c, "Partially Paid", "money status wins over Sent");
+  assert.ok(inv.Sent_At__c);
+
+  // A check for the balance: invoice Paid, job Paid.
+  const pay = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { method: "Check", amount: 283.6, reference: "1044" });
+  assert.equal(pay.status, 201);
+  assert.equal(pay.body.balance, 0);
+  assert.equal(inv.Status__c, "Paid");
+  assert.ok(inv.Paid_At__c);
+  assert.equal(job.Status__c, "Paid");
+  assert.equal(job.Payment_Status__c, "Paid");
+  // A refund reopens it.
+  const ref = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { type: "Refund", method: "Check", amount: 83.6 });
+  assert.equal(ref.status, 201);
+  assert.equal(inv.Status__c, "Partially Paid");
+  assert.equal(inv.Paid_At__c, null);
+  assert.equal(job.Status__c, "Invoiced");
+  assert.equal(ref.body.balance, 83.6);
+  const badPay = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { amount: 0 });
+  assert.equal(badPay.status, 400);
+
+  // Void: reason required; payments unhook; estimate reopens (Approved? no — Draft, never sent); job back to Ready to Bill.
+  const noReason = await call(h, "POST", `/service/invoices/${inv.Id}/void`, {});
+  assert.equal(noReason.body.code, "REASON_REQUIRED");
+  const v = await call(h, "POST", `/service/invoices/${inv.Id}/void`, { reason: "Wrong tax rate" });
+  assert.equal(v.status, 200);
+  assert.equal(inv.Status__c, "Void");
+  assert.equal(inv.Void_Reason__c, "Wrong tax rate");
+  assert.ok(fake.store.Sundial_Service_Payment__c.every((p) => !p.Invoice__c), "money stays on the job, unhooked");
+  assert.equal(est.Status__c, "Draft");
+  assert.equal(job.Status__c, "Ready to Bill");
+  assert.equal(job.Payment_Status__c, "Partially Paid");
+  const onVoid = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { amount: 5 });
+  assert.equal(onVoid.status, 409);
+
+  // Fix the estimate, reissue as -2; the money rides along.
+  const fix = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 0 });
+  assert.equal(fix.status, 200);
+  const re = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(re.status, 201);
+  const inv2 = fake.store.Sundial_Service_Invoice__c[1];
+  assert.equal(inv2.Name, `${job.Name}-2`);
+  assert.equal(inv2.Total__c, 375);
+  assert.equal(inv2.Paid_Amount__c, 300, "100 deposit + 283.60 − 83.60 refund");
+  assert.equal(re.body.balance, 75);
+  const cur = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(cur.body.invoice.Id, inv2.Id);
+  assert.equal(cur.body.history.length, 2);
+  assert.equal(cur.body.payments.length, 3);
+
+  const evs = fake.activity.map((a) => a.event);
+  assert.ok(evs.includes("invoice_issued") && evs.includes("invoice_sent") && evs.includes("payment_recorded") && evs.includes("invoice_voided"));
+});
+
+test("labor helpers: clock → quarter hours, row sources, entry validation", () => {
+  assert.equal(clockMinutes({ Duration_Minutes__c: 95 }), 95);
+  assert.equal(clockMinutes({ Actual_Start__c: "2026-09-14T15:00:00Z", Actual_End__c: "2026-09-14T16:37:00Z" }), 97);
+  assert.equal(clockMinutes({ Actual_Start__c: "2026-09-14T15:00:00Z" }), null);
+  assert.equal(roundUpQuarterHours(97), 1.75);
+  assert.equal(roundUpQuarterHours(60), 1);
+  assert.equal(roundUpQuarterHours(61), 1.25);
+  assert.equal(roundUpQuarterHours(null), null);
+  const call = { Id: "C1", Name: "SC-1", Status__c: "Complete", Tech__c: "U1", Tech__r: { First_Name__c: "Jake", Last_Name__c: "Dorsey", Hourly_Bill_Rate__c: 120 }, Actual_Start__c: "2026-09-14T15:00:00Z", Actual_End__c: "2026-09-14T16:37:00Z", Billable_to_Customer__c: true };
+  const row = laborRow(call, null);
+  assert.equal(row.hours, 1.75);
+  assert.equal(row.hoursSource, "clock");
+  assert.equal(row.rate, 120);
+  assert.equal(row.rateSource, "tech");
+  assert.equal(row.amount, 210);
+  const over = laborRow({ ...call, Billable_Hours__c: 2, Bill_Rate__c: 150 }, { Id: "L1", Quantity__c: 2, Unit_Price__c: 150 });
+  assert.equal(over.hours, 2);
+  assert.equal(over.hoursSource, "office");
+  assert.equal(over.rate, 150);
+  assert.equal(over.rateSource, "call");
+  assert.equal(over.amount, 300);
+  assert.equal(over.lineId, "L1");
+  const none = laborRow({ ...call, Actual_End__c: null, Tech__r: { First_Name__c: "New", Last_Name__c: "Guy" } }, null);
+  assert.equal(none.hours, null);
+  assert.equal(none.rate, null);
+  assert.equal(none.amount, 0);
+  assert.deepEqual(parseLaborEntry({ id: "a0K000000000001AAA", billable: true, hours: "1.5", rate: 99.999 }), { id: "a0K000000000001AAA", billable: true, hours: 1.5, rate: 100, problems: [] });
+  assert.ok(parseLaborEntry({ id: "nope", hours: -1 }).problems.length === 2);
+});
+
+test("labor billing: billable calls become Labor lines (Source Time), edits rewrite them, unbilling removes them, the invoice locks them", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Lab" });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Jake", Last_Name__c: "Dorsey", Hourly_Bill_Rate__c: 120 });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "New", Last_Name__c: "Guy" });
+  const [jake, newGuy] = fake.store.Sundial_User__c;
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Diagnostic", kind: "Labor", unitPrice: 275 }] });
+  const jobId = fake.store.Sundial_Service_Job__c[0].Id;
+  const estId = fake.store.Sundial_Estimate__c[0].Id;
+  // Three calls: two complete (one clocked 1h37, one with no clock), one still scheduled.
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-1", Sundial_Service_Job__c: jobId, Tech__c: jake.Id, Status__c: "Complete", Scheduled_Start__c: "2026-09-14T15:00:00Z", Actual_Start__c: "2026-09-14T15:00:00Z", Actual_End__c: "2026-09-14T16:37:00Z" });
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-2", Sundial_Service_Job__c: jobId, Tech__c: newGuy.Id, Status__c: "Complete", Scheduled_Start__c: "2026-09-15T15:00:00Z" });
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-3", Sundial_Service_Job__c: jobId, Tech__c: jake.Id, Status__c: "Scheduled", Scheduled_Start__c: "2026-09-16T15:00:00Z" });
+  const [c1, c2] = fake.store.Sundial_Service_Call__c;
+
+  const g = await call(h, "GET", `/service/jobs/${jobId}/labor`);
+  assert.equal(g.status, 200);
+  assert.equal(g.body.calls.length, 2, "only completed calls are offered");
+  assert.equal(g.body.calls[0].hours, 1.75);
+  assert.equal(g.body.calls[0].rate, 120);
+  assert.equal(g.body.calls[0].billable, false, "off by default — most jobs are priced from the book");
+  assert.equal(g.body.calls[1].hours, null);
+  assert.equal(g.body.calls[1].rate, null);
+  assert.equal(g.body.summary.billableAmount, 0);
+
+  // Bill Jake's call as clocked; New Guy's with typed hours and a typed rate.
+  const s1 = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: c1.Id, billable: true }, { id: c2.Id, billable: true, hours: 2, rate: 95 }] });
+  assert.equal(s1.status, 200, JSON.stringify(s1.body));
+  assert.deepEqual(s1.body.applied.map((a) => a.action), ["created", "created"]);
+  assert.equal(s1.body.totals.Subtotal__c, 275 + 210 + 190);
+  assert.equal(c1.Billable_to_Customer__c, true);
+  assert.equal(c2.Billable_Hours__c, 2);
+  assert.equal(c2.Bill_Rate__c, 95);
+  const timeLines = fake.store.Sundial_Service_Line__c.filter((l) => l.Source__c === "Time");
+  assert.equal(timeLines.length, 2);
+  assert.equal(timeLines[0].Added_By_Service_Call__c, c1.Id);
+  assert.equal(timeLines[0].Quantity__c, 1.75);
+  assert.equal(timeLines[0].Unit_Price__c, 120);
+  assert.equal(timeLines[0].Unit_of_Measure__c, "Hour");
+  assert.ok(timeLines[0].Description__c.startsWith("Labor — Jake Dorsey"));
+  assert.equal(timeLines[0].Taxable__c, false);
+
+  // Standardize: Jake's call at 100/h and 2 hours → the same line is rewritten, not duplicated.
+  const s2 = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: c1.Id, billable: true, hours: 2, rate: 100 }] });
+  assert.deepEqual(s2.body.applied.map((a) => a.action), ["updated"]);
+  assert.equal(fake.store.Sundial_Service_Line__c.filter((l) => l.Source__c === "Time").length, 2);
+  assert.equal(timeLines[0].Quantity__c, 2);
+  assert.equal(timeLines[0].Unit_Price__c, 100);
+  assert.equal(s2.body.totals.Subtotal__c, 275 + 200 + 190);
+
+  // Unbill New Guy's: the line goes, the call remembers "not billable", the hours stay typed.
+  const s3 = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: c2.Id, billable: false }] });
+  assert.deepEqual(s3.body.applied.map((a) => a.action), ["removed"]);
+  assert.equal(fake.store.Sundial_Service_Line__c.filter((l) => l.Source__c === "Time").length, 1);
+  assert.equal(c2.Billable_to_Customer__c, false);
+  assert.equal(c2.Billable_Hours__c, 2);
+  assert.equal(s3.body.totals.Subtotal__c, 475);
+  assert.equal(s3.body.summary.billableCalls, 1);
+  assert.equal(s3.body.calls.find((c) => c.id === c2.Id).billable, false);
+
+  // A call that is not on the job / not complete is refused; the scheduled one is not offered.
+  const badCall = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: fake.store.Sundial_Service_Call__c[2].Id, billable: true }] });
+  assert.equal(badCall.body.code, "CALL_INVALID");
+
+  // A tech's default rate.
+  const dr = await call(h, "POST", "/service/labor/default-rate", { userId: newGuy.Id, rate: 110 });
+  assert.equal(dr.status, 200);
+  assert.equal(newGuy.Hourly_Bill_Rate__c, 110);
+  const g2 = await call(h, "GET", `/service/jobs/${jobId}/labor`);
+  assert.equal(g2.body.calls.find((c) => c.id === c2.Id).techDefaultRate, 110);
+  assert.equal(g2.body.calls.find((c) => c.id === c2.Id).rate, 95, "the call's own rate still wins");
+
+  // Once invoiced, billed labor is frozen with everything else.
+  const inv = await call(h, "POST", `/service/jobs/${jobId}/invoice`, {});
+  assert.equal(inv.status, 201);
+  assert.equal(inv.body.invoice.Total__c, 475);
+  const locked = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: c1.Id, billable: false }] });
+  assert.equal(locked.status, 409);
+  assert.equal(locked.body.code, "ESTIMATE_INVOICED");
+  const g3 = await call(h, "GET", `/service/jobs/${jobId}/labor`);
+  assert.equal(g3.body.estimateLocked, true);
+  assert.ok(fake.activity.some((a) => a.event === "labor_billed"));
+  void estId; void j;
+});

@@ -1,0 +1,303 @@
+﻿HCP_Id__c,Name,Item_Code__c,Version__c,Is_Active__c,Kind__c,Job_Type__c,Service_Type__c,Category__c,Description__c,Unit_of_Measure__c,Default_Quantity__c,Labor_Price__c,Labor_Cost__c,Material_Price__c,Material_Cost__c,Taxable__c,Client__c
+olit_76a20f9f529e45eab74ca115ce4fdd55,"Install dryer cord, 4 wire up to 6 ft",SVC-ELEC-0001,1,false,Labor,Electrical,Installation,Appliances,"Let us set up your dryer with a new 4-wire cord up to 6 ft long. This ensures a safe connection that meets the latest electrical codes, including a dedicated ground wire for added safety. We'll check the voltage and amperage to ensure your dryer runs efficiently and lasts longer.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_04eb302904c84612b598c7862b6b1a49,"Install range cord, 4 wire, 6 ft",SVC-ELEC-0002,1,false,Labor,Electrical,Installation,Appliances,Ensure your electric range is connected safely and efficiently with a new 4-wire cord up to 6 ft long. This setup includes a dedicated ground wire to protect your home and appliances. We'll make sure the voltage and amperage are just right for optimal cooking performance.,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_79bbebe746394b1395daa3d2d0334ec7,"Install microwave outlet, install 20A 120V circuit, up to 40 ft, accessible",SVC-ELEC-0003,1,false,Labor,Electrical,Installation,Appliances,"Get a new 20-amp, 120-volt circuit and outlet installed for your microwave, extending up to 40 ft through accessible areas. This dedicated setup prevents power overload and ensures your microwave operates reliably. We'll handle all the technical details to keep your kitchen powered safely.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_917a0fbaa2c54d3f908642864714b08f,"Install dishwasher, hard wire to existing with disconnect",SVC-ELEC-0004,1,false,Labor,Electrical,Installation,Appliances,"We'll safely wire your dishwasher into your home's electrical system, complete with a disconnect switch for easy maintenance. This ensures your dishwasher is securely powered, meets electrical codes, and performs efficiently with the right amount of electricity.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_e30e0b8fd3b643c5b893a1c1343d0bd6,"Install garbage disposal, cord connected up to 3 ft",SVC-ELEC-0005,1,false,Labor,Electrical,Installation,Appliances,"Enjoy a new garbage disposal with a cord up to 3 ft long for easy installation. We'll ensure it's wired correctly and safely grounded, providing reliable power for smooth operation in your kitchen.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_39e6a9667b414bd99dad1f92d525e1bd,"Install water softener outlet, GFCI protected, tap existing circuitry",SVC-ELEC-0006,1,false,Labor,Electrical,Installation,Appliances,"Install a new outlet for your water softener with built-in ground-fault protection, tapping into your existing wiring for added safety in wet areas. This ensures your water softener operates safely and reliably while meeting all electrical standards.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_c1aa26c9aa924651a4e9bbbd730c7410,"Replace standard height, single 4 ft bulb, electronic, 120V or 277V ballast",SVC-ELEC-0007,1,false,Labor,Electrical,Repair,Ballast Replacement,"Upgrade your lighting with a new electronic ballast for a safe and efficient 4 ft bulb. This modern setup ensures reliable performance and energy savings, compatible with both 120V and 277V systems.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_e3a9261cf487433984640751c7c04e1c,"Replace standard height, single 8 ft bulb, electronic, 120V or 277V ballast",SVC-ELEC-0008,1,false,Labor,Electrical,Repair,Ballast Replacement,"Improve your lighting with an electronic ballast for an 8 ft bulb. Enjoy enhanced brightness and energy efficiency with this upgrade, suitable for 120V or 277V setups in your home.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_1abc6e92037d4d76a395a9c9f37f56c7,"Replace standard height, two 4 ft bulb, electronic, 120V or 277V ballast",SVC-ELEC-0009,1,false,Labor,Electrical,Repair,Ballast Replacement,"Enhance your room's lighting with a new electronic ballast for two 4 ft bulbs. This upgrade provides better illumination and efficiency, supporting both 120V and 277V electrical systems.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_99b17cfb1b3a4130a63ed538373df07f,"Replace standard height, two 8 ft bulb, electronic, 120V or 277V ballast",SVC-ELEC-0010,1,false,Labor,Electrical,Repair,Ballast Replacement,"Upgrade to a new electronic ballast for two 8 ft bulbs for improved lighting efficiency and performance. Perfect for 120V or 277V installations, ensuring brighter spaces with reduced energy consumption.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_da3c25a454514a68b3a264e78291401f,Install customer supplied ceiling fan on existing box,SVC-ELEC-0011,1,false,Labor,Electrical,Installation,Ceiling Fans,"We'll expertly mount your provided ceiling fan onto your existing box, ensuring optimal functionality and airflow in your space.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_2d83a235d858445dade047a28f5370e6,Install customer supplied ceiling fan with light on existing box,SVC-ELEC-0012,1,false,Labor,Electrical,Installation,Ceiling Fans,Upgrade your room with a ceiling fan and light combo on the existing box. Our precise installation guarantees efficient air circulation and enhanced lighting.,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_ca453ae508674d438c7eb4b19b677493,Furnish and install generic ball standard mount ceiling fan,SVC-ELEC-0013,1,false,Labor,Electrical,Installation,Ceiling Fans,Enjoy improved air circulation with our installation of a standard mount ceiling fan. It enhances energy efficiency and provides reliable comfort year-round.,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_7e981f7437414455a89b2f9b0236abe3,Furnish and install generic ball standard mount ceiling fan and light combinatio,SVC-ELEC-0014,1,false,Labor,Electrical,Installation,Ceiling Fans,Elevate your room's comfort with a ceiling fan and light combo installation. This upgrade combines effective air movement with enhanced lighting options for any space.,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_524d4b376cbb4327ac5d8f6cc1ace765,Install fan control switch,SVC-ELEC-0015,1,false,Labor,Electrical,Installation,Ceiling Fans,"Optimize your ceiling fan's performance with a professionally installed control switch. It offers convenient speed adjustments, ensuring precise airflow and energy efficiency.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a0d76e58fc024179a06bbac36bc2178a,"Replace all breakers and load center, 30 circuit 200 amp labeled",SVC-ELEC-0016,1,false,Labor,Electrical,Repair,Circuit Breakers,"Upgrade to a 30-circuit, 200-amp load center with new breakers. Our pros ensure accurate labeling and improved electrical safety and reliability for your home.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_575843abae444d3bac98c03be714e9e0,"Replace all breakers and load center, 40 circuit 200 amp labeled",SVC-ELEC-0017,1,false,Labor,Electrical,Repair,Circuit Breakers,"Enhance your electrical system with a 40-circuit, 200-amp load center replacement. Our experts provide precise labeling and robust protection for efficient power distribution.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_3d49a9de0a654c90965e768e6674b5df,"Replace all breakers and load center, 30 circuit 150 amp labeled",SVC-ELEC-0018,1,false,Labor,Electrical,Repair,Circuit Breakers,"Upgrade to a 30-circuit, 150-amp load center with new breakers. We ensure accurate labeling for improved electrical safety and performance in your home.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_4a1998dea5f3447fbfe6dbbc6999a5fd,"Replace main lug load center, 30 circuit 200 amp labeled",SVC-ELEC-0019,1,false,Labor,Electrical,Repair,Circuit Breakers,"Replace your main lug load center with a 30-circuit, 200-amp unit. Our professionals ensure proper installation and labeling for enhanced electrical management and safety.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a78ef51ee5524f269e19a7e784b4eff0,"Replace all breakers and load center, 20 circuit 100 amp labeled",SVC-ELEC-0020,1,false,Labor,Electrical,Repair,Circuit Breakers,"Upgrade to a 20-circuit, 100-amp load center with new breakers. Our service includes precise labeling and enhanced protection for efficient and safe power distribution.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_c78658a975fc455789c8f286a000b05b,"Replace outdoor main breaker load center, 40 circuit 200 amp labeled",SVC-ELEC-0021,1,false,Labor,Electrical,Repair,Circuit Breakers,"Replace your outdoor load center with a 40-circuit, 200-amp main breaker. Our pros ensure accurate labeling and robust protection against the elements for safe power distribution.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_71fbb2173e614636a9accefa9540b2d6,"Replace main lug load center, 20 circuit 125 amp labeled",SVC-ELEC-0022,1,false,Labor,Electrical,Repair,Circuit Breakers,"Upgrade your main lug load center to a 20-circuit, 125-amp unit. We provide precise installation and labeling for improved electrical system management and safety.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_6764ea7ef80249258b27986f0a525aa8,Replace 15 or 20A 120V receptacle outlet,SVC-ELEC-0023,1,false,Labor,Electrical,Repair,Receptacle Replacement,"Upgrade your electrical outlets to handle higher currents safely. Our pros replace outdated receptacles with new ones rated for either 15 or 20 amps, ensuring reliable power for all your devices.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_3e5b4322bfa2436eb4a812163360c027,Replace 15A 120V 2 wire receptacle with 3 wire receptacle,SVC-ELEC-0024,1,false,Labor,Electrical,Repair,Receptacle Replacement,"Update your home's wiring for increased safety and functionality. We'll replace old 2-wire outlets with new 3-wire receptacles, providing a more stable electrical connection for modern appliances.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_cb86d71997dc4fe5a2455dcb69d6d6fb,Replace 15A 120V 2 wire receptacle with GFCI receptacle indoor,SVC-ELEC-0025,1,false,Labor,Electrical,Repair,Receptacle Replacement,"Enhance your indoor electrical safety with GFCI outlets. We'll replace older 2-wire receptacles with new GFCI outlets, offering advanced protection against electrical hazards like shocks and short circuits.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a617ec3f8a78471c908ec9a16283fce5,Replace 15A 120V receptacle with GFCI receptacle and outdoor cover,SVC-ELEC-0026,1,false,Labor,Electrical,Repair,Receptacle Replacement,"Upgrade outdoor outlets for improved safety and weather resistance. Our pros replace standard outlets with GFCI models and install durable outdoor covers, ensuring reliable power and protection against moisture.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_aa64e12b1da94cdeba67da91db1fc224,Repair a reverse polarity receptacle,SVC-ELEC-0027,1,false,Labor,Electrical,Repair,Receptacle Replacement,"Ensure your outlets are wired correctly to prevent electrical hazards. Our experts diagnose and repair reverse polarity issues, ensuring outlets are properly grounded for safe operation throughout your home",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_7b0f72c3622c4d43983448691fe630fb,Replace single pole switch,SVC-ELEC-0028,1,false,Labor,Electrical,Repair,Switch Replacement,"Upgrade your light switches for better control and efficiency. Our pros replace standard single pole switches, ensuring reliable operation and energy savings with modern, durable alternatives.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_3c3b74fb5cbb476dae8f42195f9b4cc2,Replace 3 way switch,SVC-ELEC-0029,1,false,Labor,Electrical,Repair,Switch Replacement,"Enhance convenience and lighting control with updated 3-way switches. We replace old switches to allow you to control lights from multiple locations, improving accessibility and functionality.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_8bca8bf90a614bc78389aded0dd9344a,Replace single pole 24 hour digital wall timer,SVC-ELEC-0030,1,false,Labor,Electrical,Repair,Switch Replacement,"Automate your home lighting with precision and energy efficiency. Our experts replace traditional switches with advanced digital timers, offering programmable settings for optimal lighting control.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_41b10225eab74795a8db2d5abcb4197b,Replace double pole switch,SVC-ELEC-0031,1,false,Labor,Electrical,Repair,Switch Replacement,"Upgrade to secure and efficient double pole switches for high-power appliances. Our pros replace outdated switches with new double pole models, ensuring safe operation and durability for heavy-duty use.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_c95ca2ab0d6f42c7aecb5eff21546ae7,Replace 4 way switch,SVC-ELEC-0032,1,false,Labor,Electrical,Repair,Switch Replacement,"Optimize control over complex lighting setups with upgraded 4-way switches. We replace existing switches to provide seamless operation from multiple locations, enhancing convenience and functionality.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_1217730767074345b2a0c29d408b3354,Replace or install 600W single pole Ariadni dimmer,SVC-ELEC-0033,1,false,Labor,Electrical,Repair,Dimmer,"Upgrade your home's ambiance with a modern dimmer switch. Our pros install or replace Ariadni dimmers, allowing you to adjust lighting levels smoothly and save energy with precise control.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_25181e1836c541978f3bee51b994598b,Replace or install 600W single pole Diva dimmer,SVC-ELEC-0034,1,false,Labor,Electrical,Repair,Dimmer,"Enhance your lighting control with a stylish and efficient Diva dimmer switch. We install or replace these dimmers, offering seamless adjustment of brightness levels to suit any mood or occasion.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_24ea72dd801d491c96644bced6064467,Replace or install 600W 3-way Ariadni dimmer,SVC-ELEC-0035,1,false,Labor,Electrical,Repair,Dimmer,"Enjoy enhanced lighting flexibility with a 3-way Ariadni dimmer switch. Our experts install or replace these dimmers, enabling convenient control of lights from multiple locations with ease.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_9b284484088d43d0baada62970dd0b51,Replace or install 1000W single pole Diva dimmer,SVC-ELEC-0036,1,false,Labor,Electrical,Repair,Dimmer,"Upgrade to a high-capacity Diva dimmer for powerful lighting control. We install or replace these dimmers, providing smooth operation and energy savings for larger rooms or brighter settings.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_6e2cee2b4ec14049b2af5a7cd48228ab,Replace or install 1000W 3-way Skylark dimmer,SVC-ELEC-0037,1,false,Labor,Electrical,Repair,Dimmer,"Achieve superior lighting control with a 3-way Skylark dimmer switch. Our pros install or replace these dimmers, allowing you to adjust brightness levels from multiple switches, enhancing convenience and ambiance.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_f4505d4c7b2e49c98f3a26c13ba74261,Install new 120V hard wired smoke detector with battery backup,SVC-ELEC-0038,1,false,Labor,Electrical,Installation,Smoke Detectors,"Enhance your home's safety with a new hardwired smoke detector. Our pros install devices that connect directly to your electrical system, ensuring continuous protection with backup battery support.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a68091b8b70547c1a37a6481751cbf08,Replace 120V hard wired smoke detector with battery backup,SVC-ELEC-0039,1,false,Labor,Electrical,Repair,Smoke Detectors,"Upgrade your smoke detection system for reliable home safety. We replace old detectors with new, hardwired models featuring battery backups, ensuring continuous monitoring and peace of mind.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_1c7ff94351bf42dd9dfb63e191a4248a,Install new 120V hard wired carbon monoxide detector,SVC-ELEC-0040,1,false,Labor,Electrical,Installation,Smoke Detectors,"Protect your family from carbon monoxide with a new, hardwired detector. Our experts install devices that integrate into your home's electrical system, providing constant monitoring for early detection.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_2db23994225f4d2bb638e92c9c2d6a43,"Install 6"" round, black or white, no access",SVC-ELEC-0041,1,false,Labor,Electrical,Installation,Recessed Lighting,"Upgrade your ceiling with sleek 6-inch round lighting. Our pros install these fixtures without the need for ceiling access, enhancing your home's ambiance with modern, stylish lighting options.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_68ef626c1317480b9cce7172b35feb89,"Install 6"" round, black or white, access from above",SVC-ELEC-0042,1,false,Labor,Electrical,Installation,Recessed Lighting,"Enjoy easy installation and enhanced lighting with 6-inch round fixtures. We ensure seamless integration by accessing your ceiling from above, providing efficient and attractive lighting solutions.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_e450962fd11e493fb5e5a796293e4b58,"Install 4"" round, black or white, no access",SVC-ELEC-0043,1,false,Labor,Electrical,Installation,Recessed Lighting,"Add subtle yet effective lighting with 4-inch round fixtures. Our experts install these compact lights without ceiling access, offering versatile illumination to complement any room decor.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_d2264554dcc04642bb80eee80ba49a32,"Install 5"" round, black or white, no access",SVC-ELEC-0044,1,false,Labor,Electrical,Installation,Recessed Lighting,"Enhance your home's lighting with 5-inch round fixtures. Our pros install these stylish lights without needing access to your ceiling, providing efficient and modern illumination for any space.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_44a91308658e46ea9b6f9d702756ae20,"Install wall washer fixture, no access",SVC-ELEC-0045,1,false,Labor,Electrical,Installation,Recessed Lighting,"Illuminate your walls with precision and style using wall washer fixtures. We install these lights without ceiling access, ensuring even distribution of light to highlight artwork and architectural features.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_2876018bc0154f668afc1df0b7e99831,Install surface mount quartz flood light at existing location 500W,SVC-ELEC-0046,1,false,Labor,Electrical,Installation,Outdoor Lighting,"Illuminate your outdoor space effectively with a powerful quartz floodlight. Our pros install 500W lights at existing locations, providing enhanced security and visibility after dark with energy-efficient lighting.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_c62eab90fc5943a696cf43574642c4ec,Install wall mounted porch light at existing location,SVC-ELEC-0047,1,false,Labor,Electrical,Installation,Outdoor Lighting,"Enhance your home's entryway with a stylish wall-mounted porch light. We install new lights at existing locations, offering improved curb appeal and nighttime safety with durable, weather-resistant fixtures.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a1b0bdedd8254737b830b29e69a78073,Install motion detector on existing fixture,SVC-ELEC-0048,1,false,Labor,Electrical,Installation,Outdoor Lighting,"Add convenience and security with a motion detector for your existing fixture. Our experts integrate sensors for automatic lighting, enhancing energy efficiency and deterring intruders with responsive, hands-free illumination.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_989745c6fca94740a61608093f7e0f39,"Install post light with 100W fixture head, up to 25 ft from house, white or blac",SVC-ELEC-0049,1,false,Labor,Electrical,Installation,Outdoor Lighting,"Brighten pathways and driveways with a post light installation up to 25 feet from your home. We offer 100W fixture heads in white or black, ensuring stylish outdoor lighting that extends safety and aesthetics.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_5f92eed902144c808f968486131df3dc,Install new feed and box for outside fixture,SVC-ELEC-0050,1,false,Labor,Electrical,Installation,Outdoor Lighting,"Ensure reliable power for your outdoor lighting with a new feed and box installation. Our pros enhance electrical connections, enabling safe and efficient operation for your exterior fixtures, rain or shine.",Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_7e6844a02f554911901cf2f178e2b814,Installation - Solar system,SVC-SOLAR-0001,1,true,Labor,Solar,Installation,Service Call,Expert installation service for solar system,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_d9b37b5c883f45a3bae1c069012610ba,Installation - Solar inverter,SVC-SOLAR-0002,1,true,Labor,Solar,Installation,Service Call,Expert installation service for solar inverter,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_194449a851f042bca20934e88329b772,Installation - Solar Panel,SVC-SOLAR-0003,1,true,Labor,Solar,Installation,Service Call,Expert installation service for solar panel,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_87017ee1f98c4ed095f8adcac2ea9654,Installation - Electric vehicle (EV) charging station,SVC-EV-0001,1,true,Labor,EV,Installation,Service Call,Expert installation service for electric vehicle (EV) charging station,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_e00b1355904047189877f2e5f959191c,Installation - Something else / I don't know,SVC-GEN-0001,1,true,Labor,,Installation,Service Call,Expert installation service for solar systems,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_7531caf19be64189bec4e4fe5ee2a2d6,Repair - Solar system,SVC-SOLAR-0004,1,true,Labor,Solar,Repair,Service Call,Expert repair service for solar system,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_cf053b664ffb426eb66716d999010507,Repair - Solar inverter,SVC-SOLAR-0005,1,true,Labor,Solar,Repair,Service Call,Expert repair service for solar inverter,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_1050ae4d00c44c9680aac50e45c1fe51,Repair - Solar Panel,SVC-SOLAR-0006,1,true,Labor,Solar,Repair,Service Call,Expert repair service for solar panel,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_e9d0fe10f6224925842b2bc04b999daf,Repair - Electric vehicle (EV) charging station,SVC-EV-0002,1,true,Labor,EV,Repair,Service Call,Expert repair service for electric vehicle (EV) charging station,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_92a1ad0dfced428896d4e9afdb86527b,Repair - Something else / I don't know,SVC-GEN-0002,1,true,Labor,,Repair,Service Call,Expert repair service for solar systems,Each,1,800,,,,false,a1W7y000007AszBEAS
+olit_e0c7ce97cc424546b4c9512ecd113539,Solar Disconnect,SVC-SOLAR-0007,1,true,Labor,Solar,Repair,Electrical,,Each,1,95,82.54,,,false,a1W7y000007AszBEAS
+olit_cc89118ce6cf4726b1b488bd0975c8f3,SunRun Standard Truck Roll,SVC-SOLAR-0008,1,true,Labor,Solar,Repair,Service Call,"Our SunRun Standard Truck Roll includes a professional visit by a certified technician to assess, diagnose, or maintain your solar system. Ensure optimal performance, address concerns quickly, and keep your investment running efficiently and safely.",Each,1,168,,,,false,a1W7y000007AszBEAS
+olit_249ec7e14a54411cbcf62502febc0086,SunRun Troubleshooting (inverter),SVC-SOLAR-0009,1,true,Labor,Solar,Repair,Inverter,"Ensure your solar energy system runs efficiently with our professional inverter troubleshooting service. We diagnose and resolve inverter issues, restoring optimal performance, maximizing energy savings, and protecting your investment.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_2760610c9b5341abb943499e7e12f18c,SunRun Troubleshooting (full system),SVC-SOLAR-0010,1,true,Labor,Solar,Repair,Solar Repair,"Our full system troubleshooting service ensures your solar and energy systems operate at peak performance. We diagnose issues, check all components, and provide expert solutions to maximize efficiency, reliability, and energy savings for your home.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_4ffd695a898b493eb07381a51f5b3be7,SunRun Troubleshooting (optimizer/micro inverter),SVC-SOLAR-0011,1,true,Labor,Solar,Repair,Inverter,"Ensure your solar system operates at peak performance with professional troubleshooting for optimizers or micro inverters. Quickly identify and resolve issues to maximize energy output, improve reliability, and protect your investment in clean energy.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_dc2e2598178f4eb498c27dd31a24260a,SunRun Troubleshooting (battery),SVC-SOLAR-0012,1,true,Labor,Solar,Repair,Solar Repair,"Our battery troubleshooting service diagnoses and resolves issues with your solar energy storage system. Ensure reliable backup power, optimize battery performance, and protect your investment with expert care and fast solutions.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_d1bcd26e7ae9496bbb2eb69573df7007,SunRun Troubleshooting (CT),SVC-SOLAR-0013,1,true,Labor,Solar,Repair,Monitoring,"Our expert troubleshooting service quickly diagnoses and resolves issues with your solar or energy system. Ensure maximum efficiency, safety, and energy savings by addressing problems early — protecting your investment and peace of mind.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_eb1d1e42ae8d421db5d681763bc17128,SunRun RMA (Inverter),SVC-SOLAR-0014,1,true,Labor,Solar,Repair,RMA,"Our Inverter RMA (Return Merchandise Authorization) service ensures faulty inverters are expertly managed and replaced with minimal downtime. Keep your solar system running smoothly and efficiently, protecting your energy investment and savings.",Each,1,250,,,,false,a1W7y000007AszBEAS
+olit_9ac5cf4f8ef541029bfe13b783d03e54,SunRun RMA (micro/optimizer),SVC-SOLAR-0015,1,true,Labor,Solar,Repair,RMA,"If your solar system's microinverter or optimizer fails, our RMA (Return Merchandise Authorization) service ensures quick replacement and minimal downtime. Maintain peak system performance and protect your investment with our expert support.",Each,1,400,,,,false,a1W7y000007AszBEAS
+olit_6cb6b3cb8eb8438f9f235eb3274c3dae,SunRun RMA (Communication),SVC-SOLAR-0016,1,true,Labor,Solar,Repair,RMA,"Ensure your solar system stays connected and performing at its best with our RMA (Communication) service. We troubleshoot and replace faulty communication devices, keeping your monitoring system reliable and your energy savings on track.",Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_f43537a550a246488613ca7e6aa940d6,SunRun RMA (Battery),SVC-SOLAR-0017,1,true,Labor,Solar,Repair,RMA,"Our Battery RMA (Return Merchandise Authorization) service ensures safe, efficient replacement or repair of faulty solar batteries. Reliable batteries are crucial for uninterrupted solar energy. Trust us to restore your system's performance and peace of mind.",Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_097b756114434edbba951a3fbee7a104,SunRun String down/ Isolation fault,SVC-SOLAR-0018,1,true,Labor,Solar,Repair,Solar Repair,"A SunRun string down or isolation fault means a section of your solar array isn — t producing power due to a wiring or inverter issue. Prompt service restores system performance, maximizes your energy savings, and ensures safe operation of your solar investment.",Each,1,500,,,,false,a1W7y000007AszBEAS
+olit_bd95fbc972384034855c89b9f56a3f5e,Standard Service Call,SVC-SOLAR-0019,1,true,Labor,Solar,Repair,Service Call,"Our Standard Service Call includes expert troubleshooting and diagnostics for your solar or energy system. We ensure optimal performance, address concerns, and provide professional solutions — helping you maximize efficiency and protect your investment.",Each,1,275,,,,false,a1W7y000007AszBEAS
+olit_2780b0aecfef417a858d7bdd442e54b5,Engineering,SVC-SOLAR-0020,1,true,Fee,Solar,Repair,Permit & Design,,Each,1,100,,,,false,a1W7y000007AszBEAS
+olit_671865c5f5f3441b8addfc6804e346ca,SunRun Meter,SVC-SOLAR-0021,1,true,Labor,Solar,Repair,Monitoring,,Each,1,395,,,,false,a1W7y000007AszBEAS
+olit_358a00e16c134ec788c543932f0b4483,Labor Rate,SVC-SOLAR-0022,1,true,Labor,Solar,Repair,Service Call,"Covers the skilled labor required to complete your project efficiently and safely. This rate ensures all work is performed to high standards, giving you peace of mind and quality results while saving you time and effort.",Each,1,120,,,,false,a1W7y000007AszBEAS
+olit_1d6c58dd5a55415fb142ca3f0213990e,Phoenix Trip Charge,SVC-SOLAR-0023,1,true,Fee,Solar,Repair,Service Call,"Covers the cost of travel and transportation for our technician to and from your Phoenix area property, ensuring timely service and efficient delivery of materials or repairs right at your location. This fee supports reliable, local service.",Each,1,80,,,,false,a1W7y000007AszBEAS
+olit_02ef5e5242db4c39993a715b8fda4386,APS Standard Truck Roll,SVC-SOLAR-0024,1,true,Labor,Solar,Repair,Service Call,"A technician will visit your property to assess, maintain, or repair your system, ensuring prompt, professional service and minimizing downtime. This on-site support delivers peace of mind and helps keep your equipment running smoothly.",Each,1,210,,,,false,a1W7y000007AszBEAS
+olit_8216a82749d6423792413bfb1d6b099e,Warranty Repair,SVC-SOLAR-0025,1,true,Labor,Solar,Repair,Solar Repair,"Warranty repair service restores covered items to proper working condition, ensuring your home remains comfortable and functional while protecting your investment and providing peace of mind.",Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_e3ae1085da3144928b600e785365639d,Non Warranty Repair,SVC-SOLAR-0026,1,true,Labor,Solar,Repair,Solar Repair,"Professional repair service to address issues not covered by warranty, restoring proper function and ensuring reliability. This work helps prevent further damage and prolongs the lifespan of your system or equipment, providing peace of mind and continued comfort.",Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_83a230550d964a5dbde47afc172f9e7a,Discounted Labor - O&M customer,SVC-SOLAR-0027,1,true,Labor,Solar,Repair,Service Call,,Each,1,310,,,,false,a1W7y000007AszBEAS
+olit_ff0d6197d0d640e5add175dd20d6fee3,SMA -RMA ADDITIONAL,SVC-SOLAR-0028,1,false,Labor,Solar,Repair,RMA,,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_a174ef930f7f4595884c0baa15a1a57b,SMA - RMA TIGOS - FLIPPED 25 REPLACED 14,SVC-SOLAR-0029,1,true,Labor,Solar,Repair,RMA,,Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_6eea0947f0ec428baa7a47393ca53f8c,Quoted - Removal-Reinstall,SVC-SOLAR-0030,1,true,Labor,Solar,Repair,Quoted Work,,Each,1,6300,,,,false,a1W7y000007AszBEAS
+olit_00f30d484e7c44f1bc08c425ffd7dd02,Quoted - Roof repair,SVC-SOLAR-0031,1,true,Labor,Solar,Repair,Quoted Work,,Each,1,1940,,,,false,a1W7y000007AszBEAS
+olit_d62bc381013a47eaac6963a4412c5fad,Spruce - System Inspection - 100-AZ,SVC-SOLAR-0032,1,true,Labor,Solar,Repair,Inspection,,Each,1,391,,,,false,a1W7y000007AszBEAS
+olit_7cafe0d146ac48bfac373a5eada632ac,DISPATCH MAN HOURS,SVC-SOLAR-0033,1,false,Labor,Solar,Repair,Service Call,,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_56d69d107a3e496fa3797970130bc4e7,TRAVEL ADDER -AES,SVC-SOLAR-0034,1,true,Fee,Solar,Repair,Service Call,,Each,1,75,,,,false,a1W7y000007AszBEAS
+olit_e7c7ea779d634efb88d868328eaab885,SERVICE CHARGE,SVC-SOLAR-0035,1,true,Fee,Solar,Repair,Service Call,,Each,1,25,,,,false,a1W7y000007AszBEAS
+olit_344b0ad2fd88401080785d5f7a25c291,Removal/Reinstall,SVC-SOLAR-0036,1,true,Labor,Solar,Repair,Quoted Work,Remove existing (43) solar modules and associated racking components as well as all standoffs/flashings for all (43) modules being removed. Store solar modules and related racking material  onsite.   Upon completion of roof repairs Harmon will return and reinstall solar modules using stored racking material and components along with NEW standoffs/flashings. -by accepting the proposal you agree to our terms and conditions sent via clickable link,Each,1,7955,,,,false,a1W7y000007AszBEAS
+olit_f7651725a60f448184c2a60c69ad14c5,ChargePoint Dispatch,SVC-EV-0003,1,true,Labor,EV,Repair,Service Call,,Each,1,100,,,,false,a1W7y000007AszBEAS
+olit_7499d9a5dac54c7f980a6f110a867faf,CT4 INTERPOSER CAP REPLACEMENT,SVC-EV-0004,1,true,Labor,EV,Repair,EV Charger,,Each,1,85.5,,,,false,a1W7y000007AszBEAS
+olit_6c80a00f7fbf4eab9c2e50d0a6887e66,CT4 POWER PLATE REPLACEMENT,SVC-EV-0005,1,true,Labor,EV,Repair,EV Charger,,Each,1,110,,,,false,a1W7y000007AszBEAS
+olit_6167d85ba108448d91c0588b2cdc23e0,Additional Labor,SVC-SOLAR-0037,1,true,Labor,Solar,Repair,Service Call,,Each,1,100,,,,false,a1W7y000007AszBEAS
+olit_f7efc66da4674f63b020eab44a54c36e,Solar - system inspection,SVC-SOLAR-0038,1,true,Labor,Solar,Repair,Inspection,,Each,1,350,,,,false,a1W7y000007AszBEAS
+olit_786be0e225504ea6ac37425f822a8c12,Labor - Install Disconnect - 1 tech,SVC-SOLAR-0039,1,true,Labor,Solar,Repair,Service Call,,Each,1,550,,,,false,a1W7y000007AszBEAS
+olit_bc6eb8e47d6d444f80f3951bd1516cdb,Premium Bird Proofing Package,SVC-SOLAR-0040,1,true,Labor,Solar,Repair,Cleaning,"Premium Bird-Proofing Package
+**Professional solar panel cleaning: We include a full solar cleaning to maximize system efficiency and improve energy output.
+
+**Premium bird guards: Custom-fitted galvanized steel mesh with PVC coating prevents rust, corrosion, and any bird or rodent re-entry.
+
+**Durable mounting system: Guards are fastened using stainless steel J-hooks with locking washers and stainless steel, all-weather zip ties for long-lasting protection",Each,1,1200,,,,false,a1W7y000007AszBEAS
+olit_c7cf60ea13164de7875f02ebf9bc57d9,EV - O&M Inpsection,SVC-EV-0006,1,true,Labor,EV,Repair,Inspection,,Each,1,250,,,,false,a1W7y000007AszBEAS
+olit_0dbb9b079e2646be88deb092f21accad,Monitor Plan,SVC-SOLAR-0041,1,true,Fee,Solar,Installation,Service Plan,"Our Monitor Plan provides continuous tracking of your solar energy system's performance. Stay informed with real-time alerts and detailed reports, ensuring efficiency and maximizing savings. Enjoy peace of mind knowing your system is always optimized.
+
+Proactive Monitoring
+Remote Troubleshooting (no extra charge)
+Priority Scheduling
+Discounted Full System Inspection
+10% off repairs
+5% off add-on equipment",Each,1,8.99,5,,,false,a1W7y000007AszBEAS
+olit_53266f5ab50947209441b76ce9902a3a,QUOTED O&M,SVC-SOLAR-0042,1,true,Labor,Solar,Repair,Quoted Work,,Each,1,2240,,,,false,a1W7y000007AszBEAS
+olit_e2dd4c7712ce4399b1b2b04e7ba1d338,APS Quoted Cost,SVC-GEN-0003,1,true,Labor,,Repair,Quoted Work,,Each,1,5815,,,,false,a1W7y000007AszBEAS
+olit_6758c578024044bb9f47d50e0e0e3100,Maintain Plan,SVC-SOLAR-0043,1,true,Fee,Solar,Installation,Service Plan,"Our Maintain Plan ensures your solar and energy systems operate at peak performance year-round. System checks help prevent issues, maximize efficiency, and extend equipment life — protecting your investment and saving you money
+
+Includes
+Annual Tune-Up at month 11
+Hardware and visual inspection
+Preventive maintenance to keep your system performing at its best
+Proactive Monitoring
+Remote Troubleshooting (no extra charge)
+Priority Scheduling
+Discounted Full System Inspection
+10% off repairs
+5% off add-on equipment",Each,1,19.99,,,,false,a1W7y000007AszBEAS
+olit_c037acf160c9405abd405771cdb55eaa,Clean Plan,SVC-SOLAR-0044,1,true,Fee,Solar,Installation,Service Plan,"Keep your solar panels performing at their best with our Protect Plan — Clean service. Regular professional cleaning removes dirt and debris, ensuring maximum energy output, extending panel life, and protecting your investment in clean, efficient energy.
+
+Professional panel wash included during your annual month 11 visit. (Up to 40 panels included)
+Annual Tune-Up at month 11
+Hardware and visual inspection
+Preventive maintenance to keep your system performing at its best
+Proactive Monitoring
+Remote Troubleshooting (no extra charge)
+Priority Scheduling
+Discounted Full System Inspection
+10% off repairs
+5% off add-on equipment",Each,1,39.99,,,,false,a1W7y000007AszBEAS
+olit_3eec03536e6e4504884c259b4a2854d6,Protect Plan,SVC-SOLAR-0045,1,true,Fee,Solar,Installation,Service Plan,"Our Protect Plan provides priority service and expert repairs for your solar and energy systems. Enjoy peace of mind with fast response times, system health checks, and preventative maintenance — maximizing efficiency, reliability, and long-term savings.
+
+Includes
+$0 labor on covered repair visits
+$0 parts on covered system failures under normal operating conditions
+Proactive Monitoring
+Remote Troubleshooting
+Priority Scheduling
+$50 off inspections (for non-covered issues)
+10% off non-covered repairs
+5% off add-on equipment
+Annual Tune-Up at month 11*",Each,1,39.99,,,,false,a1W7y000007AszBEAS
+olit_47e78a1a4b834f8e86c786d1d329830c,Permit and Design,SVC-SOLAR-0046,1,true,Fee,Solar,Installation,Permit & Design,Permit and Design,Each,1,750,590,,,false,a1W7y000007AszBEAS
+olit_231d6e6c3c2a4f1eaaadfc6c86a55e6d,Omnidian Standard Truck Roll,SVC-EV-0007,1,true,Labor,EV,Repair,Service Call,,Each,1,300,,,,false,a1W7y000007AszBEAS
+olit_626d0d0390d34a0981e01e11c3749cf6,Labor - Inverter installation,SVC-SOLAR-0047,1,true,Labor,Solar,Repair,Service Call,,Each,1,455,,,,false,a1W7y000007AszBEAS
+olit_563ce6543fa946ebbaa08b48fd186e57,Inverter Disposal,SVC-SOLAR-0048,1,true,Fee,Solar,Repair,Disposal,,Each,1,30,,,,false,a1W7y000007AszBEAS
+olit_a27f6763019b4a56a3f784fe51987999,Spruce - 101-AZ,SVC-SOLAR-0049,1,true,Labor,Solar,Repair,Solar Repair,,Each,1,391,,,,false,a1W7y000007AszBEAS
+olit_e8498d813bc24b9ba05dc87ae59a85e1,Tesla -RMA,SVC-EV-0008,1,false,Labor,EV,Repair,RMA,,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_8ff03e55031c4c3391c25fa78a989f6f,Additional Labor - EV,SVC-EV-0009,1,true,Labor,EV,Repair,Service Call,,Each,1,90,,,,false,a1W7y000007AszBEAS
+olit_8574908d042b434ea33b36e56d011471,Disposal - Solar Panel,SVC-SOLAR-0050,1,true,Fee,Solar,Repair,Disposal,,Each,1,15,,,,false,a1W7y000007AszBEAS
+olit_dc2e7ba268874e0fa9e2f35ef9bd1ce8,QUOTED BATTERY REMOVAL,SVC-SOLAR-0051,1,true,Labor,Solar,Repair,Quoted Work,,Each,1,5815,,,,false,a1W7y000007AszBEAS
+olit_ecf8e154f53d48988ead1c3fc1e5885a,SMA RMA,SVC-SOLAR-0052,1,true,Labor,Solar,Repair,RMA,,Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_a90dfbeaf3e542b3b6e8cbbe7157c728,Disposal - EV charger,SVC-EV-0010,1,true,Fee,EV,,EV Charger,,Each,1,100,,,,false,a1W7y000007AszBEAS
+olit_4fa2669148f9448daa68f35671de1e21,Rip and Replace -EV Charger Per Port,SVC-EV-0011,1,true,Labor,EV,,EV Charger,"Removal of the existing EV charger at each port and installation of a new, upgraded unit. This service ensures safe, reliable charging for your electric vehicle with the latest technology, improving performance and meeting current safety standards.",Each,1,750,,,,false,a1W7y000007AszBEAS
+olit_e7d8a313b98244428d413214412fd751,Fronius - RMA,SVC-SOLAR-0053,1,true,Labor,Solar,Repair,RMA,,Each,1,150,,,,false,a1W7y000007AszBEAS
+olit_86477c4321b5472d8739cf1a25022e1e,Sunrun - Inverter (unlike),SVC-SOLAR-0054,1,true,Labor,Solar,Repair,Inverter,,Each,1,550,,,,false,a1W7y000007AszBEAS
+olit_631433c416b6482fa7ff8feafe4fe061,APS - EV SERVICE CALL,SVC-EV-0012,1,false,Labor,EV,,EV Charger,,Each,1,0,,,,false,a1W7y000007AszBEAS
+olit_4ea85d034f4d44f49b7cfeed9d751d87,CT4 Latch replacement,SVC-EV-0013,1,true,Labor,EV,Repair,EV Charger,,Each,1,125,,,,false,a1W7y000007AszBEAS
+olit_adb08c7bf3334cb183b1d51227adb9f4,CT4 Head Replacement,SVC-EV-0014,1,true,Labor,EV,Repair,EV Charger,,Each,1,110,,,,false,a1W7y000007AszBEAS
+olit_575146d8f16c473d849b232785d6facd,106-AZ,SVC-EV-0015,1,true,Labor,EV,Repair,EV Charger,,Each,1,391,,,,false,a1W7y000007AszBEAS
+olit_4ec0472fa3bb41309f8da580e49c16ca,Spruce - CATM1 meter,SVC-SOLAR-0055,1,true,Labor,Solar,Repair,Monitoring,,Each,1,448.09,,,,false,a1W7y000007AszBEAS
+olit_3c7025b83d0040479abcf479cd35f593,Meter can /Wire,SVC-SOLAR-0056,1,true,Labor,Solar,Repair,Monitoring,,Each,1,155,,,,false,a1W7y000007AszBEAS
+olit_f04648773f474f5c8ffaa9c9dd70d719,Removal/Reinstall,SVC-SOLAR-0057,1,false,Labor,Solar,Repair,Quoted Work,"Remove existing (58) solar modules and associated racking components as well as all standoffs/flashings for all (58) modules being removed. Store solar modules and related racking material  onsite.   Upon completion of roof repairs Harmon will return and reinstall solar modules using stored racking material and components along with NEW standoffs/flashings.
+
+Included Components in Both Options:
+- Labor to remove and reinstall solar system using existing components/hardware
+- Solar modules grounding as needed for proper reinstallation
+
+Excluded Items
+- Additional racking/attachment hardware 
+- lift rental if 2 story with no 1st story access. 
+- Any structural modifications needed
+-Additional bird debris clean up
+- Any additional issues or damage to the system not caused by Harmon found after removal occurs.
+- Any modifications made to the system after original installation i.e. bird blocking 
+	
+Payment terms:  50% Deposit due upon scheduling.  Balance is due at completion.  For your convenience we can take VISA/MC/AMEX for deposit, keep the card on file in a secure location and charge the balance upon completion.  Credit Card info will be shredded upon completion.",Each,1,0,,,,false,a1W7y000007AszBEAS
+pbmat_747f64c161204c5f92bbbaf6f893fdb8,Wire nuts,MAT-MISC-0001,1,true,Material,,,Materials,,Each,1,,,25,,true,a1W7y000007AszBEAS
+pbmat_28967762dc1b4b4fb0b73ab34b1f185b,Miscellaneous Materials,MAT-MISC-0002,1,false,Material,,,Materials,,Each,1,,,0,,false,a1W7y000007AszBEAS
+pbmat_7d9416c38bc744d8b3f50f40fe9b9375,Roofing Materials,MAT-MISC-0003,1,false,Material,,,Materials,Taxable materials for roof repair,Each,1,,,0,,true,a1W7y000007AszBEAS
+pbmat_2d29b269fa3b48cc92a99dfab8cfd812,Fronius Gen 24 10.kW inverter,MAT-INV-0001,1,true,Material,Solar,,Inverter,,Each,1,,,3200,,false,a1W7y000007AszBEAS
+pbmat_ad9f47b29ed948148c975cfb17ac68f2,Kyocera solar panel,MAT-PNL-0001,1,true,Material,Solar,,Panel,,Each,1,,,100,52,false,a1W7y000007AszBEAS
+pbmat_2b6d7d63f9c04f22be2b42b8851c184b,Envoy,MAT-MON-0001,1,true,Material,Solar,,Monitoring,Envoy S with Cell kit,Each,1,,,1550,860.46,false,a1W7y000007AszBEAS
+pbmat_fa40c78aead14fbc90f798f94348e62d,Mids/Ends,MAT-MISC-0004,1,true,Material,,,Materials,,Each,1,,,15,,false,a1W7y000007AszBEAS
+pbmat_20a0c5bf802e48089df8039863ff457a,Solar Panel,MAT-MISC-0005,1,true,Material,,,Materials,REC295W,Each,1,,,225,,false,a1W7y000007AszBEAS
+pbmat_249dbbc6b84d4bd980def3520f2d6fff,ABB A145-30-11-84 - AC CONTACTOR,MAT-MISC-0006,1,true,Material,,,Materials,,Each,1,,,561.31,509.37,false,a1W7y000007AszBEAS
+pbmat_f3cd0fc43d4940cf90c8977b13cf4959,MC4,MAT-MISC-0007,1,true,Material,,,Materials,,Each,1,,,10,,false,a1W7y000007AszBEAS
+pbmat_b04ac59b36ca4e0fbf3e7501afb2c44d,CAP 205uF 750VDC 80A POLYPRPLN MTLD ALT,MAT-MISC-0008,1,true,Material,,,Materials,CAP 205uF 750VDC 80A POLYPRPLN MTLD ALT,Each,1,,,143,130,false,a1W7y000007AszBEAS
+pbmat_ccfd7f506c884a0ab95ddbe341cb3a49,Tesla Inverter,MAT-INV-0002,1,true,Material,Solar,,Inverter,,Each,1,,,2380,1836,false,a1W7y000007AszBEAS
+pbmat_c17002a58e5f4755800bdb90e8f14cf1,ABB A145-30-11-84,MAT-AES-0001,1,true,Material,Commercial,,Commercial Parts,ABB A145-30-11-84 contactor,Each,1,,,560.31,509.37,false,a1W7y000007AszBEAS
+pbmat_ea28a855529e40eeac3cb16c89b160e3,TE EV200HAANA 1-1618002-8,MAT-AES-0002,1,true,Material,Commercial,,Commercial Parts,T E DC contactors,Each,1,,,178.42,162.2,false,a1W7y000007AszBEAS
+pbmat_b6a8c38ccad64d8eb11cc082b149a41c,Empast 4604N,MAT-AES-0003,1,true,Material,Commercial,,Commercial Parts,Empast 4604N fans,Each,1,,,63.69,57.9,false,a1W7y000007AszBEAS
+pbmat_979b6f6e343d4bb19b7a1ed9f46ef6e5,CKE Z575PA80C,MAT-AES-0004,1,true,Material,Commercial,,Commercial Parts,Surge suppressors,Each,1,,,26.08,23.71,false,a1W7y000007AszBEAS
+pbmat_e70a2799112c4f898f31c97fcec03697,SIBA 2066132.200,MAT-AES-0005,1,true,Material,Commercial,,Commercial Parts,SIBA 200 A square,Each,1,,,126.96,115.42,false,a1W7y000007AszBEAS
+pbmat_1bf230e091094606b1fd10ed3345727b,SIBA 2066132.250,MAT-AES-0006,1,true,Material,Commercial,,Commercial Parts,SIBA 250 A square,Each,1,,,178.7,162.45,false,a1W7y000007AszBEAS
+pbmat_a90578a5ac8345f0a276a2ee31bf37ce,SIBA 2066132.315,MAT-AES-0007,1,true,Material,Commercial,,Commercial Parts,SIBA 315 A square,Each,1,,,191.32,173.93,false,a1W7y000007AszBEAS
+pbmat_5684c65cfd7a42bb8281ed9fa3ab8413,SIBA 2066132.400,MAT-AES-0008,1,true,Material,Commercial,,Commercial Parts,SIBA 400 A square,Each,1,,,209.63,190.57,false,a1W7y000007AszBEAS
+pbmat_694113ed2bf24e2d98de752ebc902195,SIBA 2066132.550,MAT-AES-0009,1,true,Material,Commercial,,Commercial Parts,SIBA 550 A square,Each,1,,,191.32,173.93,false,a1W7y000007AszBEAS
+pbmat_217084fbb1d742d3a06236757748fe1b,SIBA 2066132.700,MAT-AES-0010,1,true,Material,Commercial,,Commercial Parts,SIBA 700 A square,Each,1,,,219.24,199.31,false,a1W7y000007AszBEAS
+pbmat_0255e6050a6447bd9049537b0f683e9d,SIBA 2067132.1000,MAT-AES-0011,1,true,Material,Commercial,,Commercial Parts,SIBA 1000 A square,Each,1,,,420.17,381.97,false,a1W7y000007AszBEAS
+pbmat_b7b5dd244a2b41f780e8a7c77e5aeb37,ABB OBFZNA10,MAT-AES-0012,1,true,Material,Commercial,,Commercial Parts,ABB 250 Aux DC contacts,Each,1,,,42.41,38.55,false,a1W7y000007AszBEAS
+pbmat_acbe1d00103345d4b453ceec862d53fb,ABB OA1G10,MAT-AES-0013,1,true,Material,Commercial,,Commercial Parts,ABB 50-135 Aux DC contacts,Each,1,,,29.9,27.18,false,a1W7y000007AszBEAS
+pbmat_bf55f927b12a4f5f9d5f1068e82ffa70,C2SS2-10B-11,MAT-AES-0014,1,true,Material,Commercial,,Commercial Parts,ABB E-stops,Each,1,,,25.94,23.58,false,a1W7y000007AszBEAS
+pbmat_17f31114f4ff4ec4a9f95a4adb62559c,ABB CL-502R,MAT-AES-0015,1,true,Material,Commercial,,Commercial Parts,ABB Control Light,Each,1,,,34.29,31.17,false,a1W7y000007AszBEAS
+pbmat_d218de425b5a452da6fd8c806ffc53c4,SIBA 2800310 URS B-Switch,MAT-AES-0016,1,true,Material,Commercial,,Commercial Parts,SIBA square fuse top/indicator,Each,1,,,55.91,50.83,false,a1W7y000007AszBEAS
+pbmat_fe8c4325e35a4967aebd0326e375e313,"FD27GB66V3,15T",MAT-AES-0017,1,true,Material,Commercial,,Commercial Parts,Ferazz Ground Fault fuses,Each,1,,,81.95,74.5,false,a1W7y000007AszBEAS
+pbmat_be1fe061323e43b28313faddf3d6bacd,FD27GB66V4T,MAT-AES-0018,1,true,Material,Commercial,,Commercial Parts,Ferazz Ground Fault fuses,Each,1,,,81.95,74.5,false,a1W7y000007AszBEAS
+pbmat_8a998a166fac465eb15703d655dba52b,2938743,MAT-AES-0019,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 15-1,Each,1,,,379.35,344.86,false,a1W7y000007AszBEAS
+pbmat_1a4f94790400429ead60362e10f1150c,2938756,MAT-AES-0020,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 15-2,Each,1,,,192.59,175.08,false,a1W7y000007AszBEAS
+pbmat_69a1fc59a2bd4b85a86ae807f985fd87,2866297,MAT-AES-0021,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 15-8,Each,1,,,349.14,317.4,false,a1W7y000007AszBEAS
+pbmat_8bb3233accdd4e2a952866a6c2d67175,2938730,MAT-AES-0022,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 24-2,Each,1,,,178.76,162.51,false,a1W7y000007AszBEAS
+pbmat_6a280dadaa464d26b43e92ef7339724d,2938837,MAT-AES-0023,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 24-4,Each,1,,,327.51,297.74,false,a1W7y000007AszBEAS
+pbmat_f20d9cb3d37d4b11a572f8043d69e3a7,2903157,MAT-AES-0024,1,true,Material,Commercial,,Commercial Parts,Phx Contact power supply 15-5,Each,1,,,166.4,151.27,false,a1W7y000007AszBEAS
+pbmat_c7349fb375a04dcd907c15a3ff8e6da4,DRM-24V80W1PN,MAT-AES-0025,1,true,Material,Commercial,,Commercial Parts,Delta power supply 24-3.4,Each,1,,,139.66,126.96,false,a1W7y000007AszBEAS
+pbmat_e30614d8a4ef4c6ea92c05e80406ff08,LF 306-S,MAT-AES-0026,1,true,Material,Commercial,,Commercial Parts,LEMS small,Each,1,,,120.2,109.27,false,a1W7y000007AszBEAS
+pbmat_31b18443dff1434fbdd2fd5085406f1f,LF 1005-S,MAT-AES-0027,1,true,Material,Commercial,,Commercial Parts,LEMS for 250kW,Each,1,,,282.27,256.61,false,a1W7y000007AszBEAS
+pbmat_0f5250672e2a4918ae963d65d76a285f,LA 305-S/SP1 14232,MAT-AES-0028,1,true,Material,Commercial,,Commercial Parts,LEMS for AE,Each,1,,,207.68,188.8,false,a1W7y000007AszBEAS
+pbmat_735f6efc425849dc83fd48cb71318b80,Infineon FF450R12KT4,MAT-AES-0029,1,true,Material,Commercial,,Commercial Parts,IGBT 450 for AZ W College,Each,1,,,549.31,499.37,false,a1W7y000007AszBEAS
+pbmat_5e7da08da8b242098eec6c84f3afaaa3,Infineon FZ600R12KE3,MAT-AES-0030,1,true,Material,Commercial,,Commercial Parts,IGBT 600,Each,1,,,146.16,132.87,false,a1W7y000007AszBEAS
+pbmat_d4859f3ed3f64c7eb3d4e15f1fdf7fbe,Infineon FZ800R12KE3,MAT-AES-0031,1,true,Material,Commercial,,Commercial Parts,IGBT 800,Each,1,,,172.61,156.92,false,a1W7y000007AszBEAS
+pbmat_2fcb1055aa624ae090203234ca62801d,Infineon FZ1600R12KE3,MAT-AES-0032,1,true,Material,Commercial,,Commercial Parts,IGBT 1600,Each,1,,,269.5,245,false,a1W7y000007AszBEAS
+pbmat_cdc9fa39f800469e996489247d17a189,Electro-Meters CAT 2DT-201-1,MAT-AES-0033,1,true,Material,Commercial,,Commercial Parts,CTs,Each,1,,,57,51.82,false,a1W7y000007AszBEAS
+pbmat_83c9bcfbb09c4bfe9aec9db73b052d61,SP32OU,MAT-AES-0034,1,true,Material,Commercial,,Commercial Parts,AE surge Sup SP32OU,Each,1,,,189.95,172.68,false,a1W7y000007AszBEAS
+pbmat_4bc29e6778f9477caf59fd9982582849,SP42OU,MAT-AES-0035,1,true,Material,Commercial,,Commercial Parts,AE surge Sup SP42OU,Each,1,,,257.51,234.1,false,a1W7y000007AszBEAS
+pbmat_19ac116a9dde465b859ee46b7502f950,SP70PV,MAT-AES-0036,1,true,Material,Commercial,,Commercial Parts,AE surge Sup SP70PV,Each,1,,,315.57,286.88,false,a1W7y000007AszBEAS
+pbmat_4be56179bd4e4010b70bd84395693885,Phoenix Contact 2838762,MAT-AES-0037,1,true,Material,Commercial,,Commercial Parts,P.C. data line suppressor,Each,1,,,286.11,260.1,false,a1W7y000007AszBEAS
+pbmat_39fc26537a46450fbf391dbfb65a1e54,104M06QC100,MAT-AES-0038,1,true,Material,Commercial,,Commercial Parts,Blue (AC contactor) capacitors,Each,1,,,17.51,15.92,false,a1W7y000007AszBEAS
+pbmat_95c50ae0275c4848bdfa4b034603a881,Mersen R227600,MAT-AES-0039,1,true,Material,Commercial,,Commercial Parts,GF Fuse Holder,Each,1,,,199.53,181.39,false,a1W7y000007AszBEAS
+pbmat_7ec7a99ada624981a37de99b04683546,Heyco S6405 Sunrunner Clip,MAT-AES-0040,1,true,Material,Commercial,,Commercial Parts,Panel wire clips,Each,1,,,0.01,0.01,false,a1W7y000007AszBEAS
+pbmat_fa5f9f25f9424db0bfb7c6572a7b8ebe,CA-H619006-15,MAT-AES-0041,1,true,Material,Commercial,,Commercial Parts,MC4 type connector male,Each,1,,,0.01,0.01,false,a1W7y000007AszBEAS
+pbmat_cfc30343aa0e4df9a766632c0197a2ca,CA-H629006-15,MAT-AES-0042,1,true,Material,Commercial,,Commercial Parts,MC4 type connector female,Each,1,,,0.01,0.01,false,a1W7y000007AszBEAS
+pbmat_c36f1ef675d24432b3e8d73cc709574a,Fronius Gen 24 3.8kW inverter,MAT-INV-0003,1,true,Material,Solar,,Inverter,,Each,1,,,1590,1131.4,false,a1W7y000007AszBEAS
+pbmat_4aaf89ae96d14fbfabd5a91451d94ff8,SMA- Sunny Boy Smart Energy 3.8kW inverter,MAT-INV-0004,1,true,Material,Solar,,Inverter,,Each,1,,,2200,,false,a1W7y000007AszBEAS
+pbmat_4bd49b29282e469390a9508e6df9560c,Fronius Gen24 6.0kW inverter,MAT-INV-0005,1,true,Material,Solar,,Inverter,,Each,1,,,2195,1676,false,a1W7y000007AszBEAS
+pbmat_1bd851cc939542ca9a4602e66e539996,Fronius Primo - 11.4 Inverter,MAT-INV-0006,1,true,Material,Solar,,Inverter,,Each,1,,,3679.61,2695.86,false,a1W7y000007AszBEAS
+pbmat_b37344f62ac34aeb96a8411314dd439d,SMA Speedwire Datalogging/Monitoring Card,MAT-MON-0002,1,true,Material,Solar,,Monitoring,"SMA Monitoring card for -12 or -US inverters to replace Sunny Webbox.
+Part # SWPB-US-10",Each,1,,,206.36,165.09,false,a1W7y000007AszBEAS
+pbmat_cfbbbdd51285440dae6cf2a3d9ff1c02,5 port internet switch,MAT-MON-0003,1,true,Material,Solar,,Monitoring,"TP-Link TL-SG105, 5 Port Gigabit Unmanaged Ethernet Switch, Network Hub, Ethernet Splitter, Plug & Play, Fanless Metal Design, Shielded Ports, Traffic Optimization
+Part # TP-Link TL-SG105",Each,1,,,18.4,14.16,false,a1W7y000007AszBEAS
+pbmat_6d329a4acae3400e8d22d29ec2493897,12X12 Junction box,MAT-MISC-0009,1,true,Material,,,Materials,"CANTEX Enclosure: PVC, 12 in x 12 in x 6 in, NEMA 1/3/3S/4/4X/5/6/6P, Screw On, Solid Cover",Each,1,,,85,70,false,a1W7y000007AszBEAS
+pbmat_d6f8a73e855e4659a9ab11343a382281,Single Gang Bell box,MAT-MISC-0010,1,true,Material,,,Materials,Bell Single Gang Weatherproof Box,Each,1,,,7.78,5.98,false,a1W7y000007AszBEAS
+pbmat_ec8a3d6be8854aacbeb63eb82d746cea,15.0 -Amp 125-volt Residential Decorator Outlet Receptacles,MAT-MISC-0011,1,true,Material,,,Materials,15A receptacle,Each,1,,,4.02,2.68,false,a1W7y000007AszBEAS
+pbmat_a407c644c8c942529eb2d04f15b6cbdf,Eaton Type BR 15-amp 1 -Pole Standard trip Circuit Breaker,MAT-MISC-0012,1,true,Material,,,Materials,Eaton Type BR 15-amp 1 -Pole Standard trip Circuit Breaker,Each,1,,,10.63,8.18,false,a1W7y000007AszBEAS
+pbmat_b7482905a33141a093d71e9e2affbb9f,#12 THHN wire,MAT-WIRE-0001,1,true,Material,,,Wire,"THHN TYPE; 500 FOOT; 119 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US), CSA
+C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 20 AMP CURRENT RATING; 90 DEG C (DRY) TEMPERATURE RATING; 23 POUND PER 1000
+FOOT WEIGHT",Foot,1,,,0.28,0.21,false,a1W7y000007AszBEAS
+pbmat_ccaabef628e84a8b8d4e851c774546da,CAT 5e,MAT-WIRE-0002,1,true,Material,,,Wire,Southwire 500-ft 24 CAT 5e 4 Riser Data Cable Box,Foot,1,,,0.21,0.16,false,a1W7y000007AszBEAS
+pbmat_260c45fe8a5b42ed94a8e938938f4483,1A Fuse,MAT-MISC-0013,1,true,Material,,,Materials,,Each,1,,,10,3,false,a1W7y000007AszBEAS
+pbmat_05c4038c267c47e49ec638dbf13e0787,10 AWG STRANDED,MAT-WIRE-0003,1,true,Material,,,Wire,"THHN TYPE; (2) 500 FOOT; 161 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US),
+CSA C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 30 AMP CURRENT RATING; 90 DEG C (DRY) TEMPERATURE RATING; 38 POUND PER
+1000 FOOT WEIGHT
+Part # WIRE THHN10STRBLK",Foot,1,,,0.45,0.35,false,a1W7y000007AszBEAS
+pbmat_a06c8f2b61ba40b7ab6120a2bce18609,Fronius 3.8 Primo inverter,MAT-INV-0007,1,true,Material,Solar,,Inverter,,Each,1,,,1850,1326.41,false,a1W7y000007AszBEAS
+pbmat_0fd341813adc4f5090cc4f7b8d9714f7,SMA SB SMART ENERGY 5.8KW INV,MAT-INV-0008,1,true,Material,Solar,,Inverter,,Each,1,,,2795,2017.05,false,a1W7y000007AszBEAS
+pbmat_f91585ad3e83446a8e719b95dfe702bf,8 AWG STRANDED,MAT-WIRE-0004,1,true,Material,,,Wire,"THHN TYPE; 500 FOOT; 213 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US), CSA
+C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 40 AMP (60 DEG C), 50 AMP (75 DEG C), 55 AMP (90 DEG C) CURRENT RATING
+Part # WIRE THHN8STRBLK",Foot,1,,,0.84,0.64,false,a1W7y000007AszBEAS
+pbmat_3c69b7bec41842e2b62d48ccc206776a,6 AWG STRANDED WIRE,MAT-WIRE-0005,1,true,Material,,,Wire,"THHN TYPE; 500 FT; 0.253 INCH OUTER DIAMETER; ANNEALED BARE COPPER CONDUCTOR MATERIAL; UL 83, CUL APPROVAL; 600 V
+VOLTAGE RATING; 55 AMPERE (60 DEG C), 65 AMPERE (75 DEG C), 75 AMPERE (90 DEG C) CURRENT RATING; 90 DEG C (DRY/WET)
+TEMPERATURE RATING
+Part # WIRE THHN6STRBLK500R",Foot,1,,,1.29,0.99,false,a1W7y000007AszBEAS
+pbmat_0f23a8ec7ce044009126c19928134307,4 AWG STRANDED WIRE,MAT-WIRE-0006,1,true,Material,,,Wire,"THHN TYPE; 500 FT; 500 LENGTH IN FT; SOFT ANNEALED COPPER CONDUCTOR MATERIAL; UL (CANADA AND US) APPROVAL; 600 V
+VOLTAGE RATING; 70 AMPERE (60 DEG C), 85 AMPERE (75 DEG C), 95 AMPERE (90 DEG C) CURRENT RATING
+Part # WIRE THHN4STRBLK",Foot,1,,,1.97,1.52,false,a1W7y000007AszBEAS
+pbmat_de3338c4e74a47dfadf4dbf51528521c,60A 2 POLE BREAKER,MAT-MISC-0014,1,true,Material,,,Materials,60A DOUBLE POLE BREAKER,Each,1,,,32.84,25.26,false,a1W7y000007AszBEAS
+pbmat_01f367e5b0eb42cda74de507915d8572,"3/4"" CONDUIT",MAT-CND-0001,1,true,Material,,,Conduit,"3/4"" EMT
+Part # EMT-3/4",Each,1,,,1.39,0.92,false,a1W7y000007AszBEAS
+pbmat_caa0ea44c64b43a08b8808bc3d020c92,"3/4"" CONNECTOR",MAT-CND-0002,1,true,Material,,,Conduit,"3/4 EMT CONNECTOR
+Part # 251SRTI",Each,1,,,2.27,1.74,false,a1W7y000007AszBEAS
+pbmat_943c5f44fc0443da9f824d7c2138f5b8,"3/4"" COUPLER",MAT-CND-0003,1,true,Material,,,Conduit,"3/4 EMT COUPLING
+Part # 261SRT",Each,1,,,2.78,2.14,false,a1W7y000007AszBEAS
+pbmat_a5324c0d7e64458db46a170f8042705c,"3/4"" ONE HOLE STRAP",MAT-CND-0004,1,true,Material,,,Conduit,"3/4 1H STL EMT STRAP
+Part # 921S",Each,1,,,0.46,0.23,false,a1W7y000007AszBEAS
+pbmat_9ac6c6271f2e4b95a41fe33e2f50ea3b,"3/4"" LB CONDULETTE WITH GASKET",MAT-CND-0005,1,true,Material,,,Conduit,"3/4 AL BODY ASBLY
+Part # LB42CG",Each,1,,,8.94,6.88,false,a1W7y000007AszBEAS
+pbmat_a6feb81695a74c57b01218938761075b,SWDM-US-10,MAT-MON-0004,1,true,Material,Solar,,Monitoring,"SMA Speedwire Datalogging/Monitoring Card for -22 and TriPowers
+Part # SWDM-US-10",Each,1,,,278.45,214.2,false,a1W7y000007AszBEAS
+pbmat_7fdf6d0bf92a406583677c50ea3e1887,Fronius Rapid Shut Down,MAT-MISC-0015,1,true,Material,,,Materials,,Each,1,,,335,256.91,false,a1W7y000007AszBEAS
+pbmat_adb243476e2b4076a429266afd0effee,Fronius Primo Gen24 5.0kW inverter,MAT-INV-0009,1,true,Material,Solar,,Inverter,,Each,1,,,2048.75,1517.56,false,a1W7y000007AszBEAS
+pbmat_c72c0affa74442eca5c7b313c1049618,Fuse,MAT-MISC-0016,1,true,Material,,,Materials,,Each,1,,,389.49,311.59,false,a1W7y000007AszBEAS
+pbmat_c6b760e869984554bff10d7e6f04ac1f,MOTOR RUN CAPACITOR 370 TO 440VAC,MAT-MISC-0017,1,true,Material,,,Materials,,Each,1,,,16.72,4.18,false,a1W7y000007AszBEAS
+pbmat_6d424ee396e64ec6b27fecdf9830722d,Fronius Gen24 7.7kW Inverter,MAT-INV-0010,1,true,Material,Solar,,Inverter,"Fronius Primo GEN24 7.7
+4,210,143,800
+Manufacturer: Fronius USA, 10 years limited warranty",Each,1,,,2695,2023.3,false,a1W7y000007AszBEAS
+pbmat_f4d7f8d6911140cc9255e4d5d6eb4b04,HCS-40R-C17-L25-170,MAT-EV-0001,1,true,Material,EV,,EV Charger,"32A charging, 240VAC, 10AWG service, 25' 10AWG ruggedized J1772 connector",Each,1,,,1060,916,false,a1W7y000007AszBEAS
+pbmat_9a451679e3a6458baf3250e07af61d6a,Trip Charge,MAT-EV-0002,1,true,Fee,EV,,Service Call,"Covers the cost of our technician traveling to your location, ensuring timely arrival with the necessary tools and expertise to assess and address your needs efficiently. This helps us provide reliable service and maintain prompt scheduling for all customers.",Each,1,100,,,,false,a1W7y000007AszBEAS
+pbmat_095a3d62729e4e11a9fe1da7cca93796,Spruce- CATM1 meter,MAT-MISC-0018,1,true,Material,,,Materials,,Each,1,,,448.09,,false,a1W7y000007AszBEAS
+pbmat_0d18a4f772794cf39c9fb406fcb4051d,Meter Can/Wire,MAT-MISC-0019,1,true,Material,,,Materials,,Each,1,,,140.5,,false,a1W7y000007AszBEAS
+pbmat_1f84299c35a94f7c9b1bc4a5c00ce91e,Sunny Tripower X 20-US-50,MAT-INV-0011,1,true,Material,Solar,,Inverter,,Each,1,,,4206.67,3235.9,false,a1W7y000007AszBEAS
+pbmat_eaad0f6293f748f193a1ece4ddfad31a,SQD Disconnect,MAT-MISC-0020,1,true,Material,,,Materials,,Each,1,,,175,125,false,a1W7y000007AszBEAS
+pbmat_a0e49c23c780470c8296d432e77f0712,3 AWG STRANDED,MAT-WIRE-0007,1,true,Material,,,Wire,"""THHN TYPE; 500 FT; 500 LENGTH IN FT; SOFT ANNEALED COPPER CONDUCTOR MATERIAL; UL (CANADA AND US) APPROVAL; 600 V
+VOLTAGE RATING; 85 AMPERE (60 DEG C), 100 AMPERE (75 DEG C), 110 AMPERE (90 DEG C) CURRENT RATING""
+Part # WIRE THHN3STRBLK",Foot,1,,,2.7,2.08,false,a1W7y000007AszBEAS
+pbmat_548ce63bf2bb441791a8824d04d4a949,SQD Fused Disconnect,MAT-MISC-0021,1,true,Material,,,Materials,,Each,1,,,167.87,129.13,false,a1W7y000007AszBEAS
+pbmat_76367a43735a4d7889715eb29d879ed0,250V Fuses - For SQD disconnect,MAT-MISC-0022,1,true,Material,,,Materials,,Each,1,,,8.59,4.98,false,a1W7y000007AszBEAS

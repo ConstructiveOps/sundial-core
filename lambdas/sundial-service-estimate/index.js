@@ -21,6 +21,17 @@
 //   POST   /service/price-book-items/{id}/deactivate
 //   GET    /service/estimates/{id}/preview          read-only rendered document (what the customer sees)
 //   GET    /service/jobs/{id}/activity              the job's activity feed (newest first)
+//   GET    /service/jobs/{id}/street-view           the house: Google Street View still, fetched once, cached in S3
+//   POST   /service/jobs/{id}/invoice               issue the job's invoice (estimate lines frozen)   ┐
+//   GET    /service/jobs/{id}/invoice               the job's current invoice + payments             │
+//   GET    /service/invoices/{id}                   one invoice + payments                           │ invoice.js
+//   GET    /service/invoices/{id}/preview           the invoice document (HTML)                      │
+//   POST   /service/invoices/{id}/payments          record a check / ACH / remittance / refund       │
+//   POST   /service/invoices/{id}/send              email the PDF to the payer                       │
+//   POST   /service/invoices/{id}/void              void with a reason (reissue = "-2")              ┘
+//   GET    /service/jobs/{id}/labor                 completed calls + clock hours + billing state    ┐
+//   POST   /service/jobs/{id}/labor                 bill / unbill calls, overtype hours and rates     │ labor.js
+//   POST   /service/labor/default-rate              a tech's Hourly_Bill_Rate__c                     ┘
 //   GET    /service/estimates/{id}/activity         an estimate's feed (pre-job history)
 //
 // RULES ENFORCED HERE (the metadata cannot): every job has exactly one estimate and an
@@ -71,9 +82,20 @@ import {
   soqlEscapeString,
 } from "../../lib/salesforce.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
+import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
-import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
+import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
+import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
+import {
+  buildKey,
+  publicUrlForKey,
+  registerFileMetadata,
+  findFileMetadataByKey,
+  S3_BUCKET,
+  S3_REGION,
+} from "../../lib/file-access.js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   EVENTS,
   recordActivity,
@@ -113,10 +135,13 @@ import {
   lineFromItem,
   adHocLine,
   linePatchFields,
+  linkLineToItem,
   cloneLineFields,
 } from "./pricebook.js";
 
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
+import { createInvoiceHandlers } from "./invoice.js";
+import { createLaborHandlers } from "./labor.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
@@ -137,6 +162,24 @@ export const DEFAULTS = Object.freeze({
 export const PUBLIC_BASE_URL = (process.env.SERVICE_PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 export function publicEstimateUrl(token, baseUrl = PUBLIC_BASE_URL) {
   return baseUrl && token ? `${baseUrl}/estimate/${encodeURIComponent(token)}` : null;
+}
+
+// Company name on the document + the email. Same env var the public Lambda reads, so
+// the office preview, the customer page, the PDF and the email all say the same name.
+// Falls back to the tenant slug (capitalised) until it is set.
+export const BRAND_NAME = process.env.SERVICE_BRAND_NAME || "";
+
+// The PDF of each sent version lives with the estimate's files (D-072.5):
+//   SUNDIAL/{estimateId}/estimate-v{n}.pdf
+// Deterministic key: a retry of the same version overwrites in place, never piles up.
+export function estimatePdfKey(estimateId, version) {
+  return buildKey(estimateId, `estimate-v${version}.pdf`);
+}
+
+let _s3 = null;
+function s3() {
+  if (!_s3) _s3 = new S3Client({ region: S3_REGION });
+  return _s3;
 }
 
 /** The customer email for an estimate send: what the customer record says today. */
@@ -174,8 +217,11 @@ const CACHE = Object.freeze({
   estimate: "sundial_estimate_cache",
   job: "sundial_service_job_cache",
   line: "sundial_service_line_cache",
+  call: "sundial_service_call_cache",
   item: "sundial_price_book_item_cache",
   customer: "sundial_customer_cache",
+  invoice: "sundial_service_invoice_cache",
+  payment: "sundial_service_payment_cache",
 });
 
 
@@ -282,6 +328,17 @@ const ROUTES = [
   ["POST", /^\/service\/price-book-items\/([^/]+)\/deactivate\/?$/, "deactivateItem"],
   ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "getJobInvoice"],
+  ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
+  ["GET", /^\/service\/invoices\/([^/]+)\/?$/, "getInvoice"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/payments\/?$/, "recordPayment"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/send\/?$/, "sendInvoice"],
+  ["POST", /^\/service\/invoices\/([^/]+)\/void\/?$/, "voidInvoice"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "getLabor"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "saveLabor"],
+  ["POST", /^\/service\/labor\/default-rate\/?$/, "setDefaultRate"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
 ];
 
@@ -299,6 +356,16 @@ export function matchRoute(method, path) {
 // ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
+// --- Street View (data-model §5.2, the 9/9 ask) ----------------------------------
+// The Google key lives in Secrets Manager (`sundial/google-maps` → { apiKey }), never in
+// the browser or an env var. The still is fetched ONCE per job and cached in S3 next to
+// the job's files; the job remembers the key. "NONE" in the field means Google was
+// asked and has no imagery for the address, so the page stops asking.
+export const STREET_VIEW_SECRET = "sundial/google-maps";
+export const STREET_VIEW_NONE = "NONE";
+export const STREET_VIEW_SIZE = "640x400";
+export const streetViewKey = (jobId) => buildKey(jobId, "street-view.jpg");
+
 export function createHandler(deps = {}) {
   const d = {
     resolveIdentity: realResolveIdentity,
@@ -311,10 +378,24 @@ export function createHandler(deps = {}) {
     sendEmail: realSendEmail,
     isEmailConfigured: realIsEmailConfigured,
     publicBaseUrl: PUBLIC_BASE_URL,
+    brandName: BRAND_NAME,
+    renderPdf: realRenderEstimatePdf,
+    putObject: async ({ key, body, contentType }) =>
+      s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
+    getSecret: realGetSecret,
+    fetchUrl: (url) => fetch(url),
     ...deps,
   };
+
+  // Brand block for the document. Per-tenant config when that surface lands
+  // (service-workflows.md §12); until then SERVICE_BRAND_NAME, else the tenant slug, so
+  // the layout can be reviewed. The identity block is a GET-FROM-HARMON item.
+  const brandFor = (ctx) => ({
+    ...DEFAULT_BRAND,
+    companyName: d.brandName || (ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : ""),
+  });
 
   // --- describe cache (picklist guards) ------------------------------------------
   const describeCache = new Map();
@@ -748,12 +829,26 @@ export function createHandler(deps = {}) {
       const lines = await loadLines(est.Id, tenantId);
       const line = lines.find((l) => l.Id === lineId);
       if (!line) return notFound(cors);
-      const { fields, rejected, problems } = linePatchFields(body);
+      // `priceBookItemId` links the line to a catalog item (the "save to price book"
+      // flow creates the item first, then PATCHes the line with its id). It is handled
+      // apart from the plain field map because it re-snapshots several fields at once.
+      const { priceBookItemId, ...plain } = body && typeof body === "object" ? body : {};
+      const { fields, rejected, problems } = linePatchFields(plain);
       if (problems.length) return bad(cors, "LINE_INVALID", problems.join("; "));
+      let linkedItem = null;
+      if (priceBookItemId != null) {
+        linkedItem = await loadItem(String(priceBookItemId), tenantId);
+        if (!linkedItem) return bad(cors, "ITEM_NOT_FOUND", `Price book item ${priceBookItemId} was not found.`);
+        if (linkedItem.Is_Active__c !== true) {
+          return bad(cors, "ITEM_NOT_ACTIVE", `${linkedItem.Item_Code__c} v${linkedItem.Version__c} is not the active version.`);
+        }
+        // The plain edits win over the snapshot (a caller may link AND set a price).
+        Object.assign(fields, { ...linkLineToItem({ ...line, ...fields }, linkedItem), ...fields });
+      }
       if (!Object.keys(fields).length) return bad(cors, "NO_FIELDS", "Nothing to update.", { rejectedFields: rejected });
       // An edited price on a catalog line is an override; record it.
-      if (fields.Unit_Price__c != null && line.Price_Book_Item__c) {
-        const item = await loadItem(line.Price_Book_Item__c, tenantId);
+      if (fields.Unit_Price__c != null && (linkedItem || line.Price_Book_Item__c)) {
+        const item = linkedItem || (await loadItem(line.Price_Book_Item__c, tenantId));
         const itemPrice = Number(item?.Price__c ?? NaN);
         fields.Price_Overridden__c = !Number.isFinite(itemPrice) || Math.abs(itemPrice - fields.Unit_Price__c) > 0.004;
       }
@@ -777,8 +872,8 @@ export function createHandler(deps = {}) {
       }
       const { totals } = await recomputeAndStore(est, tenantId);
       await markStale(CACHE.line, [lineId], tenantId);
-      await act(ctx, { event: EVENTS.LINE_UPDATED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: fields.Description__c ?? line.Description__c ?? null, fields: diffFields(line, fields), needsReapproval: reapproval, total: totals.total } });
-      return jsonResponse(200, cors, { success: true, id: lineId, needsReapproval: reapproval, totals: totals.fields, rejectedFields: rejected });
+      await act(ctx, { event: EVENTS.LINE_UPDATED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: fields.Description__c ?? line.Description__c ?? null, fields: diffFields(line, fields), needsReapproval: reapproval, linkedItemCode: linkedItem?.Item_Code__c ?? null, total: totals.total } });
+      return jsonResponse(200, cors, { success: true, id: lineId, needsReapproval: reapproval, priceBookItemId: linkedItem?.Id ?? line.Price_Book_Item__c ?? null, totals: totals.fields, rejectedFields: rejected });
     },
 
     async deleteLine({ ctx, params }) {
@@ -836,6 +931,44 @@ export function createHandler(deps = {}) {
       const now = d.now();
       const version = (Number(est.Version__c) || 0) + 1;
       const via = ["Email", "SMS", "Both", "Manual"].includes(body?.via) ? body.via : "Email";
+      const validDays = Number(body?.validDays) > 0 ? Number(body.validDays) : DEFAULTS.validDays;
+      const validUntil = new Date(now.getTime() + validDays * 86400000);
+      const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
+      const token = est.Public_Token__c || d.randomToken();
+      const url = publicEstimateUrl(token, d.publicBaseUrl);
+      const fields = {
+        Version__c: version,
+        Status__c: "Sent",
+        Last_Sent_At__c: now.toISOString(),
+        Last_Sent_Via__c: via,
+        Public_Token__c: token,
+        Public_Token_Expires_At__c: tokenExpires.toISOString(),
+      };
+      if (!est.Valid_Until__c || body?.validDays) fields.Valid_Until__c = validUntil.toISOString().slice(0, 10);
+      const validUntilOut = fields.Valid_Until__c ?? est.Valid_Until__c ?? null;
+
+      // The PDF of THIS version (D-072.5): rendered from the same model as the page,
+      // stored at SUNDIAL/{estimateId}/estimate-v{n}.pdf so it sits in the estimate's
+      // Files tab, and attached to the email below. Best-effort: a PDF failure is
+      // reported (pdfKey null + deliveryDetail), never a reason to refuse the send —
+      // the customer still gets the link, which is the document of record.
+      const brand = brandFor(ctx);
+      const docEstimate = { ...est, ...fields, Valid_Until__c: validUntilOut };
+      let pdfBytes = null;
+      let pdfKey = null;
+      let pdfError = null;
+      try {
+        const model = buildEstimateModel({ estimate: docEstimate, lines, totals, brand, options: { mode: "customer", acceptUrl: url || undefined } });
+        pdfBytes = await d.renderPdf(model);
+        const key = estimatePdfKey(est.Id, version);
+        await d.putObject({ key, body: pdfBytes, contentType: "application/pdf" });
+        pdfKey = key;
+      } catch (e) {
+        pdfError = e?.message || String(e);
+        console.error(`estimate send: PDF failed for ${est.Id} v${version}: ${pdfError}`);
+        pdfBytes = null;
+      }
+
       const entry = {
         version,
         sentAt: now.toISOString(),
@@ -852,7 +985,7 @@ export function createHandler(deps = {}) {
             kind: l.Kind__c,
             stage: l.Stage__c,
           })),
-        pdfKey: null, // the render worker fills this in when PDF generation lands
+        pdfKey,
       };
       let log = [];
       try {
@@ -862,20 +995,7 @@ export function createHandler(deps = {}) {
         log = [];
       }
       log.push(entry);
-      const validDays = Number(body?.validDays) > 0 ? Number(body.validDays) : DEFAULTS.validDays;
-      const validUntil = new Date(now.getTime() + validDays * 86400000);
-      const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
-      const token = est.Public_Token__c || d.randomToken();
-      const fields = {
-        Version__c: version,
-        Version_Log__c: JSON.stringify(log),
-        Status__c: "Sent",
-        Last_Sent_At__c: now.toISOString(),
-        Last_Sent_Via__c: via,
-        Public_Token__c: token,
-        Public_Token_Expires_At__c: tokenExpires.toISOString(),
-      };
-      if (!est.Valid_Until__c || body?.validDays) fields.Valid_Until__c = validUntil.toISOString().slice(0, 10);
+      fields.Version_Log__c = JSON.stringify(log);
       try {
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, fields);
       } catch (e) {
@@ -883,11 +1003,34 @@ export function createHandler(deps = {}) {
       }
       await markStale(CACHE.estimate, [est.Id], tenantId);
 
+      // Files-tab metadata row for the PDF — best-effort, after the record is updated
+      // (the object is already in S3, and the Files tab lists S3 directly anyway).
+      if (pdfKey) {
+        try {
+          const supabase = await d.getSupabaseClient();
+          if (!(await findFileMetadataByKey(supabase, pdfKey))) {
+            await registerFileMetadata(supabase, {
+              s3Key: pdfKey,
+              fileName: `estimate-v${version}.pdf`,
+              tenantId,
+              sfRecordId: est.Id,
+              sfObjectType: ESTIMATE_SF_OBJECT,
+              uploadedByUserId: userId ?? null,
+              uploadedByUserName: "Sundial (estimate send)",
+              fileSizeBytes: pdfBytes?.byteLength ?? null,
+              mimeType: "application/pdf",
+              category: "Estimate",
+              subfolder: null,
+            });
+          }
+        } catch (e) {
+          console.error(`estimate send: file metadata register failed for ${pdfKey}: ${e?.message || e}`);
+        }
+      }
+
       // Delivery. Email now (SES, lib/email.js); SMS when Twilio lands — until then an
       // SMS/Both send is recorded and the office texts the link by hand. Every failure
       // mode is reported, never silent: the version is already recorded either way.
-      const url = publicEstimateUrl(token, d.publicBaseUrl);
-      const validUntilOut = fields.Valid_Until__c ?? est.Valid_Until__c ?? null;
       let delivery = "recorded";
       let deliveryDetail = null;
       let recipient = null;
@@ -905,9 +1048,11 @@ export function createHandler(deps = {}) {
           }
           if (!email) deliveryDetail = "The customer has no email address on file.";
           else {
-            const brandName = ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
-            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName, validUntil: validUntilOut });
-            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text });
+            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut });
+            const attachments = pdfBytes
+              ? [{ fileName: `${est.Name || "estimate"}-v${version}.pdf`, contentType: "application/pdf", content: pdfBytes }]
+              : [];
+            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
             if (sent.ok) {
               delivery = "email";
               recipient = email;
@@ -918,8 +1063,11 @@ export function createHandler(deps = {}) {
       if (via === "SMS" || via === "Both") {
         deliveryDetail = [deliveryDetail, "SMS is not live yet — text the link by hand."].filter(Boolean).join(" ");
       }
+      if (pdfError) {
+        deliveryDetail = [deliveryDetail, "The PDF could not be generated for this version (the link still works)."].filter(Boolean).join(" ");
+      }
 
-      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length } });
+      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length, pdfKey } });
       return jsonResponse(200, cors, {
         success: true,
         id: est.Id,
@@ -928,6 +1076,8 @@ export function createHandler(deps = {}) {
         publicToken: token,
         publicUrl: url,
         validUntil: validUntilOut,
+        pdfKey,
+        pdfUrl: pdfKey ? publicUrlForKey(pdfKey) : null,
         delivery, // "email" (sent) | "recorded" (version bumped, nothing went out — see deliveryDetail)
         recipient,
         deliveryDetail,
@@ -1170,8 +1320,7 @@ export function createHandler(deps = {}) {
       // Brand block: per-tenant config when that surface lands (service-workflows.md
       // §12). Until then the document renders with the tenant slug as the name so the
       // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.
-      const brand = { ...DEFAULT_BRAND, companyName: ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "" };
-      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, options: { mode: "preview" } });
+      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand: brandFor(ctx), options: { mode: "preview" } });
       return jsonResponse(200, cors, { html, title, version: Number(est.Version__c) || 0 });
     },
 
@@ -1192,7 +1341,89 @@ export function createHandler(deps = {}) {
       if (error) return jsonResponse(502, cors, { error: "activity_read_failed", code: "ACTIVITY_READ_FAILED", message: error });
       return jsonResponse(200, cors, { estimateId: est.Id, jobId: est.Service_Job__c ?? null, activity: rows });
     },
+
+    // --- Street View --------------------------------------------------------------------
+    // { status: "ready", url } | { status: "none" } (no imagery) | { status: "unconfigured" }
+    // (no secret yet) | { status: "no_address" }. `?refresh=1` re-asks Google (address fixed).
+    async jobStreetView({ ctx, params, query }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(
+        `SELECT Id, Address_at_Creation__c, Street_View_Image_Key__c FROM ${JOB_SF_OBJECT} ` +
+          `WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const job = rows?.[0];
+      if (!job) return notFound(cors);
+      const refresh = query?.refresh === "1" || query?.refresh === "true";
+      const current = job.Street_View_Image_Key__c || null;
+      if (!refresh && current === STREET_VIEW_NONE) return jsonResponse(200, cors, { status: "none" });
+      if (!refresh && current) return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(current), key: current, cached: true });
+
+      const address = (job.Address_at_Creation__c || "").trim();
+      if (!address) return jsonResponse(200, cors, { status: "no_address" });
+
+      let apiKey = null;
+      try {
+        apiKey = (await d.getSecret(STREET_VIEW_SECRET))?.apiKey || null;
+      } catch (e) {
+        if (!/ResourceNotFound/i.test(e?.name || e?.message || "")) console.error("street-view secret", e?.message);
+      }
+      if (!apiKey) return jsonResponse(200, cors, { status: "unconfigured" });
+
+      // 1. Metadata first (free): is there an outdoor panorama for this address?
+      const q = `location=${encodeURIComponent(address)}&source=outdoor&key=${encodeURIComponent(apiKey)}`;
+      let meta;
+      try {
+        const r = await d.fetchUrl(`https://maps.googleapis.com/maps/api/streetview/metadata?${q}`);
+        meta = await r.json();
+      } catch (e) {
+        console.error("street-view metadata", e?.message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: "Google did not answer." });
+      }
+      if (meta?.status !== "OK") {
+        if (meta?.status === "ZERO_RESULTS" || meta?.status === "NOT_FOUND") {
+          await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Street_View_Image_Key__c: STREET_VIEW_NONE });
+          return jsonResponse(200, cors, { status: "none" });
+        }
+        console.error("street-view metadata status", meta?.status, meta?.error_message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: `Google said ${meta?.status || "nothing"}.` });
+      }
+      // 2. The still itself — requested by ADDRESS, not by panorama id. Asked for a pano
+      //    id, Google shows that panorama's default heading (the way the camera car was
+      //    facing), which on a residential street is the house across the road. Asked
+      //    for a location, Google picks the nearest outdoor panorama AND aims the camera
+      //    at the address (2026-09-12: Tim's own house came out as the neighbour's).
+      const key = streetViewKey(job.Id);
+      try {
+        const img = await d.fetchUrl(
+          `https://maps.googleapis.com/maps/api/streetview?size=${STREET_VIEW_SIZE}&${q}&fov=80&pitch=0`
+        );
+        if (!img.ok) throw new Error(`HTTP ${img.status}`);
+        const bytes = Buffer.from(await img.arrayBuffer());
+        await d.putObject({ key, body: bytes, contentType: "image/jpeg" });
+      } catch (e) {
+        console.error("street-view image", e?.message);
+        return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: "Couldn't fetch the image." });
+      }
+      await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Street_View_Image_Key__c: key });
+      return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(key), key, cached: false, panoLocation: meta.location ?? null });
+    },
   };
+
+  /** The payer's email for a customer-billed document: the customer's current one, else the snapshot. */
+  async function customerEmailFor(job, tenantId) {
+    if (job?.Sundial_Customer__c) {
+      const cust = await d.sfQuery(
+        `SELECT ${CUSTOMER_EMAIL_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Sundial_Customer__c)}' ` +
+          `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const e = strOrNull(cust?.[0]?.Primary_Email__c);
+      if (e) return e;
+    }
+    return strOrNull(job?.Primary_Email_at_Creation__c);
+  }
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor }));
+  Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
   const ACTION_FOR = {
@@ -1204,7 +1435,10 @@ export function createHandler(deps = {}) {
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: "service.estimate.write", estimateActivity: "service.estimate.write",
-    previewEstimate: "service.estimate.write",
+    previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write",
+    getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
+    issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
+    getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
   };
 
   return async function handler(event) {

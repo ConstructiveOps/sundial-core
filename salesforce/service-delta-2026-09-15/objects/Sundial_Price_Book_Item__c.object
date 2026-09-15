@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Price_Book_Item__c - DELTA 2026-09-15 (D-072 amendment 6): only the fields listed in this
+  package's package.xml. Generated from scripts/gen-service-objects.py; the full object
+  lives in salesforce/service-objects/. Never convert to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Job_Type__c</fullName>
+        <description>List-view filter #1 (2026-09-15): which department's work this item is for. Unrestricted so a tenant can add its own.</description>
+        <externalId>false</externalId>
+        <label>Job Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>false</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Solar</fullName>
+                    <default>false</default>
+                    <label>Solar</label>
+                </value>
+                <value>
+                    <fullName>Electrical</fullName>
+                    <default>false</default>
+                    <label>Electrical</label>
+                </value>
+                <value>
+                    <fullName>EV</fullName>
+                    <default>false</default>
+                    <label>EV</label>
+                </value>
+                <value>
+                    <fullName>Commercial</fullName>
+                    <default>false</default>
+                    <label>Commercial</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Service_Type__c</fullName>
+        <description>List-view filter #2 (2026-09-15): Installation / Repair (+ whatever a tenant adds - unrestricted).</description>
+        <externalId>false</externalId>
+        <label>Service Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>false</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Installation</fullName>
+                    <default>false</default>
+                    <label>Installation</label>
+                </value>
+                <value>
+                    <fullName>Repair</fullName>
+                    <default>false</default>
+                    <label>Repair</label>
+                </value>
+                <value>
+                    <fullName>Maintenance</fullName>
+                    <default>false</default>
+                    <label>Maintenance</label>
+                </value>
+                <value>
+                    <fullName>Inspection</fullName>
+                    <default>false</default>
+                    <label>Inspection</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Category__c</fullName>
+        <description>List-view filter #3. GET FROM HARMON: final list, seeded from the HCP export. Unrestricted so the office can add values via the portal admin.</description>
+        <externalId>false</externalId>
+        <label>Category</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>false</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Service Call</fullName>
+                    <default>false</default>
+                    <label>Service Call</label>
+                </value>
+                <value>
+                    <fullName>Inverter</fullName>
+                    <default>false</default>
+                    <label>Inverter</label>
+                </value>
+                <value>
+                    <fullName>Panel</fullName>
+                    <default>false</default>
+                    <label>Panel</label>
+                </value>
+                <value>
+                    <fullName>Battery</fullName>
+                    <default>false</default>
+                    <label>Battery</label>
+                </value>
+                <value>
+                    <fullName>EV Charger</fullName>
+                    <default>false</default>
+                    <label>EV Charger</label>
+                </value>
+                <value>
+                    <fullName>Electrical</fullName>
+                    <default>false</default>
+                    <label>Electrical</label>
+                </value>
+                <value>
+                    <fullName>Roofing</fullName>
+                    <default>false</default>
+                    <label>Roofing</label>
+                </value>
+                <value>
+                    <fullName>Inspection</fullName>
+                    <default>false</default>
+                    <label>Inspection</label>
+                </value>
+                <value>
+                    <fullName>Cleaning</fullName>
+                    <default>false</default>
+                    <label>Cleaning</label>
+                </value>
+                <value>
+                    <fullName>Service Plan</fullName>
+                    <default>false</default>
+                    <label>Service Plan</label>
+                </value>
+                <value>
+                    <fullName>Materials</fullName>
+                    <default>false</default>
+                    <label>Materials</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+</CustomObject>

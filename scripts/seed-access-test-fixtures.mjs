@@ -14,8 +14,9 @@
 //
 // WHAT IT CREATES
 //
-//   - 10 Supabase auth users + matching Sundial_User__c records (§9), passwords
-//     generated here and stored in Secrets Manager under `sundial/test-users`
+//   - 12 Supabase auth users + matching Sundial_User__c records (§9 + two extra
+//     Service techs for the dispatch board), passwords generated here and stored in
+//     Secrets Manager under `sundial/test-users`
 //   - 3 new ZZ PORTAL TEST customers, plus a rep stamp on the existing designated one
 //   - one Solar twin per test customer, and one ZZ PORTAL TEST ROOFING
 //
@@ -98,6 +99,13 @@ export const TEST_USERS = [
     dealer: "ZZ TEST DEALER INACTIVE", note: "inactive dealer -> scope `none` (§2.1)" },
   { slug: "tech", first: "ZZ Tech", last: "One", accessLevel: "Technician",
     note: "Technician -> `none` until Phase II (§12.3)" },
+  // Two more techs so the dispatch board has a MULTI-tech view to test against
+  // (Phase 2, D-072 amendment 4). `department` writes Default_Department__c so they
+  // match the board's tech picker on both of its rules (Technician OR Service).
+  { slug: "tech-2", first: "ZZ Tech", last: "Two", accessLevel: "Technician", department: "Service",
+    note: "dispatch-board fixture — a second tech column" },
+  { slug: "tech-3", first: "ZZ Tech", last: "Three", accessLevel: "Technician", department: "Service",
+    note: "dispatch-board fixture — a third tech column" },
   { slug: "admin", first: "ZZ Admin", last: "One", accessLevel: "Admin",
     note: "Super_Admin__c is NOT set here — D-043 says Salesforce-only. Tick it by hand to unblock the endpoint assertion in verify-provisioning-e2e." },
   { slug: "exec", first: "ZZ Exec", last: "One", accessLevel: "Executive" },
@@ -258,7 +266,7 @@ async function seedUsers() {
     if (!passwords[email]) passwords[email] = makePassword();
 
     log(`\n  ${email}`);
-    log(`    ${u.accessLevel} -> Hierarchy_Level__c "${hierarchy}"${u.dealer ? `  | dealer (Phase 1): ${u.dealer}` : "  | dealer: none"}`);
+    log(`    ${u.accessLevel} -> Hierarchy_Level__c "${hierarchy}"${u.dealer ? `  | dealer (Phase 1): ${u.dealer}` : "  | dealer: none"}${u.department ? `  | department: ${u.department}` : ""}`);
     if (u.note) log(`    note: ${u.note}`);
 
     if (!APPLY) {
@@ -305,6 +313,9 @@ async function seedUsers() {
       Supabase_User_Id__c: authUserId,
       Client__c: TENANT_ID,
     };
+    // Only the fixtures that declare a department write it; the others keep whatever
+    // Default_Department__c they have (null for the §9 set), so re-runs stay idempotent.
+    if (u.department) fields.Default_Department__c = u.department;
     if (sfRow) {
       await sfUpdateRecord("Sundial_User__c", sfRow.Id, fields);
       log(`    salesforce: updated ${sfRow.Id}`);

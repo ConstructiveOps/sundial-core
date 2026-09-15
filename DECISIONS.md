@@ -3202,3 +3202,76 @@ and the activity row records old → new. Added rule: a money-affecting edit to 
 **Approved** line drops it to `Proposed` for re-approval on the next send;
 description-only edits do not. Package unchanged; one new SQL file; `sundial-sf-update`
 redeploy. Detail: `docs/service-data-model.md` §5.4, §11.
+
+### D-072 amendment 3 (2026-09-11): the estimate document is one model with two painters; the PDF is a file on the estimate
+
+The PDF per send (D-072.5) is built. **How:** `lib/estimate-document.js` now exports
+`buildEstimateModel()` — every row, label, total and note the customer sees, as plain
+data — and two painters draw it: `renderEstimateDocument()` (HTML: office preview,
+hosted page, email) and `lib/estimate-pdf.js` (PDF via pdf-lib). Anything that decides
+*what* is shown lives in the model, so the PDF the customer files away cannot disagree
+with the page they approved; only typography differs. **Why pdf-lib and not an
+HTML-to-PDF engine:** pure JavaScript bundles into the single-file esbuild artifact
+`deploy.ps1` produces; a headless browser needs a Lambda layer, a bigger memory setting
+and a cold start Tim would have to operate. The cost is hand-drawn layout (wrapping,
+page flow) and standard Helvetica — acceptable for an estimate. **Where:** each Send
+writes `SUNDIAL/{estimateId}/estimate-v{n}.pdf` (deterministic — a retry overwrites),
+registers a `sundial_file_metadata` row (category `Estimate`), records the key in
+`Version_Log__c[].pdfKey`, attaches the bytes to the customer email
+(`Content.Simple.Attachments` — still `ses:SendEmail`, no raw-mail permission), and
+returns `pdfKey` / `pdfUrl`. The public page exposes the current version's PDF as a
+download link. **Failure posture:** a PDF that cannot render or store never blocks the
+send — `pdfKey` is null, the email goes without the attachment, and `deliveryDetail`
+says so; the hosted link is the document of record. **Files tab:** `lib/file-access.js`'s
+allowlist gains `estimate`, `job`, `servicecall`, and `lib/access.js` gains the matching
+`files.<key>.{list,related,upload,delete}` rows (tenant scope). Found while doing it:
+`roofing` and `po` had allowlist entries but no action rows, so their Files tabs
+answered 403 to everyone — rows added, and a test now pins the two lists together.
+
+### D-072 amendment 4 (2026-09-11): the dispatch board ships hand-built on the API contract FullCalendar will use; the board is always fresh; job status follows the calls
+
+**Built:** `lambdas/sundial-service-board` (board read, schedule, move / reassign /
+progress, cancel) and the portal's `/service/dispatch` day board + the job page's calls
+card. **Three decisions inside it.** (1) **Hand-built board first, FullCalendar Premium
+later.** The license is still pending and Beth's daily flow (tray → column drop, move a
+block, click for progress / cancel) does not need edge-drag resize or the week timeline
+to be usable. The API contract (`GET /service/board`, `POST …/calls`, `PATCH
+/service/calls/{id}` with `baseModstamp`, `cancel`) is the one design §3 specified for
+FullCalendar, so swapping the front end later changes no server code. (2) **The board is
+always fresh, reads included** — a deliberate narrowing of design §5's "cache-first
+reads". The volume (7 techs × ~10 calls a day) makes the cache a saving of nothing, and
+a dispatcher whose move snaps back because a cache row lagged stops trusting the board
+on day one. Optimistic concurrency stays exactly as designed: `baseModstamp` in, `409
+CALL_CONFLICT` with the current state out, nothing written. (3) **Job status follows the
+calls, in one function.** Scheduling the first call moves an unscheduled job to
+`Scheduled`; a call going `In Progress` moves the job; the last open call completing
+moves it to `Awaiting Office Review`; the last open call cancelled drops it back to
+`Ready to Schedule`. Each is its own `job_updated` activity row. Anything more
+opinionated is a per-tenant rule added on request (D-072 rule 5). **Techs** = users
+marked `Technician` or in the `Service` department; every active user until then, with
+a banner, so the board is usable before the users are curated. **Customer notify** =
+SES email per action when the dispatcher ticks the box (SMS when Twilio lands),
+best-effort and reported, never blocking. Detail: `docs/api-endpoints.md` "Dispatch
+board"; `docs/dispatch-board-design.md` remains the target design.
+
+### D-072 amendment 5 (2026-09-11): the invoice ships inside the estimate Lambda; money is settled in one function; Street View is fetched once, server-side
+
+**Invoices + payments are routes inside `sundial-service-estimate`** (`invoice.js`), not a fourth Lambda. Reason: the invoice is the estimate's lines frozen (decision 6), so issuing it needs the estimate loader, the totals math, the document painters, the activity tracker and the S3/email pipe that Lambda already has; one function and one wire script is also the ops shape Tim prefers. Facts that hold: one live invoice per job (`409 INVOICE_EXISTS` until void), number = job number with `-2`, `-3` after voids, money frozen at issue (the estimate goes `Invoiced` and its PATCH refuses), Proposed lines are billed but flagged — nothing blocks invoicing on approval state (rule 5).
+
+**`Paid_Amount__c` is written by the Lambda, not a Flow.** The data model pencilled a roll-up Flow; none is built, and the money rules (Refund rows subtract, Failed rows do not count, deposits taken before the invoice roll onto it at issue, a refund reopens a Paid invoice) belong in tested code. `settleMoney()` is the one place that writes the invoice's paid amount / status / paid-at and the job's `Payment_Status__c` and its `Invoiced ↔ Paid` status — the same "one function owns the transition" rule `settleJobStatus` set for scheduling. Manual rows (check / ACH / remittance / refund) are `Succeeded` when the office records them; Stripe rows arrive later through the webhook worker keyed on `Stripe_Payment_Intent_Id__c` and go through the same settle.
+
+**Void keeps the money on the job.** Payments are unhooked (`Invoice__c` cleared), never deleted, so the reissue picks them up; the estimate reopens to Approved / Sent / Draft by what it had been; the job returns to `Ready to Bill`. `service.invoice.write` is its own action ("who may take money" is a tenant question separate from "who may edit an estimate"); reads ride on `service.estimate.write`.
+
+**The invoice document is the estimate's model shape with a second builder** (`buildInvoiceModel`), so both painters are unchanged apart from two labels (`docLabel`, `customerLabel`). "Bill to" is the job's one payer; a partner invoice names the partner and its reference and shows the service address as a line.
+
+**Street View (data model §5.2, the 9/9 ask) is fetched once, server-side.** The Google key sits in Secrets Manager (`sundial/google-maps`); `GET /service/jobs/{id}/street-view` asks the free metadata endpoint for an outdoor panorama, fetches the still by panorama id, stores it at `SUNDIAL/{jobId}/street-view.jpg` and remembers the key on the job (`NONE` = asked, nothing there). No browser key, no per-view Google call, one image per job for the life of the job. Geocoding proper (lat/lng for the geofence) is still the later AWS Location step; the panorama's location is deliberately not written to the geocode fields.
+
+### D-072 amendment 6 (2026-09-15): direct labor billing is opt-in per call; calls can exist before they are scheduled; the job talks to the customer from one panel
+
+**Direct labor billing is a per-call opt-in, and off means invisible.** Techs' real clocked time (`Actual_Start__c → Actual_End__c`, or `Duration_Minutes__c`) on **Complete** calls can be billed to the customer by the hour, but only when the office ticks `Billable_to_Customer__c` on that call. Most jobs are priced from the book, and Tim's rule is explicit: when the customer is not billed for labor directly, "this information should be kept off the invoice entirely" — so a non-billable call contributes nothing, not a zero line. A billable call becomes **exactly one Labor line on the estimate** (`Source__c = Time`, `Added_By_Service_Call__c` = the call, UoM Hour, not taxable), hours = the office's override else the clock **rounded up to the quarter hour**, rate = the call's `Bill_Rate__c` else the tech's new `Sundial_User__c.Hourly_Bill_Rate__c` (what the customer is charged per hour — rates are standardized across techs by policy, edited per call by exception). `labor.js` inside `sundial-service-estimate` owns the whole decision in one request (`POST /service/jobs/{id}/labor`) — it writes the call fields, creates / updates / **deletes** the Time line and recomputes, so a line can never outlive the decision that created it; the write is refused once the invoice is issued (`ESTIMATE_INVOICED`), and it is a `service.invoice.write` action because it is a billing decision. No Flow, no roll-up field: the line is the record.
+
+**A service call can exist before it has a time.** `Status__c` gains `Unscheduled`: the office creates the call (tech optional, notes, type) from the job page with "Schedule later", it appears in the dispatch tray as its own card, and dropping it on the board is a PATCH that gives it a start (→ `Scheduled`, job settles, customer email) rather than a create. A job with an unscheduled call steps out of the jobs tray so nothing is listed twice; a job with no calls still appears as before. Scheduling without a tech is refused (`TECH_REQUIRED`); any status past Unscheduled without a start is `CALL_NOT_SCHEDULED`. `settleJobStatus` is untouched: an unscheduled call moves no job status, only its scheduling does.
+
+**Price-book items carry three filter fields, not a category tree.** `Job_Type__c` (Solar | Electrical | EV | Commercial), `Service_Type__c` (Installation | Repair | Maintenance | Inspection) and `Category__c` — all unrestricted picklists so the office can add a value from the portal without a metadata deploy — are the three narrowing dropdowns on the list (HCP's "find it fast"). The HCP import (`scripts/build-pricebook-import.mjs` → `salesforce/pricebook-import/`) is a pure transform: generated codes (`SVC-ELEC-0012`, `MAT-INV-0003`), the HCP uuid kept in `HCP_Id__c` as the DataLoader upsert key, `$0`-price-and-cost rows imported **inactive** so history resolves but nothing bills for nothing.
+
+**The job talks to the customer from one panel.** The job page's Comments card is replaced by **Communications**: one newest-first timeline of team notes (the shared `comments` table on `record_object = 'job'`, with @-mentions — the composer is now shared code, `useMentionComposer` + `MentionUi`, so tagging behaves identically everywhere), customer texts in both directions, and a **short list** of activity events (estimate sent / approved / declined, invoice issued / sent / voided, payment recorded, calls created / cancelled, job stage changes) — the full log stays in the Activity panel, which is now collapsed by default. Texting is its own Lambda, **`sundial-sms`**: Twilio under the hood on Constructive Ops' account, the *number* per tenant from Secrets Manager `sundial/twilio` (`tenantNumbers[slug]`, else the shared A2P-registered line; Harmon moves to its own number by editing the secret, no deploy), rows in Supabase `sundial_sms_messages` (browser access revoked; the Lambda is the only reader), the two Twilio webhooks gated solely by Twilio's request signature (constant-time, fail closed), a reply matched to the conversation we started first and to the phone-number snapshot second, and an unmatched text kept rather than dropped. `service.sms.send` is its own action for the same reason `service.invoice.write` is. The "Summary of work" the invoice prints is the job's existing `Customer_Summary__c`, now editable on the job page, preferred over the estimate's scope on the invoice document.

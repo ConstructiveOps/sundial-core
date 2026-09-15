@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-delta-2026-09-15 - the fields the 2026-09-15 increment adds to the DEPLOYED
+  service objects (D-072 amendment 6), plus the regenerated permission set so the
+  integration user can read/write them:
+
+    Sundial_Price_Book_Item__c : Job_Type__c, Service_Type__c (new picklists, unrestricted),
+                                 Category__c (description only)
+    Sundial_Service_Call__c    : Status__c (+ "Unscheduled"), Billable_to_Customer__c,
+                                 Billable_Hours__c, Bill_Rate__c
+    Sundial_Service_Line__c    : Source__c (+ "Time")
+    Sundial_User__c            : Hourly_Bill_Rate__c (ONE field on the live user object)
+
+  CustomField members only - nothing here touches object settings, and re-deploying a
+  picklist with extra values ADDS them (no value is removed).
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
+  Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
+  Single Package -> CHECK ONLY first, expect 10/10 components (9 fields + 1
+  permission set), then deploy for real. Then run sql/2026-09-15_service_delta.sql in
+  the Supabase SQL editor (adds the matching cache columns), and re-run
+  node scripts/verify-service-schema.mjs.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Service_Call__c.Status__c</members>
+        <members>Sundial_Service_Call__c.Billable_to_Customer__c</members>
+        <members>Sundial_Service_Call__c.Billable_Hours__c</members>
+        <members>Sundial_Service_Call__c.Bill_Rate__c</members>
+        <members>Sundial_Price_Book_Item__c.Job_Type__c</members>
+        <members>Sundial_Price_Book_Item__c.Service_Type__c</members>
+        <members>Sundial_Price_Book_Item__c.Category__c</members>
+        <members>Sundial_Service_Line__c.Source__c</members>
+        <members>Sundial_User__c.Hourly_Bill_Rate__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Objects</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

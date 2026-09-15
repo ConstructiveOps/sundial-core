@@ -45,6 +45,12 @@ const LABEL_SOURCES = {
     table: "sundial_roofing_cache",
     columns: ["customer_name_at_creation", "project_name", "address_at_creation"],
   },
+  // Service job: "SVC-00012 · Ann Lee" would be ideal; the first non-empty column wins,
+  // so the customer's name leads and the job number is the fallback.
+  job: {
+    table: "sundial_service_job_cache",
+    columns: ["customer_name_at_creation", "name", "address_at_creation"],
+  },
 };
 
 /** Skip/So-far results are shaped identically so the handler can just return them. */

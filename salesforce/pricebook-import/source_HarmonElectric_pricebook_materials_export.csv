@@ -1,0 +1,106 @@
+category,subcategory_1,uuid,name,description,part_number,price,cost,taxable,unit_of_measure,material_markup_enabled
+Misc material,"",pbmat_747f64c161204c5f92bbbaf6f893fdb8,Wire nuts,"","",$25.00,$0.00,true,"",false
+Misc material,"",pbmat_28967762dc1b4b4fb0b73ab34b1f185b,Miscellaneous Materials,"","",$0.00,$0.00,false,"",false
+Misc material,"",pbmat_7d9416c38bc744d8b3f50f40fe9b9375,Roofing Materials,Taxable materials for roof repair,"",$0.00,$0.00,true,"",false
+INVERTER,"",pbmat_2d29b269fa3b48cc92a99dfab8cfd812,Fronius Gen 24  10.kW inverter,"",,$3200.00,$0.00,false,,false
+Kyocera solar panel - gently used,"",pbmat_ad9f47b29ed948148c975cfb17ac68f2,Kyocera solar panel,"",,$100.00,$52.00,false,,false
+Solar Monitoring,"",pbmat_2b6d7d63f9c04f22be2b42b8851c184b,Envoy,Envoy S with Cell kit,"",$1550.00,$860.46,false,"",false
+Misc material,"",pbmat_fa40c78aead14fbc90f798f94348e62d,Mids/Ends,"",,$15.00,$0.00,false,,false
+Misc material,"",pbmat_20a0c5bf802e48089df8039863ff457a,Solar Panel ,REC295W,,$225.00,$0.00,false,,false
+Misc material,"",pbmat_249dbbc6b84d4bd980def3520f2d6fff,ABB A145-30-11-84 - AC CONTACTOR,"","",$561.31,$509.37,false,"",false
+Misc material,"",pbmat_f3cd0fc43d4940cf90c8977b13cf4959,MC4,"",,$10.00,$0.00,false,,false
+Misc material,"",pbmat_b04ac59b36ca4e0fbf3e7501afb2c44d,CAP 205uF 750VDC 80A POLYPRPLN MTLD ALT,CAP 205uF 750VDC 80A POLYPRPLN MTLD ALT,,$143.00,$130.00,false,,false
+INVERTER,"",pbmat_ccfd7f506c884a0ab95ddbe341cb3a49,Tesla Inverter,"",,$2380.00,$1836.00,false,,false
+AES ,AES PARTS,pbmat_c17002a58e5f4755800bdb90e8f14cf1,ABB A145-30-11-84,ABB A145-30-11-84 contactor,,$560.31,$509.37,false,EACH,false
+AES ,AES PARTS,pbmat_ea28a855529e40eeac3cb16c89b160e3,TE EV200HAANA 1-1618002-8,T E DC contactors,,$178.42,$162.20,false,EACH,false
+AES ,AES PARTS,pbmat_b6a8c38ccad64d8eb11cc082b149a41c,Empast 4604N,Empast 4604N fans,,$63.69,$57.90,false,EACH,false
+AES ,AES PARTS,pbmat_979b6f6e343d4bb19b7a1ed9f46ef6e5,CKE Z575PA80C,Surge suppressors,,$26.08,$23.71,false,EACH,false
+AES ,AES PARTS,pbmat_e70a2799112c4f898f31c97fcec03697,SIBA 2066132.200,SIBA 200 A square,,$126.96,$115.42,false,EACH,false
+AES ,AES PARTS,pbmat_1bf230e091094606b1fd10ed3345727b,SIBA 2066132.250,SIBA 250 A square,,$178.70,$162.45,false,EACH,false
+AES ,AES PARTS,pbmat_a90578a5ac8345f0a276a2ee31bf37ce,SIBA 2066132.315,SIBA 315 A square,,$191.32,$173.93,false,EACH,false
+AES ,AES PARTS,pbmat_5684c65cfd7a42bb8281ed9fa3ab8413,SIBA 2066132.400,SIBA 400 A square,,$209.63,$190.57,false,EACH,false
+AES ,AES PARTS,pbmat_694113ed2bf24e2d98de752ebc902195,SIBA 2066132.550,SIBA 550 A square,,$191.32,$173.93,false,EACH,false
+AES ,AES PARTS,pbmat_217084fbb1d742d3a06236757748fe1b,SIBA 2066132.700,SIBA 700 A square,,$219.24,$199.31,false,EACH,false
+AES ,AES PARTS,pbmat_0255e6050a6447bd9049537b0f683e9d,SIBA 2067132.1000,SIBA 1000 A square,,$420.17,$381.97,false,EACH,false
+AES ,AES PARTS,pbmat_b7b5dd244a2b41f780e8a7c77e5aeb37,ABB OBFZNA10,ABB 250 Aux DC contacts,,$42.41,$38.55,false,EACH,false
+AES ,AES PARTS,pbmat_acbe1d00103345d4b453ceec862d53fb,ABB OA1G10,ABB 50-135 Aux DC contacts,,$29.90,$27.18,false,EACH,false
+AES ,AES PARTS,pbmat_bf55f927b12a4f5f9d5f1068e82ffa70,C2SS2-10B-11,ABB E-stops,,$25.94,$23.58,false,EACH,false
+AES ,AES PARTS,pbmat_17f31114f4ff4ec4a9f95a4adb62559c,ABB CL-502R,ABB Control Light,,$34.29,$31.17,false,EACH,false
+AES ,AES PARTS,pbmat_d218de425b5a452da6fd8c806ffc53c4,SIBA 2800310 URS B-Switch,SIBA square fuse top/indicator,"",$55.91,$50.83,false,EACH,false
+AES ,AES PARTS,pbmat_fe8c4325e35a4967aebd0326e375e313,"FD27GB66V3,15T ",Ferazz Ground Fault fuses,"",$81.95,$74.50,false,EACH,false
+AES ,AES PARTS,pbmat_be1fe061323e43b28313faddf3d6bacd,FD27GB66V4T,Ferazz Ground Fault fuses,"",$81.95,$74.50,false,EACH,false
+AES ,AES PARTS,pbmat_8a998a166fac465eb15703d655dba52b,2938743,Phx Contact power supply 15-1,,$379.35,$344.86,false,EACH,false
+AES ,AES PARTS,pbmat_1a4f94790400429ead60362e10f1150c,2938756,Phx Contact power supply 15-2,,$192.59,$175.08,false,EACH,false
+AES ,AES PARTS,pbmat_69a1fc59a2bd4b85a86ae807f985fd87,2866297,Phx Contact power supply 15-8,,$349.14,$317.40,false,EACH,false
+AES ,AES PARTS,pbmat_8bb3233accdd4e2a952866a6c2d67175,2938730,Phx Contact power supply 24-2,,$178.76,$162.51,false,EACH,false
+AES ,AES PARTS,pbmat_6a280dadaa464d26b43e92ef7339724d,2938837,Phx Contact power supply 24-4,,$327.51,$297.74,false,EACH,false
+AES ,AES PARTS,pbmat_f20d9cb3d37d4b11a572f8043d69e3a7,2903157,Phx Contact power supply 15-5,,$166.40,$151.27,false,EACH,false
+AES ,AES PARTS,pbmat_c7349fb375a04dcd907c15a3ff8e6da4,DRM-24V80W1PN,Delta power supply 24-3.4,,$139.66,$126.96,false,EACH,false
+AES ,AES PARTS,pbmat_e30614d8a4ef4c6ea92c05e80406ff08,LF 306-S,LEMS small,,$120.20,$109.27,false,EACH,false
+AES ,AES PARTS,pbmat_31b18443dff1434fbdd2fd5085406f1f,LF 1005-S,LEMS for 250kW,,$282.27,$256.61,false,EACH,false
+AES ,AES PARTS,pbmat_0f5250672e2a4918ae963d65d76a285f,LA 305-S/SP1 14232,LEMS for AE,,$207.68,$188.80,false,EACH,false
+AES ,AES PARTS,pbmat_735f6efc425849dc83fd48cb71318b80,Infineon FF450R12KT4,IGBT 450 for AZ W College,,$549.31,$499.37,false,EACH,false
+AES ,AES PARTS,pbmat_5e7da08da8b242098eec6c84f3afaaa3,Infineon FZ600R12KE3,IGBT 600,,$146.16,$132.87,false,EACH,false
+AES ,AES PARTS,pbmat_d4859f3ed3f64c7eb3d4e15f1fdf7fbe,Infineon FZ800R12KE3,IGBT 800,,$172.61,$156.92,false,EACH,false
+AES ,AES PARTS,pbmat_2fcb1055aa624ae090203234ca62801d,Infineon FZ1600R12KE3,IGBT 1600,,$269.50,$245.00,false,EACH,false
+AES ,AES PARTS,pbmat_cdc9fa39f800469e996489247d17a189,Electro-Meters CAT 2DT-201-1,CTs,,$57.00,$51.82,false,EACH,false
+AES ,AES PARTS,pbmat_83c9bcfbb09c4bfe9aec9db73b052d61,SP32OU,AE surge Sup SP32OU,,$189.95,$172.68,false,EACH,false
+AES ,AES PARTS,pbmat_4bc29e6778f9477caf59fd9982582849,SP42OU,AE surge Sup SP42OU,,$257.51,$234.10,false,EACH,false
+AES ,AES PARTS,pbmat_19ac116a9dde465b859ee46b7502f950,SP70PV,AE surge Sup SP70PV,,$315.57,$286.88,false,EACH,false
+AES ,AES PARTS,pbmat_4be56179bd4e4010b70bd84395693885,Phoenix Contact 2838762,P.C. data line suppressor,,$286.11,$260.10,false,EACH,false
+AES ,AES PARTS,pbmat_39fc26537a46450fbf391dbfb65a1e54,104M06QC100,Blue (AC contactor) capacitors,,$17.51,$15.92,false,EACH,false
+AES ,AES PARTS,pbmat_95c50ae0275c4848bdfa4b034603a881,Mersen R227600,GF Fuse Holder,,$199.53,$181.39,false,EACH,false
+AES ,AES PARTS,pbmat_7ec7a99ada624981a37de99b04683546,Heyco S6405 Sunrunner Clip,Panel wire clips,,$0.01,$0.01,false,EACH,false
+AES ,AES PARTS,pbmat_fa5f9f25f9424db0bfb7c6572a7b8ebe,CA-H619006-15,MC4 type connector male,,$0.01,$0.01,false,EACH,false
+AES ,AES PARTS,pbmat_cfc30343aa0e4df9a766632c0197a2ca,CA-H629006-15,MC4 type connector female,,$0.01,$0.01,false,EACH,false
+INVERTER,"",pbmat_c36f1ef675d24432b3e8d73cc709574a,Fronius Gen 24  3.8kW inverter,"",,$1590.00,$1131.40,false,,false
+INVERTER,"",pbmat_4aaf89ae96d14fbfabd5a91451d94ff8,SMA- Sunny Boy Smart Energy 3.8kW inverter,"",,$2200.00,$0.00,false,,false
+INVERTER,"",pbmat_4bd49b29282e469390a9508e6df9560c,Fronius Gen24 6.0kW inverter,"",,$2195.00,$1676.00,false,,false
+INVERTER,"",pbmat_1bd851cc939542ca9a4602e66e539996,Fronius Primo - 11.4 Inverter,"",,$3679.61,$2695.86,false,,false
+Solar Monitoring,"",pbmat_b37344f62ac34aeb96a8411314dd439d,SMA Speedwire Datalogging/Monitoring Card,SMA Monitoring card for -12 or -US inverters to replace Sunny Webbox.,SWPB-US-10,$206.36,$165.09,false,Each,false
+Solar Monitoring,"",pbmat_cfbbbdd51285440dae6cf2a3d9ff1c02,5 port internet switch,"TP-Link TL-SG105, 5 Port Gigabit Unmanaged Ethernet Switch, Network Hub, Ethernet Splitter, Plug & Play, Fanless Metal Design, Shielded Ports, Traffic Optimization",TP-Link TL-SG105,$18.40,$14.16,false,Each,false
+Misc material,"",pbmat_6d329a4acae3400e8d22d29ec2493897,12X12 Junction box,"CANTEX Enclosure: PVC, 12 in x 12 in x 6 in, NEMA 1/3/3S/4/4X/5/6/6P, Screw On, Solid Cover",,$85.00,$70.00,false,,false
+Misc material,"",pbmat_d6f8a73e855e4659a9ab11343a382281,Single Gang Bell box,Bell Single Gang Weatherproof Box,,$7.78,$5.98,false,,false
+Misc material,"",pbmat_ec8a3d6be8854aacbeb63eb82d746cea,15.0 -Amp 125-volt Residential Decorator Outlet Receptacles,15A receptacle,,$4.02,$2.68,false,,false
+Misc material,"",pbmat_a407c644c8c942529eb2d04f15b6cbdf,Eaton Type BR 15-amp 1 -Pole Standard trip Circuit Breaker,Eaton Type BR 15-amp 1 -Pole Standard trip Circuit Breaker,,$10.63,$8.18,false,,false
+Wire,"",pbmat_b7482905a33141a093d71e9e2affbb9f,#12 THHN wire,"THHN TYPE; 500 FOOT; 119 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US), CSA
+C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 20 AMP CURRENT RATING; 90 DEG C (DRY) TEMPERATURE RATING; 23 POUND PER 1000
+FOOT WEIGHT","",$0.28,$0.21,false,"",false
+Wire,"",pbmat_ccaabef628e84a8b8d4e851c774546da,CAT 5e,Southwire 500-ft 24 CAT 5e 4 Riser Data Cable Box,,$0.21,$0.16,false,,false
+Misc material,"",pbmat_260c45fe8a5b42ed94a8e938938f4483,1A Fuse,"",,$10.00,$3.00,false,,false
+Wire,"",pbmat_05c4038c267c47e49ec638dbf13e0787,10 AWG STRANDED,"THHN TYPE; (2) 500 FOOT; 161 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US),
+CSA C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 30 AMP CURRENT RATING; 90 DEG C (DRY) TEMPERATURE RATING; 38 POUND PER
+1000 FOOT WEIGHT",WIRE THHN10STRBLK,$0.45,$0.35,false,Each,false
+INVERTER,"",pbmat_a06c8f2b61ba40b7ab6120a2bce18609,Fronius 3.8 Primo inverter,"",,$1850.00,$1326.41,false,,false
+INVERTER,"",pbmat_0fd341813adc4f5090cc4f7b8d9714f7,SMA SB SMART ENERGY 5.8KW INV,"",,$2795.00,$2017.05,false,,false
+Wire,"",pbmat_f91585ad3e83446a8e719b95dfe702bf,8 AWG STRANDED,"THHN TYPE; 500 FOOT; 213 MIL OUTER DIAMETER; COPPER CONDUCTOR MATERIAL; UL 83/758/1063/1581, UL (CANADA AND US), CSA
+C22.2 APPROVAL; 600 VOLT VOLTAGE RATING; 40 AMP (60 DEG C), 50 AMP (75 DEG C), 55 AMP (90 DEG C) CURRENT RATING",WIRE THHN8STRBLK,$0.84,$0.64,false,Each,false
+Wire,"",pbmat_3c69b7bec41842e2b62d48ccc206776a,6 AWG STRANDED WIRE,"THHN TYPE; 500 FT; 0.253 INCH OUTER DIAMETER; ANNEALED BARE COPPER CONDUCTOR MATERIAL; UL 83, CUL APPROVAL; 600 V
+VOLTAGE RATING; 55 AMPERE (60 DEG C), 65 AMPERE (75 DEG C), 75 AMPERE (90 DEG C) CURRENT RATING; 90 DEG C (DRY/WET)
+TEMPERATURE RATING",WIRE THHN6STRBLK500R,$1.29,$0.99,false,Each,false
+Wire,"",pbmat_0f23a8ec7ce044009126c19928134307,4 AWG STRANDED WIRE,"THHN TYPE; 500 FT; 500 LENGTH IN FT; SOFT ANNEALED COPPER CONDUCTOR MATERIAL; UL (CANADA AND US) APPROVAL; 600 V
+VOLTAGE RATING; 70 AMPERE (60 DEG C), 85 AMPERE (75 DEG C), 95 AMPERE (90 DEG C) CURRENT RATING",WIRE THHN4STRBLK,$1.97,$1.52,false,Each,false
+Misc material,"",pbmat_de3338c4e74a47dfadf4dbf51528521c,60A 2 POLE BREAKER,60A DOUBLE POLE BREAKER,"",$32.84,$25.26,false,Each,false
+CONDUIT/CONDUIT MATERIAL,"",pbmat_01f367e5b0eb42cda74de507915d8572,"3/4"" CONDUIT","3/4"" EMT",EMT-3/4,$1.39,$0.92,false,Each,false
+CONDUIT/CONDUIT MATERIAL,"",pbmat_caa0ea44c64b43a08b8808bc3d020c92,"3/4"" CONNECTOR",3/4 EMT CONNECTOR,251SRTI,$2.27,$1.74,false,Each,false
+CONDUIT/CONDUIT MATERIAL,"",pbmat_943c5f44fc0443da9f824d7c2138f5b8,"3/4"" COUPLER",3/4 EMT COUPLING,261SRT,$2.78,$2.14,false,Each,false
+CONDUIT/CONDUIT MATERIAL,"",pbmat_a5324c0d7e64458db46a170f8042705c,"3/4"" ONE HOLE STRAP",3/4 1H STL EMT STRAP,921S,$0.46,$0.23,false,Each,false
+CONDUIT/CONDUIT MATERIAL,"",pbmat_9ac6c6271f2e4b95a41fe33e2f50ea3b,"3/4"" LB CONDULETTE WITH GASKET",3/4 AL BODY ASBLY,LB42CG,$8.94,$6.88,false,Each,false
+Solar Monitoring,"",pbmat_a6feb81695a74c57b01218938761075b,SWDM-US-10,SMA Speedwire Datalogging/Monitoring Card for -22 and TriPowers,SWDM-US-10,$278.45,$214.20,false,Each,false
+Misc material,"",pbmat_7fdf6d0bf92a406583677c50ea3e1887,Fronius Rapid Shut Down,"",,$335.00,$256.91,false,,false
+INVERTER,"",pbmat_adb243476e2b4076a429266afd0effee,Fronius Primo Gen24 5.0kW inverter,"",,$2048.75,$1517.56,false,,false
+Misc material,"",pbmat_c72c0affa74442eca5c7b313c1049618,Fuse,"",,$389.49,$311.59,false,,false
+Misc material,"",pbmat_c6b760e869984554bff10d7e6f04ac1f,MOTOR RUN CAPACITOR 370 TO 440VAC,"",,$16.72,$4.18,false,,false
+INVERTER,"",pbmat_6d424ee396e64ec6b27fecdf9830722d,Fronius Gen24 7.7kW Inverter,"Fronius Primo GEN24 7.7
+4,210,143,800
+Manufacturer: Fronius USA, 10 years limited warranty",,$2695.00,$2023.30,false,,false
+Electric Vehicle ,"",pbmat_f4d7f8d6911140cc9255e4d5d6eb4b04,HCS-40R-C17-L25-170,"32A charging, 240VAC, 10AWG service, 25' 10AWG ruggedized J1772 connector",,$1060.00,$916.00,false,,false
+Electric Vehicle ,"",pbmat_9a451679e3a6458baf3250e07af61d6a,Trip Charge ,"Covers the cost of our technician traveling to your location, ensuring timely arrival with the necessary tools and expertise to assess and address your needs efficiently. This helps us provide reliable service and maintain prompt scheduling for all customers.",,$100.00,$0.00,false,,false
+Misc material,"",pbmat_095a3d62729e4e11a9fe1da7cca93796,Spruce- CATM1 meter,"",,$448.09,$0.00,false,,false
+Misc material,"",pbmat_0d18a4f772794cf39c9fb406fcb4051d,Meter Can/Wire,"",,$140.50,$0.00,false,,false
+INVERTER,"",pbmat_1f84299c35a94f7c9b1bc4a5c00ce91e,Sunny Tripower X 20-US-50,"",,$4206.67,$3235.90,false,,false
+Misc material,"",pbmat_eaad0f6293f748f193a1ece4ddfad31a,SQD Disconnect,"",,$175.00,$125.00,false,,false
+Wire,"",pbmat_a0e49c23c780470c8296d432e77f0712,3 AWG STRANDED,"""THHN TYPE; 500 FT; 500 LENGTH IN FT; SOFT ANNEALED COPPER CONDUCTOR MATERIAL; UL (CANADA AND US) APPROVAL; 600 V
+VOLTAGE RATING; 85 AMPERE (60 DEG C), 100 AMPERE (75 DEG C), 110 AMPERE (90 DEG C) CURRENT RATING""",WIRE THHN3STRBLK,$2.70,$2.08,false,Each,false
+Misc material,"",pbmat_548ce63bf2bb441791a8824d04d4a949,SQD Fused Disconnect,"",,$167.87,$129.13,false,,false
+Misc material,"",pbmat_76367a43735a4d7889715eb29d879ed0,250V Fuses - For SQD disconnect,"",,$8.59,$4.98,false,,false

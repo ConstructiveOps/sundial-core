@@ -1,0 +1,20 @@
+#Mapping values
+#2026-09-15T05:40:43.124Z
+HCP_Id__c=HCP_Id__c
+Name=Name
+Item_Code__c=Item_Code__c
+Version__c=Version__c
+Is_Active__c=Is_Active__c
+Kind__c=Kind__c
+Job_Type__c=Job_Type__c
+Service_Type__c=Service_Type__c
+Category__c=Category__c
+Description__c=Description__c
+Unit_of_Measure__c=Unit_of_Measure__c
+Default_Quantity__c=Default_Quantity__c
+Labor_Price__c=Labor_Price__c
+Labor_Cost__c=Labor_Cost__c
+Material_Price__c=Material_Price__c
+Material_Cost__c=Material_Cost__c
+Taxable__c=Taxable__c
+Client__c=Client__c

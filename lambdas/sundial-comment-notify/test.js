@@ -75,6 +75,7 @@ function resetCtx() {
     sundial_customer_cache: [{ sf_id: RECORD_ID, customer_name: "HOLLAND, DANA", name: "C-0042" }],
     sundial_solar_cache: [],
     sundial_roofing_cache: [],
+    sundial_service_job_cache: [],
   };
   ctx.authUsers = { [RECIPIENT]: { email: "dana@example.com" } };
   ctx.authError = null;
@@ -218,6 +219,10 @@ test("the three known object keys build the documented paths", () => {
   });
   assert.deepEqual(content.recordLink(base, "roofing", "a1R"), {
     url: `${base}/projects/roofing/a1R`,
+    known: true,
+  });
+  assert.deepEqual(content.recordLink(base, "job", "a1S"), {
+    url: `${base}/service/jobs/a1S`,
     known: true,
   });
   // Case-insensitive, because record_object is free text in the database.

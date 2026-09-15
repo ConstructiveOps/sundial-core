@@ -8,13 +8,15 @@
  * Object key -> portal path template.
  *
  * `comments.record_object` carries the same short key the API uses (`customer`,
- * `solar`, `roofing`), and harmon-crm routes those three paths. WHEN THE SERVICE
- * MODULE LANDS IT GETS ONE ENTRY HERE — that is the whole change.
+ * `solar`, `roofing`, `job`), and harmon-crm routes those paths. `job` landed with the
+ * Service module's Communications panel (2026-09-15) — the "note to team" side of that
+ * panel is a plain comment on record_object = 'job'.
  */
 export const RECORD_PATHS = {
   customer: (id) => `/customers/${id}`,
   solar: (id) => `/projects/solar/${id}`,
   roofing: (id) => `/projects/roofing/${id}`,
+  job: (id) => `/service/jobs/${id}`,
 };
 
 /**

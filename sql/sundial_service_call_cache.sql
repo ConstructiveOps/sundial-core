@@ -30,7 +30,7 @@ create table if not exists sundial_service_call_cache (
   visit_sub_type              text,        -- Visit_Sub_Type__c
   scheduled_start             timestamptz, -- Scheduled_Start__c (Set by the dispatch board (block drop / resize).)
   scheduled_end               timestamptz, -- Scheduled_End__c (Default length = sum of the estimate's labor Estimated_Hours...)
-  status                      text,        -- Status__c (En Route = 'on my way' (texts the customer when notify is on...)
+  status                      text,        -- Status__c (Unscheduled = created without a window (sits in the dispatch...)
   actual_start                timestamptz, -- Actual_Start__c (FIRST clock-in (device tap-time, not sync-time).)
   actual_end                  timestamptz, -- Actual_End__c (LAST clock-out; re-clock-in reopens the call.)
   duration_minutes            numeric,     -- Duration_Minutes__c (Sum of the intervals in Clock Intervals - NOT end minus star...)
@@ -41,6 +41,9 @@ create table if not exists sundial_service_call_cache (
   geofence_verified           boolean,     -- Geofence_Verified__c (All clock events within the per-tenant radius of the service...)
   checklist_template_key      text,        -- Checklist_Template_Key__c (Per-tenant config key assigned at scheduling (D-065.9).)
   photos_count                numeric,     -- Photos_Count__c (Count of photos at SUNDIAL/{jobId}/photos/{callId}/ (metadat...)
+  billable_to_customer        boolean,     -- Billable_to_Customer__c (Office opt-in: bill this call's hours to the customer as a L...)
+  billable_hours              numeric,     -- Billable_Hours__c (Hours billed. Blank = derived from the clock (Duration Minut...)
+  bill_rate                   numeric,     -- Bill_Rate__c (Hourly rate billed for this call. Blank = the tech's Hourly ...)
 
   created_date                timestamptz, -- CreatedDate (list ordering)
   last_synced_at              timestamptz not null default now(),

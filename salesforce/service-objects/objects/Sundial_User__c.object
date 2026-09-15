@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_User__c - ONE NEW FIELD ONLY (D-072 amendment 6, 2026-09-15). package.xml lists it
+  as a CustomField member, so this file adds Hourly_Bill_Rate__c and touches nothing else on
+  the object. NEVER convert this to a whole-object deploy: Sundial_User__c is the live
+  access-model object.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Hourly_Bill_Rate__c</fullName>
+        <description>What the CUSTOMER is charged per hour when this tech's completed service-call hours are billed directly (D-072 amendment 6). Not a pay rate. Blank = the office types a rate per call. Deployed as a single CustomField, never a whole-object deploy of Sundial_User__c.</description>
+        <externalId>false</externalId>
+        <label>Hourly Bill Rate</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

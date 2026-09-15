@@ -291,6 +291,7 @@
     </fields>
     <fields>
         <fullName>Source__c</fullName>
+        <description>Time = a billable service call's hours (Added By Service Call points at the call; the labor screen owns the line).</description>
         <externalId>false</externalId>
         <label>Source</label>
         <required>false</required>
@@ -324,6 +325,11 @@
                     <fullName>Migration</fullName>
                     <default>false</default>
                     <label>Migration</label>
+                </value>
+                <value>
+                    <fullName>Time</fullName>
+                    <default>false</default>
+                    <label>Time</label>
                 </value>
             </valueSetDefinition>
         </valueSet>

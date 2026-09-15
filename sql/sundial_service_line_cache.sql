@@ -38,7 +38,7 @@ create table if not exists sundial_service_line_cache (
   stage                         text,        -- Stage__c (Proposed = added but not yet in an approved version (field e...)
   sort_order                    numeric,     -- Sort_Order__c (Grid order.)
   show_unit_price               boolean,     -- Show_Unit_Price__c (Per-line display toggle; default from tenant config.)
-  source                        text,        -- Source__c
+  source                        text,        -- Source__c (Time = a billable service call's hours (Added By Service Cal...)
   added_by_service_call_sf_id   text,        -- Added_By_Service_Call__c (Set for field-added lines: which visit the tech was on.)
 
   created_date                  timestamptz, -- CreatedDate (list ordering)

@@ -169,3 +169,32 @@ Add three configurations with path pattern `SUNDIAL/{record_id}/`:
 Then I start the `sundial-service-estimate` Lambda against a real schema. If you also have
 the Lead & Source defaults for a service-originated customer (Stage / Status / Lead Source),
 send those with it.
+
+---
+
+## Delta 2026-09-15 — price-book filters, unscheduled calls, labor billing (D-072 amendment 6)
+
+The seven objects are live, so this increment ships as a **field-only** package —
+`salesforce/service-delta-2026-09-15/` — nine fields plus the regenerated permission set.
+Nothing in it touches object settings; re-deploying a picklist with extra values only ADDS
+values. Do these in order; each is a couple of minutes.
+
+1. **Zip it** (never by hand):
+   ```
+   node scripts/zip-package.mjs salesforce/service-delta-2026-09-15
+   ```
+   Expect `6 entries` and `manifest ✅ 9 CustomField member(s)`.
+2. **Workbench → Migration → Deploy** the zip exactly as in Step 4 above: Rollback On Error,
+   Single Package, **Check Only** first → `Succeeded`, `Failures: 0` → then the real deploy.
+3. **Supabase → SQL Editor** → paste and run `sql/2026-09-15_service_delta.sql` (adds the
+   matching cache columns; safe to re-run).
+4. `node scripts/verify-service-schema.mjs` — the new fields should resolve.
+5. Then the price-book import (see `salesforce/pricebook-import/README.md`) and the Lambda
+   deploys in TASKS.md.
+
+What the fields are for: **Job Type / Service Type / Category** are the three filter
+dropdowns on the Price Book list (Category already existed); **Unscheduled** lets a service
+call exist before it has a window and sit in the dispatch tray; **Billable to Customer /
+Billable Hours / Bill Rate** on the call and **Hourly Bill Rate** on the user are the direct
+labor billing the office opts into per call; **Source = Time** marks the Labor lines that
+billing writes.

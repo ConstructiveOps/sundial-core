@@ -677,6 +677,21 @@
     </fieldPermissions>
     <fieldPermissions>
         <editable>true</editable>
+        <field>Sundial_Service_Call__c.Billable_to_Customer__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Service_Call__c.Billable_Hours__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Service_Call__c.Bill_Rate__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
         <field>Sundial_Price_Book_Item__c.Item_Code__c</field>
         <readable>true</readable>
     </fieldPermissions>
@@ -698,6 +713,16 @@
     <fieldPermissions>
         <editable>true</editable>
         <field>Sundial_Price_Book_Item__c.Kind__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Price_Book_Item__c.Job_Type__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Price_Book_Item__c.Service_Type__c</field>
         <readable>true</readable>
     </fieldPermissions>
     <fieldPermissions>
@@ -1028,6 +1053,11 @@
     <fieldPermissions>
         <editable>true</editable>
         <field>Sundial_Customer__c.Stripe_Customer_Id__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_User__c.Hourly_Bill_Rate__c</field>
         <readable>true</readable>
     </fieldPermissions>
 </PermissionSet>

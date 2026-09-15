@@ -194,7 +194,7 @@
     </fields>
     <fields>
         <fullName>Status__c</fullName>
-        <description>En Route = 'on my way' (texts the customer when notify is on; ends the previous call's clock and starts drive time on this one).</description>
+        <description>Unscheduled = created without a window (sits in the dispatch tray until dropped on the board; 2026-09-15). En Route = 'on my way' (texts the customer when notify is on; ends the previous call's clock and starts drive time on this one).</description>
         <externalId>false</externalId>
         <label>Status</label>
         <required>false</required>
@@ -204,6 +204,11 @@
             <restricted>true</restricted>
             <valueSetDefinition>
                 <sorted>false</sorted>
+                <value>
+                    <fullName>Unscheduled</fullName>
+                    <default>false</default>
+                    <label>Unscheduled</label>
+                </value>
                 <value>
                     <fullName>Scheduled</fullName>
                     <default>true</default>
@@ -404,6 +409,38 @@
         <trackTrending>false</trackTrending>
         <type>Number</type>
         <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Billable_to_Customer__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Office opt-in: bill this call's hours to the customer as a Labor line on the estimate (Source = Time). Off = the hours never reach the invoice.</description>
+        <externalId>false</externalId>
+        <label>Billable to Customer</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Billable_Hours__c</fullName>
+        <description>Hours billed. Blank = derived from the clock (Duration Minutes, else Actual Start-&gt;End) rounded UP to the quarter hour; the office may overtype.</description>
+        <externalId>false</externalId>
+        <label>Billable Hours</label>
+        <precision>6</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Bill_Rate__c</fullName>
+        <description>Hourly rate billed for this call. Blank = the tech's Hourly Bill Rate on Sundial_User__c at billing time; the office may overtype per call or apply one rate to every call on the job.</description>
+        <externalId>false</externalId>
+        <label>Bill Rate</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
     </fields>
     <label>Service Call</label>
     <nameField>

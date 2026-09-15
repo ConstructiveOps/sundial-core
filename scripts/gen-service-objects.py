@@ -310,7 +310,7 @@ OBJECTS.append(dict(
         F("Visit_Sub_Type__c", "Visit Sub Type", "Identity", "Picklist", "", values=["On-Site", "Remote", "Office Work", "In-Field", "Travel", "Prep"]),
         F("Scheduled_Start__c", "Scheduled Start", "Schedule", "DateTime", "Set by the dispatch board (block drop / resize)."),
         F("Scheduled_End__c", "Scheduled End", "Schedule", "DateTime", "Default length = sum of the estimate's labor Estimated_Hours (price book) or the service-type default."),
-        F("Status__c", "Status", "Schedule", "Picklist", "En Route = 'on my way' (texts the customer when notify is on; ends the previous call's clock and starts drive time on this one).", values=["Scheduled", "En Route", "In Progress", "Complete", "Cancelled", "No-Show"], default="Scheduled"),
+        F("Status__c", "Status", "Schedule", "Picklist", "Unscheduled = created without a window (sits in the dispatch tray until dropped on the board; 2026-09-15). En Route = 'on my way' (texts the customer when notify is on; ends the previous call's clock and starts drive time on this one).", values=["Unscheduled", "Scheduled", "En Route", "In Progress", "Complete", "Cancelled", "No-Show"], default="Scheduled"),
         F("Cancel_Reason__c", "Cancel Reason", "Schedule", "Text", "Required (in code) when the board cancels a call.", cache=False, length=255),
         F("Actual_Start__c", "Actual Start", "Time", "DateTime", "FIRST clock-in (device tap-time, not sync-time).", sys=True),
         F("Actual_End__c", "Actual End", "Time", "DateTime", "LAST clock-out; re-clock-in reopens the call.", sys=True),
@@ -327,6 +327,11 @@ OBJECTS.append(dict(
         F("Checklist_Template_Key__c", "Checklist Template Key", "Checklist", "Text", "Per-tenant config key assigned at scheduling (D-065.9).", length=80),
         F("Checklist_State__c", "Checklist State", "Checklist", "LongTextArea", "Item completion snapshot (JSON). Required items gate Complete.", cache=False, sys=True),
         F("Photos_Count__c", "Photos Count", "Files", "Number", "Count of photos at SUNDIAL/{jobId}/photos/{callId}/ (metadata-derived).", sys=True, precision=4, scale=0),
+        # Direct labor billing (2026-09-15, D-072 amendment 6): the office may bill a completed
+        # call's real hours to the customer. Off by default - most jobs are priced from the book.
+        F("Billable_to_Customer__c", "Billable to Customer", "Billing", "Checkbox", "Office opt-in: bill this call's hours to the customer as a Labor line on the estimate (Source = Time). Off = the hours never reach the invoice.", default=False),
+        F("Billable_Hours__c", "Billable Hours", "Billing", "Number", "Hours billed. Blank = derived from the clock (Duration Minutes, else Actual Start->End) rounded UP to the quarter hour; the office may overtype.", precision=6, scale=2),
+        F("Bill_Rate__c", "Bill Rate", "Billing", "Currency", "Hourly rate billed for this call. Blank = the tech's Hourly Bill Rate on Sundial_User__c at billing time; the office may overtype per call or apply one rate to every call on the job.", precision=16, scale=2),
     ],
 ))
 
@@ -350,7 +355,9 @@ OBJECTS.append(dict(
         F("Is_Active__c", "Is Active", "Identity", "Checkbox", "Portal Price Book list = active only. One active per Item Code.", default=True),
         lk("Superseded_By__c", "Superseded By", "Identity", "Sundial_Price_Book_Item__c", "Prior_Versions", "Set on the old version when Update creates the new one.", "Prior Versions", sys=True),
         F("Kind__c", "Kind", "Classification", "Picklist", "Product = labor + material on one item (both price splits filled). Drives kind-scoped discounts and taxability.", values=["Labor", "Material", "Product", "Fee"], default="Labor"),
-        F("Category__c", "Category", "Classification", "Picklist", "GET FROM HARMON: final list, seeded from the HCP export. Unrestricted so the office can add values via the portal admin.", restricted=False, values=["Service Call", "Inverter", "Panel", "Battery", "EV Charger", "Electrical", "Roofing", "Inspection", "Cleaning", "Service Plan", "Materials", "Other"]),
+        F("Job_Type__c", "Job Type", "Classification", "Picklist", "List-view filter #1 (2026-09-15): which department's work this item is for. Unrestricted so a tenant can add its own.", restricted=False, values=["Solar", "Electrical", "EV", "Commercial"]),
+        F("Service_Type__c", "Service Type", "Classification", "Picklist", "List-view filter #2 (2026-09-15): Installation / Repair (+ whatever a tenant adds - unrestricted).", restricted=False, values=["Installation", "Repair", "Maintenance", "Inspection"]),
+        F("Category__c", "Category", "Classification", "Picklist", "List-view filter #3. GET FROM HARMON: final list, seeded from the HCP export. Unrestricted so the office can add values via the portal admin.", restricted=False, values=["Service Call", "Inverter", "Panel", "Battery", "EV Charger", "Electrical", "Roofing", "Inspection", "Cleaning", "Service Plan", "Materials", "Other"]),
         F("Description__c", "Description", "Content", "LongTextArea", "Customer-facing text printed on estimates/invoices.", length=4000, visibleLines=4),
         F("Internal_Notes__c", "Internal Notes", "Content", "LongTextArea", "Never printed.", cache=False),
         F("Unit_of_Measure__c", "Unit of Measure", "Pricing", "Picklist", "", values=["Each", "Hour", "Foot", "Lot"], default="Each"),
@@ -396,7 +403,7 @@ OBJECTS.append(dict(
         F("Stage__c", "Stage", "Lifecycle", "Picklist", "Proposed = added but not yet in an approved version (field estimates land here); Approved; Completed; Removed = struck after a send (kept for the printed history).", values=["Proposed", "Approved", "Completed", "Removed"], default="Proposed"),
         F("Sort_Order__c", "Sort Order", "Lifecycle", "Number", "Grid order.", precision=5, scale=0),
         F("Show_Unit_Price__c", "Show Unit Price", "Lifecycle", "Checkbox", "Per-line display toggle; default from tenant config.", default=True),
-        F("Source__c", "Source", "Lifecycle", "Picklist", "", values=["Price Book", "Template", "Ad hoc", "Field", "Migration"], default="Price Book"),
+        F("Source__c", "Source", "Lifecycle", "Picklist", "Time = a billable service call's hours (Added By Service Call points at the call; the labor screen owns the line).", values=["Price Book", "Template", "Ad hoc", "Field", "Migration", "Time"], default="Price Book"),
         lk("Added_By_Service_Call__c", "Added By Service Call", "Lifecycle", "Sundial_Service_Call__c", "Added_Service_Lines", "Set for field-added lines: which visit the tech was on.", "Added Service Lines"),
     ],
 ))
@@ -474,6 +481,11 @@ CUSTOMER_FIELD = F("Stripe_Customer_Id__c", "Stripe Customer Id", "Payments", "T
                    "Stripe customer reference (card on file via SetupIntent; also the Service Club subscription customer). Cards are vaulted in Stripe, never in Salesforce. Deployed as a single CustomField, never a whole-object deploy of Sundial_Customer__c.",
                    length=100, externalId=True)
 
+# ============================ Sundial_User__c (ONE field, not whole-object) ============================
+USER_FIELD = F("Hourly_Bill_Rate__c", "Hourly Bill Rate", "Service", "Currency",
+               "What the CUSTOMER is charged per hour when this tech's completed service-call hours are billed directly (D-072 amendment 6). Not a pay rate. Blank = the office types a rate per call. Deployed as a single CustomField, never a whole-object deploy of Sundial_User__c.",
+               precision=16, scale=2)
+
 # ---------------------------------------------------------------------------
 # Emit .object files
 # ---------------------------------------------------------------------------
@@ -483,6 +495,18 @@ if NO_COMMERCIAL:
     print("--no-commercial: omitted the three Sundial_Commercial__c lookups")
 for o in OBJECTS:
     open(f"{PKG}/objects/{o['api']}.object", "w").write(obj_xml(o))
+
+open(f"{PKG}/objects/Sundial_User__c.object", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_User__c - ONE NEW FIELD ONLY (D-072 amendment 6, 2026-09-15). package.xml lists it
+  as a CustomField member, so this file adds Hourly_Bill_Rate__c and touches nothing else on
+  the object. NEVER convert this to a whole-object deploy: Sundial_User__c is the live
+  access-model object.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+{field_xml(USER_FIELD)}
+</CustomObject>
+""")
 
 open(f"{PKG}/objects/Sundial_Customer__c.object", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!--
@@ -512,7 +536,7 @@ open(f"{PKG}/package.xml", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
 
   DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
   Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
-  Single Package -> CHECK ONLY first, expect 9/9 components (7 objects + 1 field + 1
+  Single Package -> CHECK ONLY first, expect 10/10 components (7 objects + 2 fields + 1
   permission set), then deploy for real. Then assign the permission set, re-run verify.
 -->
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -522,6 +546,7 @@ open(f"{PKG}/package.xml", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
     </types>
     <types>
         <members>Sundial_Customer__c.Stripe_Customer_Id__c</members>
+        <members>Sundial_User__c.Hourly_Bill_Rate__c</members>
         <name>CustomField</name>
     </types>
     <types>
@@ -550,6 +575,7 @@ for o in OBJECTS:
             continue
         fps.append(fp(o["api"], f.api, f.ftype != "Formula"))
 fps.append(fp("Sundial_Customer__c", CUSTOMER_FIELD.api, True))
+fps.append(fp("Sundial_User__c", USER_FIELD.api, True))
 ops = "\n".join(f"""    <objectPermissions>
         <allowCreate>true</allowCreate>
         <allowDelete>{'true' if o['delete'] else 'false'}</allowDelete>

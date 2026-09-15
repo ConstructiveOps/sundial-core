@@ -11,7 +11,7 @@
 
   DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
   Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
-  Single Package -> CHECK ONLY first, expect 9/9 components (7 objects + 1 field + 1
+  Single Package -> CHECK ONLY first, expect 10/10 components (7 objects + 2 fields + 1
   permission set), then deploy for real. Then assign the permission set, re-run verify.
 -->
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -27,6 +27,7 @@
     </types>
     <types>
         <members>Sundial_Customer__c.Stripe_Customer_Id__c</members>
+        <members>Sundial_User__c.Hourly_Bill_Rate__c</members>
         <name>CustomField</name>
     </types>
     <types>

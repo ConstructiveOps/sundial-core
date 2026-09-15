@@ -26,7 +26,9 @@ create table if not exists sundial_price_book_item_cache (
   is_active             boolean,     -- Is_Active__c (Portal Price Book list = active only. One active per Item Co...)
   superseded_by_sf_id   text,        -- Superseded_By__c (Set on the old version when Update creates the new one.)
   kind                  text,        -- Kind__c (Product = labor + material on one item (both price splits fi...)
-  category              text,        -- Category__c (GET FROM HARMON: final list, seeded from the HCP export. Unr...)
+  job_type              text,        -- Job_Type__c (List-view filter #1 (2026-09-15): which department's work th...)
+  service_type          text,        -- Service_Type__c (List-view filter #2 (2026-09-15): Installation / Repair (+ w...)
+  category              text,        -- Category__c (List-view filter #3. GET FROM HARMON: final list, seeded fro...)
   description           text,        -- Description__c (Customer-facing text printed on estimates/invoices.)
   unit_of_measure       text,        -- Unit_of_Measure__c
   default_quantity      numeric,     -- Default_Quantity__c (e.g. 1.5 hours for the standard service call.)

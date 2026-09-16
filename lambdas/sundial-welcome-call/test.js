@@ -128,6 +128,59 @@ function geovannaCall(overrides = {}, analysisOverrides = {}) {
   };
 }
 
+/**
+ * A REAL RING-OUT: `GET /v2/get-call/call_ae983426baaab27c806cd37ec01`, pulled
+ * 2026-09-16 (customer a1P7y00000B7fw9EAB, a rep-form call placed 2026-09-14 that rang
+ * out with no voicemail). The 2026-09-15 orphan backfill wrote it as
+ * "Verified - Exceptions" with Duration 0:00 — the bug this fixture pins.
+ *
+ * What a real never-connected call looks like on the wire:
+ *   - call_status "not_connected", disconnection_reason "dial_no_answer"
+ *   - duration_ms 0, start_timestamp === end_timestamp
+ *   - NO transcript / transcript_object / recording_url keys at all (absent, not empty)
+ *   - call_analysis present but hollow: custom_analysis_data {}, call_summary "",
+ *     in_voicemail false — so nothing in the analysis says "no answer"
+ *
+ * Verbatim in shape and values except PII/URLs: to_number redacted, the dynamic
+ * variables, public_log_url and pcap_url dropped.
+ */
+function lauraRingOutCall(overrides = {}) {
+  return {
+    call_id: "call_ae983426baaab27c806cd37ec01",
+    call_type: "phone_call",
+    agent_id: "agent_4a4c73b89ae6fc1f564db4e4b2",
+    agent_version: 20,
+    agent_name: "Harmon Solar Welcome Call",
+    call_status: "not_connected",
+    start_timestamp: 1789443356782,
+    end_timestamp: 1789443356782,
+    duration_ms: 0,
+    disconnection_reason: "dial_no_answer",
+    latency: {},
+    metadata: { source: "zapier_form", finance_source: "Lightreach_lease", sf_record_id: "" },
+    call_cost: {
+      total_duration_unit_price: 0,
+      total_duration_seconds: 0,
+      combined_cost: 0,
+      product_costs: [],
+    },
+    call_analysis: {
+      in_voicemail: false,
+      custom_analysis_data: {},
+      user_sentiment: "Unknown",
+      call_summary: "",
+      call_successful: false,
+    },
+    data_storage_setting: "everything",
+    opt_in_signed_url: false,
+    tool_calls: [],
+    from_number: "+16025870058",
+    to_number: "+1714XXXXXXX",
+    direction: "outbound",
+    ...overrides,
+  };
+}
+
 function baseCustomer(overrides = {}) {
   return {
     Id: "a1P7y00000AUo6TEAT",
@@ -1244,6 +1297,113 @@ test("an unknown outcome parks for a human rather than queueing another call", (
   // ...unless it's an empty result on a voicemail, which really is a no-answer.
   assert.equal(hook.mapOutcomeToStatus("", { inVoicemail: true }).status, "No Answer");
   assert.equal(hook.mapOutcomeToStatus("", { inVoicemail: false }).status, "Verified - Exceptions");
+});
+
+// --- connection check: consulted BEFORE verification_result (2026-09-16) -----
+
+test("the real ring-out (Laura, dial_no_answer) maps to No Answer, not Verified - Exceptions", () => {
+  const r = hook.resolveCallStatus(lauraRingOutCall(), { attempts: 0 });
+  assert.equal(r.status, "No Answer");
+  assert.deepEqual(r.connection, { connected: false, reason: "dial_no_answer" });
+});
+
+test("the same ring-out at the attempt ceiling is Failed - Max Attempts", () => {
+  assert.equal(
+    hook.resolveCallStatus(lauraRingOutCall(), { attempts: 5 }).status,
+    "Failed - Max Attempts"
+  );
+  assert.equal(hook.resolveCallStatus(lauraRingOutCall(), { attempts: 4 }).status, "No Answer");
+});
+
+test("analysis content on a dead call never overrides the connection evidence", () => {
+  const junk = lauraRingOutCall();
+  junk.call_analysis.custom_analysis_data = { verification_result: "passed" };
+  assert.equal(hook.resolveCallStatus(junk).status, "No Answer");
+  junk.call_analysis.custom_analysis_data = { verification_result: "refusal" };
+  assert.equal(hook.resolveCallStatus(junk).status, "No Answer");
+});
+
+test("every dial-failure reason is never-connected, even with odd call_status", () => {
+  for (const reason of ["dial_no_answer", "dial_busy", "dial_failed", "user_declined"]) {
+    const c = lauraRingOutCall({ disconnection_reason: reason, call_status: "ended" });
+    assert.deepEqual(hook.assessConnection(c), { connected: false, reason }, reason);
+  }
+});
+
+test("no transcript and zero connected time is never-connected without a dial reason", () => {
+  const c = lauraRingOutCall({ call_status: "ended", disconnection_reason: undefined });
+  const a = hook.assessConnection(c);
+  assert.equal(a.connected, false);
+  assert.equal(a.reason, "no transcript, 0:00 connected");
+  // Timestamps alone are evidence too.
+  const t = lauraRingOutCall({ call_status: "ended", disconnection_reason: "", duration_ms: undefined });
+  assert.equal(hook.assessConnection(t).connected, false);
+});
+
+test("ABSENT duration evidence is not zero — the call keeps the existing mapping", () => {
+  // The synthetic webhook fixture carries no duration or transcript at all.
+  const c = analyzedPayload({}, { verification_result: "something_new" }).call;
+  assert.equal(hook.assessConnection(c).connected, true);
+  assert.equal(hook.resolveCallStatus(c).status, "Verified - Exceptions");
+});
+
+test("a real voicemail (connected, in_voicemail) is still No Answer", () => {
+  const vm = geovannaCall({ disconnection_reason: "voicemail_reached", duration_ms: 34000 }, {
+    verification_result: "",
+  });
+  vm.call_analysis.in_voicemail = true;
+  const r = hook.resolveCallStatus(vm);
+  assert.equal(r.connection.connected, true);
+  assert.equal(r.status, "No Answer");
+});
+
+test("a connected call with an unrecognized result still parks as Verified - Exceptions", () => {
+  const c = geovannaCall({}, { verification_result: "something_new" });
+  assert.equal(hook.resolveCallStatus(c).status, "Verified - Exceptions");
+  const empty = geovannaCall({}, { verification_result: "" });
+  assert.equal(hook.resolveCallStatus(empty).status, "Verified - Exceptions");
+});
+
+test("connected-call analysis wins over a populated non-dial reason like user_hangup", () => {
+  const c = geovannaCall({ disconnection_reason: "user_hangup" }, { verification_result: "passed" });
+  assert.equal(hook.resolveCallStatus(c).status, "Verified");
+  const t = geovannaCall(
+    { disconnection_reason: "user_hangup", transcript: "Agent: Hi… User: yes." },
+    { verification_result: "refusal" }
+  );
+  assert.equal(hook.resolveCallStatus(t, { attempts: 5 }).status, "Refused");
+});
+
+test("webhook: a ring-out is written as No Answer, and the header says why", async () => {
+  fresh();
+  const call = lauraRingOutCall({
+    metadata: { sf_record_id: baseCustomer().Id, attempt_no: 2 },
+  });
+  const res = await handler(signedWebhookEvent({ event: "call_analyzed", call }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).welcomeCallStatus, "No Answer");
+  const fields = ctx.sfUpdates[0].fields;
+  assert.equal(fields.Welcome_Call_Status__c, "No Answer");
+  assert.match(
+    fields.Welcome_Call_Log__c,
+    /^── .* · Attempt 2 · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+  );
+  // The block keeps its format — empty fields read as none/N.
+  assert.match(fields.Welcome_Call_Log__c, /^Call Summary: none$/m);
+  assert.match(fields.Welcome_Call_Log__c, /^Recording: none · Duration: 0:00$/m);
+  // And the idempotency marker still matches the entry.
+  assert.ok(hook.alreadyProcessed(fields.Welcome_Call_Log__c, "call_ae983426baaab27c806cd37ec01"));
+});
+
+test("a connected call's header carries no not-answered suffix", () => {
+  const entry = hook.buildResultLogEntry({
+    stamp: "x",
+    origin: "Attempt 1",
+    status: "Verified",
+    analysis: {},
+    call: geovannaCall(),
+  });
+  assert.doesNotMatch(entry, /not answered/);
 });
 
 test("result writeback records outcome, mismatches and recording url", async () => {
@@ -2404,4 +2564,48 @@ test("the two HTTP routes are told apart by path, and neither takes a portal JWT
     body: JSON.stringify(analyzedPayload()),
   });
   assert.equal(zapOnWebhook.statusCode, 401);
+});
+
+// ---------------------------------------------------------------------------
+// Orphan backfill of a ring-out — the exact path that mis-logged Laura (2026-09-15)
+// ---------------------------------------------------------------------------
+
+test("orphan backfill: the real ring-out lands as No Answer with the reason on the header", async () => {
+  fresh();
+  ctx.retellGetCallResponse = { status: 200, body: lauraRingOutCall() };
+  const res = await handler(
+    orphanMatchEvent({
+      call_id: "call_ae983426baaab27c806cd37ec01",
+      sf_record_id: baseCustomer().Id,
+    })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.equal(body.backfill, "backfilled");
+  assert.equal(body.welcomeCallStatus, "No Answer");
+
+  const fields = ctx.sfUpdates.at(-1).fields;
+  assert.equal(fields.Welcome_Call_Status__c, "No Answer");
+  assert.match(
+    fields.Welcome_Call_Log__c,
+    /^── .* · rep-form call · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+  );
+  assert.doesNotMatch(fields.Welcome_Call_Log__c, /Verified - Exceptions/);
+});
+
+test("orphan backfill: a ring-out at the ceiling is Failed - Max Attempts", async () => {
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Attempts__c: 5 })];
+  ctx.retellGetCallResponse = { status: 200, body: lauraRingOutCall() };
+  const res = await handler(
+    orphanMatchEvent({
+      call_id: "call_ae983426baaab27c806cd37ec01",
+      sf_record_id: baseCustomer().Id,
+    })
+  );
+  assert.equal(parse(res).welcomeCallStatus, "Failed - Max Attempts");
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    /Result: Failed - Max Attempts \(not answered — dial_no_answer\) · /
+  );
 });

@@ -348,13 +348,47 @@ the **call**, and `call_summary` + `in_voicemail` from **`call_analysis`**.
 > Retell also sends **`used_loan_for_prepaid`** (e.g. `"not_applicable"`), which the
 > Lambda currently ignores. Harmless, but it is real data — see TASKS.md.
 
+**Step 1 — did the call connect? (checked FIRST, 2026-09-16).** `assessConnection()` in
+`webhook.js`, called by `resolveCallStatus()` — the ONE status decision both the webhook
+writeback and the orphan backfill use. A call is **never-connected** when any of:
+
+| Evidence | Example |
+|---|---|
+| `disconnection_reason` ∈ `dial_no_answer`, `dial_busy`, `dial_failed`, `user_declined` | the real ring-out below |
+| `call_status` = `not_connected` | Retell's own verdict |
+| no transcript **and** connected time ≤ 1 s (`duration_ms`, else `end − start` timestamps) | a dead dial with no reason string |
+
+A never-connected call is **`No Answer`** (→ **`Failed - Max Attempts`** at ≥ 5 attempts)
+**regardless of what `call_analysis` contains** — analysis content on a dead call never
+overrides the connection evidence. Its log header carries the reason:
+`Result: No Answer (not answered — dial_no_answer)`; the block keeps its format with
+`none` / `N` fields and `Recording: none · Duration: 0:00`.
+
+**Absent evidence is not zero:** a payload with no duration fields at all counts as
+connected and keeps the step-2 mapping. The reason strings are Retell's documented
+`disconnection_reason` enum (get-call reference, checked 2026-09-16). `invalid_destination`,
+`marked_as_spam` and the `error_*` / telephony family are deliberately NOT listed — they
+count as never-connected only through the evidence rule.
+
+> **What a real ring-out looks like** — `GET /v2/get-call/call_ae983426baaab27c806cd37ec01`
+> (placed 2026-09-14, rang out, no voicemail): `call_status: "not_connected"`,
+> `disconnection_reason: "dial_no_answer"`, `duration_ms: 0`,
+> `start_timestamp === end_timestamp`, **no** `transcript` / `transcript_object` /
+> `recording_url` keys at all, and a hollow `call_analysis` (`custom_analysis_data: {}`,
+> `call_summary: ""`, `in_voicemail: false`). Before the connection check existed that empty
+> result fell into the unrecognized fail-safe, and the 2026-09-15 backfill logged it
+> `Verified - Exceptions` — a terminal status for a customer nobody spoke to. Pinned as the
+> `lauraRingOutCall()` fixture in `test.js`.
+
+**Step 2 — connected calls only: `verification_result`.**
+
 | `verification_result` | `Welcome_Call_Status__c` |
 |---|---|
 | `passed` | `Verified` |
 | `partial` / `failed` / `callback_requested` | `Verified - Exceptions` |
 | `refusal` | `Refused` |
 | `wrong_person` / `voicemail` / `no answer` | `No Answer` — **`Failed - Max Attempts`** when `Welcome_Call_Attempts__c` ≥ 5 |
-| unrecognized | `Verified - Exceptions` (see below) |
+| unrecognized (connected calls only) | `Verified - Exceptions` (see below) |
 
 Values are normalized (lowercase, spaces and hyphens → `_`), so `no answer`,
 `no-answer` and `no_answer` are the same thing.
@@ -366,7 +400,8 @@ Values are normalized (lowercase, spaces and hyphens → `_`), so `no answer`,
   the fail-safe direction: Exceptions parks the record for a human, while No Answer
   would silently queue another call on a result we did not understand. The one
   exception: an empty result with `in_voicemail: true` really is a no-answer and is
-  treated as one.
+  treated as one. **This fail-safe is scoped to calls that connected** — a
+  never-connected call is settled by step 1 and never reaches it.
 - Two statuses in the org picklist — **`Contact Info Mismatch`** and
   **`Contract Values Mismatch`** — are **not currently produced** by this mapping.
   Mismatches land in `Verified - Exceptions` with the detail in the log. Splitting
@@ -529,7 +564,8 @@ started; the ledger is for billing.
 The sweep sends only `{call_id, sf_record_id}`, so the analysis is **re-read from
 Retell** (`GET /v2/get-call/{call_id}`, same API key as create-call) rather than re-sent
 by Zapier. Same data, same authority the webhook used — which is what lets both paths
-share `mapOutcomeToStatus` and `buildResultLogEntry` and emit identical entries.
+share `resolveCallStatus` (connection check, then `mapOutcomeToStatus`) and
+`buildResultLogEntry` and emit identical entries.
 
 **Status rules:**
 
@@ -766,6 +802,8 @@ would lose the status update as well.
                                     │ Calling │  ← NOT eligible (in flight)
                                     └────┬────┘
                                          │ call_analyzed
+                                         │ 1. connected? no ──► No Answer / Failed - Max Attempts
+                                         │ 2. yes ──► map verification_result:
              ┌───────────────┬───────────┼─────────────┬─────────────────┐
              ▼               ▼           ▼             ▼                 ▼
         ┌──────────┐  ┌──────────────┐ ┌─────────┐ ┌───────────┐ ┌────────────────────┐
@@ -778,6 +816,12 @@ would lose the status update as well.
 
 `No Answer` is the **only** non-terminal outcome — it is what makes the retry Flow
 meaningful, and the attempt ceiling is what makes it terminate.
+
+**The connection check runs before any of those arrows.** A call that never connected
+(dial-failure `disconnection_reason`, `call_status: not_connected`, or no transcript with
+~zero connected time) can only land in `No Answer` or `Failed - Max Attempts`, whatever
+its analysis says. Without it, a ring-out with no voicemail went to the terminal
+`Verified - Exceptions` and silently ended its own retry loop (fixed 2026-09-16).
 
 ---
 

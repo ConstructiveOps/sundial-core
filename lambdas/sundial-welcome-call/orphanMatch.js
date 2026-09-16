@@ -40,7 +40,7 @@ import {
   alreadyProcessed,
   buildResultLogEntry,
   extractCall,
-  mapOutcomeToStatus,
+  resolveCallStatus,
   ENTRY_MARKER,
 } from "./webhook.js";
 import {
@@ -264,11 +264,9 @@ async function backfillCallResult({
   // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
   // written back. Passing it keeps the mapping identical to the webhook's.
   const attempts = Number(schema.reader(record)("welcomeCallAttempts")) || 0;
-  const { status: mappedStatus } = mapOutcomeToStatus(analysis?.verification_result, {
-    attempts,
-    inVoicemail:
-      call?.call_analysis?.in_voicemail === true || call?.in_voicemail === true,
-  });
+  // Same decision as the webhook, connection check included — a rep-form call that
+  // rang out must not backfill as Verified - Exceptions (call_ae983426…, 2026-09-15).
+  const { status: mappedStatus } = resolveCallStatus(call, { attempts });
 
   const currentStatus = statusApi ? String(record[statusApi] ?? "").trim() : "";
   const isTerminal = TERMINAL_STATUSES.has(currentStatus);

@@ -285,13 +285,105 @@ test("a sales role may create ONLY customer (§3.4 step 5)", async () => {
   }
 });
 
-test("TENANT scope create is unchanged — no stamping, body honoured", async () => {
+// ---------------------------------------------------------------------------
+// §2.3 invariant 1, THE TENANT-SCOPE HALF (2026-09-16)
+// ---------------------------------------------------------------------------
+// This block used to assert `!("Dealer__c" in sent)` under the heading "TENANT scope
+// create is unchanged". That assertion was PINNING THE BUG: staff create at tenant scope
+// with a rep in the body (a coordinator acting for a rep, and the portal's Create Project
+// button), and the record landed with a rep and a null dealer — invisible to that rep's
+// own dealer manager. 8 Customers and 6 Solar in the 18 days after the backfill, growing.
+//
+// A1 says the deal's dealer comes from its rep and from nothing else. That is true on
+// every path or it is not an invariant.
+
+test("TENANT create WITH a rep derives Dealer__c from that rep (A1, create half)", async () => {
   ctx.identity = identityFor("Admin", { dealer: null });
   const res = await handler(postEvent("customer", { First_Name__c: "New", Sales_Rep__c: REP_B }));
   assert.equal(res.statusCode, 201);
   const sent = ctx.writes[0].body;
-  assert.equal(sent.Sales_Rep__c, REP_B, "staff create on a rep's behalf, as today");
-  assert.ok(!("Dealer__c" in sent), "and nothing is stamped over them");
+  assert.equal(sent.Sales_Rep__c, REP_B, "staff still create on a rep's behalf");
+  assert.equal(sent.Dealer__c, DEALER_B, "and the dealer is derived, not left null");
+  assert.equal(sent.Client__c, TENANT, "tenant stamping unchanged");
+});
+
+test("TENANT create with NO rep writes NO dealer — D-049 deals keep theirs", async () => {
+  // §2.3 invariant 6: a rep-less deal's dealer is set once and left alone. Aurora
+  // dealer-originated deals arrive with a dealer and no rep at all, so deriving
+  // unconditionally here would CLEAR them — a fix that destroys data.
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(postEvent("customer", { First_Name__c: "New" }));
+  assert.equal(res.statusCode, 201);
+  const sent = ctx.writes[0].body;
+  assert.ok(!("Sales_Rep__c" in sent), "no rep supplied, none invented");
+  assert.ok(!("Dealer__c" in sent), "and no dealer written over a null");
+  assert.equal(
+    ctx.soqlSeen.filter((q) => /FROM Sundial_User__c/.test(q)).length,
+    0,
+    "and no rep lookup is made at all"
+  );
+});
+
+test("TENANT create with a dealer but NO rep keeps the supplied dealer", async () => {
+  // The D-049 shape stated positively: a dealer-originated deal with no rep must survive
+  // create with its dealer intact.
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(
+    postEvent("customer", { First_Name__c: "New", Dealer__c: DEALER_B })
+  );
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B, "left exactly as supplied");
+});
+
+test("TENANT create: a rep with NO dealer writes an explicit null", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.userLookup = { Id: REP_B, Dealer__c: null }; // an unattributed rep
+  const res = await handler(postEvent("customer", { First_Name__c: "New", Sales_Rep__c: REP_B }));
+  assert.equal(res.statusCode, 201);
+  const sent = ctx.writes[0].body;
+  assert.ok("Dealer__c" in sent, "written explicitly, not omitted");
+  assert.equal(sent.Dealer__c, null, "a rep with no dealer yields a null dealer");
+});
+
+test("TENANT create: the DERIVED dealer overrides one in the body, and warns", async () => {
+  // A1: the dealer is never an independent input. Honouring both would let one request
+  // name a rep from one dealer and a dealer from another — the disagreement invariant 5
+  // exists to make impossible.
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(
+    postEvent("customer", { First_Name__c: "New", Sales_Rep__c: REP_B, Dealer__c: DEALER })
+  );
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B, "derived wins");
+  assert.ok(
+    ctx.warns.some((w) => String(w).includes("DEALER_DERIVED_OVERRIDE")),
+    "and the override is logged, as on the PATCH path"
+  );
+});
+
+test("TENANT create: an unknown rep is refused, and nothing is written", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.userLookup = null; // not a user in this tenant
+  const res = await handler(postEvent("customer", { First_Name__c: "New", Sales_Rep__c: REP_B }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(JSON.parse(res.body).code, "INVALID_SALES_REP");
+  assert.equal(ctx.writes.length, 0, "refused before the create, not after");
+});
+
+test("SALES-scope create is UNCHANGED — stamped from the token, no rep lookup", async () => {
+  // The sales branch already satisfied A1 by construction (the rep IS the caller), and
+  // the new derivation must not touch it — a second round-trip per create for a value
+  // already known would be cost without meaning.
+  const res = await handler(postEvent("customer", { First_Name__c: "New" }));
+  assert.equal(res.statusCode, 201);
+  const sent = ctx.writes[0].body;
+  assert.equal(sent.Sales_Rep__c, REP_A, "stamped from the AccessContext");
+  assert.equal(sent.Dealer__c, DEALER, "and the dealer with it");
+  assert.equal(
+    ctx.soqlSeen.filter((q) => /FROM Sundial_User__c/.test(q)).length,
+    0,
+    "no rep lookup on the sales path"
+  );
 });
 
 // ---------------------------------------------------------------------------

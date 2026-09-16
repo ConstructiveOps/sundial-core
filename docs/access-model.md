@@ -262,6 +262,163 @@ that have no rep** (§2.4, A2) — once, offline, out of a reviewed alias CSV, n
 7. **A sales-company picklist value is never read to decide visibility**, on any path, in any Lambda.
    The only consumer stays the commission model (D19) and the PO vendor map (D-060).
 
+### 2.3a The fields that decide visibility, and where each one comes from
+
+Everything in this subsection is stated elsewhere in this document, spread across §1.2, §2.2 A1,
+§2.3, §3.1 and §3.2. It is restated here in one place, in Salesforce field names, because
+"which field decides what a rep sees" is the question that gets asked and the answer was only
+reconstructable by reading five sections. Added 2026-09-15.
+
+#### Row visibility, per scope, per object
+
+`rowFilter()` (`lib/access.js:462`) returns the tenant clause plus **at most one** additional
+equality. Which one is decided by scope alone; which field carries it is decided by object alone
+(`OBJECT_ACCESS`, `lib/access.js:94`). There is no third input — no name text, no picklist, no
+hierarchy field.
+
+| Object | `tenant` | `dealer` | `own` | `none` / `tech` |
+|---|---|---|---|---|
+| `Sundial_Customer__c` | `Client__c` only | `Client__c` **and `Dealer__c` = my dealer** | `Client__c` **and `Sales_Rep__c` = me** | deny |
+| `Sundial_Solar__c` | `Client__c` only | same | same | deny |
+| `Sundial_Roofing__c` | `Client__c` only | **deny** (module gate, `salesScopes: false`) | **deny** | deny |
+| `Sundial_Commercial__c`, `Sundial_PO__c`, `Sundial_PO_Credit__c`, service objects | `Client__c` only | **deny** | **deny** | deny |
+| `Sundial_User__c` | `Client__c` only | §3.5 union — **not** `rowFilter()`, which refuses this object (`lib/access.js:477`) | §3.5 | deny |
+
+- **`own` keys on `Sales_Rep__c`** — a Lookup to `Sundial_User__c`, compared against the caller's
+  own `Sundial_User__c` id. Cache column `sales_rep_sf_id`.
+- **`dealer` keys on `Dealer__c`** — a Lookup to `Sundial_Dealer__c` on the RECORD, compared
+  against `Sundial_User__c.Dealer__c` on the CALLER. Cache column `dealer_sf_id`.
+- **Roofing carries both columns and is still denied**, deliberately (`lib/access.js:116`): whether
+  the data model *could* support a filter is a separate decision from whether the module is open.
+- A **null** `Dealer__c` on a record is invisible to every `dealer`-scope user and fully visible to
+  `tenant` scope. A **null** `Dealer__c` on the USER resolves that user to `none` — they see nothing
+  at all (§1.2), not everything.
+
+#### Where `Dealer__c` on a record comes from
+
+**A1: `Dealer__c := Sales_Rep__r.Dealer__c`, wherever a rep is set.** The rep is the only source.
+The exceptions are all rep-*less* records, and all of them are one-time or inbound writes.
+
+| Path | Code | What it writes |
+|---|---|---|
+| **Create, sales scope** | `sundial-sf-update/index.js:830` | `Sales_Rep__c = access.userId` and `Dealer__c = access.dealerId`, force-stamped from the AccessContext. The body cannot reach either — both are in `SALES_PROTECTED_FIELDS` and a body naming them is refused, not overwritten. Same value A1 would derive: the rep *is* the caller. |
+| **Create, tenant scope** | same branch, **not taken** | ⚠️ **Nothing is stamped, and `Dealer__c` is NOT derived from the `Sales_Rep__c` in the body.** See the gap below. |
+| **PATCH that moves `Sales_Rep__c`** | `dealerForNewRep()`, `sundial-sf-update/index.js:503`, applied at `:686` | Re-derives `Dealer__c` from the NEW rep and writes both in the SAME update. Tenant scope only by construction (a sales role cannot reach `Sales_Rep__c` at all). A rep with no dealer, or a cleared rep, writes **null** explicitly — leaving the old value would keep the deal shared with an organization that no longer sells it. A `Dealer__c` in the same body is overridden by the derived value and the override is logged (`DEALER_DERIVED_OVERRIDE`). |
+| **PATCH that does not touch `Sales_Rep__c`** | — | `Dealer__c` is untouched. A sales role cannot PATCH it in any case. |
+| **Backfill pass 1** | `scripts/backfill-deal-ownership.mjs`, both objects | `Dealer__c := Sales_Rep__r.Dealer__c` for every record that HAS a rep. A rep with a null dealer leaves the deal null. |
+| **Backfill pass 2 (A2)** | same script, **`Sundial_Solar__c` only** | Rep-LESS Solar records only: `Sales_Company_Harmon_Solar_or_Third__c` resolved through `docs/integrations/dealer-aliases.csv`, then by exact name. Near-misses are reported for approval and never auto-applied. Customer is excluded (§2.4). |
+| **Aurora dealer-originated (D-049)** | inbound | A dealer name with no rep at all. §2.3 invariant 6: set once, then left alone. |
+| **Nothing else** | — | No Flow, no Zapier path, and no sales-company picklist read on any request path (§2.3 invariant 7). |
+
+**The sales-company picklists are never an input.** `Sundial_Customer__c.Dealer_Name__c`,
+`Sundial_Customer__c.Sales_Company__c` and `Sundial_Solar__c.Sales_Company_Harmon_Solar_or_Third__c`
+are the commission discriminator (D19) and the PO vendor map (D-060). The single place a picklist
+value reaches `Dealer__c` is backfill pass 2 — once, offline, out of a reviewed alias file.
+
+#### ⚠️ Gap found 2026-09-15: tenant-scope CREATE does not derive the dealer
+
+`handleCreate` stamps ownership only when `access.scope !== "tenant"`
+(`sundial-sf-update/index.js:829`). Harmon staff create records at **tenant** scope and set
+`Sales_Rep__c` from the body — which is the supported way a coordinator creates a customer on a
+rep's behalf, and is also what the portal's **Create Project** button does (harmon-crm
+`src/config/customer-to-solar-map.ts:247` copies `Sales_Rep__c` from the Customer; nothing copies
+`Dealer__c`).
+
+So a staff-created record arrives with a rep and a **null** dealer, and A1 is silently violated on
+the create path in exactly the way invariant 2 exists to prevent on the PATCH path. It is not
+historical: measured 2026-09-15, **8 Customers and 6 Solar** records have a rep whose dealer is set
+and a null `Dealer__c`, every one of them created AFTER the 2026-08-27 backfill, the most recent the
+previous day. The number grows with use.
+
+The record is invisible to the rep's own dealer manager until someone re-runs the backfill. The fix
+is to derive on create the same way PATCH does; it is not applied here because it is a write-path
+change on a live Lambda. Tracked in TASKS.md.
+
+#### The pair invariant (§2.3.5, extended 2026-09-15)
+
+Every check above is **single-object**: does this record agree with its own rep. A linked
+Customer/Solar pair can pass on both records and still be half-attributed, because backfill pass 2
+runs on Solar only — so a rep-less pair ends up with a dealer on the project and null on the
+customer, and the dealer's manager sees the project but cannot open the customer behind it. That is
+a live report, not a hypothetical (2026-09-15).
+
+`scripts/verify-dealer-ownership.mjs` §2b now checks the pair, and
+`scripts/report-dealer-pair-consistency.mjs` is the read-only drill-down with a proposed resolution
+per record. **A disagreement is three findings, not one**, and only two are defects:
+
+| State | Verdict |
+|---|---|
+| Both attributed, differently, and **each equals its own rep's dealer** | **Not a defect.** Both obey A1; the pair is split because two organizations' reps own the two records. Nothing may copy across the link here — that would overwrite a rep-derived value. 8 pairs live. |
+| Both attributed, differently, and at least one agrees with no rep | Defect. The rep settles it if there is one; otherwise a human does. 0 pairs live. |
+| One side attributed, the other null, **neither has a rep** | The reported class. Pending the §2.3.8 decision below. 40 pairs live. |
+| One side null but **its own rep has a dealer** | Not a pair defect — unfinished backfill pass 1, or the create gap above. |
+
+#### §2.3.8 The linked-pair rule -- DECIDED 2026-09-16 (Tim)
+
+> **A linked pair's attributed side fills its null partner.** Where a `Sundial_Customer__c` and a
+> linked `Sundial_Solar__c` disagree only because one is null, **and neither record has a
+> `Sales_Rep__c`**, the non-null `Dealer__c` is copied to the null side.
+
+The "neither has a rep" condition is load-bearing, and it is the amendment the first draft of this
+rule did not have. Where a rep exists, A1 already determines the answer and the link is irrelevant --
+copying across it could overwrite a rep-derived value, which A1 forbids outright. The live data
+makes that concrete: all 8 pairs that disagree with both sides attributed are pairs where **each
+record already equals its own rep's dealer**, because two organizations' reps own the two records.
+A rule without the condition would have "fixed" all 8 by corrupting them.
+
+The rule introduces **no new name matching**: the value being copied was already resolved and
+written by backfill pass 2 out of the reviewed alias file. It is a copy across a link, not a guess.
+
+Records this does not reach stay null, per §2.4 and D19: **blank => NULL, never the default.** A null
+`Dealer__c` is invisible to every sales role and fully visible to tenant scope, so the cost of
+leaving it is a record a dealer cannot see, and the cost of guessing is a record the wrong dealer
+can. `"Valley Energy Consoltants"` -- one Customer, a misspelling that matches no dealer -- stays
+unattributed until Tim names its dealer.
+
+**Applied by** `scripts/report-dealer-pair-consistency.mjs --apply`, report-first and canary-first
+per CLAUDE.md. The apply pass covers ONLY the two inheritance buckets. It deliberately refuses the
+alias-file orphans -- see the next subsection for why that class turned out to be a different
+problem with a different fix.
+
+#### The 179 solar orphans are not what they looked like (measured 2026-09-16)
+
+The first pass of this report showed 192 records carrying a dealer-ish sales-company value with a
+null `Dealer__c`, 173 of them Solar, and the obvious reading was "backfill pass 2 has not been
+re-run since those values appeared". **That reading is wrong, and acting on it would have been a
+name-matching write nobody needed.** Measured:
+
+| | |
+|---|---|
+| Solar records, dealer-ish value, null `Dealer__c` | **179** |
+| of which **have** a `Sales_Rep__c` | **169** |
+| created **before** the 2026-08-27 backfill | 163 |
+| created by | Tim Murphy (162, the Sunbase migration) / Sundial Integration (17) |
+| distinct reps involved | 24 -- of which **23 have a null `Dealer__c`**, covering 163 records |
+| those 23 reps that are **inactive** | 21 |
+
+So these records fell **between the two backfill passes, exactly as specified**. Pass 1 set
+`Dealer__c := Sales_Rep__r.Dealer__c` and correctly left them null, because the rep has no dealer.
+Pass 2 skipped them because it runs on rep-LESS records only. Neither pass is defective; the gap is
+one level up.
+
+And the reps are the tell. They are not people -- they are **dealer organizations imported from
+Sunbase as user records**: `Residental Solar Brokers` (41 records), `Desert Sun Systems` (18),
+`I AM ENERGY` (15), `AZray Solar`, `Machometa`, `Blueberry Hill`, `Solar 4 Les`, `Sunus`,
+`Solar Buddy`, `Sonoran Solar`, `Volt Energy`, `Valley Energy Consoltants` (the same misspelling as
+the orphan value). Only 2 of the 24 are active humans: Ben Wollschlager (13) and Ralph Romano (8).
+`backfill-dealers.mjs` stamped `Dealer__c` on the ten ZZ fixtures and Dennis, and on **no other
+user** -- which was right at the time and is why these sit unattributed now.
+
+**The fix is therefore on `Sundial_User__c`, not on the deals.** Stamp those 23 user records with
+their dealer (several need an alias row first -- `Residental` -> `Residential Solar Brokers` is a
+near-miss, and near-misses are never auto-applied), then re-run backfill pass 1. All 163 records
+resolve through A1 with **zero name matching on any deal**, and they stay correct afterwards
+because the rep is the source. Writing a dealer onto 163 deals from a picklist would have produced
+the same values today by a route that has to be repeated forever.
+
+Not done here: it needs the alias rows reviewed and Tim's go. Tracked in TASKS.md.
+
+
 ### 2.4a Phase 0 describe results — the live org, 2026-08-27
 
 Produced by `node scripts/describe-access-fields.mjs` (read-only: describes + `COUNT(Id)`),
@@ -665,6 +822,64 @@ into another, and how they are handled:
 The alternative — the client having no generated role knowledge at all and rendering purely from the
 server's per-response `access` block (§4.3) — is what makes the stale-client case safe. The generated
 client config exists for layout (sections, order, labels, types), not for authorization.
+
+### 4.2a The identity rule — one list, both surfaces
+
+> **The identity of a record a role is entitled to SEE is a `read` field by definition.**
+
+A row you may have but cannot name is not a narrower answer, it is a broken one. §3 decides WHICH
+rows a role sees; it was never meant to decide whether those rows arrive legible. Withholding the
+name protects nothing — the caller already holds the record, its address, its stage and its id.
+
+**Where it lives:** `lib/field-manifest/identity.js`, one entry per object, each carrying **both
+spellings** of every element — the Salesforce field name (for the `?full=true` detail SELECT) and
+the cache column (for list and search rows).
+
+| Object | Element(s) | Has a sheet row? |
+|---|---|---|
+| `Sundial_Customer__c` | `First_Name__c` / `Last_Name__c` / `Name` | Yes, all three, marked `edit`. Listed anyway so the rule is stated once for every object. |
+| `Sundial_Solar__c` | `Project_Name__c` | **No.** This list is the only thing granting it. |
+| `Sundial_Roofing__c` | `Project_Name__c` | **No.** Grants nothing today — the module gate denies roofing to both sales scopes (§3.1) — so that the day it opens, it opens legible. |
+
+**Who reads it:**
+
+- `fieldsFor()` (`lib/field-manifest/index.js`) unions the FIELDS into the role's `read` set, which
+  is upstream of `selectListFor()` (the `?full=true` SELECT), `projectRecord()`, the
+  `access.visible` list the client renders from, and the picklist-metadata filter.
+- `listColumnsFor()` unions the COLUMNS into the role's list columns.
+- `scripts/generate-field-configs.mjs` unions the same COLUMNS into the generated `listColumns`.
+- `scripts/verify-field-manifest-live.mjs` asserts both, live, per object per sales user.
+
+**What is NOT in it.** Anything with a sheet row belongs in the SHEET.
+`Customer_Name_at_Creation__c` had one marked `hidden` and was fixed by editing row 65 to `read` —
+not by listing it as identity. The list is reviewed once and deliberately short.
+
+**It is `read`, never `edit`**, and it does not enter `MANIFEST_VERSION` — that hash covers the
+sheet's decisions, and churning it would fire the client's "config out of date" banner for a rule
+the client never renders differently.
+
+**It does not apply to the fail-closed empty sets.** A sales scope whose level is not a manifest
+column, or an object with no manifest, still gets an empty set. The rule grants the name of a record
+the role is *entitled to see*; an unresolvable entitlement is not an entitlement.
+
+#### Why it is one list and not two — it was two, and the second surface broke
+
+The rule was written for LIST rows only, as `IDENTITY_LIST_COLUMNS` inside the generator, after
+board cards and the list "Project" column came back blank for both sales roles on **2026-09-01**.
+`Project_Name__c` has no row in `docs/Sundial_Solar_Fields_by_Section.xlsx`, and the generator emits
+a field only if the workbook has a row for it — so it was never hidden by anyone, it fell through
+the gap between the sheet and the schema.
+
+That fix repaired the list and nothing else, because it was expressed in **cache columns** and lists
+are the only surface that speaks cache columns. The detail read speaks **Salesforce field names**
+and builds its SELECT from `roles[role].read`, which still had no `Project_Name__c` — so
+**on 2026-09-15 a dealer reported Solar detail headers rendering `—`**, two weeks later, from the
+same root cause on the other surface.
+
+Every leak assertion was green throughout both incidents: the rows were narrow, not wide, and
+**narrow is the failure mode a leak test cannot see**. Two spellings of one rule, in two files, is
+how the second surface got missed. There is now nowhere to add an object to only one of them.
+
 
 ### 4.3 Server enforcement on reads
 

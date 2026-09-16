@@ -37,6 +37,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
 import { getSalesforceToken } from "../lib/salesforce.js";
+import { identityColumns } from "../lib/field-manifest/identity.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = path.join(ROOT, "docs");
@@ -89,38 +90,31 @@ const ALWAYS_LIST_COLUMNS = [
 /**
  * IDENTITY columns: what a record is CALLED, per object.
  *
- * ⚠️ This IS a visibility decision, which is exactly why it is not in
- * ALWAYS_LIST_COLUMNS. That list is plumbing -- keys and freshness markers, no business
- * data -- and folding a project name into it would have made its own warning false.
+ * ⚠️ THE LIST ITSELF NOW LIVES IN `lib/field-manifest/identity.js`, and it is imported
+ * rather than restated. This IS a visibility decision, which is exactly why it is not in
+ * ALWAYS_LIST_COLUMNS -- that list is plumbing (keys and freshness markers, no business
+ * data) and folding a project name into it would have made its own warning false.
  *
  * THE RULE, and it is a rule rather than an exception list:
  *
  *   The identity of a record a role is entitled to SEE is a `read` field by definition.
  *
- * A row you may have but cannot name is not a narrower answer, it is a broken one. The
- * access model decides WHICH rows a role sees (`rowFilter`); it was never meant to decide
- * whether those rows arrive legible. Withholding the name protects nothing -- the caller
- * already holds the record, its address, its stage and its id.
+ * It was written HERE first, in cache-column spelling, because lists were the surface
+ * that broke (blank board cards, empty "Project" column, 2026-09-01). Lists are also the
+ * only surface that speaks cache columns -- so the DETAIL read, which builds its SELECT
+ * from `roles[role].read` in Salesforce field names, kept rendering a nameless header
+ * until 2026-09-15. Two spellings in two files is how the second surface got missed.
+ * `identity.js` carries both spellings of every element and both surfaces read it; the
+ * full reasoning is in that file's header.
  *
- * WHY THESE NEED A LIST AT ALL. The generator emits a field only if the workbook has a row
- * for it, and `Sundial_Solar__c.Project_Name__c` has NO ROW in
- * Sundial_Solar_Fields_by_Section.xlsx -- so it was never hidden by anyone. It fell through
- * the gap between the sheet and the schema. That produced blank board cards and an empty
- * "Project" column for every sales role (found 2026-09-01), on a column populated 4492 of
- * 4492 rows in cache.
- *
- * Reviewed once, here, and deliberately SHORT. Anything with a sheet row belongs in the
- * SHEET: `Customer_Name_at_Creation__c` had one marked `hidden`, and was fixed by editing
- * row 65 to `read` -- NOT by adding it here. Add to this list only when a column names the
- * record and there is no sheet row that could carry the decision.
- *
- * Customer is absent on purpose: `First_Name__c` / `Last_Name__c` / `Name` all have sheet
- * rows marked `edit`, so its list identity already resolves. Checked, not assumed.
+ * Anything with a sheet row still belongs in the SHEET: `Customer_Name_at_Creation__c`
+ * had one marked `hidden` and was fixed by editing row 65 to `read` -- NOT by listing it
+ * as identity.
  */
 const IDENTITY_LIST_COLUMNS = {
-  // Board card titles and the list "Project" column, for both project objects.
-  solar: ["project_name"],
-  roofing: ["project_name"],
+  customer: identityColumns("customer"),
+  solar: identityColumns("solar"),
+  roofing: identityColumns("roofing"),
 };
 
 const OBJECTS = [

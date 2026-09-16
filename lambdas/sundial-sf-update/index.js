@@ -824,11 +824,81 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
   // "derive the dealer from the rep" matters on REASSIGNMENT (invariant 2), which is
   // tenant-scope only and is not this path.
   //
-  // Tenant scope is untouched: staff keep setting Sales_Rep__c from the body, which is
-  // how a coordinator creates a customer on a rep's behalf.
+  // Staff keep setting Sales_Rep__c from the body, which is how a coordinator creates a
+  // customer on a rep's behalf — and the dealer is derived from it just below.
   if (access && access.scope !== "tenant") {
     payload.Sales_Rep__c = access.userId;
     payload.Dealer__c = access.dealerId;
+  } else {
+    // §2.3 invariant 1, THE TENANT-SCOPE HALF (added 2026-09-16, approved by Tim).
+    //
+    // ---------------------------------------------------------------------------
+    // WHY THIS WAS MISSING, AND WHAT IT COST
+    // ---------------------------------------------------------------------------
+    // Invariant 2 re-derives the dealer on a PATCH that moves the rep, and its comment
+    // calls that "the half that is easy to forget". It was the wrong half. CREATE has
+    // the same hole and nobody wrote it down: the block above stamps ownership only for
+    // a SALES role, on the reasoning that the rep IS the caller there. Harmon staff
+    // create at TENANT scope and pass `Sales_Rep__c` in the body — including the
+    // portal's Create Project button, whose field map copies the rep and not the dealer
+    // (harmon-crm src/config/customer-to-solar-map.ts). So the record landed with a rep
+    // and a NULL dealer, and A1 ("the deal's dealer comes from its rep, and from nothing
+    // else") was violated on the create path exactly the way invariant 2 prevents it on
+    // the update path.
+    //
+    // The failure is silent from every seat that could report it: the record looks fine,
+    // the rep sees it (own scope matches Sales_Rep__c), and only the rep's own dealer
+    // manager notices a deal missing from their book. Measured 2026-09-15: 8 Customers
+    // and 6 Solar, every one created AFTER the 2026-08-27 backfill, newest the previous
+    // day. It grew with use, because it is a write path and not a migration artifact.
+    //
+    // ---------------------------------------------------------------------------
+    // THE THREE CONDITIONS, EACH LOAD-BEARING
+    // ---------------------------------------------------------------------------
+    // 1. ONLY WHEN THE BODY CARRIES A REP. No rep means A1 says nothing, and §2.3
+    //    invariant 6 says a rep-less deal's dealer is set once and left alone — which is
+    //    how Aurora dealer-originated deals (D-049) arrive: a dealer and no rep at all.
+    //    Deriving unconditionally would CLEAR those, turning a fix into a data loss.
+    // 2. ONLY WHEN THE OBJECT HAS A CREATEABLE `Dealer__c`. handleCreate serves every
+    //    object; writing a field an object does not have makes Salesforce reject the
+    //    whole create, so a customer-shaped fix would break PO creation.
+    // 3. THE DERIVED VALUE WINS over a `Dealer__c` in the same body, and the override is
+    //    logged — identical to the PATCH path. Honouring both would let one request name
+    //    a rep from one dealer and a dealer from another, which is precisely the
+    //    disagreement invariant 5 exists to make impossible.
+    //
+    // Null is a valid answer and is written explicitly: a rep with no dealer yields a
+    // null dealer, not an absent key, so the record cannot inherit a stale value.
+    const repKey = Object.keys(payload).find((k) => k.toLowerCase() === "sales_rep__c");
+    const dealerDef = (describe.fields || []).find(
+      (f) => f.name.toLowerCase() === "dealer__c" && f.createable === true
+    );
+    if (repKey && dealerDef) {
+      const derived = await dealerForNewRep({
+        repValue: payload[repKey],
+        tenantId,
+        cors,
+      });
+      if (!derived.ok) return derived.response;
+
+      const dealerKey =
+        Object.keys(payload).find((k) => k.toLowerCase() === "dealer__c") ?? dealerDef.name;
+      if (dealerKey in payload && (payload[dealerKey] ?? null) !== derived.dealerId) {
+        console.warn(
+          JSON.stringify({
+            accessNote: "DEALER_DERIVED_OVERRIDE",
+            message:
+              "Dealer__c in the create body was replaced by the value derived from " +
+              "Sales_Rep__c (A1: the dealer is never an independent input).",
+            object: objectKey,
+            create: true,
+            supplied: payload[dealerKey] ?? null,
+            derived: derived.dealerId,
+          })
+        );
+      }
+      payload[dealerKey] = derived.dealerId;
+    }
   }
 
   const resp = await sfWrite(

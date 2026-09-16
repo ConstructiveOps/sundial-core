@@ -170,6 +170,7 @@ const pairs = {
   inheritCustomer: [],// Customer null, Solar set -> the (a) rule, Customer inherits
   inheritSolar: [],   // Solar null, Customer set -> the (a) rule, reversed
   backfillPending: [],// one side null but ITS OWN rep has a dealer -> pass 1 never ran
+  repPresent: [],     // one side null, a Sales_Rep__c on EITHER record -> A1's, never §2.3.8's
   bothNull: [],       // neither attributed -> the orphan buckets decide what that means
 };
 
@@ -235,6 +236,14 @@ for (const s of solar) {
   // overwrite what the rep already determines, which is the one thing A1 forbids.
   const nullSideRepDealer = cd === null ? row.customerRepDealer : row.solarRepDealer;
   if (nullSideRepDealer) { pairs.backfillPending.push(row); continue; }
+  // ⚠️ §2.3.8 REQUIRES THAT NEITHER RECORD HAS A `Sales_Rep__c` -- not merely that the
+  // null side's rep lacks a dealer. Corrected 2026-09-16 (Tim): the test above was the
+  // only one here, so a null side whose rep has NO dealer, and a pair whose ATTRIBUTED
+  // side carries a rep, both fell through into the inheritance buckets. The report called
+  // 40 pairs "no rep either side" and 33 of them had one. A rep anywhere in the pair
+  // makes it A1's question -- the dealer comes from that rep or it stays null -- and the
+  // link must not answer it.
+  if (row.solarRep || row.customerRep) { pairs.repPresent.push(row); continue; }
   if (cd === null) pairs.inheritCustomer.push(row);
   else pairs.inheritSolar.push(row);
 }
@@ -392,6 +401,25 @@ for (const r of pairs.backfillPending.slice(0, ROW_LIMIT)) {
 if (pairs.backfillPending.length > ROW_LIMIT)
   log(`  … and ${pairs.backfillPending.length - ROW_LIMIT} more`);
 
+// --- 4b. EXCLUDED: A REP IS PRESENT ------------------------------------------
+section(
+  "4b. EXCLUDED — one side null, but a Sales_Rep__c on at least one record (§2.3.8 does not apply)",
+  pairs.repPresent,
+  "  NEVER WRITTEN FROM HERE. A rep anywhere in the pair makes the dealer A1's answer: it\n" +
+    "  comes from that rep, or it stays null. Many resolve on their own once the rep's\n" +
+    "  Sundial_User__c carries a dealer and backfill pass 1 re-runs."
+);
+const repLabel = (id, repDealer) =>
+  id ? `${id} (rep dealer ${repDealer ? dealerLabel(repDealer) : "null"})` : "-";
+for (const r of pairs.repPresent.slice(0, ROW_LIMIT)) {
+  const dir = r.customerDealer === null ? "customer ← solar" : "solar ← customer";
+  log(`  ${dir}  ${r.customerId} ${String(r.customerName).slice(0, 24).padEnd(24)} | ${r.solarId}  ` +
+      `would copy ${dealerLabel(r.customerDealer ?? r.solarDealer)}`);
+  log(`      reps: customer ${repLabel(r.customerRep, r.customerRepDealer)}  solar ${repLabel(r.solarRep, r.solarRepDealer)}`);
+}
+if (pairs.repPresent.length > ROW_LIMIT)
+  log(`  … and ${pairs.repPresent.length - ROW_LIMIT} more`);
+
 // --- 5. ORPHANS -------------------------------------------------------------
 section(
   "5. DEALER-ISH VALUE, NULL Dealer__c — resolvable EXACTLY through the alias file",
@@ -467,6 +495,7 @@ const table = [
   ["2. customer inherits from solar  — rule (a)", pairs.inheritCustomer.length],
   ["3. solar inherits from customer  — rule (a)", pairs.inheritSolar.length],
   ["4. backfill pass 1 pending       — re-run the backfill", pairs.backfillPending.length],
+  ["4b. excluded, rep present        — A1's, never written here", pairs.repPresent.length],
   [`5. orphan, resolves EXACTLY      — ${byObject(orphans.exact)}`, orphans.exact.length],
   ["6. orphan, NEAR MISS             — needs an alias row", orphans.near.length],
   [`7. orphan, unattributed          — rule (b), stays null`, orphans.unknown.length],
@@ -517,93 +546,125 @@ if (APPLY) {
   log("APPLYING §2.3.8 — the inheritance buckets ONLY");
   rule();
 
-  // Each plan row: which object, which record, what value, and where it came from.
+  // Each plan row names BOTH records of the pair: the target (null side) and the source
+  // (attributed side), so the fresh re-check below can test the whole §2.3.8 condition.
   const plan = [
     ...pairs.inheritCustomer.map((r) => ({
-      sfObject: "Sundial_Customer__c",
-      id: r.customerId,
-      name: r.customerName,
+      target: { sfObject: "Sundial_Customer__c", id: r.customerId, name: r.customerName },
+      source: { sfObject: "Sundial_Solar__c", id: r.solarId },
       dealerId: r.solarDealer,
-      from: `Solar ${r.solarId}`,
     })),
     ...pairs.inheritSolar.map((r) => ({
-      sfObject: "Sundial_Solar__c",
-      id: r.solarId,
-      name: r.solarName,
+      target: { sfObject: "Sundial_Solar__c", id: r.solarId, name: r.solarName },
+      source: { sfObject: "Sundial_Customer__c", id: r.customerId },
       dealerId: r.customerDealer,
-      from: `Customer ${r.customerId}`,
     })),
   ];
 
+  // Fields re-read on the TARGET around the canary write; none of them may move. The
+  // recalc Flow's outputs on Solar are watched per CLAUDE.md (a draft today).
+  const WATCH = {
+    Sundial_Customer__c: ["Sales_Rep__c", "Dealer_Name__c", "Sales_Company__c"],
+    Sundial_Solar__c: ["Sales_Rep__c", "Budget_Calc_Status__c", "Budget_Calc_Error__c"],
+  };
+  const readRow = async (sfObject, id, extra = []) =>
+    (
+      await sfQuery(
+        `SELECT ${[...new Set(["Id", "Dealer__c", "Sales_Rep__c", ...extra])].join(", ")} ` +
+          `FROM ${sfObject} WHERE Id = '${soqlEscapeString(id)}' LIMIT 1`
+      )
+    )[0] ?? null;
+
+  /**
+   * THE FRESH RE-CHECK, immediately before each write (added 2026-09-16). The plan was
+   * classified from a read that may be minutes old on a live org: a rep assigned since, a
+   * dealer stamped since, or a source that changed since each turn a correct plan row into
+   * a wrong write. BOTH records are re-read and the full §2.3.8 condition is re-tested.
+   * A failure SKIPS the row rather than aborting the run -- leaving that pair alone is the
+   * §2.3.8-correct outcome for it.
+   */
+  async function freshCheck(p) {
+    const target = await readRow(p.target.sfObject, p.target.id, WATCH[p.target.sfObject]);
+    const source = await readRow(p.source.sfObject, p.source.id);
+    if (!target || !source) return { ok: false, reason: "a record in the pair is no longer readable" };
+    if (target.Sales_Rep__c || source.Sales_Rep__c)
+      return { ok: false, reason: `a rep is now present (target ${target.Sales_Rep__c ?? "-"} / source ${source.Sales_Rep__c ?? "-"})` };
+    if (target.Dealer__c) return { ok: false, reason: `target is no longer blank (${dealerLabel(target.Dealer__c)})` };
+    if ((source.Dealer__c ?? null) !== p.dealerId)
+      return {
+        ok: false,
+        reason: `source dealer changed: planned ${dealerLabel(p.dealerId)}, now ${source.Dealer__c ? dealerLabel(source.Dealer__c) : "null"}`,
+      };
+    return { ok: true, target };
+  }
+
   if (plan.length === 0) {
     log("  Nothing to apply — no half-attributed rep-less pairs.");
+  } else if (plan.some((p) => !p.dealerId)) {
+    log(`  ** ABORT: planned row(s) carry no source dealer. Nothing written.`);
+    process.exitCode = 1;
   } else {
-    // A last re-check against what we just read, rather than trusting the plan. Every
-    // row must still be: target null, source set, and NO rep on either side.
-    const unsafe = plan.filter((p) => !p.dealerId);
-    if (unsafe.length > 0) {
-      log(`  ** ABORT: ${unsafe.length} planned row(s) carry no source dealer. Nothing written.`);
-      process.exitCode = 1;
-    } else {
-      log(`  ${plan.length} record(s) to write (${pairs.inheritCustomer.length} customer, ` +
-          `${pairs.inheritSolar.length} solar).`);
+    log(`  ${plan.length} record(s) planned (${pairs.inheritCustomer.length} customer, ` +
+        `${pairs.inheritSolar.length} solar). Each is re-checked fresh before its write.`);
 
-      // --- the canary -------------------------------------------------------
-      const canary = plan[0];
-      const fieldsBefore = await sfQuery(
-        `SELECT Id, Dealer__c, Sales_Rep__c, LastModifiedDate FROM ${canary.sfObject} ` +
-          `WHERE Id = '${soqlEscapeString(canary.id)}' LIMIT 1`
-      );
-      const before = fieldsBefore[0];
-      if (!before) {
-        log(`  ** ABORT: canary ${canary.id} not readable. Nothing written.`);
-        process.exitCode = 1;
-      } else {
-        log(`\n  CANARY  ${canary.sfObject} ${canary.id} -> ${dealerLabel(canary.dealerId)}`);
-        await sfUpdateRecord(canary.sfObject, canary.id, { Dealer__c: canary.dealerId });
-        const after = (
-          await sfQuery(
-            `SELECT Id, Dealer__c, Sales_Rep__c FROM ${canary.sfObject} ` +
-              `WHERE Id = '${soqlEscapeString(canary.id)}' LIMIT 1`
-          )
-        )[0];
+    const skipped = [];
+    let written = 0;
+    let failed = 0;
+    let canaryDone = false;
 
+    for (const p of plan) {
+      const chk = await freshCheck(p);
+      if (!chk.ok) {
+        skipped.push({ p, reason: chk.reason });
+        log(`    SKIP ${p.target.sfObject} ${p.target.id}: ${chk.reason}`);
+        continue;
+      }
+
+      if (!canaryDone) {
+        // --- the canary: the first row that passes the fresh check, written alone ----
+        const before = chk.target;
+        log(`\n  CANARY  ${p.target.sfObject} ${p.target.id} (${String(p.target.name).slice(0, 30)}) -> ${dealerLabel(p.dealerId)}`);
+        await sfUpdateRecord(p.target.sfObject, p.target.id, { Dealer__c: p.dealerId });
+        const after = await readRow(p.target.sfObject, p.target.id, WATCH[p.target.sfObject]);
         const problems = [];
-        if ((after?.Dealer__c ?? null) !== canary.dealerId) {
-          problems.push(`Dealer__c is ${after?.Dealer__c ?? "(null)"}, expected ${canary.dealerId}`);
-        }
-        // The field we did NOT write. If automation moved it, stop.
-        if ((after?.Sales_Rep__c ?? null) !== (before.Sales_Rep__c ?? null)) {
-          problems.push(
-            `Sales_Rep__c moved ${before.Sales_Rep__c ?? "(null)"} -> ${after?.Sales_Rep__c ?? "(null)"} ` +
-              `on a write that did not touch it — automation is live`
-          );
+        if (!after) {
+          problems.push("re-read found no record AFTER writing — script bug or permissions, not automation");
+        } else {
+          if ((after.Dealer__c ?? null) !== p.dealerId)
+            problems.push(`Dealer__c is ${after.Dealer__c ?? "(null)"}, expected ${p.dealerId}`);
+          for (const f of WATCH[p.target.sfObject]) {
+            if ((after[f] ?? null) !== (before[f] ?? null))
+              problems.push(`${f} moved ${JSON.stringify(before[f] ?? null)} -> ${JSON.stringify(after[f] ?? null)} on a write that did not touch it — automation is live`);
+          }
         }
         if (problems.length > 0) {
           log("  ** CANARY FAILED — ABORTING before the remaining writes:");
-          for (const p of problems) log(`       ${p}`);
+          for (const x of problems) log(`       ${x}`);
           process.exitCode = 1;
-        } else {
-          log("  canary OK (dealer set, nothing else moved). Continuing.\n");
-
-          let written = 1;
-          let failed = 0;
-          for (const p of plan.slice(1)) {
-            try {
-              await sfUpdateRecord(p.sfObject, p.id, { Dealer__c: p.dealerId });
-              written++;
-              if (written % 10 === 0) log(`    ... ${written}/${plan.length}`);
-            } catch (e) {
-              failed++;
-              log(`    ** FAILED ${p.sfObject} ${p.id}: ${e.message}`);
-            }
-          }
-          log(`\n  WROTE ${written} of ${plan.length}${failed ? `, ${failed} failed` : ""}.`);
-          log("  Re-run without --apply to confirm the buckets are empty, then");
-          log("  node scripts/verify-dealer-ownership.mjs  (§2b should report 0 half-attributed).");
+          break;
         }
+        log("  canary OK (dealer set, nothing else moved). Continuing.\n");
+        canaryDone = true;
+        written++;
+        continue;
+      }
+
+      try {
+        await sfUpdateRecord(p.target.sfObject, p.target.id, { Dealer__c: p.dealerId });
+        written++;
+        if (written % 10 === 0) log(`    ... ${written}/${plan.length}`);
+      } catch (e) {
+        failed++;
+        log(`    ** FAILED ${p.target.sfObject} ${p.target.id}: ${e.message}`);
       }
     }
+
+    log(`\n  WROTE ${written} of ${plan.length}` +
+        `${skipped.length ? `, SKIPPED ${skipped.length} on the fresh re-check` : ""}` +
+        `${failed ? `, ${failed} FAILED` : ""}.`);
+    if (failed) process.exitCode = 1;
+    log("  Re-run without --apply to confirm buckets 2 and 3 are empty, then");
+    log("  node scripts/verify-dealer-ownership.mjs  (§2b should report 0 half-attributed).");
   }
   rule();
 }
@@ -640,6 +701,12 @@ if (CSV_PATH) {
     push("backfill-pending", isCust ? "Customer" : "Solar", isCust ? r.customerId : r.solarId,
       isCust ? r.customerName : r.solarName, null, isCust ? r.customerRepDealer : r.solarRepDealer,
       "backfill pass 1 (rep's dealer)", null);
+  }
+  for (const r of pairs.repPresent) {
+    const isCust = r.customerDealer === null;
+    push("excluded-rep-present", isCust ? "Customer" : "Solar", isCust ? r.customerId : r.solarId,
+      isCust ? r.customerName : r.solarName, null, null,
+      `rep present (customer ${r.customerRep ?? "-"} / solar ${r.solarRep ?? "-"}) — A1, not §2.3.8`, null);
   }
   for (const r of orphans.exact)
     push("orphan-exact", r.object, r.id, r.name, null, r.resolution.dealer.Id, "alias file, exact", r.value);

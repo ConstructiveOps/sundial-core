@@ -331,8 +331,17 @@ and a null `Dealer__c`, every one of them created AFTER the 2026-08-27 backfill,
 previous day. The number grows with use.
 
 The record is invisible to the rep's own dealer manager until someone re-runs the backfill. The fix
-is to derive on create the same way PATCH does; it is not applied here because it is a write-path
-change on a live Lambda. Tracked in TASKS.md.
+is to derive on create the same way PATCH does.
+
+> **✅ Fixed, deployed and confirmed live (2026-09-16).** `handleCreate`'s tenant-scope branch now
+> derives `Dealer__c` from the body's `Sales_Rep__c` through `dealerForNewRep()`
+> (`sundial-sf-update/index.js:877`), commit `eb8a35b`, deployed 18:59 UTC. Create Project was
+> traced end to end to this path — no other Lambda creates a Customer or Solar with a rep.
+> Confirmed on a genuinely new record: a live `POST /sf/solar` as `zz-admin` on the designated ZZ
+> test customer created **SOL-10055**, which came back stamped **ZZ TEST DEALER A** — the dealer of
+> that customer's rep `zz-rep-a1`, and no `Dealer__c` in the body; the test record was deleted. The
+> 15 records the gap had produced (8 Customer + 7 Solar) were backfilled with
+> `backfill-deal-ownership.mjs --pass1-only`.
 
 #### The pair invariant (§2.3.5, extended 2026-09-15)
 
@@ -350,7 +359,17 @@ per record. **A disagreement is three findings, not one**, and only two are defe
 |---|---|
 | Both attributed, differently, and **each equals its own rep's dealer** | **Not a defect.** Both obey A1; the pair is split because two organizations' reps own the two records. Nothing may copy across the link here — that would overwrite a rep-derived value. 8 pairs live. |
 | Both attributed, differently, and at least one agrees with no rep | Defect. The rep settles it if there is one; otherwise a human does. 0 pairs live. |
-| One side attributed, the other null, **neither has a rep** | The reported class. Pending the §2.3.8 decision below. 40 pairs live. |
+| One side attributed, the other null, **neither has a rep** | The reported class. Filled by the §2.3.8 rule below. **7 pairs live** (all customer ← solar), measured 2026-09-16 with the corrected classification. |
+| One side attributed, the other null, **a rep on either record** (the null side's rep has no dealer) | **Not §2.3.8's.** A1 answers it: the dealer comes from the rep, or it stays null. Never copied across the link. **33 pairs live.** |
+
+> **Correction, 2026-09-16.** This table first said "40 pairs live" for the rep-less row. That
+> number came from `report-dealer-pair-consistency.mjs` and `verify-dealer-ownership.mjs` §2b,
+> which tested only whether the **null** side's rep *had a dealer* -- never whether either record
+> *had a rep*. A null side whose rep has no dealer, or a pair whose attributed side carries a rep,
+> fell into the inheritance buckets. The measured split is **7 eligible + 33 excluded**; 12 of the
+> 33 have a Dennis-derived Harmon Solar on one side. Both scripts now require that neither record
+> has a `Sales_Rep__c`, and `--apply` re-reads both records immediately before each write and
+> skips the pair if a rep has appeared, the target is no longer blank, or the source dealer changed.
 | One side null but **its own rep has a dealer** | Not a pair defect — unfinished backfill pass 1, or the create gap above. |
 
 #### §2.3.8 The linked-pair rule -- DECIDED 2026-09-16 (Tim)

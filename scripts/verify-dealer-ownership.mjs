@@ -187,7 +187,7 @@ log("\n2b. THE PAIR INVARIANT — linked Customer/Solar must agree on Dealer__c 
   }
 
   const n0 = (v) => v ?? null;
-  const found = { splitByRep: [], conflict: [], halfAttributed: [] };
+  const found = { splitByRep: [], conflict: [], halfAttributed: [], repPresent: [] };
   for (const sRow of solarPairs) {
     const c = cust.get(sRow.Sundial_Customer__c);
     if (!c) continue;
@@ -204,7 +204,14 @@ log("\n2b. THE PAIR INVARIANT — linked Customer/Solar must agree on Dealer__c 
       // unfinished backfill pass 1, already counted as `pending` above — not a pair
       // defect, and counting it twice would make the pair number unreadable.
       const nullSideRepDealer = cd === null ? crd : srd;
-      if (!nullSideRepDealer) found.halfAttributed.push([c.Id, sRow.Id]);
+      if (nullSideRepDealer) continue;
+      // §2.3.8 reaches a pair ONLY when NEITHER record has a Sales_Rep__c. Corrected
+      // 2026-09-16: this used to test only whether the null side's rep HAD A DEALER, so a
+      // rep with no dealer -- or a rep on the attributed side -- still counted as
+      // "neither has a rep". That reported 40 half-attributed pairs where 33 carried a rep
+      // and belong to A1, not to the link. Those are counted separately and never pending.
+      if (sRow.Sales_Rep__c || c.Sales_Rep__c) found.repPresent.push([c.Id, sRow.Id]);
+      else found.halfAttributed.push([c.Id, sRow.Id]);
     }
   }
 
@@ -229,12 +236,13 @@ log("\n2b. THE PAIR INVARIANT — linked Customer/Solar must agree on Dealer__c 
   if (found.halfAttributed.length > 0) {
     log(`  ** ${found.halfAttributed.length} HALF-ATTRIBUTED pair(s) — one side has a dealer,`);
     log(`     the other is null, and neither has a rep to derive it from.`);
-    log(`     PENDING the D-064 §2.3.8 decision. Drill down:`);
-    log(`       node scripts/report-dealer-pair-consistency.mjs`);
+    log(`     §2.3.8 (decided 2026-09-16) fills these. Report, then apply:`);
+    log(`       node scripts/report-dealer-pair-consistency.mjs [--apply]`);
     for (const [cid, sid] of found.halfAttributed.slice(0, 10)) log(`       ${cid} / ${sid}`);
   } else {
     log("  half-attributed pairs 0");
   }
+  log(`  one side null, a rep present (A1's, not §2.3.8's -- informational) ${found.repPresent.length}`);
 }
 
 // --- 3. Per-dealer counts for the ACTIVE dealers ----------------------------

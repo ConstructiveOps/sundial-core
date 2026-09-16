@@ -1,5 +1,64 @@
 # Sundial — Progress Log
 
+## 2026-09-16 — Dealer__c null-attribution cleanup (D-064 §2.3a), items 1–3 done
+
+Branch `feature/access-identity-detail`. Every write report-first, canary-first, on Tim's go.
+
+**The create fix, proven live.** `eb8a35b` (tenant-scope CREATE derives `Dealer__c` from
+`Sales_Rep__c`) landed at 18:59 UTC. SOL-10054, the "gap record created today", was created at
+16:49 — before the deploy, not past it. Create Project traced end to end: `ProjectSetupAction`
+→ `createSolarFromCustomer` → `api.createRecord('solar')` → `POST /sf/solar` → API Gateway
+`s6tt25` → `sundial-sf-update` `handleCreate` → `dealerForNewRep`. No other Lambda creates a
+Customer or Solar with a rep. A live `POST /sf/solar` as `zz-admin` on the ZZ customer came back
+with the rep's dealer (ZZ TEST DEALER A — the ZZ customer's rep is `zz-rep-a1`, so Harmon Solar
+would have been the bug); the test record (SOL-10055) was deleted and never reached the cache.
+
+**Item 1 — rep-stamp the create-gap records: DONE.** `backfill-deal-ownership.mjs` gained
+`--pass1-only` so the mop-up could not carry 10 pass-2 name-matched writes nobody asked for.
+15 written (8 Customer + 7 Solar — the count was 15, not 14; SOL-10054 was the extra), all
+Dennis → Harmon Solar; canaries clean; re-run plans 0; `verify-dealer-ownership.mjs` ALL CHECKS
+PASS; `dealer_sf_id` on all 15 cache rows after the 19:42 sync.
+
+**Item 2 — §2.3.8 pair inheritance: DONE and verified.** The report said 40 eligible pairs.
+**33 of them carried a `Sales_Rep__c`**: `report-dealer-pair-consistency.mjs` and
+`verify-dealer-ownership.mjs` §2b only excluded a pair when the NULL side's rep *had a dealer*,
+never when either record *had a rep*, and the apply step's "no rep either side" re-check only
+checked the source dealer was non-null. `--apply` as it stood would have written 33 records
+§2.3.8 forbids. Both scripts fixed (neither record may have a rep; a new excluded bucket; apply
+re-reads BOTH records immediately before each write and skips on a rep, a non-blank target, or
+a changed source). Corrected: **7 eligible / 0 conflicts / 33 excluded**. 7 written (all
+customer ← solar), canary clean, re-run 0 eligible, 7/7 match their Solar, cache verified after
+the 20:12 sync. §2b stays a soft report (Tim). `docs/access-model.md` §2.3a corrected.
+
+**Item 3 — stamp dealer-named users, then pass 1: DONE and verified.** The "23 dealer-named users"
+were 12 dealer organizations, 2 with no resolvable dealer (Desert Sun Systems — its deals say
+"Solar Bill"; Volt Energy) and 9 people. 12 `User` rows added to
+`docs/integrations/dealer-aliases.csv`. New `scripts/stamp-user-dealer.mjs` (closed plan: the
+`User` alias rows + Ralph Romano and Ben Wollschlager → Harmon Solar; Dealer__c only; every
+scalar field compared and any drift aborts the run). Dry run: 14 would-change, 0 skipped, every
+row one user and one dealer. Simulated pass 1 afterwards: 2,564 Customer + 1,655 Solar
+attributed (Ralph alone is 1,933 + 1,490); the 12 alias dealers are inactive and Harmon Solar
+has 0 active dealer-scope users, so no one's visibility widens today. `Sales_Rep__c` is not a
+field on `Sundial_User__c` and is reported as such.
+
+Applied: the script gained `--only <userId>` (canary run) and `--snapshot-out/--snapshot-in` (the
+apply aborts if any user differs in ANY field from the dry-run read). Canary Residental Solar
+Brokers → Residential Solar Brokers, then the other 13 — all 14 PASS, 22 other fields identical,
+Ralph Romano still `Super_Admin__c=true` / Executive. Pass-1 report then planned exactly the
+simulated 2,564 Customer + 1,655 Solar; `--pass1-only --apply` wrote 4,219 of 4,219, 0 failures,
+both canaries clean. `verify-dealer-ownership.mjs` §1 (Dennis gate) PASS on both objects.
+
+Two residual checks now fail, both consequences of stamping Ralph Romano, neither written:
+**ROOF-1000** has rep Ralph and a null `Dealer__c` (the backfill does not cover Roofing — module
+denied to sales scopes, so nothing is visible either way); and the pair **"Trigger Test"** (Customer,
+rep Ralph → Harmon Solar) / **"Ralph Romano - TEST"** (Solar, rep-less, Alternative Energy from
+pass 2) is a one-rep conflict §2.3.6 settles in the rep's favour. Both need Tim's go.
+
+**Found: the orphans are still being created.** All 19 rep-less orphans since the 2026-08-27
+backfill are Aurora dealer-originated (D-049): `sundial-aurora-inbound` writes
+`Aurora_Dealer_Name__c`, never `Dealer__c`, and Create Project carries the name, not the id.
+User stamping fixes the backlog, not the recurrence. Tracked in TASKS.md.
+
 ## 2026-09-12 — Street View: aim the camera at the house
 
 Tim's first look at the card on his own address showed the house across the street.

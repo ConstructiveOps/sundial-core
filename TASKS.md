@@ -1066,6 +1066,56 @@ lands only after its server change is verified in prod. Branch per repo per phas
       client configs (§4.2 output 2, with `--confirm-target`), then delete harmon-crm's
       two generators, its two sheet copies, and the `generate:configs` script.
 
+### Dealer__c null-attribution cleanup (2026-09-16, branch `feature/access-identity-detail`)
+
+`docs/access-model.md` §2.3a. Report-first, canary-first, Tim's go before every `--apply`.
+
+- [x] **Tenant-scope CREATE derives `Dealer__c` from `Sales_Rep__c`** (`eb8a35b`, deployed
+      18:59 UTC). Proven live 2026-09-16: `POST /sf/solar` as `zz-admin` on the ZZ customer
+      stamped the rep's dealer (ZZ TEST DEALER A); test record SOL-10055 deleted.
+- [x] **Item 1 — backfill the create-gap records.** `backfill-deal-ownership.mjs` gained
+      `--pass1-only`; 15 written (8 Customer + 7 Solar, all Dennis → Harmon Solar), cache
+      verified after sync, `verify-dealer-ownership.mjs` ALL CHECKS PASS.
+- [x] **Item 2 — §2.3.8 pair inheritance.** Classification bug fixed in
+      `report-dealer-pair-consistency.mjs` and `verify-dealer-ownership.mjs` §2b (both now
+      require NO `Sales_Rep__c` on either record; the old test let 33 rep-present pairs
+      through). 7 eligible written (customer ← solar), 33 excluded, 0 conflicts; `--apply`
+      re-reads both records before each write. Cache verified. §2b stays a soft report
+      (Tim: a half-attributed pair is fail-closed-correct, not a gate failure).
+- [x] **Item 3 — stamp dealer-named users, then pass 1.** 12 `User` alias rows added to
+      `docs/integrations/dealer-aliases.csv`; `scripts/stamp-user-dealer.mjs` (gained
+      `--only`, `--snapshot-out/--snapshot-in`) stamped 14 users — canary Residental Solar
+      Brokers, then the other 13 incl. Ralph Romano and Ben Wollschlager → Harmon Solar —
+      every one PASS on field invariance (22 other fields identical). Pass 1
+      (`--pass1-only --apply`): 4,219 of 4,219 written (2,564 Customer + 1,655 Solar, exactly
+      as simulated), 0 failures, canaries clean. `verify-dealer-ownership.mjs` §1 PASS.
+      Two residual findings the stamp surfaced (not written — each needs Tim's go):
+      **ROOF-1000** (rep Ralph Romano) now has a rep with a dealer and a null `Dealer__c` —
+      the backfill does not cover Roofing; and the pair **"Trigger Test"** customer (rep Ralph
+      → Harmon Solar) / **"Ralph Romano - TEST"** Solar (rep-less, Alternative Energy from
+      pass 2) now conflict, where §2.3.6 says the rep's dealer wins. Both look like test data.
+- [ ] **Aurora-inbound recurrence gap (create path).** `lambdas/sundial-aurora-inbound/customerCreate.js`
+      writes `Aurora_Dealer_Name__c` but never `Dealer__c` on a dealer-originated create, so
+      every D-049 customer arrives unattributed, and Create Project then makes a rep-less
+      Solar with a sales company and no `Dealer__c`. All 19 rep-less orphans created since
+      the 2026-08-27 backfill came this way (9 Customer, 10 Solar). Fix per
+      `docs/access-model.md` §2.3 invariant 6: resolve `Aurora_Dealer_Name__c` → `Dealer__c`
+      through the alias file on create, set once. Consider also: a rep-less tenant-scope
+      Solar create inherits its linked Customer's `Dealer__c` (§2.3.8 at create time).
+      Separately, something outside this repo (a Flow or Zap — unverifiable, the integration
+      user cannot read Flows) sets `Dealer_Name__c` / `Sales_Company__c` / `Lead_Source__c`
+      seconds after the create; identify it. Backlog today: 13 Customer + 10 Solar.
+- [ ] **Left unattributed, pending a decision (Tim / Harmon):** Desert Sun Systems (user;
+      its 18 Solar deals all say "Solar Bill", and no Desert Sun dealer row exists), Volt
+      Energy (user; no dealer row, its deal says Harmon Solar), and the 7 inactive people
+      reps Thomas Kopp, Thomas Snow, Taylor Horin, Rowdy Meeker, Humberto Aranda, Angel
+      Solis, Caleb Heerma. Their records stay null (§2.4 "blank ⇒ NULL, never the default").
+- [!] **Phase II Service-module access changes are NOT approved.** The Technician user
+      directory and enforcing `service.tech.read` inside the service Lambdas must go through
+      the D-064 process (design → report → Tim's approval) before any code. All authorization
+      stays in `lib/access.js` — **no second authorization implementation** in a service
+      Lambda, the portal, or anywhere else.
+
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:
   - `sundial-sf-query`: `customer`/`solar` list + single + `?full=true` reads are filtered to `Sunbase_Sales_Rep__c`/`Sales_Representative__c` = `Dennis Alessandro`. **Rep reads BYPASS the cache and go live to Salesforce** (the authoritative field isn't cached; `sales_rep_name` is a different formula field). **Known jank:** SOQL `OFFSET` caps at 2000, so on the customer list a rep can page the first ~2000 of Dennis's 3,511 (SAFE — never another rep's records — but incomplete on deep pages). **Roofing NOT gated** (no rep field in scope; ~1 record; revisit with the real feature).

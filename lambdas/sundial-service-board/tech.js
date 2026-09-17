@@ -58,12 +58,12 @@ export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const CLOSED_JOB_STATUSES = Object.freeze(["Closed", "Cancelled", "Paid"]);
 const LIST_LIMIT = 50;
 export const TECH_JOB_SELECT =
-  "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Job_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
+  "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " + // no Job_Type__c: that field is on the price-book item, not the job (2026-09-17)
   "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Customer_Summary__c, Sundial_Customer__c, Estimate__c, " +
   "Estimate_Total__c, Bill_To_Type__c, Payment_Status__c, Geocode_Lat__c, Geocode_Lon__c, CreatedDate, SystemModstamp";
 export const TECH_ESTIMATE_SELECT =
   "Id, Name, Client__c, Status__c, Version__c, Is_Template__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
-  "Sundial_Customer__c, Service_Job__c, Subtotal__c, Discount_Amount__c, Tax_Amount__c, Total__c, Deposit_Amount__c, Sent_At__c, Approved_At__c, CreatedDate";
+  "Sundial_Customer__c, Service_Job__c, Subtotal__c, Discount_Amount__c, Tax_Amount__c, Total__c, Deposit_Amount__c, Last_Sent_At__c, Approved_At__c, CreatedDate";
 export const TECH_CUSTOMER_SELECT =
   "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate";
 const CLOCK_FUTURE_GRACE_MS = 5 * 60 * 1000;
@@ -488,7 +488,7 @@ export function jobToView(j) {
     status: j.Status__c ?? null,
     priority: j.Priority__c ?? null,
     serviceType: j.Service_Type__c ?? null,
-    jobType: j.Job_Type__c ?? null,
+    jobType: null, // kept for the app's shape; the job has no type field of its own
     customerId: j.Sundial_Customer__c ?? null,
     customerName: j.Customer_Name_at_Creation__c ?? null,
     address: j.Address_at_Creation__c ?? null,
@@ -519,7 +519,7 @@ export function estimateToView(e) {
     tax: e.Tax_Amount__c ?? null,
     total: e.Total__c ?? null,
     deposit: e.Deposit_Amount__c ?? null,
-    sentAt: e.Sent_At__c ?? null,
+    sentAt: e.Last_Sent_At__c ?? null,
     approvedAt: e.Approved_At__c ?? null,
     createdAt: e.CreatedDate ?? null,
   };

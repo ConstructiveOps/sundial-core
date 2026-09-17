@@ -10,6 +10,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   createHandler,
   matchRoute,
@@ -20,6 +23,9 @@ import {
   UNSCHEDULED_JOB_STATUSES,
 } from "./index.js";
 import {
+  TECH_CUSTOMER_SELECT,
+  TECH_ESTIMATE_SELECT,
+  TECH_JOB_SELECT,
   annotateLog,
   applyClockEvent,
   applyCorrection,
@@ -942,4 +948,40 @@ test("GET/POST /service/calls/{id}/clock: the office closes a forgotten clock, t
   // Completing a call with no clocked time at all is sent to the status menu instead.
   r = await call(office, "POST", `/service/calls/${id2}/clock`, { reason: "x", intervals: [], complete: true });
   assert.equal(r.body.code, "NO_CLOCK");
+});
+
+// ---------------------------------------------------------------------------
+// Every field a tech route SELECTs must exist in the deployed object metadata.
+// 2026-09-17: `Job_Type__c` (a price-book field) and `Sent_At__c` (it is
+// `Last_Sent_At__c`) were in the jobs / estimates SELECTs; Salesforce refused both
+// queries, the Lambda answered 502, and the phone showed "Loading…" forever. The fake
+// SOQL in these tests cannot catch a bad column — this reads the repo's own .object
+// files instead, so the next typo fails here, not on a phone.
+// ---------------------------------------------------------------------------
+test("tech SELECTs only name fields that exist in the object metadata", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const root = join(here, "..", "..", "salesforce");
+  const dirs = ["service-objects", "service-delta-2026-09-15"].map((d) => join(root, d, "objects"));
+  const fieldsOf = (obj) => {
+    const found = new Set();
+    for (const d of dirs) {
+      const p = join(d, `${obj}.object`);
+      if (!existsSync(p)) continue;
+      for (const m of readFileSync(p, "utf8").matchAll(/<fullName>([A-Za-z0-9_]+__c)<\/fullName>/g)) found.add(m[1]);
+    }
+    return found;
+  };
+  const custom = (select) => select.split(",").map((f) => f.trim()).filter((f) => /^[A-Za-z0-9_]+__c$/.test(f));
+  for (const [obj, select] of [
+    ["Sundial_Service_Job__c", TECH_JOB_SELECT],
+    ["Sundial_Estimate__c", TECH_ESTIMATE_SELECT],
+  ]) {
+    const have = fieldsOf(obj);
+    assert.ok(have.size > 10, `${obj}: metadata not found under salesforce/`);
+    const missing = custom(select).filter((f) => !have.has(f));
+    assert.deepEqual(missing, [], `${obj}: SELECT names fields the org does not have`);
+  }
+  // The customer hub predates the service package (its metadata lives in the org, not
+  // this folder) — pin the exact list instead, so a change here is a deliberate one.
+  assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate");
 });

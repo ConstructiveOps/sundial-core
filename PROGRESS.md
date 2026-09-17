@@ -1,5 +1,19 @@
 # Sundial — Progress Log
 
+## 2026-09-17 (later) — Tech app: Jobs and Estimates tabs stuck on "Loading…"
+
+Two fields that do not exist on the objects were in the tech app's SELECTs — `Job_Type__c`
+on the job (it is a price-book field) and `Sent_At__c` on the estimate (it is
+`Last_Sent_At__c`). Salesforce refused both queries, the Lambda answered 502, and the
+phone — which treats a 5xx as "no signal, keep the cached copy" — had no copy, so it sat
+on "Loading…". Customers worked because its SELECT was right. Fixed both names, and a new
+board test reads the repo's own `.object` metadata and fails on any tech SELECT field the
+org does not have (the fake SOQL in the tests cannot catch a bad column). Portal:
+`loadError()` in `offline.ts` — a transient failure with a copy on the phone is still
+silent, but with NO copy the page now says "Sundial couldn't answer just now…" / "Can't
+reach Sundial…" instead of loading forever (all four tech pages). Tests: board 18,
+portal 144. Deploy: `.\deploy.ps1 sundial-service-board`; portal `main`.
+
 ## 2026-09-17 — The office corrects the clock: time corrections on the dispatch board
 
 The tech app's clock is an append-only log the phone can never edit (amendment 7); until

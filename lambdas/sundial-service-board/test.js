@@ -20,9 +20,16 @@ import {
   UNSCHEDULED_JOB_STATUSES,
 } from "./index.js";
 import {
+  annotateLog,
   applyClockEvent,
+  applyCorrection,
   clockFields,
   clockState,
+  hasClockEvent,
+  lastClockTime,
+  liveIntervals,
+  openIntervalIndex,
+  sumMinutes,
   checklistFor,
   appendStamped,
   dayBounds,
@@ -312,22 +319,30 @@ test("PATCH /service/calls/{id}: move with baseModstamp; 409 on a stale stamp; r
   const noop = await call(h, "PATCH", `/service/calls/${id}`, { techId: "USR000000000000002" });
   assert.equal(noop.body.unchanged, true);
 
-  // Status: In Progress stamps Actual_Start and moves the job Scheduled → In Progress.
+  // Status: In Progress opens the SAME clock the phone writes (Actual_Start derived from it)
+  // and moves the job Scheduled → In Progress.
   const prog = await call(h, "PATCH", `/service/calls/${id}`, { status: "In Progress" });
   assert.equal(prog.status, 200);
   assert.equal(prog.body.jobStatusChanged, "In Progress");
   assert.equal(w.store.Sundial_Service_Call__c[0].Actual_Start__c, NOW.toISOString());
   assert.equal(w.store.Sundial_Service_Job__c[2].Status__c, "In Progress");
+  const opened = parseIntervals(w.store.Sundial_Service_Call__c[0].Clock_Intervals__c);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].kind, "on_site");
+  assert.equal(opened[0].out, null);
 
   // Started → cannot be moved.
   const moved = await call(h, "PATCH", `/service/calls/${id}`, { start: "2026-09-14T18:00:00Z" });
   assert.equal(moved.body.code, "CALL_ALREADY_STARTED");
 
   // Complete: another call on the job is still open, so the job stays In Progress…
+  w.now = new Date(NOW.getTime() + 45 * 60000);
   const done = await call(h, "PATCH", `/service/calls/${id}`, { status: "Complete", workNotes: "Replaced the disconnect." });
   assert.equal(done.status, 200);
   assert.equal(done.body.jobStatusChanged, null);
-  assert.equal(w.store.Sundial_Service_Call__c[0].Actual_End__c, NOW.toISOString());
+  assert.equal(w.store.Sundial_Service_Call__c[0].Actual_End__c, w.now.toISOString());
+  assert.equal(w.store.Sundial_Service_Call__c[0].Duration_Minutes__c, 45); // closed the interval the office opened
+  w.now = NOW;
   // …and once the last open call completes, the job goes to Awaiting Office Review.
   const done2 = await call(h, "PATCH", "/service/calls/SC0000000000000002", { status: "Complete" });
   assert.equal(done2.body.jobStatusChanged, "Awaiting Office Review");
@@ -762,4 +777,169 @@ test("read-only lists for the tech app: jobs (open by default, searchable), esti
   // A sales rep (own scope) has none of this.
   const rep = makeHandler(w, { user: { id: "USR000000000000003" }, access: { scope: "own", level: "Sales Rep", tenantId: TENANT, userId: "USR000000000000003", dealerId: "DLR000000000000001" } });
   assert.equal((await call(rep, "GET", "/service/tech/jobs")).status, 403);
+});
+
+// ---------------------------------------------------------------------------
+// The office's time corrections (2026-09-17)
+// ---------------------------------------------------------------------------
+
+test("applyCorrection: edits stamp who/when/why, removed rows stay in the log but count for nothing, nothing reopens", () => {
+  const by = { id: "USR000000000000003", name: "Beth Office" };
+  const now = "2026-09-14T20:00:00.000Z";
+  let log = applyClockEvent([], { kind: "en_route", at: "2026-09-14T15:00:00.000Z", eventId: "e1" }).intervals;
+  log = applyClockEvent(log, { kind: "clock_in", at: "2026-09-14T15:20:00.000Z", eventId: "e2" }).intervals;
+  log = applyClockEvent(log, { kind: "clock_out", at: "2026-09-14T16:00:00.000Z", eventId: "e3" }).intervals;
+  log = applyClockEvent(log, { kind: "clock_in", at: "2026-09-14T16:30:00.000Z", eventId: "e4" }).intervals; // forgot to clock out
+  assert.equal(sumMinutes(log, now), 60 + 210);
+
+  // The dialog sends the rows back: close the forgotten one at 17:00, trim the first one's arrival.
+  const rows = annotateLog(log).map((r) => ({ index: r.index, in: r.in, arrived: r.arrived, out: r.out }));
+  rows[0].arrived = "2026-09-14T15:25:00.000Z";
+  rows[1].out = "2026-09-14T17:00:00.000Z";
+  const r = applyCorrection(log, rows, { now, by, reason: "forgot to clock out" });
+  assert.equal(r.error, undefined, JSON.stringify(r.error));
+  assert.equal(r.changed, true);
+  assert.deepEqual([r.changes.corrected.length, r.changes.added, r.changes.removed], [2, 0, 0]);
+  assert.equal(r.intervals[1].out, "2026-09-14T17:00:00.000Z");
+  assert.equal(r.intervals[1].corrections[0].by.name, "Beth Office");
+  assert.equal(r.intervals[1].corrections[0].from.out, null);
+  assert.equal(r.intervals[0].corrections[0].from.arrived, "2026-09-14T15:20:00.000Z");
+  assert.deepEqual(r.intervals[1].ids, ["e4"]); // the phone's event ids survive a correction
+  const f = clockFields(r.intervals);
+  assert.equal(f.Actual_End__c, "2026-09-14T17:00:00.000Z");
+  assert.equal(f.Duration_Minutes__c, 90);
+
+  // Remove the second interval entirely: it stays in the JSON, flagged, and stops counting.
+  const rm = applyCorrection(r.intervals, [{ index: 0, in: rows[0].in, arrived: rows[0].arrived, out: rows[0].out }], { now, by, reason: "double tap" });
+  assert.equal(rm.changes.removed, 1);
+  assert.equal(rm.intervals.length, 2);
+  assert.equal(rm.intervals[1].removed.reason, "double tap");
+  assert.equal(liveIntervals(rm.intervals).length, 1);
+  assert.equal(clockFields(rm.intervals).Duration_Minutes__c, 60);
+  assert.equal(openIntervalIndex(rm.intervals), -1);
+  assert.equal(hasClockEvent(rm.intervals, "e4"), true); // a replay of the removed tap is still a duplicate
+  assert.equal(lastClockTime(rm.intervals), "2026-09-14T16:00:00.000Z");
+  assert.deepEqual(parseIntervals(JSON.stringify(rm.intervals)).map((i) => !!i.removed), [false, true]);
+
+  // Add a missed interval (office-added rows carry no ids and an `added` stamp).
+  const add = applyCorrection(rm.intervals, [{ index: 0, in: rows[0].in, arrived: rows[0].arrived, out: rows[0].out }, { in: "2026-09-14T17:30:00.000Z", out: "2026-09-14T18:00:00.000Z" }], { now, by, reason: "second visit not clocked" });
+  assert.equal(add.changes.added, 1);
+  assert.equal(liveIntervals(add.intervals).length, 2);
+  assert.equal(add.intervals[add.intervals.length - 1].added.by.id, by.id);
+  assert.equal(add.intervals[add.intervals.length - 1].kind, "on_site");
+  assert.equal(clockFields(add.intervals).Duration_Minutes__c, 90);
+
+  // Same rows back = nothing to do.
+  const same = applyCorrection(add.intervals, annotateLog(add.intervals).filter((i) => !i.removed).map((i) => ({ index: i.index, in: i.in, arrived: i.arrived, out: i.out })), { now, by, reason: "x" });
+  assert.equal(same.changed, false);
+  assert.equal(same.intervals, add.intervals);
+
+  // Refusals.
+  const bad = (rows2, code) => assert.equal(applyCorrection(add.intervals, rows2, { now, by, reason: "x" }).error?.[0], code, code);
+  bad("nope", "INTERVALS_REQUIRED");
+  bad([{ index: 9, in: now }], "INDEX_INVALID");
+  bad([{ index: 1, in: now }], "INDEX_INVALID"); // the removed row cannot be edited
+  bad([{ index: 0, in: rows[0].in, out: rows[0].out }, { index: 0, in: rows[0].in, out: rows[0].out }], "INDEX_DUPLICATE");
+  bad([{ index: 0, in: "when?", out: rows[0].out }], "TIME_INVALID");
+  bad([{ index: 0, in: rows[0].in, out: "2026-09-15T20:00:00.000Z" }], "TIME_FUTURE");
+  bad([{ index: 0, out: rows[0].out }], "IN_REQUIRED");
+  bad([{ in: "2026-09-14T18:30:00.000Z" }], "OUT_REQUIRED");
+  bad([{ index: 0, in: rows[0].in, out: null }], "NO_REOPEN");
+  bad([{ index: 0, in: rows[0].out, out: rows[0].in }], "ORDER_INVALID");
+  bad([{ index: 0, in: rows[0].in, arrived: "2026-09-14T14:00:00.000Z", out: rows[0].out }], "ORDER_INVALID");
+  bad([{ index: 0, in: rows[0].in, out: rows[0].out }, { in: "2026-09-14T15:30:00.000Z", out: "2026-09-14T15:45:00.000Z" }], "OVERLAP");
+  const open = applyClockEvent([], { kind: "clock_in", at: "2026-09-14T18:30:00.000Z" }).intervals;
+  assert.equal(applyCorrection(open, [{ index: 0, in: "2026-09-14T18:30:00.000Z", out: null }, { in: "2026-09-14T19:00:00.000Z", out: "2026-09-14T19:30:00.000Z" }], { now, by, reason: "x" }).error[0], "OPEN_NOT_LAST");
+});
+
+test("GET/POST /service/calls/{id}/clock: the office closes a forgotten clock, the actuals follow the log, complete:true finishes the call and settles the job", async () => {
+  const w = fakeWorld();
+  const office = makeHandler(w);
+  const techH = makeHandler(w, { user: { id: "USR000000000000001", firstName: "Jake", lastName: "Dorsey" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001" } });
+  const id = "SC0000000000000001";
+  // Jake clocks in at 9:05 and never clocks out.
+  w.now = new Date("2026-09-14T16:05:00Z");
+  let r = await call(techH, "POST", `/service/tech/calls/${id}/status`, { status: "In Progress", eventId: "t1", textCustomer: false });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(w.store.Sundial_Service_Job__c[2].Status__c, "In Progress");
+
+  // Next morning the office opens the dialog: the log is numbered, GPS rides along, it came from the phone.
+  w.now = new Date("2026-09-15T14:00:00Z");
+  r = await call(office, "GET", `/service/calls/${id}/clock`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.log.length, 1);
+  assert.deepEqual([r.body.log[0].index, r.body.log[0].out, r.body.log[0].fromPhone, r.body.log[0].kind], [0, null, true, "on_site"]);
+  assert.equal(r.body.call.clock.state, "on_site");
+  assert.equal(r.body.timeZone, "America/Phoenix");
+  // A tech cannot reach the office's route.
+  assert.equal((await call(techH, "GET", `/service/calls/${id}/clock`)).status, 403);
+  assert.equal((await call(techH, "POST", `/service/calls/${id}/clock`, { reason: "x", intervals: [] })).status, 403);
+
+  // A reason is required; a stale stamp is a 409; the tech's rules apply (no future times).
+  assert.equal((await call(office, "POST", `/service/calls/${id}/clock`, { intervals: [] })).body.code, "REASON_REQUIRED");
+  assert.equal((await call(office, "POST", `/service/calls/${id}/clock`, { reason: "x", intervals: [], baseModstamp: "2000-01-01T00:00:00Z" })).body.code, "CALL_CONFLICT");
+  assert.equal((await call(office, "POST", `/service/calls/${id}/clock`, { reason: "x", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: "2026-09-16T00:00:00.000Z" }] })).body.code, "TIME_FUTURE");
+  // Completing with the interval still open is refused.
+  assert.equal((await call(office, "POST", `/service/calls/${id}/clock`, { reason: "x", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: null }], complete: true })).body.code, "STILL_OPEN");
+
+  // Close it at 11:00 yesterday and mark the call complete.
+  const before = w.calls.updates.length;
+  r = await call(office, "POST", `/service/calls/${id}/clock`, { reason: "Jake forgot to clock out", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: "2026-09-14T18:00:00.000Z" }], complete: true, baseModstamp: w.store.Sundial_Service_Call__c[0].SystemModstamp });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.changes, { corrected: [{ index: 0, from: { in: "2026-09-14T16:05:00.000Z", arrived: "2026-09-14T16:05:00.000Z", out: null }, to: { in: "2026-09-14T16:05:00.000Z", arrived: "2026-09-14T16:05:00.000Z", out: "2026-09-14T18:00:00.000Z" } }], added: 0, removed: 0 });
+  const rec = w.store.Sundial_Service_Call__c[0];
+  assert.equal(rec.Status__c, "Complete");
+  assert.equal(rec.Actual_Start__c, "2026-09-14T16:05:00.000Z");
+  assert.equal(rec.Actual_End__c, "2026-09-14T18:00:00.000Z");
+  assert.equal(rec.Duration_Minutes__c, 115);
+  assert.equal(r.body.call.clock.state, "idle");
+  assert.equal(r.body.log[0].corrections[0].reason, "Jake forgot to clock out");
+  assert.equal(r.body.log[0].corrections[0].by.name, "Beth Office");
+  assert.equal(r.body.laborFromClock, false); // not billable
+  assert.equal(r.body.jobStatusChanged, null); // Larry's SC-00002 is still open on the job
+  assert.equal(w.calls.updates.length, before + 1);
+  const row = w.activity.filter((a) => a.event === "service_call_clock").pop();
+  assert.equal(row.details.via, "dispatch");
+  assert.equal(row.details.reason, "Jake forgot to clock out");
+  assert.deepEqual(row.details.fields.Duration_Minutes__c, { from: null, to: 115 });
+  assert.equal(w.broadcasts.at(-1).payload.call.status, "Complete");
+  assert.ok(w.stale.some((s) => s.ids.includes(id)));
+
+  // The phone's view of the call agrees, and the tech never sees a removed row.
+  r = await call(office, "POST", `/service/calls/${id}/clock`, { reason: "double tap", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: "2026-09-14T18:00:00.000Z" }, { in: "2026-09-14T19:00:00.000Z", out: "2026-09-14T19:30:00.000Z" }] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.changes.added, 1);
+  assert.equal(w.store.Sundial_Service_Call__c[0].Duration_Minutes__c, 145);
+  r = await call(office, "POST", `/service/calls/${id}/clock`, { reason: "never happened", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: "2026-09-14T18:00:00.000Z" }] });
+  assert.equal(r.body.changes.removed, 1);
+  assert.equal(r.body.log.length, 2);
+  assert.equal(r.body.log[1].removed.reason, "never happened");
+  assert.equal(w.store.Sundial_Service_Call__c[0].Duration_Minutes__c, 115);
+  const phone = await call(techH, "GET", `/service/tech/calls/${id}`);
+  assert.equal(phone.body.call.intervals.length, 1);
+  assert.equal(phone.body.call.clock.minutes, 115);
+  // Nothing changed → says so, writes nothing.
+  const n = w.calls.updates.length;
+  r = await call(office, "POST", `/service/calls/${id}/clock`, { reason: "x", intervals: [{ index: 0, in: "2026-09-14T16:05:00.000Z", out: "2026-09-14T18:00:00.000Z" }] });
+  assert.equal(r.body.unchanged, true);
+  assert.equal(w.calls.updates.length, n);
+  // A completed call cannot be completed again from here; a cancelled one is untouchable.
+  assert.equal((await call(office, "POST", `/service/calls/${id}/clock`, { reason: "x", complete: true })).body.code, "CALL_STATE");
+  assert.equal((await call(office, "POST", "/service/calls/SC0000000000009999/clock", { reason: "x", intervals: [] })).status, 404);
+
+  // An En Route call whose drive is closed off without an arrival goes back to Scheduled.
+  const id2 = "SC0000000000000002";
+  const larry = makeHandler(w, { user: { id: "USR000000000000002", firstName: "Larry", lastName: "Ng" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000002" } });
+  w.now = new Date("2026-09-20T15:30:00Z");
+  r = await call(larry, "POST", `/service/tech/calls/${id2}/status`, { status: "En Route", eventId: "t2", textCustomer: false });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  w.now = new Date("2026-09-20T20:00:00Z");
+  r = await call(office, "POST", `/service/calls/${id2}/clock`, { reason: "truck broke down, rescheduling", intervals: [{ index: 0, in: "2026-09-20T15:30:00.000Z", out: "2026-09-20T15:50:00.000Z" }] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(w.store.Sundial_Service_Call__c[1].Status__c, "Scheduled");
+  assert.equal(w.store.Sundial_Service_Call__c[1].Actual_End__c, null);
+  assert.equal(w.store.Sundial_Service_Call__c[1].Duration_Minutes__c, null);
+  // Completing a call with no clocked time at all is sent to the status menu instead.
+  r = await call(office, "POST", `/service/calls/${id2}/clock`, { reason: "x", intervals: [], complete: true });
+  assert.equal(r.body.code, "NO_CLOCK");
 });

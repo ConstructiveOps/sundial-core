@@ -75,7 +75,7 @@ const MAX_TEXT_CHARS = 320;
 
 /** Extra columns the app needs beyond the board's CALL_SELECT. */
 export const TECH_CALL_EXTRA =
-  "Clock_Intervals__c, Clock_In_Latitude__c, Clock_In_Longitude__c, Clock_Out_Latitude__c, Clock_Out_Longitude__c, " +
+  "Clock_In_Latitude__c, Clock_In_Longitude__c, Clock_Out_Latitude__c, Clock_Out_Longitude__c, " + // Clock_Intervals__c is in CALL_SELECT (the board's PATCH needs it too)
   "Checklist_Template_Key__c, Checklist_State__c, " +
   "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Estimate__c, Sundial_Service_Job__r.Primary_Email_at_Creation__c, " +
   "Sundial_Service_Job__r.Geocode_Lat__c, Sundial_Service_Job__r.Geocode_Lon__c, Sundial_Service_Job__r.Geocode_Status__c";
@@ -154,18 +154,29 @@ export function parseIntervals(json) {
   if (!Array.isArray(v)) return [];
   return v.filter((i) => i && typeof i === "object" && typeof i.in === "string").map((i) => ({ ...i, ids: Array.isArray(i.ids) ? i.ids : [] }));
 }
-export const openIntervalIndex = (intervals) => intervals.findIndex((i) => !i.out);
+/**
+ * An interval the office removed stays in the log (with `removed: { at, by, reason }`) so the
+ * history is never lost, but it counts for nothing: not time, not the open clock, not the floor.
+ * The one thing it keeps is its event ids — a replayed tap that produced it is still a duplicate.
+ */
+export const isLive = (i) => !i.removed;
+export const liveIntervals = (intervals) => intervals.filter(isLive);
+export const openIntervalIndex = (intervals) => intervals.findIndex((i) => isLive(i) && !i.out);
 export const hasClockEvent = (intervals, id) => !!id && intervals.some((i) => i.ids.includes(id));
 /** The latest timestamp in the log — the floor for the next event. */
 export function lastClockTime(intervals) {
   let t = null;
-  for (const i of intervals) for (const k of ["in", "arrived", "out"]) if (i[k] && (!t || i[k] > t)) t = i[k];
+  for (const i of intervals) {
+    if (!isLive(i)) continue;
+    for (const k of ["in", "arrived", "out"]) if (i[k] && (!t || i[k] > t)) t = i[k];
+  }
   return t;
 }
-/** Minutes across all intervals; an open one counts up to `now` when given. */
+/** Minutes across all live intervals; an open one counts up to `now` when given. */
 export function sumMinutes(intervals, now = null) {
   let ms = 0;
   for (const i of intervals) {
+    if (!isLive(i)) continue;
     const a = Date.parse(i.in);
     const b = i.out ? Date.parse(i.out) : now ? Date.parse(now) : NaN;
     if (Number.isFinite(a) && Number.isFinite(b) && b > a) ms += b - a;
@@ -230,15 +241,16 @@ export function clockState(intervals, now = null) {
     since: i ? i.arrived || i.in : null,
     openSince: i ? i.in : null,
     minutes: sumMinutes(intervals, now),
-    intervals: intervals.length,
+    intervals: liveIntervals(intervals).length,
   };
 }
 
 /** Salesforce fields that follow from a log: actuals + duration (+ GPS snapshots). */
 export function clockFields(intervals) {
-  const first = intervals[0] || null;
-  const last = intervals[intervals.length - 1] || null;
-  const closed = intervals.every((i) => i.out);
+  const live = liveIntervals(intervals);
+  const first = live[0] || null;
+  const last = live[live.length - 1] || null;
+  const closed = live.every((i) => i.out);
   const f = {
     Clock_Intervals__c: JSON.stringify(intervals),
     Actual_Start__c: first ? first.in : null,
@@ -256,6 +268,109 @@ export function clockFields(intervals) {
     f.Clock_Out_Longitude__c = outGps.lng;
   }
   return f;
+}
+
+// --- the office's corrections -------------------------------------------------
+/** The log as the office sees it: every row (removed ones too), numbered so an edit can point at one. */
+export function annotateLog(intervals) {
+  return intervals.map((i, index) => ({
+    index,
+    in: i.in,
+    arrived: i.arrived ?? null,
+    out: i.out ?? null,
+    kind: i.kind ?? (i.arrived ? "on_site" : "en_route"),
+    minutes: i.out ? Math.max(0, Math.round((Date.parse(i.out) - Date.parse(i.in)) / 60000)) : null,
+    gps: { in: i.in_gps ?? null, arrived: i.arrived_gps ?? null, out: i.out_gps ?? null },
+    fromPhone: (i.ids || []).length > 0,
+    added: i.added ?? null,
+    removed: i.removed ?? null,
+    corrections: i.corrections ?? [],
+  }));
+}
+
+/**
+ * Apply the office's version of the log. `rows` is the list the dialog sends back: each row
+ * either points at an existing interval by `index` (only in / arrived / out may change) or is a
+ * new one (needs in + out; kind defaults to on_site). An existing interval left out of the list
+ * is removed — kept in the log with a `removed` stamp, ignored everywhere else. Nothing is ever
+ * reopened: an open interval may stay open, a closed one stays closed, a new one is closed.
+ * Returns { intervals, changed, changes } or { error: [code, message] }.
+ */
+export function applyCorrection(intervals, rows, { now, by, reason }) {
+  if (!Array.isArray(rows)) return { error: ["INTERVALS_REQUIRED", "intervals must be a list."] };
+  const nowMs = Date.parse(now);
+  const parseT = (v, label, n) => {
+    if (v === null || v === undefined || v === "") return { t: null };
+    const t = Date.parse(String(v));
+    if (!Number.isFinite(t)) return { error: ["TIME_INVALID", `Row ${n + 1}: ${label} must be a date and time.`] };
+    if (t > nowMs + CLOCK_FUTURE_GRACE_MS) return { error: ["TIME_FUTURE", `Row ${n + 1}: ${label} is in the future.`] };
+    return { t: new Date(t).toISOString() };
+  };
+  const stamp = { at: now, by: by ? { id: by.id ?? null, name: by.name ?? null } : null, reason };
+  const seen = new Set();
+  const next = [];
+  for (let n = 0; n < rows.length; n++) {
+    const r = rows[n] && typeof rows[n] === "object" ? rows[n] : {};
+    let base = null;
+    let idx = null;
+    if (r.index !== undefined && r.index !== null) {
+      idx = Number(r.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= intervals.length || !isLive(intervals[idx])) return { error: ["INDEX_INVALID", `Row ${n + 1}: that interval is not on this call.`] };
+      if (seen.has(idx)) return { error: ["INDEX_DUPLICATE", `Row ${n + 1}: the same interval is listed twice.`] };
+      seen.add(idx);
+      base = intervals[idx];
+    }
+    const inT = parseT(r.in, "the start", n);
+    if (inT.error) return inT;
+    const arrT = parseT(r.arrived, "arrived", n);
+    if (arrT.error) return arrT;
+    const outT = parseT(r.out, "the end", n);
+    if (outT.error) return outT;
+    if (!inT.t) return { error: ["IN_REQUIRED", `Row ${n + 1}: a start time is required.`] };
+    const kind = base ? base.kind ?? (base.arrived ? "on_site" : "en_route") : r.kind === "en_route" ? "en_route" : "on_site";
+    if (!base && !outT.t) return { error: ["OUT_REQUIRED", `Row ${n + 1}: a new interval needs an end time.`] };
+    if (base && base.out && !outT.t) return { error: ["NO_REOPEN", `Row ${n + 1}: a closed interval can't be reopened — the tech clocks in again instead.`] };
+    if (outT.t && outT.t <= inT.t) return { error: ["ORDER_INVALID", `Row ${n + 1}: the end must be after the start.`] };
+    const arrived = arrT.t ?? (kind === "on_site" ? inT.t : null);
+    if (arrived && (arrived < inT.t || (outT.t && arrived > outT.t))) return { error: ["ORDER_INVALID", `Row ${n + 1}: arrived must fall between the start and the end.`] };
+    next.push({ base, idx, in: inT.t, arrived, out: outT.t, kind });
+  }
+  next.sort((a, b) => a.in.localeCompare(b.in));
+  for (let i = 0; i < next.length; i++) {
+    if (!next[i].out && i !== next.length - 1) return { error: ["OPEN_NOT_LAST", "Only the latest interval can be open."] };
+    if (i > 0 && next[i].in < next[i - 1].out) return { error: ["OVERLAP", `Intervals ${i} and ${i + 1} overlap.`] };
+  }
+
+  const changes = { corrected: [], added: 0, removed: 0 };
+  const out = intervals.map((i) => ({ ...i, ids: [...i.ids] }));
+  for (const row of next) {
+    if (row.base) {
+      const cur = out[row.idx];
+      const from = { in: cur.in, arrived: cur.arrived ?? null, out: cur.out ?? null };
+      if (from.in === row.in && from.arrived === row.arrived && from.out === row.out) continue;
+      cur.in = row.in;
+      if (row.arrived) cur.arrived = row.arrived;
+      else delete cur.arrived;
+      cur.out = row.out;
+      cur.corrections = [...(cur.corrections || []), { ...stamp, from }];
+      changes.corrected.push({ index: row.idx, from, to: { in: row.in, arrived: row.arrived, out: row.out } });
+    } else {
+      const i = { in: row.in, out: row.out, kind: row.kind, ids: [], added: stamp };
+      if (row.arrived) i.arrived = row.arrived;
+      out.push(i);
+      changes.added += 1;
+    }
+  }
+  for (let idx = 0; idx < intervals.length; idx++) {
+    if (isLive(intervals[idx]) && !seen.has(idx)) {
+      out[idx].removed = stamp;
+      changes.removed += 1;
+    }
+  }
+  const changed = changes.corrected.length > 0 || changes.added > 0 || changes.removed > 0;
+  // Keep the array in time order so first/last mean what they say; removed rows ride along.
+  out.sort((a, b) => a.in.localeCompare(b.in));
+  return { intervals: changed ? out : intervals, changed, changes };
 }
 
 // --- notes -------------------------------------------------------------------
@@ -495,7 +610,7 @@ export function createTechHandlers(d, h) {
       geofenceVerified: c.Geofence_Verified__c === true,
       photosCount: num(c.Photos_Count__c) ?? 0,
       clock: clockState(intervals, now),
-      intervals,
+      intervals: liveIntervals(intervals), // the phone never sees a removed row; the office's GET /clock does
       checklist: checklistFor(c),
     };
   }
@@ -786,6 +901,105 @@ export function createTechHandlers(d, h) {
       const view = callView(after, d.now().toISOString());
       await h.announce(ctx, { kind: "call", action: "updated", call: callToBoard(after), jobStatus: job?.Status__c ?? null, via: "tech" });
       return jsonResponse(200, cors, { success: true, call: view, jobStatus: job?.Status__c ?? null, jobStatusChanged, closedOthers, ...extra });
+    },
+
+    // --- the office's time corrections (dispatch board) ---------------------------------
+    // The phone appends; the office corrects here. Every edit stamps who / when / why onto the
+    // interval; a removed interval stays in the log flagged `removed`. Actual_Start/End and
+    // Duration_Minutes are re-derived from the log — never typed in.
+    async clockGet({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const call = await loadTechCall(params[0], tenantId);
+      if (!call) return notFound(cors);
+      const now = d.now().toISOString();
+      const log = parseIntervals(call.Clock_Intervals__c);
+      return jsonResponse(200, cors, { call: callView(call, now), log: annotateLog(log), timeZone: DEFAULTS.timeZone, serverTime: now });
+    },
+
+    async clockCorrect({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const call = await loadTechCall(params[0], tenantId);
+      if (!call) return notFound(cors);
+      if (call.Status__c === "Cancelled") return jsonResponse(409, cors, { error: "cancelled", code: "CALL_CANCELLED", message: "This call is cancelled." });
+      if (call.Status__c === "Unscheduled") return jsonResponse(409, cors, { error: "unscheduled", code: "CALL_NOT_SCHEDULED", message: "Schedule the call before correcting its time." });
+      const base = strOrNull(body?.baseModstamp);
+      if (base && call.SystemModstamp && base !== call.SystemModstamp) {
+        return jsonResponse(409, cors, { error: "conflict", code: "CALL_CONFLICT", message: "This call changed since you loaded it — take another look.", call: callView(call, d.now().toISOString()) });
+      }
+      const reason = strOrNull(body?.reason);
+      if (!reason) return bad(cors, "REASON_REQUIRED", "Say why the time is being corrected.");
+      const now = d.now();
+      const log = parseIntervals(call.Clock_Intervals__c);
+      const r = applyCorrection(log, body?.intervals ?? annotateLog(log).filter((i) => !i.removed), { now: now.toISOString(), by: ctx.actor, reason: reason.slice(0, 255) });
+      if (r.error) return bad(cors, r.error[0], r.error[1]);
+      const complete = body?.complete === true;
+      if (!r.changed && !complete) return jsonResponse(200, cors, { success: true, unchanged: true, call: callView(call, now.toISOString()), log: annotateLog(log) });
+
+      const logAfter = r.intervals;
+      const open = openIntervalIndex(logAfter) >= 0;
+      let status = call.Status__c;
+      if (complete) {
+        if (!["Scheduled", "En Route", "In Progress"].includes(call.Status__c)) return jsonResponse(409, cors, { error: "state", code: "CALL_STATE", status: call.Status__c, message: `A ${call.Status__c} call can't be marked complete from here.` });
+        if (open) return bad(cors, "STILL_OPEN", "Give the open interval an end time before marking the call complete.");
+        if (!liveIntervals(logAfter).length) return bad(cors, "NO_CLOCK", "There is no clocked time on this call — mark it complete from the board's status menu instead.");
+        status = "Complete";
+      } else if (call.Status__c === "En Route" && !open) {
+        status = "Scheduled"; // the drive was closed off without an arrival: back on the board as scheduled
+      }
+      const fields = r.changed ? clockFields(logAfter) : {};
+      if (status !== "Complete") {
+        // Not finished: the end and the duration belong to Complete (mirrors the tech's clock-in / pause).
+        fields.Actual_End__c = null;
+        fields.Duration_Minutes__c = null;
+      } else if (!r.changed) {
+        Object.assign(fields, clockFields(logAfter));
+      }
+      if (status !== call.Status__c) fields.Status__c = status;
+      try {
+        await d.sfUpdateRecord(CALL_SF_OBJECT, call.Id, fields);
+      } catch (e) {
+        return sfError(cors, e, "clock correction");
+      }
+      const after = (await loadTechCall(call.Id, tenantId)) || { ...call, ...fields };
+      const job = call.Sundial_Service_Job__c ? await h.loadJob(call.Sundial_Service_Job__c, tenantId) : null;
+      await h.act(ctx, {
+        event: EVENTS.SERVICE_CALL_CLOCK,
+        recordType: "servicecall",
+        recordSfId: call.Id,
+        jobSfId: call.Sundial_Service_Job__c ?? null,
+        estimateSfId: job?.Estimate__c ?? null,
+        details: {
+          via: "dispatch",
+          reason,
+          corrected: r.changes.corrected.length,
+          added: r.changes.added,
+          removed: r.changes.removed,
+          status,
+          from: call.Status__c,
+          minutes: fields.Duration_Minutes__c ?? null,
+          fields: {
+            Actual_Start__c: { from: call.Actual_Start__c ?? null, to: fields.Actual_Start__c ?? call.Actual_Start__c ?? null },
+            Actual_End__c: { from: call.Actual_End__c ?? null, to: fields.Actual_End__c ?? null },
+            Duration_Minutes__c: { from: call.Duration_Minutes__c ?? null, to: fields.Duration_Minutes__c ?? null },
+          },
+        },
+      });
+      await h.markStale(CACHE.call, [call.Id], tenantId);
+      let jobStatusChanged = null;
+      if (job && status === "Complete" && call.Status__c !== "Complete") {
+        jobStatusChanged = await h.settleJobStatus(ctx, job, "complete", await h.loadJobCalls(job.Id, tenantId));
+      }
+      await h.announce(ctx, { kind: "call", action: "updated", call: callToBoard(after), jobStatus: job?.Status__c ?? null, via: "dispatch" });
+      return jsonResponse(200, cors, {
+        success: true,
+        call: callView(after, d.now().toISOString()),
+        log: annotateLog(parseIntervals(after.Clock_Intervals__c)),
+        changes: r.changes,
+        jobStatusChanged,
+        // Labor billing (amendment 6) reads the clock when the office has not typed hours: the
+        // job's Labor card needs a re-save for its line to follow this correction.
+        laborFromClock: after.Billable_to_Customer__c === true && after.Billable_Hours__c == null,
+      });
     },
 
     // --- notes (append-only, stamped) ---------------------------------------------------

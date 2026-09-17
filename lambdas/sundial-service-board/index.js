@@ -55,7 +55,7 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
-import { createTechHandlers, realListPhotos, realPresignPut } from "./tech.js";
+import { applyClockEvent, clockFields, createTechHandlers, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -90,7 +90,7 @@ export const CALL_SELECT =
   "Id, Name, Client__c, Visit_Type__c, Visit_Sub_Type__c, Sundial_Service_Job__c, Tech__c, Scheduled_Start__c, " +
   "Scheduled_End__c, Status__c, Cancel_Reason__c, Actual_Start__c, Actual_End__c, Duration_Minutes__c, Work_Notes__c, " +
   "Private_Notes__c, Geofence_Verified__c, Photos_Count__c, Billable_to_Customer__c, Billable_Hours__c, Bill_Rate__c, " +
-  "SystemModstamp, CreatedDate, " +
+  "Clock_Intervals__c, SystemModstamp, CreatedDate, " +
   "Tech__r.First_Name__c, Tech__r.Last_Name__c, " +
   "Sundial_Service_Job__r.Name, Sundial_Service_Job__r.Status__c, Sundial_Service_Job__r.Priority__c, " +
   "Sundial_Service_Job__r.Service_Type__c, Sundial_Service_Job__r.Customer_Name_at_Creation__c, " +
@@ -242,6 +242,9 @@ const ROUTES = [
   ["POST", /^\/service\/jobs\/([^/]+)\/calls\/?$/, "createCall"],
   ["PATCH", /^\/service\/calls\/([^/]+)\/?$/, "patchCall"],
   ["POST", /^\/service\/calls\/([^/]+)\/cancel\/?$/, "cancelCall"],
+  // The office's time corrections (tech.js — same clock engine as the phone).
+  ["GET", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockGet"],
+  ["POST", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockCorrect"],
   // The technician app (tech.js). Order matters: "photos/confirm" before "photos".
   ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
   ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
@@ -274,6 +277,8 @@ const ACTION_FOR = Object.freeze({
   createCall: "service.call.write",
   patchCall: "service.call.write",
   cancelCall: "service.call.write",
+  clockGet: "service.board.read",
+  clockCorrect: "service.call.write",
   techDay: "service.tech.self",
   techPriceBook: "service.tech.self",
   techCall: "service.tech.self",
@@ -619,9 +624,22 @@ export function createHandler(deps = {}) {
         if (status !== call.Status__c) {
           fields.Status__c = status;
           changes.Status__c = { from: call.Status__c, to: status };
-          // The office marking progress by hand stamps the actuals the PWA would have.
-          if (status === "In Progress" && !call.Actual_Start__c) fields.Actual_Start__c = d.now().toISOString();
-          if (status === "Complete" && !call.Actual_End__c) fields.Actual_End__c = d.now().toISOString();
+          // The office marking progress by hand moves the SAME clock the phone writes, so the
+          // log, the actuals and the tech's app all agree: In Progress opens an interval (if none
+          // is open), Complete / No-Show closes the open one, and the actuals are derived from
+          // the log — never stamped beside it. A call that was never clocked and is marked
+          // Complete keeps the old behaviour: the end is now.
+          const now = d.now().toISOString();
+          const log = parseIntervals(call.Clock_Intervals__c);
+          if (status === "In Progress") {
+            const ev = applyClockEvent(log, { kind: "clock_in", at: now });
+            if (ev.changed) Object.assign(fields, clockFields(ev.intervals), { Actual_End__c: null, Duration_Minutes__c: null });
+          } else if (status === "Complete" || status === "No-Show") {
+            const ev = applyClockEvent(log, { kind: "clock_out", at: now });
+            if (ev.changed) Object.assign(fields, clockFields(ev.intervals));
+            if (status === "Complete" && !fields.Actual_End__c && !call.Actual_End__c) fields.Actual_End__c = now;
+            if (status === "No-Show") { delete fields.Actual_End__c; delete fields.Duration_Minutes__c; }
+          }
         }
       }
       for (const [key, api] of [["workNotes", "Work_Notes__c"], ["privateNotes", "Private_Notes__c"]]) {

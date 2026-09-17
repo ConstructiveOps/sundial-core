@@ -1,5 +1,41 @@
 # Sundial — Progress Log
 
+## 2026-09-17 — The office corrects the clock: time corrections on the dispatch board
+
+The tech app's clock is an append-only log the phone can never edit (amendment 7); until
+today nobody could fix a tech who forgot to clock out, tapped twice, or whose phone died
+mid-visit — the office could only stamp `Actual_End__c` by hand, beside a log that still
+said "on site". Tim put this first on the owed list.
+
+**Backend (`sundial-service-board`, `tech.js`).** `GET /service/calls/{id}/clock`
+(`service.board.read`) returns every row of the log, numbered, GPS and history included.
+`POST /service/calls/{id}/clock` (`service.call.write`) takes **the office's version of the
+live rows** with a required `reason`: a row with `index` edits that interval (only `in` /
+`arrived` / `out`; GPS and the tap's event ids stay), a row without one is a new interval,
+and a live interval left out is **removed** — kept in the JSON with `removed: { at, by,
+reason }` and ignored everywhere else (its event ids still make a replayed tap a
+duplicate). Every changed row gets a `corrections[]` entry (who / when / why / the previous
+times). Nothing reopens. The actuals and `Duration_Minutes__c` are re-derived from the log;
+end + duration only once the call is Complete. `complete: true` closes the loop (call →
+Complete, job settles through `settleJobStatus` as always); an En Route call whose drive is
+closed off without an arrival goes back to Scheduled. `applyCorrection` / `annotateLog` /
+`liveIntervals` are pure and tested. Activity `service_call_clock` with `via: "dispatch"`.
+**The board's own status menu now moves the same clock**: PATCH `In Progress` opens an
+interval, `Complete` / `No-Show` close the open one, actuals derived — so the log, the
+actuals and the tech's app never disagree again (`Clock_Intervals__c` moved into
+`CALL_SELECT`). `laborFromClock` in the response tells the office to re-save the job's
+Labor billing card when the call is billed from its clock. Tests: board 17.
+
+**Portal.** "Fix time" on the call dialog (dispatch board and the job page's calls card):
+one row per interval — day, start (or "left" / "arrived" on a drive), end — with Remove,
+"Add on-site time", the reason, a "Mark this call Complete" tick (only once everything is
+closed), the History of past corrections and removals, and the Labor-billing reminder. The
+Activity feed reads the office's correction as "Time corrected by the office (1 edited) ·
+115 min · marked complete — reason". Tests: portal 143.
+
+**Deploy:** `.\deploy.ps1 sundial-service-board`, then `.\scripts\wire-service-board-routes.ps1`
+(adds `/service/calls/{id}/clock`), portal `main`.
+
 ## 2026-09-16 (later) — Tech app round 2: read-only module, Communications for techs, the menu, photo library, staying signed in
 
 Tim's first day with the app on a phone: tagging staff from the notes (or the whole

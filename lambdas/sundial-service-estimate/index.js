@@ -140,7 +140,8 @@ import {
 } from "./pricebook.js";
 
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
-import { createInvoiceHandlers } from "./invoice.js";
+import { createInvoiceHandlers, createMoneyCore } from "./invoice.js";
+import { createStripeHandlers } from "./stripe.js";
 import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
@@ -341,11 +342,14 @@ const ROUTES = [
   ["POST", /^\/service\/labor\/default-rate\/?$/, "setDefaultRate"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/estimate-lines\/?$/, "techAddLines"], // the tech app (service.tech.self)
+  // Stripe (D-072 amendment 8, stripe.js): the office's charge, and Stripe's own calls (no login).
+  ["POST", /^\/service\/invoices\/([^/]+)\/charge\/?$/, "chargeInvoiceRoute"],
+  ["POST", /^\/webhooks\/stripe\/([^/]+)\/?$/, "stripeWebhook"],
 ];
 
 export function matchRoute(method, path) {
   // Strip a stage prefix ("/prod/service/...") if the gateway passes one.
-  const p = (path || "").replace(/^\/[^/]+(?=\/service\/)/, "");
+  const p = (path || "").replace(/^\/[^/]+(?=\/(service|webhooks)\/)/, "");
   for (const [m, re, name] of ROUTES) {
     if (m !== method) continue;
     const hit = p.match(re);
@@ -386,7 +390,7 @@ export function createHandler(deps = {}) {
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
     getSecret: realGetSecret,
-    fetchUrl: (url) => fetch(url),
+    fetchUrl: (url, init) => fetch(url, init), // Street View (GET) and Stripe (POST) share it
     ...deps,
   };
 
@@ -1202,7 +1206,14 @@ export function createHandler(deps = {}) {
       await markStale(CACHE.estimate, [est.Id], tenantId);
       await linkEstimateActivityToJob(d.getSupabaseClient, { tenantId, estimateSfId: est.Id, jobSfId: job.id });
       await act(ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.Id, details: { fromEstimate: true, estimateNumber: est.Name ?? null, customerId: customer.Id } });
-      return jsonResponse(201, cors, { success: true, jobId: job.id, estimateId: est.Id, rejectedFields: job.rejected });
+      // A deposit / card that arrived before the job existed (Stripe ledger) lands on it now.
+      let stripeDeferred = { applied: 0 };
+      try {
+        stripeDeferred = await stripeH.applyDeferred({ ctx, estimateId: est.Id, jobId: job.id });
+      } catch (e) {
+        console.error("create job: deferred Stripe apply failed:", e?.message || e);
+      }
+      return jsonResponse(201, cors, { success: true, jobId: job.id, estimateId: est.Id, rejectedFields: job.rejected, stripeApplied: stripeDeferred.applied });
     },
 
     async createJob({ ctx, body }) {
@@ -1471,7 +1482,12 @@ export function createHandler(deps = {}) {
     }
     return strOrNull(job?.Primary_Email_at_Creation__c);
   }
-  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor }));
+  // Money: one core (loaders + settleMoney) shared by the invoice routes and Stripe.
+  const money = createMoneyCore(d, { act, markStale, CACHE });
+  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE });
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
+  H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
+  H.stripeWebhook = stripeH.stripeWebhook;
   Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
@@ -1487,6 +1503,7 @@ export function createHandler(deps = {}) {
     previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write",
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
+    chargeInvoiceRoute: "service.invoice.write",
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     techAddLines: "service.tech.self",
   };
@@ -1499,6 +1516,16 @@ export function createHandler(deps = {}) {
 
     const route = matchRoute(method, event?.rawPath || event?.path || "");
     if (!route) return jsonResponse(404, cors, { error: "not_found", code: "ROUTE_NOT_FOUND" });
+
+    // Stripe calls us with no bearer token: the signature check inside is the whole gate.
+    if (route.name === "stripeWebhook") {
+      try {
+        return await H.stripeWebhook({ params: route.params, event, headers, cors });
+      } catch (err) {
+        console.error("stripe webhook error:", err?.message || err);
+        return jsonResponse(500, cors, { error: "server_error", route: route.name });
+      }
+    }
 
     let identity;
     try {

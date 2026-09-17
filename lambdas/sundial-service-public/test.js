@@ -125,3 +125,137 @@ test("accept on a declined/unsent estimate is 409; decline works and refuses aft
   const k = fake({ status: "Approved" });
   assert.equal((await call(createHandler(k.deps), "POST", `/public/estimates/${TOKEN}/decline`, {})).status, 409);
 });
+
+// ---------------------------------------------------------------------------
+// Payments on the hosted page (D-072 amendment 8, 2026-09-17)
+// ---------------------------------------------------------------------------
+import { paymentSummary, CHECKOUT_KINDS } from "./index.js";
+
+test("paymentSummary: what the page offers, from the records alone", () => {
+  const est = { Status__c: "Approved", Deposit_Required__c: true, Deposit_Amount__c: 101.33, Deposit_Paid_At__c: null };
+  const job = { Bill_To_Type__c: "Customer", Customer_Card_on_File__c: false };
+  // Approved + deposit due → deposit (and it also keeps the card).
+  assert.equal(paymentSummary({ est, job, invoice: null, configured: true }).next, "deposit");
+  // Deposit paid, no card yet → setup. Card on file → nothing.
+  assert.equal(paymentSummary({ est: { ...est, Deposit_Paid_At__c: "2026-09-17T00:00:00Z" }, job, invoice: null, configured: true }).next, "setup");
+  assert.equal(paymentSummary({ est: { ...est, Deposit_Paid_At__c: "x" }, job: { ...job, Customer_Card_on_File__c: true }, invoice: null, configured: true }).next, null);
+  // No deposit on the estimate, approved, no card → setup; not yet approved → nothing.
+  assert.equal(paymentSummary({ est: { ...est, Deposit_Required__c: false }, job, invoice: null, configured: true }).next, "setup");
+  assert.equal(paymentSummary({ est: { ...est, Status__c: "Sent" }, job, invoice: null, configured: true }).next, null);
+  // A live invoice with a balance wins over everything; a paid one offers nothing.
+  const inv = { Name: "SVC-00003", Status__c: "Issued", Total__c: 405.32, Paid_Amount__c: 101.33 };
+  const s = paymentSummary({ est: { ...est, Status__c: "Invoiced" }, job, invoice: inv, configured: true });
+  assert.equal(s.next, "balance");
+  assert.deepEqual(s.invoice, { number: "SVC-00003", status: "Issued", total: 405.32, paid: 101.33, balance: 303.99 });
+  assert.equal(paymentSummary({ est, job, invoice: { ...inv, Status__c: "Paid", Paid_Amount__c: 405.32 }, configured: true }).next, null);
+  assert.equal(paymentSummary({ est, job, invoice: { ...inv, Status__c: "Void" }, configured: true }).next, "deposit"); // a void invoice is no invoice
+  // A partner-billed job never asks the customer for a card or money.
+  assert.equal(paymentSummary({ est, job: { ...job, Bill_To_Type__c: "Manufacturer" }, invoice: inv, configured: true }).next, null);
+  // Stripe not configured: nothing offered, and the page is told why.
+  const off = paymentSummary({ est, job, invoice: null, configured: false });
+  assert.equal(off.next, null);
+  assert.equal(off.configured, false);
+  assert.match(off.unavailable, /isn't set up yet/);
+  assert.deepEqual(CHECKOUT_KINDS, ["setup", "deposit", "balance"]);
+});
+
+test("checkout: re-derives the step, finds-or-creates the Stripe customer, builds the session on the tenant's keys, never trusts the browser's kind", async () => {
+  const f = fake({ status: "Approved", approvedAt: "2026-09-12T00:00:00Z" });
+  f.est.Sundial_Customer__c = "CUS000000000000001";
+  f.est.Deposit_Amount__c = 101.33;
+  const job = { Id: "SVC000000000000001", Name: "SVC-00003", Client__c: TENANT, Status__c: "Scheduled", Bill_To_Type__c: "Customer", Sundial_Customer__c: "CUS000000000000001", Customer_Card_on_File__c: false, Customer_Name_at_Creation__c: "Ann Lee" };
+  const customer = { Id: "CUS000000000000001", Name: "Ann Lee", Client__c: TENANT, Primary_Email__c: "ann@example.com", Primary_Phone__c: "(602) 555-0100", Stripe_Customer_Id__c: null };
+  const invoices = [];
+  const stripeCalls = [];
+  const deps = {
+    ...f.deps,
+    sfQuery: async (soql) => {
+      if (soql.includes("FROM Sundial_Service_Job__c")) return [{ ...job }];
+      if (soql.includes("FROM Sundial_Customer__c")) return [{ ...customer }];
+      if (soql.includes("FROM Sundial_Service_Invoice__c")) return invoices.map((i) => ({ ...i }));
+      if (soql.includes("FROM Sundial_Tenant__c")) return [{ Id: TENANT, Name: "harmon" }];
+      return f.deps.sfQuery(soql);
+    },
+    sfUpdateRecord: async (obj, id, fields) => {
+      if (obj === "Sundial_Customer__c") { Object.assign(customer, fields); f.updates.push({ obj, id, fields }); return { ok: true, id }; }
+      return f.deps.sfUpdateRecord(obj, id, fields);
+    },
+    getSecret: async (name) => (name === "sundial/stripe" ? { tenants: { harmon: { secretKey: "sk_test_h", webhookSecret: "whsec_h" } } } : {}),
+    fetchUrl: async (url, init) => {
+      stripeCalls.push({ url, init });
+      if (url.endsWith("/customers") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_new" }) };
+      if (url.includes("/customers/cus_")) return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop() }) };
+      if (url.endsWith("/checkout/sessions")) return { ok: true, status: 200, json: async () => ({ id: "cs_1", url: "https://checkout.stripe.com/c/pay/cs_1" }) };
+      return { ok: false, status: 500, json: async () => ({}) };
+    },
+    publicBaseUrl: "https://sundial.example.com/",
+  };
+  const h = createHandler(deps);
+
+  // The page is told what to offer.
+  let r = await call(h, "GET", `/public/estimates/${TOKEN}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.payment.configured, true);
+  assert.equal(r.body.payment.next, "deposit");
+  assert.equal(r.body.payment.depositAmount, 101.33);
+
+  // Asking for the wrong step is refused before Stripe is touched.
+  r = await call(h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "balance" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "CHECKOUT_NOT_APPLICABLE");
+  assert.equal(stripeCalls.length, 0);
+  assert.equal((await call(h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "bogus" })).body.code, "KIND_INVALID");
+
+  // The deposit: a Stripe customer is created and remembered on the hub, the session charges the deposit and keeps the card.
+  r = await call(h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "deposit" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.url, "https://checkout.stripe.com/c/pay/cs_1");
+  assert.equal(r.body.mode, "test");
+  assert.equal(customer.Stripe_Customer_Id__c, "cus_new");
+  const session = stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  const p = new URLSearchParams(session.init.body);
+  assert.equal(session.init.headers.Authorization, "Bearer sk_test_h");
+  assert.equal(p.get("mode"), "payment");
+  assert.equal(p.get("customer"), "cus_new");
+  assert.equal(p.get("line_items[0][price_data][unit_amount]"), "10133");
+  assert.equal(p.get("line_items[0][price_data][product_data][name]"), "Deposit — EST-00042 (Acme Solar)");
+  assert.equal(p.get("payment_intent_data[setup_future_usage]"), "off_session");
+  assert.equal(p.get("payment_intent_data[metadata][kind]"), "deposit");
+  assert.equal(p.get("payment_intent_data[metadata][jobId]"), "SVC000000000000001");
+  assert.equal(p.get("payment_intent_data[metadata][tenantId]"), TENANT);
+  assert.equal(p.get("success_url"), `https://sundial.example.com/estimate/${TOKEN}?checkout=success&kind=deposit`);
+  assert.equal(p.get("cancel_url"), `https://sundial.example.com/estimate/${TOKEN}?checkout=cancel`);
+  assert.ok(f.activity.some((a) => a.details?.checkout === "deposit" && a.details.amount === 101.33));
+
+  // Deposit paid (the webhook stamped it), the customer id is reused: a setup session, no charge.
+  f.est.Deposit_Paid_At__c = "2026-09-13T00:00:00Z";
+  stripeCalls.length = 0;
+  r = await call(h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "setup" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.ok(!stripeCalls.some((c) => c.url.endsWith("/customers") && c.init.method === "POST"), "no second Stripe customer");
+  const setup = new URLSearchParams(stripeCalls.find((c) => c.url.endsWith("/checkout/sessions")).init.body);
+  assert.equal(setup.get("mode"), "setup");
+  assert.equal(setup.get("customer"), "cus_new");
+  assert.equal(setup.get("setup_intent_data[metadata][kind]"), "setup");
+
+  // Invoiced with a balance: the balance session names the invoice.
+  job.Customer_Card_on_File__c = true;
+  f.est.Status__c = "Invoiced";
+  invoices.push({ Id: "INV000000000000001", Name: "SVC-00003", Service_Job__c: job.Id, Client__c: TENANT, Status__c: "Sent", Total__c: 405.32, Paid_Amount__c: 101.33 });
+  stripeCalls.length = 0;
+  r = await call(h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "balance" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const bal = new URLSearchParams(stripeCalls.find((c) => c.url.endsWith("/checkout/sessions")).init.body);
+  assert.equal(bal.get("line_items[0][price_data][unit_amount]"), "30399");
+  assert.equal(bal.get("payment_intent_data[metadata][invoiceId]"), "INV000000000000001");
+  assert.equal(bal.get("payment_intent_data[metadata][kind]"), "balance");
+
+  // No Stripe for this tenant → 503 with a plain message, and the page's summary says so.
+  const off = createHandler({ ...deps, getSecret: async () => ({}) });
+  r = await call(off, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "balance" });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "STRIPE_NOT_CONFIGURED");
+  r = await call(off, "GET", `/public/estimates/${TOKEN}`);
+  assert.equal(r.body.payment.next, null);
+  assert.match(r.body.payment.unavailable, /isn't set up/);
+});

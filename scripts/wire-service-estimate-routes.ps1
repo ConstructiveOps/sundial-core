@@ -16,7 +16,8 @@
       POST   /service/jobs/{id}/invoice | labor
       POST   /service/labor/default-rate
       GET    /service/invoices/{id} | /service/invoices/{id}/preview
-      POST   /service/invoices/{id}/payments | send | void
+      POST   /service/invoices/{id}/payments | send | void | charge   (charge: the card on file, 2026-09-17)
+      POST   /webhooks/stripe/{tenant}                                  (Stripe -> Sundial, signature-gated)
       POST   /service/price-book-items
       PATCH  /service/price-book-items/{id}
       POST   /service/price-book-items/{id}/new-version | deactivate
@@ -129,11 +130,18 @@ foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invId $m }
 Write-Host "==> /service/invoices/{id}/preview : GET, OPTIONS" -ForegroundColor Cyan
 $invPv = Ensure-Resource $invId "preview"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invPv $m }
-foreach ($action in @("payments", "send", "void")) {
+foreach ($action in @("payments", "send", "void", "charge")) {
     Write-Host "==> /service/invoices/{id}/$action : POST, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $invId $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
 }
+# Stripe's webhook (2026-09-17, stripe.js): POST only, no CORS needed (Stripe is a server),
+# no bearer token — the Stripe-Signature check inside the Lambda is the whole gate.
+Write-Host "==> /webhooks/stripe/{tenant} : POST" -ForegroundColor Cyan
+$webhooks = Ensure-Resource $root "webhooks"
+$stripeWh = Ensure-Resource $webhooks "stripe"
+$stripeTenant = Ensure-Resource $stripeWh "{tenant}"
+Wire-Method $stripeTenant "POST"
 Write-Host "==> /service/price-book-items : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $items $m }
 Write-Host "==> /service/price-book-items/{id} : PATCH, OPTIONS" -ForegroundColor Cyan
@@ -151,6 +159,11 @@ aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-service-estimate" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn $srcArn --output json 2>$null | Out-Null
 Write-Host "  (an 'already exists' error here is harmless - permission is in place)" -ForegroundColor DarkGray
+# A second one for the Stripe webhook path (it is not under /service/).
+$whArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/webhooks/stripe/*"
+aws lambda add-permission --function-name $Fn --region $Region `
+    --statement-id "apigw-service-estimate-stripe" --action "lambda:InvokeFunction" `
+    --principal apigateway.amazonaws.com --source-arn $whArn --output json 2>$null | Out-Null
 
 if (-not $Yes) {
     $ans = Read-Host "Deploy API to '$Stage' now? LIVE production change. (y/N)"

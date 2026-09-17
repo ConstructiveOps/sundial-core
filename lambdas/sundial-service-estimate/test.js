@@ -199,7 +199,7 @@ test("matchRoute strips a stage prefix and captures ids", () => {
 });
 
 function fakeSalesforce() {
-  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [], Sundial_Service_Call__c: [], Sundial_User__c: [] };
+  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [], Sundial_Service_Call__c: [], Sundial_User__c: [], Sundial_Tenant__c: [{ Id: TENANT, Name: "harmon" }] };
   let seq = 0;
   const calls = { creates: [], updates: [], deletes: [], queries: [] };
   const fetches = [];
@@ -283,8 +283,10 @@ function fakeSalesforce() {
   const stale = [];
   const activity = [];
   const files = [];
+  const stripeEvents = []; // the Stripe webhook ledger (sundial_stripe_events)
   store.sundial_file_metadata = files;
-  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : null);
+  store.sundial_stripe_events = stripeEvents;
+  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : table === "sundial_stripe_events" ? stripeEvents : null);
   function chain(table, op, patch) {
     const filters = [];
     const q = {
@@ -325,9 +327,19 @@ function fakeSalesforce() {
       },
       update: (patch) => chain(table, "update", patch),
       select: () => chain(table, "select"),
+      // upsert on the primary key (the ledger's Stripe event id).
+      upsert: (row) => {
+        const src = tableRows(table);
+        if (src) {
+          const cur = src.find((r) => r.id === row.id);
+          if (cur) Object.assign(cur, row);
+          else src.push({ ...row });
+        }
+        return { then: (resolve) => resolve({ error: null }) };
+      },
     }),
   });
-  return { store, calls, stale, activity, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  return { store, calls, stale, activity, stripeEvents, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -357,12 +369,14 @@ function makeHandler(fake, identityOverrides = {}) {
     },
     getSecret: async (name) => {
       if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
+      if (name === "sundial/stripe" && fake.stripeSecret) return fake.stripeSecret;
       const e = new Error("not found");
       e.name = "ResourceNotFoundException";
       throw e;
     },
-    fetchUrl: async (url) => {
+    fetchUrl: async (url, init) => {
       fake.fetches.push(url);
+      if (url.startsWith("https://api.stripe.com/") && fake.stripe) return fake.stripe(url, init);
       if (url.includes("/streetview/metadata")) {
         const status = fake.streetViewStatus ?? "OK";
         return { ok: true, json: async () => (status === "OK" ? { status, pano_id: "PANO1", location: { lat: 33.4, lng: -112.0 } } : { status }) };
@@ -1131,4 +1145,270 @@ test("tech app: POST /service/tech/calls/{id}/estimate-lines adds Proposed 'Fiel
   await fake.deps.sfUpdateRecord("Sundial_Estimate__c", estId, { Status__c: "Invoiced" });
   const locked = await call(asTech(jake), "POST", `/service/tech/calls/${callId}/estimate-lines`, { description: "late", kind: "Labor", unitPrice: 1 });
   assert.equal(locked.body.code, "ESTIMATE_INVOICED");
+});
+
+// ---------------------------------------------------------------------------
+// Stripe (D-072 amendment 8, 2026-09-17): the webhook, the office's charge, deferred money
+// ---------------------------------------------------------------------------
+import { createHmac } from "node:crypto";
+import { paymentFieldsFromIntent, refundFields, rawBodyOf, STRIPE_EVENT_TYPES } from "./stripe.js";
+
+const STRIPE_SECRET = { tenants: { harmon: { secretKey: "sk_test_h", webhookSecret: "whsec_h" } } };
+/** A signed webhook delivery, the way API Gateway hands it over (base64 body). */
+function stripeDelivery(evt, { secret = "whsec_h", at = new Date("2026-09-10T12:00:00Z"), slug = "harmon", tamper = false } = {}) {
+  const raw = JSON.stringify(evt);
+  const t = Math.floor(at.getTime() / 1000);
+  const sig = createHmac("sha256", secret).update(`${t}.${raw}`).digest("hex");
+  return {
+    requestContext: { http: { method: "POST" } },
+    rawPath: `/prod/webhooks/stripe/${slug}`,
+    headers: { "stripe-signature": `t=${t},v1=${sig}`, "content-type": "application/json" },
+    body: Buffer.from(tamper ? raw + " " : raw).toString("base64"),
+    isBase64Encoded: true,
+  };
+}
+const send = (h, delivery) => h(delivery).then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
+const evt = (id, type, object, extra = {}) => ({ id, type, livemode: false, data: { object }, ...extra });
+
+test("stripe pure helpers: the Payment / Refund rows an intent becomes, the raw body", () => {
+  const pi = { id: "pi_1", amount: 40532, amount_received: 40532, created: 1_789_000_000, latest_charge: "ch_1", metadata: { kind: "deposit" } };
+  const f = paymentFieldsFromIntent(pi, { tenantId: TENANT, jobId: "J1", invoiceId: null, mode: "test", now: "2026-09-10T12:00:00.000Z" });
+  assert.equal(f.Type__c, "Deposit");
+  assert.equal(f.Amount__c, 405.32);
+  assert.equal(f.Received_At__c, new Date(1_789_000_000 * 1000).toISOString());
+  assert.equal(f.Stripe_Payment_Intent_Id__c, "pi_1");
+  assert.equal(f.Stripe_Charge_Id__c, "ch_1");
+  assert.equal(f.Invoice__c, undefined);
+  assert.equal(paymentFieldsFromIntent({ ...pi, metadata: { kind: "charge" } }, { tenantId: TENANT, jobId: "J1", invoiceId: "I1", mode: "live", now: "x" }).Type__c, "Payment");
+  const r = refundFields({ id: "re_1", amount: 5000, created: 1_789_000_100, reason: "requested_by_customer" }, { tenantId: TENANT, jobId: "J1", invoiceId: "I1", paymentIntentId: "pi_1", mode: "test", now: "x" });
+  assert.equal(r.Type__c, "Refund");
+  assert.equal(r.Amount__c, 50);
+  assert.equal(r.Stripe_Refund_Id__c, "re_1");
+  assert.equal(r.Invoice__c, "I1");
+  assert.equal(rawBodyOf({ body: Buffer.from("abc").toString("base64"), isBase64Encoded: true }).toString(), "abc");
+  assert.equal(rawBodyOf({ body: "abc" }), "abc");
+  assert.deepEqual([...STRIPE_EVENT_TYPES], ["checkout.session.completed", "payment_intent.succeeded", "payment_intent.payment_failed", "charge.refunded"]);
+});
+
+test("stripe webhook: signature is the gate (bad / tampered / unknown tenant / not configured); a deposit lands as a Payment row exactly once; the card goes on file", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  const stripeCalls = [];
+  fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, init });
+    if (url.endsWith("/setup_intents/seti_1")) return { ok: true, status: 200, json: async () => ({ id: "seti_1", payment_method: "pm_card" }) };
+    if (url.endsWith("/payment_intents/pi_dep")) return { ok: true, status: 200, json: async () => ({ id: "pi_dep", payment_method: "pm_card" }) };
+    if (url.includes("/customers/cus_1") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_1" }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { taxRate: 8.6, depositRequired: true, depositType: "Flat", depositValue: 100 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+  const customer = fake.store.Sundial_Customer__c[0];
+  const meta = { tenant: "harmon", tenantId: TENANT, estimateId: est.Id, jobId: job.Id, customerId: customer.Id, invoiceId: "", kind: "deposit" };
+
+  // The gate.
+  const good = evt("evt_dep", "payment_intent.succeeded", { id: "pi_dep", object: "payment_intent", amount: 10000, amount_received: 10000, created: 1_789_000_000, latest_charge: "ch_dep", metadata: meta });
+  assert.equal((await send(h, stripeDelivery(good, { secret: "whsec_wrong" }))).status, 400);
+  assert.equal((await send(h, stripeDelivery(good, { tamper: true }))).status, 400);
+  assert.equal((await send(h, stripeDelivery(good, { at: new Date("2026-09-10T11:00:00Z") }))).status, 400, "10 minutes old");
+  assert.equal((await send(h, stripeDelivery(good, { slug: "nobody" }))).status, 503, "no keys for that tenant");
+  const off = makeHandler({ ...fake, stripeSecret: null });
+  assert.equal((await send(off, stripeDelivery(good))).status, 503);
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 0, "nothing written by a refused event");
+
+  // The card on file (a setup Checkout): hub remembers the Stripe customer, job flags the card, Stripe's default card is set.
+  const session = evt("evt_cs", "checkout.session.completed", { id: "cs_1", object: "checkout.session", mode: "setup", customer: "cus_1", setup_intent: "seti_1", metadata: { ...meta, kind: "setup" } });
+  let r = await send(h, stripeDelivery(session));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, "applied");
+  assert.equal(customer.Stripe_Customer_Id__c, "cus_1");
+  assert.equal(job.Customer_Card_on_File__c, true);
+  const setDefault = stripeCalls.find((c) => c.url.endsWith("/customers/cus_1") && c.init.method === "POST");
+  assert.equal(new URLSearchParams(setDefault.init.body).get("invoice_settings[default_payment_method]"), "pm_card");
+  assert.ok(fake.activity.some((a) => a.event === "job_updated" && a.details.via === "stripe" && a.details.fields.Customer_Card_on_File__c.to === true));
+
+  // The deposit: one Payment row, the estimate stamped, the job Deposit Paid (no invoice yet).
+  r = await send(h, stripeDelivery(good));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, "applied");
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 1);
+  const row = fake.store.Sundial_Service_Payment__c[0];
+  assert.equal(row.Type__c, "Deposit");
+  assert.equal(row.Amount__c, 100);
+  assert.equal(row.Status__c, "Succeeded");
+  assert.equal(row.Service_Job__c, job.Id);
+  assert.equal(row.Stripe_Payment_Intent_Id__c, "pi_dep");
+  assert.equal(row.Invoice__c, undefined);
+  assert.ok(est.Deposit_Paid_At__c);
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  const paid = fake.activity.find((a) => a.event === "payment_recorded");
+  assert.equal(paid.details.via, "stripe");
+  assert.equal(paid.actor_name, "Stripe");
+  const ledger = fake.stripeEvents.find((e) => e.id === "evt_dep");
+  assert.equal(ledger.status, "applied");
+  assert.equal(ledger.payment_sf_id, row.Id);
+  assert.equal(ledger.amount, 100);
+
+  // Redelivered (same event id) and re-sent under a new id (same intent): still one row.
+  r = await send(h, stripeDelivery(good));
+  assert.equal(r.body.duplicate, true);
+  r = await send(h, stripeDelivery(evt("evt_dep2", "payment_intent.succeeded", good.data.object)));
+  assert.equal(r.body.duplicate, true);
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 1);
+  assert.equal(fake.activity.filter((a) => a.event === "payment_recorded").length, 1);
+
+  // Another tenant's metadata, a live event on test keys, an unhandled type: ignored, 200, nothing written.
+  r = await send(h, stripeDelivery(evt("evt_x1", "payment_intent.succeeded", { ...good.data.object, id: "pi_other", metadata: { ...meta, tenantId: "a1W7y000007OTHERAS" } })));
+  assert.equal(r.body.status, "ignored");
+  r = await send(h, stripeDelivery(evt("evt_x2", "payment_intent.succeeded", { ...good.data.object, id: "pi_live" }, { livemode: true })));
+  assert.equal(r.body.status, "ignored");
+  r = await send(h, stripeDelivery(evt("evt_x3", "customer.updated", { id: "cus_1", object: "customer" })));
+  assert.equal(r.body.status, "ignored");
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 1);
+
+  // Issue the invoice: the deposit rides onto it; the balance is charged off-session by the office.
+  fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, init });
+    if (url.endsWith("/customers/cus_1") && (!init.method || init.method === "GET")) return { ok: true, status: 200, json: async () => ({ id: "cus_1", invoice_settings: { default_payment_method: "pm_card" } }) };
+    if (url.endsWith("/payment_intents") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "pi_bal", status: "requires_confirmation" }) };
+    if (url.endsWith("/payment_intents/pi_bal/confirm")) {
+      if (fake.decline) return { ok: false, status: 402, json: async () => ({ error: { type: "card_error", code: "card_declined", decline_code: "insufficient_funds", message: "Your card has insufficient funds." } }) };
+      return { ok: true, status: 200, json: async () => ({ id: "pi_bal", status: "succeeded", created: 1_789_000_500, latest_charge: "ch_bal" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  assert.equal(iss.body.cardOnFile, undefined);
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Paid_Amount__c, 100);
+  assert.equal(inv.Total__c, 275);
+  assert.equal((await call(h, "GET", `/service/jobs/${job.Id}/invoice`)).body.cardOnFile, true);
+
+  // Declined: a Failed row with Stripe's words, a 402, the invoice untouched.
+  fake.decline = true;
+  r = await call(h, "POST", `/service/invoices/${inv.Id}/charge`, {});
+  assert.equal(r.status, 402, JSON.stringify(r.body));
+  assert.equal(r.body.code, "insufficient_funds");
+  assert.match(r.body.message, /insufficient funds/);
+  const failed = fake.store.Sundial_Service_Payment__c.find((p) => p.Stripe_Payment_Intent_Id__c === "pi_bal");
+  assert.equal(failed.Status__c, "Failed");
+  assert.equal(failed.Failure_Reason__c, "Your card has insufficient funds.");
+  assert.equal(failed.Amount__c, 175);
+  assert.equal(inv.Paid_Amount__c, 100);
+  // The failed webhook for the same intent just confirms the row.
+  r = await send(h, stripeDelivery(evt("evt_fail", "payment_intent.payment_failed", { id: "pi_bal", object: "payment_intent", amount: 17500, last_payment_error: { message: "Your card has insufficient funds." }, metadata: { ...meta, kind: "charge", invoiceId: inv.Id } })));
+  assert.equal(r.body.status, "ignored"); // the office's confirm already recorded the decline
+  assert.equal(failed.Status__c, "Failed");
+
+  // The office tries again once the customer fixed the card: PaymentIntent → Pending row → confirm → Succeeded → settled.
+  fake.decline = false;
+  const created = { pi: "pi_bal2" };
+  fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, init });
+    if (url.endsWith("/customers/cus_1")) return { ok: true, status: 200, json: async () => ({ id: "cus_1", invoice_settings: { default_payment_method: "pm_card" } }) };
+    if (url.endsWith("/payment_intents") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: created.pi, status: "requires_confirmation" }) };
+    if (url.endsWith(`/payment_intents/${created.pi}/confirm`)) return { ok: true, status: 200, json: async () => ({ id: created.pi, status: "succeeded", created: 1_789_000_500, latest_charge: "ch_bal2" }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  r = await call(h, "POST", `/service/invoices/${inv.Id}/charge`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, "succeeded");
+  assert.equal(r.body.amount, 175);
+  const piCreate = new URLSearchParams(stripeCalls.find((c) => c.url.endsWith("/payment_intents") && c.init.method === "POST" && c.init.body.includes("17500")).init.body);
+  assert.equal(piCreate.get("customer"), "cus_1");
+  assert.equal(piCreate.get("payment_method"), "pm_card");
+  assert.equal(piCreate.get("off_session"), "true");
+  assert.equal(piCreate.get("confirm"), "false");
+  assert.equal(piCreate.get("metadata[kind]"), "charge");
+  assert.equal(piCreate.get("metadata[invoiceId]"), inv.Id);
+  assert.equal(piCreate.get("receipt_email"), "ivy@example.com");
+  const ok = fake.store.Sundial_Service_Payment__c.find((p) => p.Stripe_Payment_Intent_Id__c === "pi_bal2");
+  assert.equal(ok.Status__c, "Succeeded");
+  assert.equal(ok.Stripe_Charge_Id__c, "ch_bal2");
+  assert.equal(inv.Paid_Amount__c, 275);
+  assert.equal(inv.Status__c, "Paid");
+  assert.equal(job.Status__c, "Paid");
+  assert.equal(job.Payment_Status__c, "Paid");
+  // Stripe's own webhook for that intent arrives later: nothing doubles.
+  r = await send(h, stripeDelivery(evt("evt_bal2", "payment_intent.succeeded", { id: "pi_bal2", object: "payment_intent", amount: 17500, amount_received: 17500, created: 1_789_000_500, latest_charge: "ch_bal2", metadata: { ...meta, kind: "charge", invoiceId: inv.Id } })));
+  assert.equal(r.body.duplicate, true);
+  assert.equal(inv.Paid_Amount__c, 275);
+  // Charging a paid invoice is refused; so is a partner-billed one.
+  assert.equal((await call(h, "POST", `/service/invoices/${inv.Id}/charge`, {})).body.code, "NOTHING_DUE");
+
+  // A refund made in the Stripe dashboard mirrors as a Refund row and reopens the balance.
+  r = await send(h, stripeDelivery(evt("evt_ref", "charge.refunded", { id: "ch_bal2", object: "charge", payment_intent: "pi_bal2", amount_refunded: 5000, refunds: { data: [{ id: "re_1", amount: 5000, status: "succeeded", created: 1_789_000_900, reason: "requested_by_customer" }] } })));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.refunds, 1);
+  const refund = fake.store.Sundial_Service_Payment__c.find((p) => p.Type__c === "Refund");
+  assert.equal(refund.Amount__c, 50);
+  assert.equal(refund.Invoice__c, inv.Id);
+  assert.equal(inv.Paid_Amount__c, 225);
+  assert.equal(inv.Status__c, "Partially Paid");
+  assert.equal(job.Status__c, "Invoiced");
+  r = await send(h, stripeDelivery(evt("evt_ref2", "charge.refunded", { id: "ch_bal2", object: "charge", payment_intent: "pi_bal2", refunds: { data: [{ id: "re_1", amount: 5000, status: "succeeded", created: 1_789_000_900 }] } })));
+  assert.equal(r.body.duplicate, true);
+  assert.equal(fake.store.Sundial_Service_Payment__c.filter((p) => p.Type__c === "Refund").length, 1);
+});
+
+test("stripe: a deposit paid before the job exists is deferred, then lands when the office creates the job; issue with chargeCard charges the balance", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.stripe = async (url, init) => {
+    if (url.endsWith("/customers/cus_1")) return { ok: true, status: 200, json: async () => ({ id: "cus_1", invoice_settings: { default_payment_method: "pm_card" } }) };
+    if (url.endsWith("/payment_intents") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "pi_auto", status: "requires_confirmation" }) };
+    if (url.endsWith("/payment_intents/pi_auto/confirm")) return { ok: true, status: 200, json: async () => ({ id: "pi_auto", status: "succeeded", created: 1_789_001_000, latest_charge: "ch_auto" }) };
+    if (url.endsWith("/payment_intents/pi_early")) return { ok: true, status: 200, json: async () => ({ id: "pi_early", payment_method: "pm_card" }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const customer = fake.store.Sundial_Customer__c[0];
+  // An estimate with no job (the office quotes first, converts on acceptance).
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: customer.Id }, estimate: { taxRate: 0, depositRequired: true, depositType: "Flat", depositValue: 50 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 200 }] });
+  assert.equal(c.status, 201, JSON.stringify(c.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(est.Service_Job__c, undefined);
+  const meta = { tenant: "harmon", tenantId: TENANT, estimateId: est.Id, jobId: "", customerId: customer.Id, invoiceId: "", kind: "deposit" };
+
+  // Deposit paid on the hosted page: no job → deferred; the estimate is stamped; no Payment row.
+  let r = await send(h, stripeDelivery(evt("evt_early_cs", "checkout.session.completed", { id: "cs_e", object: "checkout.session", mode: "payment", customer: "cus_1", payment_intent: "pi_early", metadata: meta })));
+  assert.equal(r.body.status, "deferred", JSON.stringify(r.body));
+  assert.equal(customer.Stripe_Customer_Id__c, "cus_1");
+  r = await send(h, stripeDelivery(evt("evt_early", "payment_intent.succeeded", { id: "pi_early", object: "payment_intent", amount: 5000, amount_received: 5000, created: 1_789_000_000, latest_charge: "ch_early", metadata: meta })));
+  assert.equal(r.body.status, "deferred");
+  assert.ok(est.Deposit_Paid_At__c);
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 0);
+  assert.equal(fake.stripeEvents.filter((e) => e.status === "deferred").length, 2);
+
+  // Create Job: the deposit lands as a Payment row on the new job, the card flag is set, the ledger says applied.
+  const cj = await call(h, "POST", `/service/estimates/${est.Id}/create-job`, { job: {} });
+  assert.equal(cj.status, 201, JSON.stringify(cj.body));
+  assert.equal(cj.body.stripeApplied, 2);
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 1);
+  const dep = fake.store.Sundial_Service_Payment__c[0];
+  assert.equal(dep.Service_Job__c, job.Id);
+  assert.equal(dep.Type__c, "Deposit");
+  assert.equal(dep.Amount__c, 50);
+  assert.equal(job.Customer_Card_on_File__c, true);
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  assert.ok(fake.stripeEvents.every((e) => e.status === "applied"), JSON.stringify(fake.stripeEvents.map((e) => [e.id, e.status, e.error])));
+  assert.equal(fake.stripeEvents.find((e) => e.id === "evt_early").job_sf_id, job.Id);
+
+  // Issue with chargeCard: the 150 balance is charged in the same request.
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  assert.equal(iss.body.charge.ok, true);
+  assert.equal(iss.body.charge.amount, 150);
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Paid_Amount__c, 200);
+  assert.equal(inv.Status__c, "Paid");
+  assert.equal(iss.body.paymentStatus, "Paid");
+  assert.ok(!iss.body.warnings.some((w) => /not charged/.test(w)), JSON.stringify(iss.body.warnings));
 });

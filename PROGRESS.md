@@ -1,5 +1,54 @@
 # Sundial — Progress Log
 
+## 2026-09-17 (evening) — Stripe: card on file, deposits, off-session charges, refunds (D-072 amendment 8)
+
+Tim got a user on Harmon's Stripe account, so payments are built. The shape is the one D-065
+decided (SetupIntent + off-session charge, Harmon's own account, a signed webhook that fails
+closed) with one simplification that removed a whole class of risk: **the customer pays on
+Stripe's hosted Checkout page**, so no card number, no Stripe.js and no publishable key ever
+reach the portal — the page only holds a Checkout URL.
+
+**`lib/stripe.js`** — a page of REST over `fetch` (customers, Checkout Sessions,
+PaymentIntents, refunds), keys per tenant from `sundial/stripe` (`tenants[slug]`, flat
+fallback), `verifyWebhookSignature` (HMAC-SHA256 over the raw body, 5-min tolerance,
+constant-time, every refusal names its reason), `StripeError` with Stripe's own code /
+decline code / message. 4 tests.
+
+**Customer side (`sundial-service-public`).** `GET` returns `payment` — `paymentSummary()`
+derives the ONE step to offer from the records: `deposit` (approved, required, unpaid),
+`setup` (approved, no card), `balance` (a live invoice with a balance), never for a
+partner-billed job, and `unavailable` text when Stripe is not set up. `POST …/checkout
+{ kind }` refuses a step that is not due (409), finds-or-creates the Stripe customer
+(remembered on `Sundial_Customer__c.Stripe_Customer_Id__c`), and mints the session (`setup`
+mode, or `payment` mode with `setup_future_usage: off_session` so the deposit also keeps the
+card). Never writes a Payment row. 7 tests.
+
+**Stripe → Sundial (`sundial-service-estimate/stripe.js`).** `POST /webhooks/stripe/{tenant}`
+sits in the estimate Lambda so it reaches `settleMoney` directly (`createMoneyCore()` is the
+new shared core split out of `invoice.js`). The signature is the gate; the slug → tenant, the
+event's `metadata.tenantId` and `livemode` must agree. Every accepted event is upserted into
+**`sundial_stripe_events`** by Stripe's event id (`sql/sundial_stripe_events.sql`) with what
+Sundial did: `checkout.session.completed` → Stripe customer on the hub, `Customer_Card_on_File__c`
+on the job, Stripe's default card set; `payment_intent.succeeded` → ONE Payment row per intent
+(Deposit / Payment, Card), `Deposit_Paid_At__c`, settle; `payment_failed` → the Pending row
+goes Failed; `charge.refunded` → a Refund row per refund. **Deferred:** a deposit paid before
+the job exists stamps the estimate and waits in the ledger; `create-job` applies it
+(`stripeApplied` in its response). **The office's charge** (`POST /service/invoices/{id}/charge`,
+and `chargeCard: true` on issue): PaymentIntent unconfirmed → Pending row → confirm, so the
+webhook only updates; a decline is a 402 in Stripe's words with a Failed row. 3 new tests
+(37 in the suite) cover the gate, idempotency across redeliveries and re-sent intents, the
+deferred deposit landing on Create Job, the charge, the decline, the refund.
+
+**Portal.** The hosted page offers the money step after Approve ("Pay the deposit — $100.00"
+/ "Keep a card on file" / "Pay SVC-00042 — $440.07"), sends the customer to Stripe, and on
+return shows the thank-you and re-reads until the webhook has landed. The job's Invoice card
+shows "Charge the card on file now" at issue (ticked by default when there is one), "Charge
+card on file $X" on the invoice, and Failed rows with Stripe's reason. 148/148.
+
+**Runbook:** `docs/integrations/stripe.md` — the restricted key, the webhook endpoint + four
+events, the secret's shape, `SERVICE_PUBLIC_BASE_URL` on the public Lambda, and a test-mode
+walkthrough on the ZZ customer. Decision: D-072 amendment 8.
+
 ## 2026-09-17 (later) — Tech app: Jobs and Estimates tabs stuck on "Loading…"
 
 Two fields that do not exist on the objects were in the tech app's SELECTs — `Job_Type__c`

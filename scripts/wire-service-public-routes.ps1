@@ -6,6 +6,7 @@
       GET    /public/estimates/{token}            view (marks Sent -> Viewed)
       POST   /public/estimates/{token}/accept     { name }   -> Approved (Online)
       POST   /public/estimates/{token}/decline    { reason } -> Declined
+      POST   /public/estimates/{token}/checkout   { kind }   -> a Stripe Checkout Session URL (2026-09-17)
     plus OPTIONS everywhere for CORS. AWS_PROXY, authorization NONE at the gateway
     (there IS no bearer token on these routes — the URL token is the whole credential;
     the Lambda returns 404 for anything it does not recognise), same shape as every
@@ -66,7 +67,7 @@ $token     = Ensure-Resource $estimates "{token}"
 
 Write-Host "==> /public/estimates/{token} : GET, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $token $m }
-foreach ($action in @("accept", "decline")) {
+foreach ($action in @("accept", "decline", "checkout")) {
     Write-Host "==> /public/estimates/{token}/$action : POST, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $token $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }

@@ -18,8 +18,10 @@
 //     function (settleMoney), the way settleJobStatus owns the schedule states.
 //   - Deposits taken before the invoice existed (Invoice__c blank) are back-filled onto
 //     the invoice at issue and count toward it.
-//   - Stripe rows are the webhook worker's job (later); manual rows here are Succeeded
-//     the moment the office records them — a check in hand is money received.
+//   - Stripe rows are written by stripe.js (the webhook + the off-session charge) through
+//     the SAME settleMoney — createMoneyCore() below is what both modules share. Manual
+//     rows here are Succeeded the moment the office records them — a check in hand is
+//     money received.
 //
 // This module is deployed INSIDE sundial-service-estimate (one Lambda, one wire script)
 // and receives that handler's helpers, so tenant scoping, activity, staleness, brand
@@ -42,11 +44,11 @@ export const INVOICE_SELECT =
   "Due_Date__c, Paid_At__c, PDF_S3_Key__c, Acumatica_Ref__c, Acumatica_Entered_At__c, Voided_At__c, Void_Reason__c, CreatedDate";
 export const PAYMENT_SELECT =
   "Id, Name, Service_Job__c, Invoice__c, Client__c, Type__c, Method__c, Amount__c, Status__c, Received_At__c, " +
-  "Reference__c, Recorded_By__c, Notes__c, Stripe_Payment_Intent_Id__c, CreatedDate";
+  "Reference__c, Recorded_By__c, Notes__c, Stripe_Payment_Intent_Id__c, Stripe_Charge_Id__c, Stripe_Refund_Id__c, Failure_Reason__c, CreatedDate";
 export const INVOICE_JOB_SELECT =
   "Id, Name, Sundial_Customer__c, Estimate__c, Client__c, Status__c, Payment_Status__c, Bill_To_Type__c, Bill_To_Name__c, " +
   "Billing_Reference__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
-  "Primary_Email_at_Creation__c, Customer_Summary__c";
+  "Primary_Email_at_Creation__c, Customer_Summary__c, Customer_Card_on_File__c";
 
 export const PAYMENT_TYPES = ["Deposit", "Payment", "Refund", "Adjustment"];
 export const PAYMENT_METHODS = ["Card", "Check", "ACH", "Partner Remittance", "Other"];
@@ -176,8 +178,12 @@ export function buildInvoiceEmail({ invoice, job, brandName, balance, pdfAttache
  *                          brandFor, jsonResponse, bad, notFound, sfError, CACHE,
  *                          customerEmailFor }
  */
-export function createInvoiceHandlers(d, h) {
-  const { jsonResponse, bad, notFound, sfError, CACHE } = h;
+/**
+ * The money core, shared by the invoice routes and stripe.js: the tenant-scoped loaders
+ * and settleMoney — the ONE function that turns payment rows into invoice / job status.
+ */
+export function createMoneyCore(d, h) {
+  const { CACHE } = h;
 
   async function loadJob(id, tenantId) {
     if (!SF_ID_RE.test(id || "")) return null;
@@ -247,6 +253,30 @@ export function createInvoiceHandlers(d, h) {
     await h.markStale(CACHE.invoice, [invoice.Id], tenantId);
     return { payments, summary, balance: balanceOf(invoice) };
   }
+
+  /**
+   * Money on a job that has NO invoice yet (a deposit): the job's Payment_Status follows
+   * the rows alone. The invoice, when issued, adopts the rows and settleMoney takes over.
+   */
+  async function settleJobWithoutInvoice({ job, tenantId }) {
+    const payments = (await loadJobPayments(job.Id, tenantId)).filter((p) => !p.Invoice__c);
+    const summary = paidSummary(payments);
+    const payStatus = jobPaymentStatusFor(summary, 0, false);
+    if (payStatus !== job.Payment_Status__c) {
+      await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Payment_Status__c: payStatus });
+      job.Payment_Status__c = payStatus;
+      await h.markStale(CACHE.job, [job.Id], tenantId);
+    }
+    return { payments, summary };
+  }
+
+  return { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice };
+}
+
+export function createInvoiceHandlers(d, h) {
+  const { jsonResponse, bad, notFound, sfError, CACHE } = h;
+  const money = h.money || createMoneyCore(d, h);
+  const { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney } = money;
 
   /** Render + store the PDF for an invoice (best-effort; returns { key, bytes } or nulls). */
   async function renderAndStorePdf({ invoice, job, est, lines, payments, ctx, tenantId }) {
@@ -318,6 +348,8 @@ export function createInvoiceHandlers(d, h) {
         paymentStatus: job.Payment_Status__c,
         canIssue: !blocker,
         issueBlocker: blocker,
+        cardOnFile: job.Customer_Card_on_File__c === true, // Stripe (amendment 8): the office may charge it
+        billToType: job.Bill_To_Type__c || "Customer",
         history: invoices.map((i) => ({ id: i.Id, name: i.Name, status: i.Status__c, total: i.Total__c, issuedAt: i.Issued_At__c, voidedAt: i.Voided_At__c })),
         ...(inv ? present(inv, payments.filter((p) => p.Invoice__c === inv.Id)) : { invoice: null, payments: payments.filter((p) => !p.Invoice__c), balance: null, pdfUrl: null }),
       });
@@ -382,22 +414,31 @@ export function createInvoiceHandlers(d, h) {
       job.Status__c = "Invoiced";
       await h.markStale(CACHE.estimate, [est.Id], tenantId);
 
-      const money = await settleMoney({ invoice, job, tenantId, ctx });
+      let money = await settleMoney({ invoice, job, tenantId, ctx });
       const pdf = await renderAndStorePdf({ invoice, job, est, lines, payments: money.payments, ctx, tenantId });
       await h.markStale(CACHE.invoice, [invoice.Id], tenantId);
       await h.act(ctx, {
         event: EVENTS.INVOICE_ISSUED, recordType: "serviceinvoice", recordSfId: invoice.Id, jobSfId: job.Id, estimateSfId: est.Id,
         details: { number: invoice.Name, total: totals.total, lineCount: lines.length, proposedLines: proposed, billTo: invoice.Bill_To_Type__c, dueDate, depositsApplied: orphans.length, paid: money.summary.paid, pdfKey: pdf.key },
       });
+      // Customer-pay job with a card on file: charge the balance now, off-session (D-065.6).
+      // The charge's own outcome rides along; a decline never un-issues the invoice.
+      let charge = null;
+      if (body?.chargeCard === true && h.chargeInvoice) {
+        charge = await h.chargeInvoice({ ctx, invoice, job });
+        if (charge?.settled) money = charge.settled;
+      }
       return jsonResponse(201, cors, {
         success: true,
         id: invoice.Id,
         ...present(invoice, money.payments),
         jobStatus: job.Status__c,
         paymentStatus: job.Payment_Status__c,
+        charge,
         warnings: [
           proposed ? `${proposed} line${proposed === 1 ? "" : "s"} the customer never approved ${proposed === 1 ? "is" : "are"} on this invoice.` : null,
           pdf.error ? "The PDF could not be generated (the invoice is issued; try Send again later)." : null,
+          charge && !charge.ok ? `The card on file was not charged: ${charge.message}` : null,
         ].filter(Boolean),
       });
     },

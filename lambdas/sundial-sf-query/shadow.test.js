@@ -507,7 +507,9 @@ test("ENFORCE: TENANT scope is untouched on every surface", async () => {
 
 test("ENFORCE: scope none reaches nothing, on every route", async () => {
   process.env.ACCESS_MODEL_MODE = "enforce";
-  ctx.identity = identityFor("Technician", { userId: REP_B });
+  // An unattributed rep (no dealer) is `none`. A Technician is not — since D-072
+  // amendment 7 it has its own `tech` scope (see the test below).
+  ctx.identity = identityFor("Sales Rep", { userId: REP_B, dealer: null });
   ctx.cacheRows = [customerRow(CUST_1, REP_A)];
   ctx.sfRows = [{ Id: CUST_1, Client__c: TENANT }];
 
@@ -519,6 +521,20 @@ test("ENFORCE: scope none reaches nothing, on every route", async () => {
     (await handler(event("/sf/meta/customer/picklists", { object: "customer" }))).statusCode,
     403
   );
+});
+
+test("ENFORCE: a Technician reaches the user directory and no sales object", async () => {
+  // D-072 amendment 7 + addendum: scope `tech` — the directory (the mention list) is
+  // open to a tech; customer / solar / roofing / PO reads are not. The Service module
+  // itself is served by the service Lambdas, not this one.
+  process.env.ACCESS_MODEL_MODE = "enforce";
+  ctx.identity = identityFor("Technician", { userId: REP_B, dealer: null });
+  ctx.cacheRows = [customerRow(CUST_1, REP_A)];
+  ctx.sfRows = [{ Id: REP_B, First_Name__c: "Tech", Last_Name__c: "B" }];
+
+  assert.equal((await handler(listEvent("customer"))).statusCode, 403);
+  assert.equal((await handler(singleEvent("customer", CUST_1))).statusCode, 404);
+  assert.equal((await handler(event("/sf/users", null))).statusCode, 200);
 });
 
 test("ENFORCE: GET /sf/users returns the §3.5 union for a dealer", async () => {
@@ -1035,27 +1051,28 @@ test("no token, secret, email or record id reaches the log", async () => {
 
 test("a `none` user is still IDENTIFIED in the line", async () => {
   process.env.ACCESS_MODEL_MODE = "shadow";
-  ctx.identity = identityFor("Technician", { userId: REP_B });
+  ctx.identity = identityFor("Sales Rep", { userId: REP_B, dealer: null }); // unattributed rep
   ctx.cacheRows = [customerRow(CUST_1, REP_A)];
 
   await handler(listEvent("customer"));
   const line = oneLine();
   assert.equal(line.scope, "none");
   assert.equal(line.user, REP_B, "the caller must be nameable even with no scope");
-  assert.equal(line.level, "Technician");
+  assert.equal(line.level, "Sales Rep");
   assert.equal(line.newOutcome, "forbidden");
 });
 
 test("the THREE ways to reach `none` are told apart by the line alone", async () => {
-  // Technician / unattributed rep / switched-off dealer all resolve to the same scope and
-  // the same denial. They need completely different fixes, so the line has to distinguish
-  // them without a second lookup.
+  // Unknown level / unattributed rep / switched-off dealer all resolve to the same scope
+  // and the same denial. They need completely different fixes, so the line has to
+  // distinguish them without a second lookup. (Technician used to be the first case;
+  // since D-072 amendment 7 it is scope `tech`, so an unmapped level stands in.)
   process.env.ACCESS_MODEL_MODE = "shadow";
   const cases = [
     [
-      "Technician",
-      { userId: "a1O7y00000TECHAAAAA" },
-      { level: "Technician", dealer: DEALER, dealerActive: true },
+      "Dispatcher",
+      { userId: "a1O7y00000UNMAPPEDA" },
+      { level: "Dispatcher", dealer: DEALER, dealerActive: true },
     ],
     [
       "Sales Rep",

@@ -59,6 +59,43 @@ backfill are Aurora dealer-originated (D-049): `sundial-aurora-inbound` writes
 `Aurora_Dealer_Name__c`, never `Dealer__c`, and Create Project carries the name, not the id.
 User stamping fixes the backlog, not the recurrence. Tracked in TASKS.md.
 
+## 2026-09-16 — Welcome Call: a call that never connected is No Answer, not Verified - Exceptions
+
+**Bug (production).** `call_ae983426baaab27c806cd37ec01` (customer `a1P7y00000B7fw9EAB`)
+rang out with no voicemail on 2026-09-14; the 2026-09-15 orphan backfill wrote
+`Result: Verified - Exceptions` with `Duration: 0:00` and every analysis field empty.
+Cause: `mapOutcomeToStatus`'s only never-connected signal was `in_voicemail`. A ring-out
+without voicemail has an empty `verification_result`, so it fell into the
+unrecognized → `Verified - Exceptions` fail-safe — a TERMINAL status. On the webhook path
+the same mapping would have ended the retry loop for any Salesforce-initiated dial that
+rang out, and would fire a false team alert once the alert Flow exists.
+
+**Evidence first.** `GET /v2/get-call` for the call: `call_status: "not_connected"`,
+`disconnection_reason: "dial_no_answer"`, `duration_ms: 0`, start == end timestamp, no
+`transcript` / `transcript_object` / `recording_url` keys at all, `custom_analysis_data: {}`.
+Pinned verbatim (PII/URLs redacted) as `lauraRingOutCall()` in the tests. Reason strings
+checked against Retell's documented `disconnection_reason` enum.
+
+**Fix.** New `assessConnection()` + `resolveCallStatus()` in `webhook.js`, the one status
+decision for BOTH the webhook writeback and the orphan backfill. Connection is decided
+first: never-connected when `disconnection_reason` ∈ {`dial_no_answer`, `dial_busy`,
+`dial_failed`, `user_declined`}, or `call_status` is `not_connected`, or there is no
+transcript and ≤ 1 s of connected time. Such a call is `No Answer` (`Failed - Max
+Attempts` at the ceiling) whatever its analysis says. Absent duration evidence is NOT
+treated as zero. The unrecognized → `Verified - Exceptions` fail-safe is unchanged but
+only reached by connected calls. The log header names the reason:
+`Result: No Answer (not answered — dial_no_answer)`; the block format is unchanged.
+
+**Tests:** 13 new (126 welcome-call, 917 suite-wide, all green) — the real ring-out →
+No Answer on both paths, same shape at attempts ≥ 5 → Failed - Max Attempts, analysis on a
+dead call cannot override, every dial-failure reason, the evidence rule, absent evidence
+stays connected, voicemail still No Answer, connected + unrecognized still Exceptions,
+connected analysis beats `user_hangup`.
+
+**Laura's record:** status was already manually corrected to `No Answer` (attempts 0) and
+was not touched. A one-line `mapping correction` entry was prepended to her log (append,
+never edit); status and attempts re-read unchanged afterwards.
+
 ## 2026-09-12 — Street View: aim the camera at the house
 
 Tim's first look at the card on his own address showed the house across the street.

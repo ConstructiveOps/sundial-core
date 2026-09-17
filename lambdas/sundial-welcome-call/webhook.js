@@ -319,6 +319,117 @@ export function mapOutcomeToStatus(verificationResult, { attempts = 0, inVoicema
 }
 
 // ---------------------------------------------------------------------------
+// Did the call ever connect? — consulted BEFORE the verification_result mapping
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS (2026-09-16). call_ae983426baaab27c806cd37ec01 rang out with no
+// voicemail. Its get-call came back `call_status: "not_connected"`,
+// `disconnection_reason: "dial_no_answer"`, `duration_ms: 0`, start == end timestamp,
+// no transcript or recording keys at all, and an EMPTY custom_analysis_data. The only
+// never-connected signal mapOutcomeToStatus knew was `in_voicemail`, so the empty
+// result fell into the unrecognized → "Verified - Exceptions" fail-safe: a TERMINAL
+// status for a customer nobody spoke to. On the webhook path that ends the retry loop.
+//
+// The fail-safe was right for calls that CONNECTED (a conversation we could not read
+// belongs in front of a human) and wrong for calls that did not (there is nothing to
+// read). So connection is decided first, from the telephony evidence, and analysis
+// content on a dead call is never allowed to override it.
+
+/**
+ * Retell `disconnection_reason` values meaning the dial never reached a person.
+ * Exact strings from Retell's get-call reference (docs.retellai.com, 2026-09-16);
+ * `dial_no_answer` is confirmed on the wire by the call above.
+ *
+ * `user_declined` is the callee rejecting the ring — still no conversation.
+ * Deliberately NOT here: `invalid_destination`, `marked_as_spam` and the telephony /
+ * `error_*` family. Those are not "nobody picked up"; if one arrives with no transcript
+ * and no connected time the evidence rule below still catches it, and otherwise it
+ * stays on the existing path.
+ */
+export const NEVER_CONNECTED_REASONS = new Set([
+  "dial_no_answer",
+  "dial_busy",
+  "dial_failed",
+  "user_declined",
+]);
+
+/** At or under this much connected time, with no transcript, nobody was on the line. */
+export const MAX_UNCONNECTED_DURATION_MS = 1000;
+
+function hasTranscript(call) {
+  if (typeof call?.transcript === "string" && call.transcript.trim() !== "") return true;
+  return Array.isArray(call?.transcript_object) && call.transcript_object.length > 0;
+}
+
+/** Connected duration in ms, or null when the payload carries no evidence either way. */
+function connectedDurationMs(call) {
+  const d = call?.duration_ms;
+  if (typeof d === "number" && Number.isFinite(d)) return d;
+  const start = call?.start_timestamp;
+  const end = call?.end_timestamp;
+  if (typeof start === "number" && typeof end === "number") return Math.max(0, end - start);
+  return null;
+}
+
+/**
+ * Decide whether a call ever connected.
+ *
+ * Never-connected when ANY of:
+ *   1. `disconnection_reason` is in the dial-failure family above
+ *   2. `call_status` is `not_connected` (Retell's own verdict)
+ *   3. there is no transcript AND the connected duration is effectively zero
+ *
+ * ABSENT EVIDENCE IS NOT ZERO. A payload with no duration fields at all is treated as
+ * connected, so it keeps the existing mapping (and its fail-safe) rather than being
+ * quietly re-queued on a guess.
+ *
+ * @returns {{ connected: boolean, reason: string|null }} reason names the evidence
+ */
+export function assessConnection(call) {
+  const disconnection = String(call?.disconnection_reason ?? "").trim();
+  if (NEVER_CONNECTED_REASONS.has(disconnection)) {
+    return { connected: false, reason: disconnection };
+  }
+  if (String(call?.call_status ?? "").trim() === "not_connected") {
+    return { connected: false, reason: disconnection || "not_connected" };
+  }
+  const duration = connectedDurationMs(call);
+  if (!hasTranscript(call) && duration != null && duration <= MAX_UNCONNECTED_DURATION_MS) {
+    return {
+      connected: false,
+      reason: disconnection || `no transcript, ${durationMmSs(duration)} connected`,
+    };
+  }
+  return { connected: true, reason: null };
+}
+
+/**
+ * The ONE status decision both paths use (webhook writeback and orphan backfill).
+ *
+ * Connection first: a never-connected call is "No Answer" (→ "Failed - Max Attempts"
+ * at the ceiling) no matter what call_analysis says. Only a connected call reaches
+ * mapOutcomeToStatus, where the unrecognized → Verified - Exceptions fail-safe stands.
+ *
+ * @returns {{ status: string, outcome: string, recognized: boolean,
+ *             connection: { connected: boolean, reason: string|null } }}
+ */
+export function resolveCallStatus(call, { attempts = 0 } = {}) {
+  const connection = assessConnection(call);
+  if (!connection.connected) {
+    const status = attempts >= MAX_ATTEMPTS ? "Failed - Max Attempts" : "No Answer";
+    return { status, outcome: "not_connected", recognized: true, connection };
+  }
+  const analysis = call?.call_analysis?.custom_analysis_data ?? {};
+  return {
+    ...mapOutcomeToStatus(analysis?.verification_result, {
+      attempts,
+      inVoicemail: inVoicemail(call),
+    }),
+    connection,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Payload readers
 // ---------------------------------------------------------------------------
 
@@ -430,8 +541,14 @@ export function buildResultLogEntry({
   call,
   recordingKey = null,
 }) {
+  // A never-connected call says so ON THE HEADER, with the evidence. Its block below is
+  // all "none" and N, which alone reads like a conversation that went badly.
+  const connection = assessConnection(call);
+  const result = connection.connected
+    ? status
+    : `${status} (not answered — ${connection.reason})`;
   const header =
-    `${ENTRY_MARKER}${stamp} · ${origin} · Result: ${status} · ` +
+    `${ENTRY_MARKER}${stamp} · ${origin} · Result: ${result} · ` +
     `call_id=${call?.call_id ?? "unknown"}`;
 
   const lines = [header];
@@ -596,10 +713,8 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
 
   const analysis = call?.call_analysis?.custom_analysis_data ?? {};
   const attempts = Number(get("welcomeCallAttempts")) || 0;
-  const { status, outcome } = mapOutcomeToStatus(analysis?.verification_result, {
-    attempts,
-    inVoicemail: inVoicemail(call),
-  });
+  // Connection is checked inside, before the verification_result mapping.
+  const { status, outcome, connection } = resolveCallStatus(call, { attempts });
 
   // The attempt this result belongs to. metadata.attempt_no is what the placing side
   // stamped; the stored counter is the fallback for a call placed some other way.
@@ -654,7 +769,8 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
       },
     });
     console.log(
-      `welcome-call RESULT ${recordId}: ${outcome} -> ${status} (attempt ${attemptNo}, ` +
+      `welcome-call RESULT ${recordId}: ${outcome}` +
+        `${connection.connected ? "" : ` (${connection.reason})`} -> ${status} (attempt ${attemptNo}, ` +
         `call_id=${callId}, forwarded=${forwarded.ok}, cache=${applied.cache}, ` +
         `realtime=${applied.realtime}, recording=${recording.key ?? recording.reason ?? "none"})`
     );

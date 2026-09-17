@@ -73,7 +73,9 @@ const ROUTES = [
   ["POST", /^\/sms\/status\/?$/, "status"],
 ];
 const PUBLIC_ROUTES = new Set(["inbound", "status"]);
-const ACTION_FOR = { getThread: "service.estimate.write", sendText: "service.sms.send", unmatched: "service.estimate.write" };
+// getThread: the office (service.estimate.write) or a tech (service.tech.read — the tech
+// app's Communications panel, amendment 7). sendText: service.sms.send, which a tech holds too.
+const ACTION_FOR = { getThread: ["service.estimate.write", "service.tech.read"], sendText: "service.sms.send", unmatched: "service.estimate.write" };
 
 export function matchRoute(method, path) {
   // Strip a stage prefix ("/prod/sms/inbound") — but never a real first segment.

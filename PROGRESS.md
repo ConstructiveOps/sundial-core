@@ -1,5 +1,35 @@
 # Sundial — Progress Log
 
+## 2026-09-16 (later) — Tech app round 2: read-only module, Communications for techs, the menu, photo library, staying signed in
+
+Tim's first day with the app on a phone: tagging staff from the notes (or the whole
+Communications feed), a photo picker that only opened the camera, no way to look up a
+customer / job / estimate that is not today's, and a session that ended after an hour.
+
+**Access.** `service.tech.read` (tech + tenant) — read-only, tenant-wide. `tech.js` gains
+`GET /service/tech/jobs[/{id}]`, `/estimates[/{id}]`, `/customers[/{id}]` (Salesforce
+direct, 50 newest, `q` search, closed jobs hidden unless searched; a job page carries its
+calls with `isMine`, the estimate with lines; a customer page their jobs + estimates;
+templates never). `assertAction` accepts a list, so `GET /service/jobs/{id}/sms` and
+`GET /service/jobs/{id}/activity` admit `service.tech.read` next to `service.estimate.write`;
+`service.sms.send` extends to a tech; `userFilter` serves a tech the tenant directory (the
+@-mention list). **`sql/sundial_access_p10_tech_scope.sql`**: `private.resolve_access()`
+learns the `tech` lane, `record_visible_for()` answers job / estimate / customer tenant-wide
+for a tech (nothing else), `user_visible()` treats a tech as staff — the comments and
+mentions policies follow without change. Tests: board 15 (a lists test), access 165 (three
+expectations moved), estimate 34, sms 14. Wire script gains the three list resources.
+
+**Portal.** Bottom bar → Today · Jobs · Estimates · Customers · More (sheet: refresh, sign
+out, room for more). `TechListPages.tsx` (three searchable lists, debounced, cached on the
+phone) and `TechDetailPages.tsx` (job with visits / estimate / **Communications**, estimate
+with lines + totals, customer with history). The Communications panel is the office's own
+component inside a `.dark` wrapper — on the job page and, on demand, on the visit page.
+Photos: **Take photo** (camera, `capture`) and **Choose from library** (no `capture`) as two
+inputs. `AuthContext` calls `getSession()` on resume / online so a suspended phone renews
+its token instead of racing the timer; the Supabase-side settings that actually end a
+session are written up in `docs/pwa-architecture.md` → "Staying signed in". Tests 137 →
+**140**; tsc, lint (new files), build clean.
+
 ## 2026-09-16 — The technician app: /tech in the portal, the clock, on-my-way texts, photos, the offline queue (D-072 amendment 7)
 
 **Access.** `lib/access.js` gains scope **`tech`** (`Access_Level__c = Technician`) with exactly one
@@ -56,6 +86,102 @@ copy. `public/manifest.webmanifest`, `public/sw.js` (shell only, registered from
 
 **Tim's steps** are in TASKS.md ("TIM: deploy the tech app"): four Lambda deploys, the
 Geocoding API on the Google key, two optional env vars, the wire script, push `main`.
+
+## 2026-09-16 — Dealer__c null-attribution cleanup (D-064 §2.3a), items 1–3 done
+
+Branch `feature/access-identity-detail`. Every write report-first, canary-first, on Tim's go.
+
+**The create fix, proven live.** `eb8a35b` (tenant-scope CREATE derives `Dealer__c` from
+`Sales_Rep__c`) landed at 18:59 UTC. SOL-10054, the "gap record created today", was created at
+16:49 — before the deploy, not past it. Create Project traced end to end: `ProjectSetupAction`
+→ `createSolarFromCustomer` → `api.createRecord('solar')` → `POST /sf/solar` → API Gateway
+`s6tt25` → `sundial-sf-update` `handleCreate` → `dealerForNewRep`. No other Lambda creates a
+Customer or Solar with a rep. A live `POST /sf/solar` as `zz-admin` on the ZZ customer came back
+with the rep's dealer (ZZ TEST DEALER A — the ZZ customer's rep is `zz-rep-a1`, so Harmon Solar
+would have been the bug); the test record (SOL-10055) was deleted and never reached the cache.
+
+**Item 1 — rep-stamp the create-gap records: DONE.** `backfill-deal-ownership.mjs` gained
+`--pass1-only` so the mop-up could not carry 10 pass-2 name-matched writes nobody asked for.
+15 written (8 Customer + 7 Solar — the count was 15, not 14; SOL-10054 was the extra), all
+Dennis → Harmon Solar; canaries clean; re-run plans 0; `verify-dealer-ownership.mjs` ALL CHECKS
+PASS; `dealer_sf_id` on all 15 cache rows after the 19:42 sync.
+
+**Item 2 — §2.3.8 pair inheritance: DONE and verified.** The report said 40 eligible pairs.
+**33 of them carried a `Sales_Rep__c`**: `report-dealer-pair-consistency.mjs` and
+`verify-dealer-ownership.mjs` §2b only excluded a pair when the NULL side's rep *had a dealer*,
+never when either record *had a rep*, and the apply step's "no rep either side" re-check only
+checked the source dealer was non-null. `--apply` as it stood would have written 33 records
+§2.3.8 forbids. Both scripts fixed (neither record may have a rep; a new excluded bucket; apply
+re-reads BOTH records immediately before each write and skips on a rep, a non-blank target, or
+a changed source). Corrected: **7 eligible / 0 conflicts / 33 excluded**. 7 written (all
+customer ← solar), canary clean, re-run 0 eligible, 7/7 match their Solar, cache verified after
+the 20:12 sync. §2b stays a soft report (Tim). `docs/access-model.md` §2.3a corrected.
+
+**Item 3 — stamp dealer-named users, then pass 1: DONE and verified.** The "23 dealer-named users"
+were 12 dealer organizations, 2 with no resolvable dealer (Desert Sun Systems — its deals say
+"Solar Bill"; Volt Energy) and 9 people. 12 `User` rows added to
+`docs/integrations/dealer-aliases.csv`. New `scripts/stamp-user-dealer.mjs` (closed plan: the
+`User` alias rows + Ralph Romano and Ben Wollschlager → Harmon Solar; Dealer__c only; every
+scalar field compared and any drift aborts the run). Dry run: 14 would-change, 0 skipped, every
+row one user and one dealer. Simulated pass 1 afterwards: 2,564 Customer + 1,655 Solar
+attributed (Ralph alone is 1,933 + 1,490); the 12 alias dealers are inactive and Harmon Solar
+has 0 active dealer-scope users, so no one's visibility widens today. `Sales_Rep__c` is not a
+field on `Sundial_User__c` and is reported as such.
+
+Applied: the script gained `--only <userId>` (canary run) and `--snapshot-out/--snapshot-in` (the
+apply aborts if any user differs in ANY field from the dry-run read). Canary Residental Solar
+Brokers → Residential Solar Brokers, then the other 13 — all 14 PASS, 22 other fields identical,
+Ralph Romano still `Super_Admin__c=true` / Executive. Pass-1 report then planned exactly the
+simulated 2,564 Customer + 1,655 Solar; `--pass1-only --apply` wrote 4,219 of 4,219, 0 failures,
+both canaries clean. `verify-dealer-ownership.mjs` §1 (Dennis gate) PASS on both objects.
+
+Two residual checks now fail, both consequences of stamping Ralph Romano, neither written:
+**ROOF-1000** has rep Ralph and a null `Dealer__c` (the backfill does not cover Roofing — module
+denied to sales scopes, so nothing is visible either way); and the pair **"Trigger Test"** (Customer,
+rep Ralph → Harmon Solar) / **"Ralph Romano - TEST"** (Solar, rep-less, Alternative Energy from
+pass 2) is a one-rep conflict §2.3.6 settles in the rep's favour. Both need Tim's go.
+
+**Found: the orphans are still being created.** All 19 rep-less orphans since the 2026-08-27
+backfill are Aurora dealer-originated (D-049): `sundial-aurora-inbound` writes
+`Aurora_Dealer_Name__c`, never `Dealer__c`, and Create Project carries the name, not the id.
+User stamping fixes the backlog, not the recurrence. Tracked in TASKS.md.
+
+## 2026-09-16 — Welcome Call: a call that never connected is No Answer, not Verified - Exceptions
+
+**Bug (production).** `call_ae983426baaab27c806cd37ec01` (customer `a1P7y00000B7fw9EAB`)
+rang out with no voicemail on 2026-09-14; the 2026-09-15 orphan backfill wrote
+`Result: Verified - Exceptions` with `Duration: 0:00` and every analysis field empty.
+Cause: `mapOutcomeToStatus`'s only never-connected signal was `in_voicemail`. A ring-out
+without voicemail has an empty `verification_result`, so it fell into the
+unrecognized → `Verified - Exceptions` fail-safe — a TERMINAL status. On the webhook path
+the same mapping would have ended the retry loop for any Salesforce-initiated dial that
+rang out, and would fire a false team alert once the alert Flow exists.
+
+**Evidence first.** `GET /v2/get-call` for the call: `call_status: "not_connected"`,
+`disconnection_reason: "dial_no_answer"`, `duration_ms: 0`, start == end timestamp, no
+`transcript` / `transcript_object` / `recording_url` keys at all, `custom_analysis_data: {}`.
+Pinned verbatim (PII/URLs redacted) as `lauraRingOutCall()` in the tests. Reason strings
+checked against Retell's documented `disconnection_reason` enum.
+
+**Fix.** New `assessConnection()` + `resolveCallStatus()` in `webhook.js`, the one status
+decision for BOTH the webhook writeback and the orphan backfill. Connection is decided
+first: never-connected when `disconnection_reason` ∈ {`dial_no_answer`, `dial_busy`,
+`dial_failed`, `user_declined`}, or `call_status` is `not_connected`, or there is no
+transcript and ≤ 1 s of connected time. Such a call is `No Answer` (`Failed - Max
+Attempts` at the ceiling) whatever its analysis says. Absent duration evidence is NOT
+treated as zero. The unrecognized → `Verified - Exceptions` fail-safe is unchanged but
+only reached by connected calls. The log header names the reason:
+`Result: No Answer (not answered — dial_no_answer)`; the block format is unchanged.
+
+**Tests:** 13 new (126 welcome-call, 917 suite-wide, all green) — the real ring-out →
+No Answer on both paths, same shape at attempts ≥ 5 → Failed - Max Attempts, analysis on a
+dead call cannot override, every dial-failure reason, the evidence rule, absent evidence
+stays connected, voicemail still No Answer, connected + unrecognized still Exceptions,
+connected analysis beats `user_hangup`.
+
+**Laura's record:** status was already manually corrected to `No Answer` (attempts 0) and
+was not touched. A one-line `mapping correction` entry was prepended to her log (append,
+never edit); status and attempts re-read unchanged afterwards.
 
 ## 2026-09-15 — Labor billing, "schedule later" calls, price-book filters, the Communications panel with texting (D-072 amendment 6)
 

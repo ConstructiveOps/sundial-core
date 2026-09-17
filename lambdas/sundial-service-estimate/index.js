@@ -1483,7 +1483,7 @@ export function createHandler(deps = {}) {
     createJobFromEstimate: "service.job.create", createJob: "service.job.create",
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
-    jobActivity: "service.estimate.write", estimateActivity: "service.estimate.write",
+    jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed
     previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write",
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",

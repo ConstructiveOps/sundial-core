@@ -36,8 +36,34 @@ log("VERIFY DEALER OWNERSHIP — read-only, straight from Salesforce");
 rule();
 
 // --- 1. A3 gate -------------------------------------------------------------
+//
+// ⚠️ THE ASSERTION IS THE SET EQUALITY, NOT THE COUNT. This block used to also assert
+// `byName.size === 3534` and `=== 777` -- the numbers §2.4a measured on 2026-08-27.
+// Those are a point-in-time snapshot of a LIVE org that gains records every day: by
+// 2026-09-15 they read 3,549 and 783, and the script went red on two lines while the
+// invariant it exists to protect was perfectly intact (`onlyInOld` and `onlyInNew` both
+// zero, on every run).
+//
+// That is the worst failure mode a gate can have. A check that cries wolf on correct
+// data gets read as noise, and the next time it goes red for a REAL reason -- a record
+// Dennis would lose at cutover -- nobody looks. We already learned this on 2026-08-27
+// with the workbook hash: it hashed file BYTES, Excel never writes the same bytes twice,
+// so it fired on every save. The fix there was to hash the DECISIONS rather than the
+// file. Same lesson, and this script had regressed to numbers.
+//
+// So the counts are still MEASURED and PRINTED -- they are useful context, and a sudden
+// collapse from 3,549 to 40 should be visible -- but what is ASSERTED is the property
+// that holds at any size:
+//
+//   the legacy name match and the Sales_Rep__c match return the SAME SET,
+//   and that set is not empty.
+//
+// Non-emptiness earns its place: two empty sets are trivially equal, so a query that
+// silently stopped matching anything -- a renamed field, a re-spelled name -- would
+// otherwise pass the equality and report success over zero records.
 log("\n1. THE A3 GATE (docs/access-model.md §2.4a, §7.2)");
-for (const [obj, nameField, expected] of [
+log("   Asserting SET EQUALITY, not a pinned count -- the org grows; the invariant does not.");
+for (const [obj, nameField, measured] of [
   ["Sundial_Customer__c", "Sunbase_Sales_Rep__c", 3534],
   ["Sundial_Solar__c", "Sales_Representative__c", 777],
 ]) {
@@ -56,8 +82,22 @@ for (const [obj, nameField, expected] of [
   const onlyInOld = [...byName].filter((id) => !byId.has(id));
   const onlyInNew = [...byId].filter((id) => !byName.has(id));
   const label = obj.replace("Sundial_", "").replace("__c", "");
-  check(`${label}: legacy name match = ${expected}`, byName.size === expected, `got ${byName.size}`);
-  check(`${label}: Sales_Rep__c match = ${expected}`, byId.size === expected, `got ${byId.size}`);
+  const drift = byName.size - measured;
+  log(
+    `  ${label}: name match ${byName.size}, id match ${byId.size}` +
+      `  (measured ${measured} on 2026-08-27${drift === 0 ? "" : `, ${drift > 0 ? "+" : ""}${drift} since`})`
+  );
+  // The invariant, at any size.
+  check(
+    `${label}: both matches return a NON-EMPTY set`,
+    byName.size > 0 && byId.size > 0,
+    `name ${byName.size}, id ${byId.size}`
+  );
+  check(
+    `${label}: the two matches return the SAME SIZE`,
+    byName.size === byId.size,
+    `name ${byName.size} vs id ${byId.size}`
+  );
   check(`${label}: onlyInOld is EMPTY (nothing Dennis loses)`, onlyInOld.length === 0, `${onlyInOld.length}`);
   check(`${label}: onlyInNew is EMPTY (nothing Dennis gains)`, onlyInNew.length === 0, `${onlyInNew.length}`);
 }
@@ -102,6 +142,107 @@ for (const [obj, label] of [
   for (const r of disagreeing.slice(0, 10)) {
     log(`       ${r.Id}: deal ${r.Dealer__c} vs rep ${r.Sales_Rep__r?.Dealer__c}`);
   }
+}
+
+// --- 2b. THE PAIR INVARIANT (§2.3.5, added 2026-09-15) ----------------------
+// Every check above is SINGLE-OBJECT: it asks whether one record agrees with its own
+// rep. A linked Customer/Solar pair can pass both halves and still be half-attributed,
+// and that is not a hypothetical — it is how this check came to exist.
+//
+// A live pair carried "Property Upgrades" in the sales-company fields and had NO rep on
+// either record. The §2.4 backfill's pass 2 (A2) resolves a rep-less record's
+// sales-company value through the alias file, but it runs on SOLAR ONLY (deliberately:
+// Customer Dealer_Name__c was populated on 13 of 31,637 rows, so a Customer pass was
+// risk without benefit). So the Solar record got a Dealer__c and its Customer did not.
+// The dealer's manager saw the project and could not open the customer behind it.
+//
+// Nothing above catches that. The rep invariant needs a rep and there is none. The
+// `pending` probe needs a rep with a dealer, likewise. Both records are individually
+// defensible; the defect only exists BETWEEN them. So the pair is now checked here, and
+// `scripts/report-dealer-pair-consistency.mjs` is the drill-down with proposed
+// resolutions per record.
+//
+// ⚠️ "THE TWO DISAGREE" IS THREE FINDINGS, AND ONLY TWO ARE DEFECTS. Where both records
+// have a rep and each equals ITS OWN rep's dealer, nothing is broken: A1 says the dealer
+// comes from the rep, both obey, and the pair is split because two organizations' reps
+// own the two records. Failing on that would make the nightly cry wolf on correct data —
+// and worse, would invite a "fix" that overwrites a rep-derived value, which is the one
+// thing A1 forbids. It is counted and shown, never failed.
+log("\n2b. THE PAIR INVARIANT — linked Customer/Solar must agree on Dealer__c (§2.3.5)");
+{
+  const solarPairs = await sfQuery(
+    `SELECT Id, Sundial_Customer__c, Dealer__c, Sales_Rep__c, Sales_Rep__r.Dealer__c ` +
+      `FROM Sundial_Solar__c WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' ` +
+      `AND Sundial_Customer__c != null`
+  );
+  const custIds = [...new Set(solarPairs.map((r) => r.Sundial_Customer__c))];
+  const cust = new Map();
+  for (let i = 0; i < custIds.length; i += 400) {
+    const chunk = custIds.slice(i, i + 400).map((v) => `'${soqlEscapeString(v)}'`).join(",");
+    const rows = await sfQuery(
+      `SELECT Id, Dealer__c, Sales_Rep__c, Sales_Rep__r.Dealer__c FROM Sundial_Customer__c ` +
+        `WHERE Client__c = '${soqlEscapeString(TENANT_ID)}' AND Id IN (${chunk})`
+    );
+    for (const r of rows) cust.set(r.Id, r);
+  }
+
+  const n0 = (v) => v ?? null;
+  const found = { splitByRep: [], conflict: [], halfAttributed: [], repPresent: [] };
+  for (const sRow of solarPairs) {
+    const c = cust.get(sRow.Sundial_Customer__c);
+    if (!c) continue;
+    const sd = n0(sRow.Dealer__c);
+    const cd = n0(c.Dealer__c);
+    if (sd === cd) continue;
+    const srd = n0(sRow.Sales_Rep__r?.Dealer__c);
+    const crd = n0(c.Sales_Rep__r?.Dealer__c);
+    if (sd && cd) {
+      if (srd && crd && sd === srd && cd === crd) found.splitByRep.push([c.Id, sRow.Id]);
+      else found.conflict.push([c.Id, sRow.Id]);
+    } else {
+      // Exactly one side is null. If the NULL side's own rep has a dealer this is
+      // unfinished backfill pass 1, already counted as `pending` above — not a pair
+      // defect, and counting it twice would make the pair number unreadable.
+      const nullSideRepDealer = cd === null ? crd : srd;
+      if (nullSideRepDealer) continue;
+      // §2.3.8 reaches a pair ONLY when NEITHER record has a Sales_Rep__c. Corrected
+      // 2026-09-16: this used to test only whether the null side's rep HAD A DEALER, so a
+      // rep with no dealer -- or a rep on the attributed side -- still counted as
+      // "neither has a rep". That reported 40 half-attributed pairs where 33 carried a rep
+      // and belong to A1, not to the link. Those are counted separately and never pending.
+      if (sRow.Sales_Rep__c || c.Sales_Rep__c) found.repPresent.push([c.Id, sRow.Id]);
+      else found.halfAttributed.push([c.Id, sRow.Id]);
+    }
+  }
+
+  log(`  pairs examined ${solarPairs.length}`);
+  log(`  split by rep (both correct, informational) ${found.splitByRep.length}`);
+  for (const [cid, sid] of found.splitByRep.slice(0, 10)) log(`       ${cid} / ${sid}`);
+
+  // A genuine conflict: two dealers, and at least one of them agrees with no rep. There
+  // is no rule in the model that produces this, so it is a write path that went wrong.
+  check(
+    "Pair: no linked Customer/Solar disagree with NO rep to settle it",
+    found.conflict.length === 0,
+    `${found.conflict.length} pair(s)`
+  );
+  for (const [cid, sid] of found.conflict.slice(0, 10)) log(`       ${cid} / ${sid}`);
+
+  // HALF-ATTRIBUTED is the reported class. It is REPORTED, NOT FAILED, until Tim rules
+  // on the proposed §2.3.8 amendment (a Customer inherits its linked Solar's Dealer__c
+  // when its own is null, and the reverse) — because until that rule exists, a null here
+  // is fail-closed behaviour working as specified, not a broken record. The moment the
+  // amendment lands, turn this into a `check(...)` and it fails on the next occurrence.
+  if (found.halfAttributed.length > 0) {
+    log(`  ** ${found.halfAttributed.length} HALF-ATTRIBUTED pair(s) — one side has a dealer,`);
+    log(`     the other is null, and neither has a rep to derive it from.`);
+    log(`     §2.3.8 (decided 2026-09-16) fills these. Report, then apply:`);
+    log(`       node scripts/report-dealer-pair-consistency.mjs [--apply]`);
+    for (const [cid, sid] of found.halfAttributed.slice(0, 10)) log(`       ${cid} / ${sid}`);
+  } else {
+    log("  half-attributed pairs 0");
+  }
+  log(`  one side null, a rep present (A1's, not §2.3.8's -- informational) ${found.repPresent.length}`);
 }
 
 // --- 3. Per-dealer counts for the ACTIVE dealers ----------------------------

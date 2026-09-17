@@ -2,7 +2,7 @@
 
 **Status:** built 2026-09-16 (D-072 amendment 7). Lives **inside the portal at `/tech`** — same login, same Vercel deploy, its own phone-first shell. A user whose access level is **Technician** lands there from every office route; the office can open it too (and look at any tech's day).
 
-This page is the architecture as it exists, written for the next person who touches it. `docs/service-workflows.md` §8 is the workflow contract it implements.
+The original design brief is `docs/pwa-architecture-design.md` (its header lists where the build diverged). This page is the architecture as it exists, written for the next person who touches it. `docs/service-workflows.md` §8 is the workflow contract it implements.
 
 ## Where things live
 
@@ -11,9 +11,17 @@ This page is the architecture as it exists, written for the next person who touc
 | Routes | `sundial-core/lambdas/sundial-service-board/tech.js` (mounted by `index.js`) | Everything under `/service/tech/*`, one file, action `service.tech.self` |
 | Field estimate lines | `sundial-core/lambdas/sundial-service-estimate/index.js` → `techAddLines` | `POST /service/tech/calls/{id}/estimate-lines` (the money math stays in the estimate Lambda) |
 | The text | `sundial-core/lib/sms-send.js` | The ONE way Sundial sends a customer text; `sundial-sms` and the board Lambda both use it |
-| Access | `sundial-core/lib/access.js` | scope `tech` (Technician): `service.tech.self` and nothing else — no `/sf` reads, no modules |
-| App | `harmon-crm/src/tech/` | `TechLayout`, `TechTodayPage`, `TechCallPage`, `techApi.ts`, `offline.ts`, `photoStore.ts`, `techView.ts`, `gps.ts`, `registerSw.ts` |
+| Access | `sundial-core/lib/access.js` | scope `tech` (Technician): `service.tech.self` (writes on own calls), `service.tech.read` (the module, read-only) and `service.sms.send`; the user directory; no other `/sf` reads, no modules |
+| App | `harmon-crm/src/tech/` | `TechLayout`, `TechTodayPage`, `TechCallPage`, `TechListPages`, `TechDetailPages`, `techApi.ts`, `offline.ts`, `photoStore.ts`, `techView.ts`, `gps.ts`, `registerSw.ts` |
 | PWA | `harmon-crm/public/manifest.webmanifest`, `public/sw.js`, `public/icons/tech-*.png` | Installable; opens offline |
+
+## The menu (2026-09-16)
+
+Five slots on the bottom bar — **Today · Jobs · Estimates · Customers · More** — and a More sheet (refresh, sign out, room for the price book / time sheet / settings as they come). Jobs, Estimates and Customers are **read-only and tenant-wide** (`service.tech.read`): searchable lists (50 newest, `q` on number / name / address / phone) and record pages — a job with its visits (the tech's own link into the visit page), its estimate and the job's **Communications**; an estimate with its lines and stored totals; a customer with their jobs and estimates. The last answer to every list and record is cached on the phone.
+
+**Communications on the job and on the visit page** is the office's own `CommunicationsPanel` (team notes with @-mentions, customer texts both ways, the feed-worthy events), rendered inside a `.dark` wrapper — no copy. What that took: `service.tech.read` on the sms thread and job activity reads, `service.sms.send` for a tech, the user directory (`/sf/users`) open to a tech for the mention list, and **`sql/sundial_access_p10_tech_scope.sql`**, which teaches the comments/mentions RLS the `tech` scope (`private.resolve_access` tech lane; `record_visible_for`: job / estimate / customer tenant-wide, nothing else; `user_visible`: a tech is staff). Until that SQL is applied, a tech's Communications shows "Couldn't load the team notes" — texts and events still work.
+
+**Photos** come from the camera (one input with `capture`) or the library (a second input without it — iOS hides the library when `capture` is set).
 
 ## The shape of a day
 
@@ -52,13 +60,18 @@ A tap is sent straight away when there is signal. Otherwise — or when the requ
 
 The last good copy of the day and of each call is cached in `localStorage` so the app opens with no signal; the service worker (`public/sw.js`) caches only the app shell (network-first for navigations, cache-first for hashed assets) and never an API response. It is registered from `/tech` only — the office portal has no worker.
 
+## Staying signed in
+
+Supabase issues an access token that lives **one hour** by default; a healthy client renews it silently with the refresh token (supabase-js does this on a timer, and since 2026-09-16 `AuthContext` also calls `getSession()` whenever the app comes back to the foreground or the network returns, so a phone that sat in a pocket resumes with a live token). Being sent to the login page means a renewal was *refused* by Supabase, not that the hour ran out — the refresh token was revoked. The two Supabase settings that do that: **Authentication → Sessions → "Single session per user"** (a second login as the same account, e.g. the office checking a tech's day on a desktop with the tech's credentials, kills the phone's session) and **"Time-box user sessions" / "Inactivity timeout"**. Both should be off for Harmon. Independently, raising **Authentication → Sessions → "Access token (JWT) expiry"** from 3600 to **86400** (24 h) makes each token itself last a day, so even a phone whose refresh fails keeps working for the shift. Tokens are verified by signature and `exp` in `lib/supabase-auth.js`, so a longer expiry needs no backend change.
+
 ## Setup (Tim)
 
 1. Deploy: `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-sms`, `.\deploy.ps1 sundial-auth-proxy`.
 2. Google Cloud → the `sundial/google-maps` key → enable the **Geocoding API** alongside Street View Static.
 3. Optional env on `sundial-service-board`: `SERVICE_GEOFENCE_METERS`, `SERVICE_SHOP_LATLNG`.
 4. The board Lambda's role needs `s3:PutObject` + `s3:ListBucket` on `sfsolproj` under `SUNDIAL/*` (what `sundial-upload-file` / `sundial-list-files` have).
-5. `.\scripts\wire-service-tech-routes.ps1`.
-6. Portal deploys with `main`. On a phone: open `https://sundial.harmonelectric.net/tech`, sign in as a Technician, "Add to Home Screen".
+5. `.\scripts\wire-service-tech-routes.ps1` (re-run after 2026-09-16: it adds the jobs / estimates / customers routes).
+6. Supabase SQL editor: `sql/sundial_access_p10_tech_scope.sql`, then its verification block. Supabase → Authentication → Sessions: JWT expiry 86400; single-session / time-box / inactivity off.
+7. Portal deploys with `main`. On a phone: open `https://sundial.harmonelectric.net/tech`, sign in as a Technician, "Add to Home Screen".
 
 Test with the ZZ tech users (`zz-tech-2`, `zz-tech-3`) on the ZZ test job, never a live tech.

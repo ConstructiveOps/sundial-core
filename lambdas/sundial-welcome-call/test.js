@@ -128,6 +128,59 @@ function geovannaCall(overrides = {}, analysisOverrides = {}) {
   };
 }
 
+/**
+ * A REAL RING-OUT: `GET /v2/get-call/call_ae983426baaab27c806cd37ec01`, pulled
+ * 2026-09-16 (customer a1P7y00000B7fw9EAB, a rep-form call placed 2026-09-14 that rang
+ * out with no voicemail). The 2026-09-15 orphan backfill wrote it as
+ * "Verified - Exceptions" with Duration 0:00 — the bug this fixture pins.
+ *
+ * What a real never-connected call looks like on the wire:
+ *   - call_status "not_connected", disconnection_reason "dial_no_answer"
+ *   - duration_ms 0, start_timestamp === end_timestamp
+ *   - NO transcript / transcript_object / recording_url keys at all (absent, not empty)
+ *   - call_analysis present but hollow: custom_analysis_data {}, call_summary "",
+ *     in_voicemail false — so nothing in the analysis says "no answer"
+ *
+ * Verbatim in shape and values except PII/URLs: to_number redacted, the dynamic
+ * variables, public_log_url and pcap_url dropped.
+ */
+function lauraRingOutCall(overrides = {}) {
+  return {
+    call_id: "call_ae983426baaab27c806cd37ec01",
+    call_type: "phone_call",
+    agent_id: "agent_4a4c73b89ae6fc1f564db4e4b2",
+    agent_version: 20,
+    agent_name: "Harmon Solar Welcome Call",
+    call_status: "not_connected",
+    start_timestamp: 1789443356782,
+    end_timestamp: 1789443356782,
+    duration_ms: 0,
+    disconnection_reason: "dial_no_answer",
+    latency: {},
+    metadata: { source: "zapier_form", finance_source: "Lightreach_lease", sf_record_id: "" },
+    call_cost: {
+      total_duration_unit_price: 0,
+      total_duration_seconds: 0,
+      combined_cost: 0,
+      product_costs: [],
+    },
+    call_analysis: {
+      in_voicemail: false,
+      custom_analysis_data: {},
+      user_sentiment: "Unknown",
+      call_summary: "",
+      call_successful: false,
+    },
+    data_storage_setting: "everything",
+    opt_in_signed_url: false,
+    tool_calls: [],
+    from_number: "+16025870058",
+    to_number: "+1714XXXXXXX",
+    direction: "outbound",
+    ...overrides,
+  };
+}
+
 function baseCustomer(overrides = {}) {
   return {
     Id: "a1P7y00000AUo6TEAT",
@@ -185,6 +238,10 @@ function resetCtx() {
   ctx.s3Throws = null; // { op: "PutObject", message } -> that op throws
   ctx.metadataInserts = [];
   ctx.recordingResponse = { status: 200, bytes: Buffer.from("ID3fake-mp3-bytes") };
+  // Consumed one per download ATTEMPT, so a test can hand the retry loop a
+  // not-ready-yet 404 followed by a 200. Empty falls back to recordingResponse.
+  ctx.recordingResponses = [];
+  ctx.recordingFetches = 0;
   process.env.ZAPIER_RESULTS_HOOK_URL = "https://hooks.zapier.com/hooks/catch/1/abc/";
   delete process.env.RETELL_API_KEY;
   delete process.env.RETELL_FROM_NUMBER;
@@ -296,7 +353,15 @@ mock.module("@aws-sdk/client-s3", {
     S3Client: class {
       async send(cmd) {
         ctx.s3Ops.push({ op: cmd.op, key: cmd.input?.Key, input: cmd.input });
-        if (ctx.s3Throws?.op === cmd.op) throw new Error(ctx.s3Throws.message);
+        // `keyIncludes` narrows the fault to one key, which is what lets a test break
+        // the confirming HEAD on a destination without also breaking the HEAD that
+        // looks for the holding object.
+        if (
+          ctx.s3Throws?.op === cmd.op &&
+          (!ctx.s3Throws.keyIncludes || String(cmd.input?.Key).includes(ctx.s3Throws.keyIncludes))
+        ) {
+          throw new Error(ctx.s3Throws.message);
+        }
 
         switch (cmd.op) {
           case "PutObject":
@@ -377,7 +442,9 @@ globalThis.fetch = async (url, init = {}) => {
   const u = String(url);
 
   if (u.includes("recordings.retellai.com") || u.includes("recordings.example")) {
-    const { status, bytes, throws } = ctx.recordingResponse;
+    ctx.recordingFetches += 1;
+    const { status, bytes, throws } =
+      ctx.recordingResponses.length > 0 ? ctx.recordingResponses.shift() : ctx.recordingResponse;
     if (throws) throw new Error(throws);
     return {
       ok: status >= 200 && status < 300,
@@ -463,6 +530,9 @@ function fresh() {
   resetCtx();
   clearConfigCache();
   wb.clearCacheColumnCache();
+  // The retry policy's real delay is 3 s; nothing here is worth waiting for. Attempts
+  // and budget stay at their production values so the loop under test is the real one.
+  rec.downloadRetryPolicy.delayMs = 0;
 }
 
 const parse = (res) => JSON.parse(res.body);
@@ -1229,6 +1299,113 @@ test("an unknown outcome parks for a human rather than queueing another call", (
   assert.equal(hook.mapOutcomeToStatus("", { inVoicemail: false }).status, "Verified - Exceptions");
 });
 
+// --- connection check: consulted BEFORE verification_result (2026-09-16) -----
+
+test("the real ring-out (Laura, dial_no_answer) maps to No Answer, not Verified - Exceptions", () => {
+  const r = hook.resolveCallStatus(lauraRingOutCall(), { attempts: 0 });
+  assert.equal(r.status, "No Answer");
+  assert.deepEqual(r.connection, { connected: false, reason: "dial_no_answer" });
+});
+
+test("the same ring-out at the attempt ceiling is Failed - Max Attempts", () => {
+  assert.equal(
+    hook.resolveCallStatus(lauraRingOutCall(), { attempts: 5 }).status,
+    "Failed - Max Attempts"
+  );
+  assert.equal(hook.resolveCallStatus(lauraRingOutCall(), { attempts: 4 }).status, "No Answer");
+});
+
+test("analysis content on a dead call never overrides the connection evidence", () => {
+  const junk = lauraRingOutCall();
+  junk.call_analysis.custom_analysis_data = { verification_result: "passed" };
+  assert.equal(hook.resolveCallStatus(junk).status, "No Answer");
+  junk.call_analysis.custom_analysis_data = { verification_result: "refusal" };
+  assert.equal(hook.resolveCallStatus(junk).status, "No Answer");
+});
+
+test("every dial-failure reason is never-connected, even with odd call_status", () => {
+  for (const reason of ["dial_no_answer", "dial_busy", "dial_failed", "user_declined"]) {
+    const c = lauraRingOutCall({ disconnection_reason: reason, call_status: "ended" });
+    assert.deepEqual(hook.assessConnection(c), { connected: false, reason }, reason);
+  }
+});
+
+test("no transcript and zero connected time is never-connected without a dial reason", () => {
+  const c = lauraRingOutCall({ call_status: "ended", disconnection_reason: undefined });
+  const a = hook.assessConnection(c);
+  assert.equal(a.connected, false);
+  assert.equal(a.reason, "no transcript, 0:00 connected");
+  // Timestamps alone are evidence too.
+  const t = lauraRingOutCall({ call_status: "ended", disconnection_reason: "", duration_ms: undefined });
+  assert.equal(hook.assessConnection(t).connected, false);
+});
+
+test("ABSENT duration evidence is not zero — the call keeps the existing mapping", () => {
+  // The synthetic webhook fixture carries no duration or transcript at all.
+  const c = analyzedPayload({}, { verification_result: "something_new" }).call;
+  assert.equal(hook.assessConnection(c).connected, true);
+  assert.equal(hook.resolveCallStatus(c).status, "Verified - Exceptions");
+});
+
+test("a real voicemail (connected, in_voicemail) is still No Answer", () => {
+  const vm = geovannaCall({ disconnection_reason: "voicemail_reached", duration_ms: 34000 }, {
+    verification_result: "",
+  });
+  vm.call_analysis.in_voicemail = true;
+  const r = hook.resolveCallStatus(vm);
+  assert.equal(r.connection.connected, true);
+  assert.equal(r.status, "No Answer");
+});
+
+test("a connected call with an unrecognized result still parks as Verified - Exceptions", () => {
+  const c = geovannaCall({}, { verification_result: "something_new" });
+  assert.equal(hook.resolveCallStatus(c).status, "Verified - Exceptions");
+  const empty = geovannaCall({}, { verification_result: "" });
+  assert.equal(hook.resolveCallStatus(empty).status, "Verified - Exceptions");
+});
+
+test("connected-call analysis wins over a populated non-dial reason like user_hangup", () => {
+  const c = geovannaCall({ disconnection_reason: "user_hangup" }, { verification_result: "passed" });
+  assert.equal(hook.resolveCallStatus(c).status, "Verified");
+  const t = geovannaCall(
+    { disconnection_reason: "user_hangup", transcript: "Agent: Hi… User: yes." },
+    { verification_result: "refusal" }
+  );
+  assert.equal(hook.resolveCallStatus(t, { attempts: 5 }).status, "Refused");
+});
+
+test("webhook: a ring-out is written as No Answer, and the header says why", async () => {
+  fresh();
+  const call = lauraRingOutCall({
+    metadata: { sf_record_id: baseCustomer().Id, attempt_no: 2 },
+  });
+  const res = await handler(signedWebhookEvent({ event: "call_analyzed", call }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).welcomeCallStatus, "No Answer");
+  const fields = ctx.sfUpdates[0].fields;
+  assert.equal(fields.Welcome_Call_Status__c, "No Answer");
+  assert.match(
+    fields.Welcome_Call_Log__c,
+    /^── .* · Attempt 2 · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+  );
+  // The block keeps its format — empty fields read as none/N.
+  assert.match(fields.Welcome_Call_Log__c, /^Call Summary: none$/m);
+  assert.match(fields.Welcome_Call_Log__c, /^Recording: none · Duration: 0:00$/m);
+  // And the idempotency marker still matches the entry.
+  assert.ok(hook.alreadyProcessed(fields.Welcome_Call_Log__c, "call_ae983426baaab27c806cd37ec01"));
+});
+
+test("a connected call's header carries no not-answered suffix", () => {
+  const entry = hook.buildResultLogEntry({
+    stamp: "x",
+    origin: "Attempt 1",
+    status: "Verified",
+    analysis: {},
+    call: geovannaCall(),
+  });
+  assert.doesNotMatch(entry, /not answered/);
+});
+
 test("result writeback records outcome, mismatches and recording url", async () => {
   fresh();
   const payload = analyzedPayload(
@@ -1682,14 +1859,36 @@ test("the archived key goes into the same Salesforce write as the status", async
   );
 });
 
-test("with no archived key the Recording line falls back to Retell's URL", async () => {
+test("with no archived key the Recording line says unavailable, never the expiring URL", async () => {
   fresh();
   ctx.s3Throws = { op: "PutObject", message: "AccessDenied" };
   await handler(signedWebhookEvent(analyzedPayload()));
+  const log = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
+  assert.match(log, /^Recording: unavailable — see ledger\/CloudWatch(?: |$)/m);
+  // The URL expires. Writing it into a permanent field is what made a dead pointer
+  // look like a filed recording.
+  assert.ok(!log.includes("recordings.retellai.com"));
+});
+
+test("the Recording line names a key only after the object is CONFIRMED present", async () => {
+  fresh();
+  // The PUT succeeds; the confirming HEAD does not. Bytes in an unknown state must
+  // not be described to a reader as a filed recording.
+  ctx.s3Throws = { op: "HeadObject", message: "ServiceUnavailable" };
+  const res = await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(parse(res).salesforce, "updated");
+  assert.equal(parse(res).recording, null);
   assert.match(
     ctx.sfUpdates[0].fields.Welcome_Call_Log__c,
-    /^Recording: https:\/\/recordings\.retellai\.com\/call_abc123\.wav/m
+    /^Recording: unavailable — see ledger\/CloudWatch(?: |$)/m
   );
+  assert.equal(ctx.broadcasts.at(-1).payload.recording_key, null);
+});
+
+test("a call that produced no audio at all still reads as 'none', not 'unavailable'", async () => {
+  fresh();
+  await handler(signedWebhookEvent(analyzedPayload({ recording_url: null })));
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /^Recording: none$/m);
 });
 
 test("a recording failure does NOT block the Salesforce writeback", async () => {
@@ -2095,14 +2294,224 @@ test("a retry heals a run whose log append failed", async () => {
   );
 });
 
-test("orphan-match 404s when there is nothing parked and nothing matched", async () => {
+// ---------------------------------------------------------------------------
+// Recording download: the bounded retry
+// ---------------------------------------------------------------------------
+
+test("a not-ready-yet recording_url is retried and succeeds", async () => {
   fresh();
+  // Retell can answer call_analyzed before the CDN will serve the object.
+  ctx.recordingResponses = [
+    { status: 404 },
+    { status: 404 },
+    { status: 200, bytes: Buffer.from("ID3late-but-here") },
+  ];
+  await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(ctx.recordingFetches, 3);
+  const key = "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-09-10-attempt-1.mp3";
+  const stored = [...ctx.s3Objects.keys()].find((k) => k.endsWith("-attempt-1.mp3"));
+  assert.ok(stored, `expected an archived recording, saw ${[...ctx.s3Objects.keys()]}`);
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, new RegExp(`^Recording: ${stored}$`, "m"));
+  assert.ok(key.length > 0);
+});
+
+test("a permanent download failure is NOT retried", async () => {
+  fresh();
+  // 401 will be just as wrong in three seconds; spending the Lambda's budget on it
+  // costs the writeback that still has to happen.
+  ctx.recordingResponse = { status: 401 };
+  await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(ctx.recordingFetches, 1);
+  assert.match(
+    ctx.sfUpdates[0].fields.Welcome_Call_Log__c,
+    /^Recording: unavailable — see ledger\/CloudWatch(?: |$)/m
+  );
+});
+
+test("the retry gives up after its attempt ceiling", async () => {
+  fresh();
+  ctx.recordingResponse = { status: 503 };
+  await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(ctx.recordingFetches, rec.downloadRetryPolicy.attempts);
+});
+
+test("a retry that cannot fit the budget is not started", async () => {
+  fresh();
+  // A delay longer than the whole budget stands in for the real case: an attempt that
+  // burned 20 s on a timeout leaves nothing to pay for the next one.
+  rec.downloadRetryPolicy.delayMs = 999999;
+  try {
+    ctx.recordingResponse = { status: 503 };
+    await handler(signedWebhookEvent(analyzedPayload()));
+    assert.equal(ctx.recordingFetches, 1);
+  } finally {
+    rec.downloadRetryPolicy.delayMs = 0;
+  }
+});
+
+test("the heal path retries the same way", async () => {
+  fresh();
+  ctx.retellGetCallResponse = callFixtureOn();
+  ctx.recordingResponses = [{ status: 404 }, { status: 200, bytes: Buffer.from("ID3ok") }];
+  const res = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(res.healed, true);
+  assert.equal(ctx.recordingFetches, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Self-heal: neither the holding object nor the destination exists
+// ---------------------------------------------------------------------------
+// The production failure this covers (customer a1P7y00000B4iaPEAR, 2026-09-10): the
+// sweep attached the recording correctly, and 66 seconds later a portal bulk-delete
+// of the record's Files removed it. The log kept naming a key that no longer existed
+// and the endpoint had no way back — a second sweep just 404'd forever.
+
+/** A get-call fixture whose timestamp puts the call on the parkOrphan date. */
+function callFixtureOn(when = "2026-08-17T21:32:00Z", overrides = {}) {
+  return {
+    status: 200,
+    body: geovannaCall({ start_timestamp: Date.parse(when), ...overrides }),
+  };
+}
+
+test("orphan-match heals a recording missing on BOTH sides, straight from Retell", async () => {
+  fresh();
+  ctx.retellGetCallResponse = callFixtureOn();
+  const res = await handler(
+    orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.equal(body.healed, true);
+  // The key is rebuilt from the CALL's timestamp, not from today.
+  assert.equal(
+    body.key,
+    "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-17-call_abc123.mp3"
+  );
+  assert.ok(ctx.s3Objects.has(body.key), "the healed object is really in the bucket");
+  assert.equal(ctx.metadataInserts.length, 1, "and it is registered for the Files tab");
+  // The full result lands too — one Retell read serves both the heal and the backfill.
+  assert.equal(body.backfill, "backfilled");
+  assert.equal(ctx.retellGetCalls.length, 1);
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    new RegExp(`^Recording: ${body.key}(?: |$)`, "m")
+  );
+});
+
+test("a repeat heal reproduces the logged key and adds no second entry", async () => {
+  fresh();
+  ctx.retellGetCallResponse = callFixtureOn();
+  parkOrphan();
+  const first = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  const loggedKey = first.key;
+
+  // Someone clears the record's Files tab — exactly what happened in production.
+  ctx.s3Objects.delete(loggedKey);
+  ctx.queryRows = [
+    baseCustomer({ Welcome_Call_Log__c: ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c }),
+  ];
+  const writesBefore = ctx.sfUpdates.length;
+
+  const second = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(second.healed, true);
+  assert.equal(second.key, loggedKey, "the repair lands on the key the log already names");
+  assert.ok(ctx.s3Objects.has(loggedKey));
+  // The status/log writes are skipped — the result was already recorded — and no
+  // correction is needed because the log's key is once again true.
+  assert.equal(second.backfill, "already_present");
+  assert.equal(second.correction, "already_correct");
+  assert.equal(ctx.sfUpdates.length, writesBefore, "no duplicate Salesforce entry");
+  assert.equal(ctx.metadataInserts.length, 1, "no duplicate metadata row");
+});
+
+test("a repair that changes the key APPENDS a correction instead of editing", async () => {
+  fresh();
+  ctx.retellGetCallResponse = callFixtureOn();
+  // The record already carries a result entry that had to say "unavailable".
+  const priorLog = [
+    "── 2026-08-17 14:32 MST · rep-form call · Result: Verified · call_id=call_abc123",
+    "Call Summary: Customer confirmed all terms.",
+    "Recording: unavailable — see ledger/CloudWatch",
+  ].join("\n");
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Log__c: priorLog })];
+
+  const res = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(res.healed, true);
+  assert.equal(res.backfill, "already_present");
+  assert.equal(res.correction, "appended");
+
+  const log = ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c;
+  assert.match(log, /^── .* · recording recovered · call_id=call_abc123$/m);
+  assert.match(log, new RegExp(`^Recording: ${res.key}(?: |$)`, "m"));
+  // Append-only: the original entry is still there, still saying what it said.
+  assert.ok(log.includes("Recording: unavailable — see ledger/CloudWatch"));
+  assert.ok(log.includes("Result: Verified · call_id=call_abc123"));
+  // A correction must never read as a result, or it would block the real one.
+  assert.ok(!/recording recovered.*Result:/s.test(log.split("\n")[0]));
+});
+
+test("orphan-match still 404s when the call cannot be recovered and was already logged", async () => {
+  fresh();
+  ctx.retellGetCallResponse = { status: 404, body: { error_message: "call not found" } };
+  ctx.queryRows = [
+    baseCustomer({
+      Welcome_Call_Log__c:
+        "── 2026-08-17 14:32 MST · rep-form call · Result: Verified · call_id=call_missing",
+    }),
+  ];
   const res = await handler(
     orphanMatchEvent({ call_id: "call_missing", sf_record_id: baseCustomer().Id })
   );
   assert.equal(res.statusCode, 404);
   assert.equal(parse(res).code, "RECORDING_NOT_FOUND");
   assert.equal(parse(res).holdingKey, "SUNDIAL/_orphan-welcome-calls/call_missing.mp3");
+  assert.equal(parse(res).healAttempted, true);
+  assert.equal(ctx.sfUpdates.length, 0, "nothing was written");
+});
+
+test("a call with no recording_url still gets its result backfilled", async () => {
+  fresh();
+  ctx.retellGetCallResponse = callFixtureOn("2026-08-17T21:32:00Z", { recording_url: null });
+  const res = await handler(
+    orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id })
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).healed, false);
+  assert.equal(parse(res).healReason, "no recording_url");
+  assert.equal(parse(res).backfill, "backfilled");
+  // A call that produced no audio reads as "none" — there is nothing to be missing.
+  assert.match(ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c, /^Recording: none(?: |$)/m);
+});
+
+test("an unconfirmed copy keeps the holding object and logs no key", async () => {
+  fresh();
+  parkOrphan();
+  // Break ONLY the HEAD that confirms the destination — the holding lookup must still
+  // work, or the request fails before it reaches the copy at all.
+  ctx.s3Throws = {
+    op: "HeadObject",
+    keyIncludes: "welcome-call-",
+    message: "ServiceUnavailable",
+  };
+  const res = parse(
+    await handler(orphanMatchEvent({ call_id: "call_abc123", sf_record_id: baseCustomer().Id }))
+  );
+  assert.equal(res.key, null);
+  assert.equal(res.holdingDeleted, false, "the source survives an unverifiable copy");
+  assert.ok(ctx.s3Objects.has("SUNDIAL/_orphan-welcome-calls/call_abc123.mp3"));
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    /^Recording: unavailable — see ledger\/CloudWatch(?: |$)/m
+  );
 });
 
 test("orphan-match validates its inputs and the target record", async () => {
@@ -2155,4 +2564,48 @@ test("the two HTTP routes are told apart by path, and neither takes a portal JWT
     body: JSON.stringify(analyzedPayload()),
   });
   assert.equal(zapOnWebhook.statusCode, 401);
+});
+
+// ---------------------------------------------------------------------------
+// Orphan backfill of a ring-out — the exact path that mis-logged Laura (2026-09-15)
+// ---------------------------------------------------------------------------
+
+test("orphan backfill: the real ring-out lands as No Answer with the reason on the header", async () => {
+  fresh();
+  ctx.retellGetCallResponse = { status: 200, body: lauraRingOutCall() };
+  const res = await handler(
+    orphanMatchEvent({
+      call_id: "call_ae983426baaab27c806cd37ec01",
+      sf_record_id: baseCustomer().Id,
+    })
+  );
+  assert.equal(res.statusCode, 200);
+  const body = parse(res);
+  assert.equal(body.backfill, "backfilled");
+  assert.equal(body.welcomeCallStatus, "No Answer");
+
+  const fields = ctx.sfUpdates.at(-1).fields;
+  assert.equal(fields.Welcome_Call_Status__c, "No Answer");
+  assert.match(
+    fields.Welcome_Call_Log__c,
+    /^── .* · rep-form call · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+  );
+  assert.doesNotMatch(fields.Welcome_Call_Log__c, /Verified - Exceptions/);
+});
+
+test("orphan backfill: a ring-out at the ceiling is Failed - Max Attempts", async () => {
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Attempts__c: 5 })];
+  ctx.retellGetCallResponse = { status: 200, body: lauraRingOutCall() };
+  const res = await handler(
+    orphanMatchEvent({
+      call_id: "call_ae983426baaab27c806cd37ec01",
+      sf_record_id: baseCustomer().Id,
+    })
+  );
+  assert.equal(parse(res).welcomeCallStatus, "Failed - Max Attempts");
+  assert.match(
+    ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
+    /Result: Failed - Max Attempts \(not answered — dial_no_answer\) · /
+  );
 });

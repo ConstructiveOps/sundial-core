@@ -245,6 +245,12 @@ const ROUTES = [
   // The technician app (tech.js). Order matters: "photos/confirm" before "photos".
   ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
   ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
+  ["GET", /^\/service\/tech\/jobs\/?$/, "techJobs"],
+  ["GET", /^\/service\/tech\/jobs\/([^/]+)\/?$/, "techJob"],
+  ["GET", /^\/service\/tech\/estimates\/?$/, "techEstimates"],
+  ["GET", /^\/service\/tech\/estimates\/([^/]+)\/?$/, "techEstimate"],
+  ["GET", /^\/service\/tech\/customers\/?$/, "techCustomers"],
+  ["GET", /^\/service\/tech\/customers\/([^/]+)\/?$/, "techCustomer"],
   ["GET", /^\/service\/tech\/calls\/([^/]+)\/?$/, "techCall"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/status\/?$/, "techStatus"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/notes\/?$/, "techNote"],
@@ -277,6 +283,13 @@ const ACTION_FOR = Object.freeze({
   techPhotoConfirm: "service.tech.self",
   techPhotoPresign: "service.tech.self",
   techPhotos: "service.tech.self",
+  // Read-only, tenant-wide (2026-09-16).
+  techJobs: "service.tech.read",
+  techJob: "service.tech.read",
+  techEstimates: "service.tech.read",
+  techEstimate: "service.tech.read",
+  techCustomers: "service.tech.read",
+  techCustomer: "service.tech.read",
 });
 
 function bad(cors, code, message, extra = {}) {

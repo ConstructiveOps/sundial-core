@@ -60,9 +60,13 @@ function fakeWorld() {
     ],
     Sundial_Customer__c: [
       { Id: "CUS000000000000002", Client__c: TENANT, Primary_Email__c: "bo@example.com" },
-      { Id: "CUS000000000000003", Client__c: TENANT, Primary_Phone__c: "(602) 555-0100" },
+      { Id: "CUS000000000000003", Client__c: TENANT, Name: "Cy Diaz", First_Name__c: "Cy", Last_Name__c: "Diaz", Street__c: "3 Elm St", City__c: "Phoenix", State__c: "AZ", Postal_Code__c: "85001", Primary_Phone__c: "(602) 555-0100", CreatedDate: "2026-06-01T12:00:00Z" },
+      { Id: "CUS000000000000099", Client__c: OTHER, Name: "Cy Other", Primary_Phone__c: "(602) 555-0100" },
     ],
-    Sundial_Estimate__c: [{ Id: "EST000000000000003", Client__c: TENANT, Name: "EST-00003", Status__c: "Approved", Total__c: 450, Subtotal__c: 450 }],
+    Sundial_Estimate__c: [
+      { Id: "EST000000000000003", Client__c: TENANT, Name: "EST-00003", Status__c: "Approved", Total__c: 450, Subtotal__c: 450, Is_Template__c: false, Customer_Name_at_Creation__c: "Cy Diaz", Sundial_Customer__c: "CUS000000000000003", Service_Job__c: "SVC000000000000003", CreatedDate: "2026-09-01T12:00:00Z" },
+      { Id: "EST000000000000008", Client__c: TENANT, Name: "EST-TPL", Status__c: "Draft", Is_Template__c: true, Customer_Name_at_Creation__c: "Template", CreatedDate: "2026-08-01T12:00:00Z" },
+    ],
     Sundial_Service_Line__c: [
       { Id: "LIN000000000000001", Client__c: TENANT, Estimate__c: "EST000000000000003", Description__c: "Diagnostic", Kind__c: "Labor", Quantity__c: 1, Unit_Price__c: 150, Line_Total__c: 150, Stage__c: "Approved", Sort_Order__c: 10 },
       { Id: "LIN000000000000002", Client__c: TENANT, Estimate__c: "EST000000000000003", Description__c: "Breaker 20A", Kind__c: "Material", Quantity__c: 2, Unit_Price__c: 150, Line_Total__c: 300, Stage__c: "Proposed", Sort_Order__c: 20, Added_By_Service_Call__c: "SC0000000000000001" },
@@ -95,6 +99,7 @@ function fakeWorld() {
     let m;
     if ((m = c.match(/^([\w.]+) = '(.*)'$/))) return String(rec[m[1]] ?? "") === m[2];
     if ((m = c.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
+    if ((m = c.match(/^(\w+) NOT IN \((.*)\)$/))) return !m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) IN \((.*)\)$/))) return m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^\((.*)\)$/)) && m[1].includes(" OR ")) return m[1].split(" OR ").some((sub) => cond(rec, sub));
     if ((m = c.match(/^([\w.]+) LIKE '%(.*)%'$/))) return String(rec[m[1]] ?? "").toLowerCase().includes(m[2].toLowerCase());
@@ -717,4 +722,44 @@ test("GET /service/tech/price-book?q=: active items of this tenant matching name
   assert.deepEqual(r.body.items.map((i) => i.name), ["Breaker 20A single pole"]);
   r = await call(h, "GET", "/service/tech/price-book");
   assert.equal(r.body.items.length, 2);
+});
+
+test("read-only lists for the tech app: jobs (open by default, searchable), estimates (no templates), customers — tenant-wide, action service.tech.read", async () => {
+  const w = fakeWorld();
+  const h = makeHandler(w, JAKE);
+  // Jobs: open ones only unless searching or asked for a status; Closed SVC-00004 hidden; other tenant never.
+  let r = await call(h, "GET", "/service/tech/jobs");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.jobs.map((j) => j.number).sort(), ["SVC-00001", "SVC-00002", "SVC-00003"]);
+  r = await call(h, "GET", "/service/tech/jobs", null, { q: "cy" });
+  assert.deepEqual(r.body.jobs.map((j) => j.number), ["SVC-00003"]);
+  r = await call(h, "GET", "/service/tech/jobs", null, { status: "Closed" });
+  assert.deepEqual(r.body.jobs.map((j) => j.number), ["SVC-00004"]);
+  // One job: header + calls (mine flagged) + estimate with lines.
+  r = await call(h, "GET", "/service/tech/jobs/SVC000000000000003");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.job.customerName, "Cy Diaz");
+  assert.equal(r.body.job.address, "3 Elm St, Phoenix");
+  assert.deepEqual(r.body.calls.map((c) => [c.techName, c.isMine]), [["Jake Dorsey", true], ["Larry Ng", false]]);
+  assert.equal(r.body.estimate.number, "EST-00003");
+  assert.equal(r.body.estimate.lines.length, 2);
+  assert.equal((await call(h, "GET", "/service/tech/jobs/SVC000000000000099")).status, 404); // other tenant
+  // Estimates: templates never listed; a template id is a 404.
+  r = await call(h, "GET", "/service/tech/estimates");
+  assert.deepEqual(r.body.estimates.map((e) => e.number), ["EST-00003"]);
+  r = await call(h, "GET", "/service/tech/estimates/EST000000000000003");
+  assert.equal(r.body.estimate.total, 450);
+  assert.equal(r.body.estimate.lines[1].description, "Breaker 20A");
+  assert.equal((await call(h, "GET", "/service/tech/estimates/EST000000000000008")).status, 404);
+  // Customers: search, then the hub with their jobs + estimates.
+  r = await call(h, "GET", "/service/tech/customers", null, { q: "555-0100" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.customers.map((c) => c.name), ["Cy Diaz"]); // the other tenant's Cy is not ours
+  assert.equal(r.body.customers[0].address, "3 Elm St, Phoenix, AZ, 85001");
+  r = await call(h, "GET", "/service/tech/customers/CUS000000000000003");
+  assert.deepEqual(r.body.jobs.map((j) => j.number), ["SVC-00003"]);
+  assert.deepEqual(r.body.estimates.map((e) => e.number), ["EST-00003"]);
+  // A sales rep (own scope) has none of this.
+  const rep = makeHandler(w, { user: { id: "USR000000000000003" }, access: { scope: "own", level: "Sales Rep", tenantId: TENANT, userId: "USR000000000000003", dealerId: "DLR000000000000001" } });
+  assert.equal((await call(rep, "GET", "/service/tech/jobs")).status, 403);
 });

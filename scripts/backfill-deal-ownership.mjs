@@ -3,6 +3,8 @@
 //
 //   node scripts/backfill-deal-ownership.mjs           # REPORT ONLY. Default.
 //   node scripts/backfill-deal-ownership.mjs --apply   # writes
+//   node scripts/backfill-deal-ownership.mjs --pass1-only [--apply]
+//                                                      # A1 from the rep ONLY; pass 2 skipped
 //
 // TWO PASSES, AND THE FIRST ONE IS THE RULE
 //
@@ -52,6 +54,13 @@ import {
 import { loadDealerAliases, normalizeDealerName, resolveDealerName } from "./dealer-aliases.mjs";
 
 const APPLY = process.argv.includes("--apply");
+
+// --pass1-only: plan and write A1 (dealer from the rep) and nothing else. Added 2026-09-16
+// so a fix scoped to "records whose rep has a dealer" -- the tenant-create gap mop-up, and
+// the re-run after stamping dealer-named users -- cannot also carry pass-2 name-matched
+// writes that were never part of the request. Rep-less Solar rows are counted under
+// their own outcome and left exactly as they are.
+const PASS1_ONLY = process.argv.includes("--pass1-only");
 
 // --limit N: write at most N records this run, then stop cleanly and report what is
 // left. Added because two unattended runs were stopped part-way by the environment
@@ -188,6 +197,7 @@ log("BACKFILL DEAL OWNERSHIP — survey");
 rule();
 log(`  tenant  ${TENANT_ID}`);
 log(`  mode    ${APPLY ? "APPLY (this WRITES)" : "REPORT ONLY (pass --apply to write)"}`);
+log(`  passes  ${PASS1_ONLY ? "PASS 1 ONLY (A1 from the rep; pass 2 skipped)" : "1 and 2"}`);
 log(`  dealers ${dealerRows.length} row(s), ${dealerRows.filter((d) => d.Active__c).length} active`);
 log(`  aliases ${aliases.rows.length} reviewed merge(s)`);
 if (dealerRows.length === 0) {
@@ -208,6 +218,7 @@ const OUTCOMES = [
   ["no_rep_no_company", "left null — no rep and no sales company"],
   ["no_rep_company_unmatched", "left null — sales company matches no dealer"],
   ["would_clear", "left alone — has a dealer, nothing to derive one from"],
+  ["pass2_skipped", "skipped — rep-less, pass 2 not run (--pass1-only)"],
 ];
 
 async function planObject(key) {
@@ -254,7 +265,11 @@ async function planObject(key) {
       continue;
     }
 
-    // No rep. Pass 2 applies to Solar only.
+    // No rep. Pass 2 applies to Solar only -- and not at all under --pass1-only.
+    if (PASS1_ONLY) {
+      counts.pass2_skipped++;
+      continue;
+    }
     const company = o.salesCompanyField ? r[o.salesCompanyField] : null;
     if (!company) {
       counts[current ? "would_clear" : "no_rep_no_company"]++;
@@ -336,6 +351,7 @@ rule("-");
 log("PASS 2 (A2) — Solar, rep-less records, resolved through the alias file");
 rule("-");
 const solar = plans.find((p) => p.key === "solar");
+if (PASS1_ONLY) log(`  NOT RUN (--pass1-only). The zeros below mean "not evaluated", not "nothing to do".`);
 const aliasWrites = solar.writes.filter((w) => w.why === "company");
 log(`  ${aliasWrites.length} record(s) resolved by EXACT name after alias folding.`);
 const byCanonical = new Map();

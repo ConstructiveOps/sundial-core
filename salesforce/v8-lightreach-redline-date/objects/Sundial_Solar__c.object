@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v8 LIGHTREACH REDLINE DATE CUTOFF - MODIFIES the existing Commission_Redline_PPW__c
+  formula field on Sundial_Solar__c. Reference: rework doc D19, amended D36 (2026-09-16).
+
+  CHANGE: External+Lightreach redline becomes date-conditional - 1.65 for deals with
+  Customer CreatedDate on/after 2026-09-04, 1.75 before. Internal+Lightreach (2.10)
+  and both non-Lightreach rates are UNCHANGED. All other field metadata is reproduced
+  verbatim from the deployed v3 definition - a CustomField deploy replaces the whole
+  field, so everything below except <description> and <formula> must match v3 exactly.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Commission_Redline_PPW__c</fullName>
+        <description>D19 REDLINE model, amended D36 (2026-09-16): $/W redline chosen by deal type x finance source x SALE DATE. External+Lightreach: 1.65 when the linked CUSTOMER record's CreatedDate is on/after 2026-09-04 (Sundial_Customer__r.CreatedDate - the Solar record is created later, at Create Project, so its own date is not the sale date; one deal, one redline), 1.75 before OR when no Customer is linked (conservative: pre-change rate); External+other 1.85; Internal+Lightreach 2.10 (UNCHANGED by D36); Internal+other 2.20. Deal type: INTERNAL when Sales_Company_Harmon_Solar_or_Third__c = "Harmon Solar", EXTERNAL otherwise. Finance: Lightreach when Sales_Type_Partner__c = "LightReach" (this object's spelling; no Financing_Partner__c here). BLANK Sales_Company_Harmon_Solar_or_Third__c =&gt; NULL (never falls through to the external rate).</description>
+        <externalId>false</externalId>
+        <formula>IF(ISBLANK(TEXT(Sales_Company_Harmon_Solar_or_Third__c)),NULL,IF(TEXT(Sales_Company_Harmon_Solar_or_Third__c)="Harmon Solar",IF(TEXT(Sales_Type_Partner__c)="LightReach",2.10,2.20),IF(TEXT(Sales_Type_Partner__c)="LightReach",IF(AND(NOT(ISBLANK(Sundial_Customer__c)),DATEVALUE(Sundial_Customer__r.CreatedDate)&gt;=DATE(2026,9,4)),1.65,1.75),1.85)))</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>The $/W redline used to work out commission. Blank if the sales company is not set.</inlineHelpText>
+        <label>Commission Redline $/W</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v8 LIGHTREACH REDLINE DATE CUTOFF - MODIFIES the existing Commission_Redline_PPW__c
+  formula field on Sundial_Customer__c. Reference: rework doc D19, amended D36 (2026-09-16).
+
+  CHANGE: External+Lightreach redline becomes date-conditional - 1.65 for deals with
+  Customer CreatedDate on/after 2026-09-04, 1.75 before. Internal+Lightreach (2.10)
+  and both non-Lightreach rates are UNCHANGED. All other field metadata is reproduced
+  verbatim from the deployed v3 definition - a CustomField deploy replaces the whole
+  field, so everything below except <description> and <formula> must match v3 exactly.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Commission_Redline_PPW__c</fullName>
+        <description>D19 REDLINE model, amended D36 (2026-09-16): $/W redline chosen by deal type x finance source x SALE DATE. External+Lightreach: 1.65 when this record's CreatedDate is on/after 2026-09-04, 1.75 before; External+other 1.85; Internal+Lightreach 2.10 (UNCHANGED by D36); Internal+other 2.20. Deal type: INTERNAL when Sales_Company__c = "Harmon Solar", EXTERNAL otherwise (two-value picklist "Harmon Solar" / "Third-Party Dealer"). Finance: Lightreach when Financing_Partner__c = "Lightreach" (Sales_Type_Partner__c on this object is an unconfigured placeholder and must NOT be used). BLANK Sales_Company__c =&gt; NULL (never falls through to the external rate). The date cutoff intentionally uses CreatedDate as the sale-date proxy per the owner; the Solar twin reads THIS record's CreatedDate through its Customer lookup so one deal gets one redline.</description>
+        <externalId>false</externalId>
+        <formula>IF(ISBLANK(TEXT(Sales_Company__c)),NULL,IF(TEXT(Sales_Company__c)="Harmon Solar",IF(TEXT(Financing_Partner__c)="Lightreach",2.10,2.20),IF(TEXT(Financing_Partner__c)="Lightreach",IF(DATEVALUE(CreatedDate)&gt;=DATE(2026,9,4),1.65,1.75),1.85)))</formula>
+        <formulaTreatBlanksAs>BlankAsBlank</formulaTreatBlanksAs>
+        <inlineHelpText>The $/W redline used to work out commission. Blank if the sales company is not set.</inlineHelpText>
+        <label>Commission Redline $/W</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>4</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+</CustomObject>

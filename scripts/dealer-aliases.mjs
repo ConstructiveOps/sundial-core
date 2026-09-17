@@ -16,7 +16,8 @@
 // COLUMNS
 //   DealerName  the CANONICAL name. One Sundial_Dealer__c row is created under this.
 //   Alias       the variant spelling. Never gets a row of its own; folds into the above.
-//   Object      where the alias spelling is seen (Customer | Solar | Both). Informational.
+//   Object      where the alias spelling is seen (Customer | Solar | Both | User). Informational.
+//               `User` = a Sundial_User__c Name (a dealer org imported as a user), 2026-09-16.
 //   Note        why. Free text, quoted.
 
 import fs from "node:fs";

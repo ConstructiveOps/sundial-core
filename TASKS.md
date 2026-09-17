@@ -76,6 +76,8 @@ off the LIVE tenant first (GETs only). Suite 809 green.
 - [ ] **TIM: deploy this increment** — (1) Salesforce: deploy `salesforce/service-delta-2026-09-15/` (zip → Workbench Check Only → deploy; `DEPLOY-WALKTHROUGH.md` "Delta 2026-09-15"); (2) Supabase SQL editor: `sql/2026-09-15_service_delta.sql`, then `sql/sundial_sms_messages.sql`; (3) DataLoader: upsert `salesforce/pricebook-import/Sundial_Price_Book_Item__c.csv` on `HCP_Id__c` with the `.sdl` mapping (README); (4) `npm test`; (5) `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-auth-proxy` (new action `service.sms.send`), `.\deploy.ps1 sundial-comment-notify` (job links in mention emails); (6) `.\scripts\wire-service-estimate-routes.ps1` (labor routes; idempotent); (7) **texting:** Secrets Manager `sundial/twilio` `{ accountSid, authToken, fromNumber, "defaultTenant": "harmon" }` → Lambda console → Create function **`sundial-sms`** (same runtime / role / arch / timeout as `sundial-service-board`; env `SMS_WEBHOOK_BASE = https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`) → `.\deploy.ps1 sundial-sms` → `.\scripts\wire-sms-routes.ps1` → Twilio console: the number's "A message comes in" webhook = `POST …/prod/sms/inbound`; (8) harmon-crm `npm run build`, commit, push `main`; (9) test with the ZZ job and your own mobile: Communications → Text customer → reply from the phone → it appears on the job; job page → Schedule → "Schedule later" → Dispatch tray → drag it onto a day; complete a call → Labor billing → tick Bill → Save → the estimate shows the Time line; Price Book → filters.
 - [x] **The technician app (2026-09-16, D-072 amendment 7):** `lib/access.js` scope `tech` + `service.tech.self`; `sundial-service-board/tech.js` (`/service/tech/day`, `/calls/{id}`, `/status` clock engine + "on my way" text + geofence/lazy geocode, `/notes`, `/checklist`, `/photos` presign + confirm, `/price-book`); `POST /service/tech/calls/{id}/estimate-lines` in the estimate Lambda; `lib/sms-send.js` extracted (sundial-sms uses it); `lib/twilio.js` moved from the sms folder; `settleJobStatus` gains `reopened`; `scripts/wire-service-tech-routes.ps1`; `docs/pwa-architecture.md`. Portal: `/tech` (TechLayout, Today, Call page: buttons / clock / checklist / notes / photos / estimate + add / other techs), offline queue with tap-time replay + IndexedDB photo store, manifest + shell service worker + icons, Technician redirect. Tests: board 14, estimate 34, sms 14, access 165; portal 137.
 - [ ] **TIM: deploy the tech app** — (1) `npm test`; (2) `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-sms`, `.\deploy.ps1 sundial-auth-proxy` (new scope `tech` in `lib/access.js`); (3) Google Cloud → the `sundial/google-maps` key's project → APIs & Services → enable **Geocoding API** → Credentials → the key → API restrictions: add Geocoding API; (4) Lambda console → `sundial-service-board` → Configuration → Environment variables → optional `SERVICE_GEOFENCE_METERS` (250) and `SERVICE_SHOP_LATLNG` (the shop, `lat,lng`); confirm the board's role has `s3:PutObject` + `s3:ListBucket` on `sfsolproj` (same as `sundial-upload-file`); (5) `.\scripts\wire-service-tech-routes.ps1`; (6) harmon-crm: `npm run build`, commit, push `main`; (7) on a phone: sign in as `zz-tech-2`, open `/tech`, Add to Home Screen; on the ZZ job scheduled to that tech: On my way (your mobile as the customer number) → Clock in → note → photo → tick the two items → Complete; airplane mode: add a note, tick an item, back online → "Sent 2 queued updates"; the dispatch board shows the statuses move.
+- [x] **Tech app round 2 (2026-09-16, Tim's first-day notes):** `service.tech.read` + read-only `/service/tech/{jobs,estimates,customers}[/{id}]`; sms thread / job activity reads accept it; `service.sms.send` for techs; `/sf/users` for a tech; `assertAction` takes a list; `sql/sundial_access_p10_tech_scope.sql` (comments RLS learns `tech`); wire script re-run. Portal: 5-slot menu + More sheet, Jobs / Estimates / Customers lists + records, the office's Communications panel on the job and visit pages, camera + library photo buttons, session recovery on resume. Tests: board 15, access 165, estimate 34, sms 14; portal 140.
+- [ ] **TIM: deploy round 2** — (1) `npm test`; (2) `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-sms`, `.\deploy.ps1 sundial-auth-proxy`, `.\deploy.ps1 sundial-sf-query` (the user directory for techs), `.\deploy.ps1 sundial-comment-notify` (shares `lib/access-enforce.js`); (3) `.\scripts\wire-service-tech-routes.ps1` (adds the three list routes); (4) Supabase SQL editor: `sql/sundial_access_p10_tech_scope.sql`, then its V1–V3 checks; (5) Supabase → Authentication → Sessions: JWT expiry **86400**; confirm "Single session per user", "Time-box user sessions" and "Inactivity timeout" are OFF; (6) harmon-crm `npm run build`, commit, push `main`; (7) on the phone as `zz-tech-2`: Jobs → search the ZZ job → open it → Communications → @-tag yourself → the mention email arrives; Customers → search; a visit → Choose from library.
 - [ ] **Tech app follow-ups:** per-tenant checklist templates (`Checklist_Template_Key__c`); the office's time-correction UI on the board (edit an interval with a reason); customer-visible photo flag + the photo job report; materials used (price-book pick straight into the job's lines is there; a "used from truck stock" list is not); install-crew mode (Visit_Type Solar/Roofing with project context); push notifications for a new/changed call; a tech map on the board from the GPS fixes.
 - [ ] **Texting follow-ups:** an "Unmatched texts" view (`GET /service/sms/unmatched` exists; the office needs a place to claim them onto a job); board / estimate-send notifications by text (the send path is there); MMS photos into the job folder; Harmon's own number → `tenantNumbers.harmon` when A2P approves.
 - [ ] **Invoice follow-ups:** Stripe — SetupIntent on the accept page, off-session charge at issue for customer-pay jobs, webhook worker writing `Sundial_Service_Payment__c` (idempotent on `Stripe_Payment_Intent_Id__c`) through `settleMoney`; `Acumatica_Ref__c` / `Acumatica_Entered_At__c` hand-entry on the Invoices tab (Heather's bridge) and the weekly digest email; receipt + photo job report for customers (the "two send buttons"); partner terms (net days) as tenant config.
@@ -587,6 +589,8 @@ Runbook: `docs/integrations/comment-mention-alerts.md`. **Backend ships first** 
 
 ## Welcome Call — Retell voice verification (2026-08-17, D-054)
 
+- [x] **Never-connected calls map to No Answer (2026-09-16).** A ring-out with no voicemail (`call_ae983426baaab27c806cd37ec01`) was backfilled as the terminal `Verified - Exceptions` because an empty `verification_result` hit the unrecognized fail-safe. `resolveCallStatus()` now checks connection first (`dial_no_answer` / `dial_busy` / `dial_failed` / `user_declined`, `call_status: not_connected`, or no transcript + ≤ 1 s connected) for both the webhook and the orphan backfill; header reads `Result: No Answer (not answered — <reason>)`. Fixture from the real get-call payload. 13 new tests, 917 green, deployed. Laura's log got a one-line correction; her status was left as manually set.
+
 Runbook: `docs/integrations/retell-welcome-call.md`. **No portal UI** — do not add one (D-054 explains why a "Call now" button was rejected).
 
 - [x] **`lambdas/sundial-welcome-call`** — one Lambda, two entry points routed by event shape. Platform-event path: fresh Salesforce read → eligibility guard → Retell `create-phone-call` → SF/cache/Realtime writeback. Webhook path: signature → Zapier ledger forward → outcome mapping → writeback.
@@ -1071,6 +1075,61 @@ lands only after its server change is verified in prod. Branch per repo per phas
       The close-out is all three together: teach `generate-field-configs.mjs` to emit the
       client configs (§4.2 output 2, with `--confirm-target`), then delete harmon-crm's
       two generators, its two sheet copies, and the `generate:configs` script.
+
+### Dealer__c null-attribution cleanup (2026-09-16, branch `feature/access-identity-detail`)
+
+`docs/access-model.md` §2.3a. Report-first, canary-first, Tim's go before every `--apply`.
+
+- [x] **Tenant-scope CREATE derives `Dealer__c` from `Sales_Rep__c`** (`eb8a35b`, deployed
+      18:59 UTC). Proven live 2026-09-16: `POST /sf/solar` as `zz-admin` on the ZZ customer
+      stamped the rep's dealer (ZZ TEST DEALER A); test record SOL-10055 deleted.
+- [x] **Item 1 — backfill the create-gap records.** `backfill-deal-ownership.mjs` gained
+      `--pass1-only`; 15 written (8 Customer + 7 Solar, all Dennis → Harmon Solar), cache
+      verified after sync, `verify-dealer-ownership.mjs` ALL CHECKS PASS.
+- [x] **Item 2 — §2.3.8 pair inheritance.** Classification bug fixed in
+      `report-dealer-pair-consistency.mjs` and `verify-dealer-ownership.mjs` §2b (both now
+      require NO `Sales_Rep__c` on either record; the old test let 33 rep-present pairs
+      through). 7 eligible written (customer ← solar), 33 excluded, 0 conflicts; `--apply`
+      re-reads both records before each write. Cache verified. §2b stays a soft report
+      (Tim: a half-attributed pair is fail-closed-correct, not a gate failure).
+- [x] **Item 3 — stamp dealer-named users, then pass 1.** 12 `User` alias rows added to
+      `docs/integrations/dealer-aliases.csv`; `scripts/stamp-user-dealer.mjs` (gained
+      `--only`, `--snapshot-out/--snapshot-in`) stamped 14 users — canary Residental Solar
+      Brokers, then the other 13 incl. Ralph Romano and Ben Wollschlager → Harmon Solar —
+      every one PASS on field invariance (22 other fields identical). Pass 1
+      (`--pass1-only --apply`): 4,219 of 4,219 written (2,564 Customer + 1,655 Solar, exactly
+      as simulated), 0 failures, canaries clean. `verify-dealer-ownership.mjs` §1 PASS.
+      Two residual findings the stamp surfaced (not written — each needs Tim's go):
+      **ROOF-1000** (rep Ralph Romano) now has a rep with a dealer and a null `Dealer__c` —
+      the backfill does not cover Roofing; and the pair **"Trigger Test"** customer (rep Ralph
+      → Harmon Solar) / **"Ralph Romano - TEST"** Solar (rep-less, Alternative Energy from
+      pass 2) now conflict, where §2.3.6 says the rep's dealer wins. Both look like test data.
+- [ ] **Aurora-inbound recurrence gap (create path).** `lambdas/sundial-aurora-inbound/customerCreate.js`
+      writes `Aurora_Dealer_Name__c` but never `Dealer__c` on a dealer-originated create, so
+      every D-049 customer arrives unattributed, and Create Project then makes a rep-less
+      Solar with a sales company and no `Dealer__c`. All 19 rep-less orphans created since
+      the 2026-08-27 backfill came this way (9 Customer, 10 Solar). Fix per
+      `docs/access-model.md` §2.3 invariant 6: resolve `Aurora_Dealer_Name__c` → `Dealer__c`
+      through the alias file on create, set once. Consider also: a rep-less tenant-scope
+      Solar create inherits its linked Customer's `Dealer__c` (§2.3.8 at create time).
+      Separately, something outside this repo (a Flow or Zap — unverifiable, the integration
+      user cannot read Flows) sets `Dealer_Name__c` / `Sales_Company__c` / `Lead_Source__c`
+      seconds after the create; identify it. Backlog today: 13 Customer + 10 Solar.
+- [ ] **Left unattributed, pending a decision (Tim / Harmon):** Desert Sun Systems (user;
+      its 18 Solar deals all say "Solar Bill", and no Desert Sun dealer row exists), Volt
+      Energy (user; no dealer row, its deal says Harmon Solar), and the 7 inactive people
+      reps Thomas Kopp, Thomas Snow, Taylor Horin, Rowdy Meeker, Humberto Aranda, Angel
+      Solis, Caleb Heerma. Their records stay null (§2.4 "blank ⇒ NULL, never the default").
+- [x] **Phase II Service-module access changes — resolved by Tim, 2026-09-17.** An
+      earlier note held that the Technician user directory and `service.tech.read` had
+      to go through the D-064 process (design → report → approval) before any code.
+      Tim's call: **D-064 is the sales-rep / dealer sharing model and does not apply to
+      technicians**, who are all Harmon employees; the tech app's round 2
+      (`service.tech.read`, the directory open to a tech, `sql/sundial_access_p10_tech_scope.sql`)
+      stays as built. What still holds, unchanged: all authorization stays in
+      `lib/access.js` — **no second authorization implementation** in a service Lambda,
+      the portal, or anywhere else (the Lambdas call `assertAction`; the p10 SQL is the
+      same per-side copy p1b/p8/p9 use).
 
 - [ ] **Build per-user record visibility** (the real feature the TEMP guard stands in for). Model: roles on `Sundial_User__c` (`Hierarchy_Level__c`, `Parent_User__c`), records carry `Sales_Rep__c`/`Sunbase_Sales_Rep__c` (customer) and `Sales_Representative__c`/`Sales_Rep__c` (solar). Needs the rep field mirrored into the cache tables so filtering is cache-side (paginatable) instead of the live-SF bypass below.
 - [~] **TEMP Sales Rep hard-restrict (shipped 2026-08-03)** — Harmon has ONE Sales Rep (Dennis Alessandro). Server-side, a caller with `Hierarchy_Level__c === "Sales Rep"`:

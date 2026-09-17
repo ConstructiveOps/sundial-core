@@ -29,7 +29,6 @@ import {
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
-  HeadObjectCommand,
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
@@ -41,10 +40,15 @@ import {
   alreadyProcessed,
   buildResultLogEntry,
   extractCall,
-  mapOutcomeToStatus,
+  resolveCallStatus,
+  ENTRY_MARKER,
 } from "./webhook.js";
 import {
   s3,
+  callRecordedAt,
+  headObject,
+  healRecordingToKey,
+  objectExists,
   orphanRecordingKey,
   matchedRecordingKey,
   registerRecordingMetadata,
@@ -58,19 +62,6 @@ const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 /** The log line this endpoint writes. Also the marker its retry path searches for. */
 export function matchLogText(callId) {
   return `rep-form call ${callId} matched, recording attached`;
-}
-
-/** HEAD one key. Returns the object's metadata, or null when it isn't there. */
-async function headObject(key) {
-  try {
-    return await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: key }));
-  } catch (e) {
-    // The SDK reports a missing key as NotFound / 404; anything else is a real fault
-    // and must not be mistaken for "absent" (that would delete-and-lose on a retry).
-    const status = e?.$metadata?.httpStatusCode;
-    if (e?.name === "NotFound" || e?.name === "NoSuchKey" || status === 404) return null;
-    throw e;
-  }
 }
 
 /**
@@ -135,6 +126,80 @@ async function appendMatchNote({ record, schema, callId, now }) {
 }
 
 /**
+ * Fetch one call from Retell for a repair, with the API-key check folded in.
+ *
+ * The repair path needs the call for TWO things — the analysis for the backfill and
+ * the fresh `recording_url` for the heal — so it is fetched once, up front, and the
+ * one result is handed to both. Retell mints a new URL on every read, which is
+ * precisely why re-reading works when the webhook's original URL has long expired.
+ *
+ * Never throws; `getCall` already degrades to a result object.
+ */
+async function fetchCallForRepair(callId) {
+  const cfg = await getConfig();
+  if (!cfg.retellApiKey) {
+    console.warn(
+      `welcome-call orphan-match: no Retell API key configured — cannot repair ${callId}.`
+    );
+    return { ok: false, status: 0, call: null, error: "no Retell API key", noApiKey: true };
+  }
+  return await getCall({ apiKey: cfg.retellApiKey, callId });
+}
+
+/**
+ * Append a one-line correction naming the recording's real key.
+ *
+ * WHY A NEW LINE RATHER THAN AN EDIT. `Welcome_Call_Log__c` is append-only by
+ * convention: entries are evidence, and silently rewriting one destroys the record of
+ * what the system believed at the time. When a repair produces a key the log does not
+ * already name — because the old entry said `unavailable`, or named a key that turned
+ * out to be wrong — the honest fix is a new line saying so, leaving the original
+ * visible above it.
+ *
+ * Idempotent: if the key is already somewhere in the log there is nothing to correct.
+ *
+ * @returns {Promise<"appended"|"already_correct"|"failed"|"no_log_field">}
+ */
+async function appendRecordingCorrection({ record, schema, callId, key, now }) {
+  const logApi = schema.apiName("welcomeCallLog");
+  if (!logApi) return "no_log_field";
+
+  const existing = record[logApi];
+  if (typeof existing === "string" && existing.includes(key)) return "already_correct";
+
+  // Deliberately carries NO "Result:" segment — `alreadyProcessed` matches on a line
+  // holding both the call_id and that marker, and a correction must not be mistaken
+  // for the result entry it is correcting.
+  const entry =
+    `${ENTRY_MARKER}${phoenixStamp(now)} · recording recovered · ` +
+    `call_id=${callId}
+Recording: ${key}`;
+  const nextLog = prependLogEntry(existing, entry, schema.fieldLength("welcomeCallLog"));
+
+  try {
+    await applyWelcomeCallUpdate({
+      recordId: record.Id,
+      tenantId: schema.reader(record)("client") ?? null,
+      sfFields: { [logApi]: nextLog },
+      cacheValues: { welcome_call_log: nextLog },
+      broadcastPayload: {
+        reason: "welcome_call_recording_recovered",
+        call_id: callId,
+        recording_key: key,
+      },
+    });
+    return "appended";
+  } catch (e) {
+    console.error(
+      `welcome-call orphan-match: recording correction failed for ${record.Id} ` +
+        `(call_id=${callId}):`,
+      e?.message || String(e)
+    );
+    return "failed";
+  }
+}
+
+/**
  * Backfill a rep-form call's FULL result onto the customer record.
  *
  * WHY THIS EXISTS (D-055). A rep-form call reaches the webhook with no
@@ -165,7 +230,14 @@ async function appendMatchNote({ record, schema, callId, now }) {
  *
  * @returns {Promise<{ result: string, status?: string|null, detail?: string }>}
  */
-async function backfillCallResult({ record, schema, callId, now, recordingKey }) {
+async function backfillCallResult({
+  record,
+  schema,
+  callId,
+  now,
+  recordingKey,
+  prefetched = null,
+}) {
   const logApi = schema.apiName("welcomeCallLog");
   const statusApi = schema.apiName("welcomeCallStatus");
   if (!logApi) return { result: "no_log_field" };
@@ -174,15 +246,10 @@ async function backfillCallResult({ record, schema, callId, now, recordingKey })
   // Same guard the webhook uses: a full result entry for this call_id is already here.
   if (alreadyProcessed(existingLog, callId)) return { result: "already_present" };
 
-  const cfg = await getConfig();
-  if (!cfg.retellApiKey) {
-    console.warn(
-      `welcome-call orphan-match: no Retell API key configured — cannot backfill ${callId}.`
-    );
-    return { result: "no_api_key" };
-  }
-
-  const fetched = await getCall({ apiKey: cfg.retellApiKey, callId });
+  // The repair path has already fetched this call (for the heal) and hands it over,
+  // so the analysis is never read from Retell twice for one invocation.
+  const fetched = prefetched ?? (await fetchCallForRepair(callId));
+  if (fetched.noApiKey) return { result: "no_api_key" };
   if (!fetched.ok) {
     console.warn(
       `welcome-call orphan-match: could not fetch ${callId} from Retell ` +
@@ -197,11 +264,9 @@ async function backfillCallResult({ record, schema, callId, now, recordingKey })
   // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
   // written back. Passing it keeps the mapping identical to the webhook's.
   const attempts = Number(schema.reader(record)("welcomeCallAttempts")) || 0;
-  const { status: mappedStatus } = mapOutcomeToStatus(analysis?.verification_result, {
-    attempts,
-    inVoicemail:
-      call?.call_analysis?.in_voicemail === true || call?.in_voicemail === true,
-  });
+  // Same decision as the webhook, connection check included — a rep-form call that
+  // rang out must not backfill as Verified - Exceptions (call_ae983426…, 2026-09-15).
+  const { status: mappedStatus } = resolveCallStatus(call, { attempts });
 
   const currentStatus = statusApi ? String(record[statusApi] ?? "").trim() : "";
   const isTerminal = TERMINAL_STATUSES.has(currentStatus);
@@ -260,8 +325,22 @@ async function backfillCallResult({ record, schema, callId, now, recordingKey })
  * analysis, and the one-line match note when it cannot. One log write either way —
  * the backfill entry supersedes the note, so writing both would be duplicate noise.
  */
-async function recordMatchOnSalesforce({ record, schema, callId, now, recordingKey }) {
-  const backfill = await backfillCallResult({ record, schema, callId, now, recordingKey });
+async function recordMatchOnSalesforce({
+  record,
+  schema,
+  callId,
+  now,
+  recordingKey,
+  prefetched = null,
+}) {
+  const backfill = await backfillCallResult({
+    record,
+    schema,
+    callId,
+    now,
+    recordingKey,
+    prefetched,
+  });
   if (backfill.result === "fetch_failed" || backfill.result === "no_api_key") {
     const note = await appendMatchNote({ record, schema, callId, now });
     return { backfill: backfill.result, log: note, status: null };
@@ -336,6 +415,19 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
         size: null,
         description: `Retell call ${callId} (rep-form, matched)`,
       });
+      // The file is here, but an earlier run may have logged it as `unavailable` or
+      // under a name that has since changed. Same one-line correction as the repair
+      // path — the log has to agree with the bucket.
+      let correction = "not_needed";
+      if (attached.backfill === "already_present") {
+        correction = await appendRecordingCorrection({
+          record,
+          schema,
+          callId,
+          key: existingKey,
+          now,
+        });
+      }
       console.log(
         `welcome-call orphan-match: ${callId} already matched to ${sfRecordId} at ${existingKey}`
       );
@@ -350,21 +442,117 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
           backfill: attached.backfill,
           welcomeCallStatus: attached.status,
           metadata,
+          correction,
         },
       };
     }
-    // Neither the holding object nor a destination exists. Nothing to match.
+    // ---- Neither object exists: REPAIR from Retell ------------------------
+    //
+    // This used to be a flat 404, and that made the endpoint unable to fix the one
+    // failure it is best placed to fix. A gap on either side of the chain lands here:
+    // the holding upload never happened, or it happened and both it and the copy were
+    // later removed (a portal bulk-delete of the record's Files will do exactly that).
+    // Either way Retell still has the audio, the sweep still knows the record, and a
+    // fresh `recording_url` is one read away — everything the repair needs is already
+    // in hand, so refusing to try was the only thing standing between a customer and
+    // their recording.
+    //
+    // The key is rebuilt from the CALL's own timestamp, not from now(). It has to
+    // reproduce the name the log may already claim; a repair that invents today's
+    // date leaves the old line dangling and files one conversation under two names.
     console.warn(
       `welcome-call orphan-match: no holding object at ${holdingKey} and no matched ` +
-        `recording under ${sfRecordId} — nothing to do.`
+        `recording under ${sfRecordId} — attempting to heal from Retell.`
+    );
+
+    const fetched = await fetchCallForRepair(callId);
+    const fetchedCall = fetched.ok ? extractCall(fetched.call) : null;
+
+    let healed = { ok: false, reason: fetched.error || "call could not be fetched" };
+    if (fetchedCall) {
+      healed = await healRecordingToKey({
+        call: fetchedCall,
+        sfRecordId,
+        tenantId,
+        key: matchedRecordingKey(
+          sfRecordId,
+          phoenixDate(callRecordedAt(fetchedCall, now)),
+          callId
+        ),
+        description: `Retell call ${callId} (rep-form, recovered)`,
+      });
+    }
+    const healedKey = healed.ok ? healed.key : null;
+
+    // The Salesforce side runs either way: a first-time backfill is worth writing
+    // even when the audio is unrecoverable, and it is what makes the status and the
+    // analysis land. Only a CONFIRMED key is passed in — `healRecordingToKey` HEADs
+    // the object before it reports success — so the entry can never name a file that
+    // is not there.
+    const attached = await recordMatchOnSalesforce({
+      record,
+      schema,
+      callId,
+      now,
+      recordingKey: healedKey,
+      prefetched: fetched,
+    });
+
+    // A repeat run for a call whose result was already logged writes nothing above
+    // (that is the idempotency guard doing its job) — so if this run is what finally
+    // produced the recording, the existing entry still says `unavailable`, or names a
+    // key that no longer holds. One appended line, never an edit.
+    let correction = "not_needed";
+    if (healedKey && attached.backfill === "already_present") {
+      correction = await appendRecordingCorrection({
+        record,
+        schema,
+        callId,
+        key: healedKey,
+        now,
+      });
+    }
+
+    // Nothing recovered AND nothing written: the call really is a dead end, and the
+    // Zap should still hear about it the way it always has.
+    if (!healedKey && attached.backfill === "already_present") {
+      console.warn(
+        `welcome-call orphan-match: ${callId} could not be healed (${healed.reason}) ` +
+          `and its result was already logged on ${sfRecordId} — nothing to do.`
+      );
+      return {
+        status: 404,
+        body: {
+          error: "recording_not_found",
+          code: "RECORDING_NOT_FOUND",
+          message: `No orphan recording for call_id ${callId}, and it could not be recovered.`,
+          holdingKey,
+          healAttempted: true,
+          healReason: healed.reason ?? null,
+        },
+      };
+    }
+
+    console.log(
+      `welcome-call orphan-match: ${callId} -> ${sfRecordId} repaired ` +
+        `(healed=${healedKey ?? healed.reason}, backfill=${attached.backfill}, ` +
+        `correction=${correction})`
     );
     return {
-      status: 404,
+      status: 200,
       body: {
-        error: "recording_not_found",
-        code: "RECORDING_NOT_FOUND",
-        message: `No orphan recording for call_id ${callId}.`,
-        holdingKey,
+        already_matched: false,
+        healed: Boolean(healedKey),
+        key: healedKey,
+        recordId: sfRecordId,
+        callId,
+        sizeBytes: healed.ok ? (healed.size ?? null) : null,
+        metadata: healed.ok ? healed.metadata : "not_applicable",
+        log: attached.log,
+        backfill: attached.backfill,
+        welcomeCallStatus: attached.status,
+        correction,
+        healReason: healedKey ? null : (healed.reason ?? null),
       },
     };
   }
@@ -385,6 +573,18 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
     })
   );
 
+  // Confirm the copy before anything names the key OR deletes the source. The log
+  // line below is permanent and the delete below is not reversible, so both hang on
+  // this answer rather than on the copy call having returned.
+  const copyConfirmed = await objectExists(destKey);
+  if (!copyConfirmed) {
+    console.error(
+      `welcome-call orphan-match: copied ${holdingKey} -> ${destKey} but the ` +
+        `destination could not be confirmed — keeping the holding object and ` +
+        `writing the result without a recording key.`
+    );
+  }
+
   const metadata = await registerRecordingMetadata({
     key: destKey,
     fileName: destKey.slice(destKey.lastIndexOf("/") + 1),
@@ -401,7 +601,7 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
     schema,
     callId,
     now,
-    recordingKey: destKey,
+    recordingKey: copyConfirmed ? destKey : null,
   });
 
   // Delete the holding object LAST, and only after the copy is confirmed. If anything
@@ -412,6 +612,9 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
   // finds the destination, reports already_matched, and re-attempts nothing harmful).
   let holdingDeleted = false;
   try {
+    // An unconfirmed copy keeps its source. The duplicate is free to clean up later;
+    // the bytes are not.
+    if (!copyConfirmed) throw new Error("destination unconfirmed");
     await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: holdingKey }));
     holdingDeleted = true;
   } catch (e) {
@@ -431,7 +634,7 @@ export async function handleOrphanMatch(body, { now = new Date() } = {}) {
     status: 200,
     body: {
       already_matched: false,
-      key: destKey,
+      key: copyConfirmed ? destKey : null,
       recordId: sfRecordId,
       callId,
       sizeBytes: holding.ContentLength ?? null,

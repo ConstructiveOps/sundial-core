@@ -10,6 +10,14 @@
 //   POST /service/tech/calls/{id}/photos/confirm  { key, size?, caption? } → metadata row + Photos_Count__c
 //   GET  /service/tech/calls/{id}/photos
 //   GET  /service/tech/price-book?q=              active items, for "add to estimate"
+//   READ-ONLY, TENANT-WIDE (action service.tech.read — 2026-09-16, Tim: "techs may need
+//   to see these even if they aren't assigned"):
+//   GET  /service/tech/jobs?q=&status=            jobs (open ones by default), search by number / name / address / phone
+//   GET  /service/tech/jobs/{id}                  one job: header, its calls, the estimate summary
+//   GET  /service/tech/estimates?q=&status=       estimates (not templates)
+//   GET  /service/tech/estimates/{id}             one estimate with its lines and stored totals
+//   GET  /service/tech/customers?q=               the customer hub
+//   GET  /service/tech/customers/{id}             one customer with their jobs and estimates
 //
 // WHO MAY TOUCH A CALL: the tech it is assigned to (Tech__c = the caller's Sundial user),
 // or anyone with tenant scope (the office acting as / checking on a tech). Anyone else
@@ -45,6 +53,19 @@ export const ESTIMATE_SF_OBJECT = "Sundial_Estimate__c";
 export const LINE_SF_OBJECT = "Sundial_Service_Line__c";
 export const ITEM_SF_OBJECT = "Sundial_Price_Book_Item__c";
 export const TECH_STATUSES = Object.freeze(["En Route", "In Progress", "Complete", "No-Show"]);
+export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
+/** Jobs the lists hide unless asked for by status: finished business. */
+export const CLOSED_JOB_STATUSES = Object.freeze(["Closed", "Cancelled", "Paid"]);
+const LIST_LIMIT = 50;
+export const TECH_JOB_SELECT =
+  "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Job_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
+  "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Customer_Summary__c, Sundial_Customer__c, Estimate__c, " +
+  "Estimate_Total__c, Bill_To_Type__c, Payment_Status__c, Geocode_Lat__c, Geocode_Lon__c, CreatedDate, SystemModstamp";
+export const TECH_ESTIMATE_SELECT =
+  "Id, Name, Client__c, Status__c, Version__c, Is_Template__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
+  "Sundial_Customer__c, Service_Job__c, Subtotal__c, Discount_Amount__c, Tax_Amount__c, Total__c, Deposit_Amount__c, Sent_At__c, Approved_At__c, CreatedDate";
+export const TECH_CUSTOMER_SELECT =
+  "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate";
 const CLOCK_FUTURE_GRACE_MS = 5 * 60 * 1000;
 const CLOCK_MAX_AGE_MS = 7 * 86400000;
 const PHOTO_URL_EXPIRY_SECONDS = 300;
@@ -338,6 +359,73 @@ export function onMyWayText({ customerName, techFirstName, brandName, jobNumber 
 
 /** Photos live under the job, in a folder per call. */
 export const photoPrefix = (jobId, callId) => `${buildKey(jobId, "photos")}/${callId}/`;
+
+/** A search box's text → the SOQL LIKE literal, or null when there is nothing to search for. */
+export function likeFor(q) {
+  const t = strOrNull(q);
+  if (!t) return null;
+  return `'%${soqlEscapeString(t).replace(/[%_]/g, " ")}%'`;
+}
+export function jobToView(j) {
+  return {
+    id: j.Id,
+    number: j.Name ?? null,
+    status: j.Status__c ?? null,
+    priority: j.Priority__c ?? null,
+    serviceType: j.Service_Type__c ?? null,
+    jobType: j.Job_Type__c ?? null,
+    customerId: j.Sundial_Customer__c ?? null,
+    customerName: j.Customer_Name_at_Creation__c ?? null,
+    address: j.Address_at_Creation__c ?? null,
+    phone: j.Primary_Phone_at_Creation__c ?? null,
+    email: j.Primary_Email_at_Creation__c ?? null,
+    issue: j.Issue_Description__c ?? null,
+    summary: j.Customer_Summary__c ?? null,
+    estimateId: j.Estimate__c ?? null,
+    estimateTotal: j.Estimate_Total__c ?? null,
+    billToType: j.Bill_To_Type__c ?? null,
+    paymentStatus: j.Payment_Status__c ?? null,
+    createdAt: j.CreatedDate ?? null,
+  };
+}
+export function estimateToView(e) {
+  return {
+    id: e.Id,
+    number: e.Name ?? null,
+    status: e.Status__c ?? null,
+    version: e.Version__c ?? null,
+    customerId: e.Sundial_Customer__c ?? null,
+    customerName: e.Customer_Name_at_Creation__c ?? null,
+    address: e.Address_at_Creation__c ?? null,
+    phone: e.Primary_Phone_at_Creation__c ?? null,
+    jobId: e.Service_Job__c ?? null,
+    subtotal: e.Subtotal__c ?? null,
+    discount: e.Discount_Amount__c ?? null,
+    tax: e.Tax_Amount__c ?? null,
+    total: e.Total__c ?? null,
+    deposit: e.Deposit_Amount__c ?? null,
+    sentAt: e.Sent_At__c ?? null,
+    approvedAt: e.Approved_At__c ?? null,
+    createdAt: e.CreatedDate ?? null,
+  };
+}
+export function customerToView(c) {
+  const address = [c.Street__c, [c.City__c, c.State__c].filter(Boolean).join(", "), c.Postal_Code__c].filter(Boolean).join(", ");
+  return {
+    id: c.Id,
+    name: c.Name ?? [c.First_Name__c, c.Last_Name__c].filter(Boolean).join(" ") ?? null,
+    firstName: c.First_Name__c ?? null,
+    lastName: c.Last_Name__c ?? null,
+    address: address || null,
+    phone: c.Primary_Phone__c ?? null,
+    email: c.Primary_Email__c ?? null,
+    projectTypes: c.Requested_Project_Types__c ?? null,
+    createdAt: c.CreatedDate ?? null,
+  };
+}
+export function lineToView(l, callId = null) {
+  return { id: l.Id, description: l.Description__c ?? null, kind: l.Kind__c ?? null, quantity: l.Quantity__c ?? null, unitPrice: l.Unit_Price__c ?? null, lineTotal: l.Line_Total__c ?? null, stage: l.Stage__c ?? null, addedByThisCall: !!callId && l.Added_By_Service_Call__c === callId };
+}
 
 // ---------------------------------------------------------------------------
 // Real S3 helpers (injectable through deps: presignPut, listPhotos)
@@ -829,6 +917,81 @@ export function createTechHandlers(d, h) {
       if (!call || !ownsCall(ctx, call)) return notFound(cors);
       const photos = call.Sundial_Service_Job__c ? await d.listPhotos(photoPrefix(call.Sundial_Service_Job__c, call.Id)) : [];
       return jsonResponse(200, cors, { photos, photosCount: num(call.Photos_Count__c) ?? photos.length });
+    },
+
+    // --- read-only lists + records (service.tech.read) ----------------------------------
+    async techJobs({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const like = likeFor(query?.q);
+      const status = strOrNull(query?.status);
+      const where =
+        `Client__c = '${soqlEscapeString(tenantId)}'` +
+        (status ? ` AND Status__c = '${soqlEscapeString(status)}'` : like ? "" : ` AND Status__c NOT IN (${CLOSED_JOB_STATUSES.map((x) => `'${x}'`).join(", ")})`) +
+        (like ? ` AND (Name LIKE ${like} OR Customer_Name_at_Creation__c LIKE ${like} OR Address_at_Creation__c LIKE ${like} OR Primary_Phone_at_Creation__c LIKE ${like})` : "");
+      const rows = await d.sfQuery(`SELECT ${TECH_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
+      return jsonResponse(200, cors, { q: strOrNull(query?.q), status, jobs: (rows || []).map(jobToView) });
+    },
+    async techJob({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(`SELECT ${TECH_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+      const job = rows?.[0];
+      if (!job) return notFound(cors);
+      const [calls, estimate, lines] = await Promise.all([
+        h.loadJobCalls(job.Id, tenantId),
+        job.Estimate__c ? d.sfQuery(`SELECT ${TECH_ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`).then((r) => r?.[0] ?? null) : null,
+        job.Estimate__c
+          ? d.sfQuery(`SELECT Id, Description__c, Kind__c, Quantity__c, Unit_Price__c, Line_Total__c, Stage__c, Added_By_Service_Call__c, Sort_Order__c FROM ${LINE_SF_OBJECT} WHERE Estimate__c = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' ORDER BY Sort_Order__c LIMIT 200`)
+          : [],
+      ]);
+      const mine = (c) => !!ctx.userId && c.Tech__c === ctx.userId;
+      return jsonResponse(200, cors, {
+        job: jobToView(job),
+        calls: (calls || []).map((c) => ({ ...callToBoard(c), isMine: mine(c) })),
+        estimate: estimate ? { ...estimateToView(estimate), lines: (lines || []).filter((l) => l.Stage__c !== "Removed").map((l) => lineToView(l)) } : null,
+      });
+    },
+    async techEstimates({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const like = likeFor(query?.q);
+      const status = strOrNull(query?.status);
+      const where =
+        `Client__c = '${soqlEscapeString(tenantId)}' AND Is_Template__c = false` +
+        (status ? ` AND Status__c = '${soqlEscapeString(status)}'` : "") +
+        (like ? ` AND (Name LIKE ${like} OR Customer_Name_at_Creation__c LIKE ${like} OR Address_at_Creation__c LIKE ${like} OR Primary_Phone_at_Creation__c LIKE ${like})` : "");
+      const rows = await d.sfQuery(`SELECT ${TECH_ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
+      return jsonResponse(200, cors, { q: strOrNull(query?.q), status, estimates: (rows || []).map(estimateToView) });
+    },
+    async techEstimate({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(`SELECT ${TECH_ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+      const est = rows?.[0];
+      if (!est || est.Is_Template__c === true) return notFound(cors);
+      const lines = await d.sfQuery(`SELECT Id, Description__c, Kind__c, Quantity__c, Unit_Price__c, Line_Total__c, Stage__c, Added_By_Service_Call__c, Sort_Order__c FROM ${LINE_SF_OBJECT} WHERE Estimate__c = '${soqlEscapeString(est.Id)}' AND Client__c = '${soqlEscapeString(tenantId)}' ORDER BY Sort_Order__c LIMIT 200`);
+      return jsonResponse(200, cors, { estimate: { ...estimateToView(est), lines: (lines || []).filter((l) => l.Stage__c !== "Removed").map((l) => lineToView(l)) } });
+    },
+    async techCustomers({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const like = likeFor(query?.q);
+      const where =
+        `Client__c = '${soqlEscapeString(tenantId)}'` +
+        (like ? ` AND (Name LIKE ${like} OR Street__c LIKE ${like} OR Primary_Phone__c LIKE ${like} OR Primary_Email__c LIKE ${like})` : "");
+      // Without a search the hub is far too big to page through on a phone: the newest 50.
+      const rows = await d.sfQuery(`SELECT ${TECH_CUSTOMER_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
+      return jsonResponse(200, cors, { q: strOrNull(query?.q), customers: (rows || []).map(customerToView) });
+    },
+    async techCustomer({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(`SELECT ${TECH_CUSTOMER_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+      const cust = rows?.[0];
+      if (!cust) return notFound(cors);
+      const [jobs, estimates] = await Promise.all([
+        d.sfQuery(`SELECT ${TECH_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Sundial_Customer__c = '${soqlEscapeString(cust.Id)}' AND Client__c = '${soqlEscapeString(tenantId)}' ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`),
+        d.sfQuery(`SELECT ${TECH_ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE Sundial_Customer__c = '${soqlEscapeString(cust.Id)}' AND Client__c = '${soqlEscapeString(tenantId)}' AND Is_Template__c = false ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`),
+      ]);
+      return jsonResponse(200, cors, { customer: customerToView(cust), jobs: (jobs || []).map(jobToView), estimates: (estimates || []).map(estimateToView) });
     },
 
     // --- price book search (for "add to estimate") ----------------------------------------

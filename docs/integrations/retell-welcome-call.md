@@ -348,13 +348,47 @@ the **call**, and `call_summary` + `in_voicemail` from **`call_analysis`**.
 > Retell also sends **`used_loan_for_prepaid`** (e.g. `"not_applicable"`), which the
 > Lambda currently ignores. Harmless, but it is real data — see TASKS.md.
 
+**Step 1 — did the call connect? (checked FIRST, 2026-09-16).** `assessConnection()` in
+`webhook.js`, called by `resolveCallStatus()` — the ONE status decision both the webhook
+writeback and the orphan backfill use. A call is **never-connected** when any of:
+
+| Evidence | Example |
+|---|---|
+| `disconnection_reason` ∈ `dial_no_answer`, `dial_busy`, `dial_failed`, `user_declined` | the real ring-out below |
+| `call_status` = `not_connected` | Retell's own verdict |
+| no transcript **and** connected time ≤ 1 s (`duration_ms`, else `end − start` timestamps) | a dead dial with no reason string |
+
+A never-connected call is **`No Answer`** (→ **`Failed - Max Attempts`** at ≥ 5 attempts)
+**regardless of what `call_analysis` contains** — analysis content on a dead call never
+overrides the connection evidence. Its log header carries the reason:
+`Result: No Answer (not answered — dial_no_answer)`; the block keeps its format with
+`none` / `N` fields and `Recording: none · Duration: 0:00`.
+
+**Absent evidence is not zero:** a payload with no duration fields at all counts as
+connected and keeps the step-2 mapping. The reason strings are Retell's documented
+`disconnection_reason` enum (get-call reference, checked 2026-09-16). `invalid_destination`,
+`marked_as_spam` and the `error_*` / telephony family are deliberately NOT listed — they
+count as never-connected only through the evidence rule.
+
+> **What a real ring-out looks like** — `GET /v2/get-call/call_ae983426baaab27c806cd37ec01`
+> (placed 2026-09-14, rang out, no voicemail): `call_status: "not_connected"`,
+> `disconnection_reason: "dial_no_answer"`, `duration_ms: 0`,
+> `start_timestamp === end_timestamp`, **no** `transcript` / `transcript_object` /
+> `recording_url` keys at all, and a hollow `call_analysis` (`custom_analysis_data: {}`,
+> `call_summary: ""`, `in_voicemail: false`). Before the connection check existed that empty
+> result fell into the unrecognized fail-safe, and the 2026-09-15 backfill logged it
+> `Verified - Exceptions` — a terminal status for a customer nobody spoke to. Pinned as the
+> `lauraRingOutCall()` fixture in `test.js`.
+
+**Step 2 — connected calls only: `verification_result`.**
+
 | `verification_result` | `Welcome_Call_Status__c` |
 |---|---|
 | `passed` | `Verified` |
 | `partial` / `failed` / `callback_requested` | `Verified - Exceptions` |
 | `refusal` | `Refused` |
 | `wrong_person` / `voicemail` / `no answer` | `No Answer` — **`Failed - Max Attempts`** when `Welcome_Call_Attempts__c` ≥ 5 |
-| unrecognized | `Verified - Exceptions` (see below) |
+| unrecognized (connected calls only) | `Verified - Exceptions` (see below) |
 
 Values are normalized (lowercase, spaces and hyphens → `_`), so `no answer`,
 `no-answer` and `no_answer` are the same thing.
@@ -366,7 +400,8 @@ Values are normalized (lowercase, spaces and hyphens → `_`), so `no answer`,
   the fail-safe direction: Exceptions parks the record for a human, while No Answer
   would silently queue another call on a result we did not understand. The one
   exception: an empty result with `in_voicemail: true` really is a no-answer and is
-  treated as one.
+  treated as one. **This fail-safe is scoped to calls that connected** — a
+  never-connected call is settled by step 1 and never reaches it.
 - Two statuses in the org picklist — **`Contact Info Mismatch`** and
   **`Contract Values Mismatch`** — are **not currently produced** by this mapping.
   Mismatches land in `Verified - Exceptions` with the detail in the log. Splitting
@@ -434,6 +469,18 @@ The URL arrives inside the request body; even though that body is HMAC-verified,
 attaching the Retell API key to a URL taken from a payload would hand the key to
 whatever host it names.
 
+**Bounded retry** (`downloadRetryPolicy` in `recording.js`): 3 attempts, 3 s apart,
+inside a **30 s budget**. Retell can answer `call_analyzed` before the CDN will serve
+the object, and a single attempt turns that race into a permanently missing recording.
+
+The budget, not the attempt count, is the real limit. The Lambda's ceiling is 60 s and
+the orphan path still has a ledger forward and a Salesforce round-trip to make, so the
+loop refuses to *start* an attempt it cannot pay for. In practice that means three
+tries for a fast `403`/`404` — the not-ready-yet shape — and exactly one for a
+connection that hung, because a 20 s timeout has already spent the budget and retrying
+it would trade a missing recording for a lost writeback. `400`/`401` are never retried:
+they will be just as wrong in three seconds.
+
 **Nothing here can fail the call result.** Every path resolves rather than throwing,
 and a failure logs at ERROR with the `call_id` and the still-live `recording_url` so
 the file can be fetched by hand.
@@ -447,8 +494,31 @@ object; the trade is that a first delivery which stored the status but failed th
 recording will not retry the audio. The Retell URL is in the log line and the ledger
 row for exactly that case.
 
-When archival succeeds, the result log line gains an `archived=<key>` segment. The
-expiring Retell URL stays alongside it; the key is the durable one.
+### Only a confirmed key is ever written to the log
+
+Every `Recording:` key in `Welcome_Call_Log__c` is **HEAD-confirmed** before it is
+written — on upload, on copy, and on repair. When no object can be confirmed the line
+reads:
+
+```
+Recording: unavailable — see ledger/CloudWatch
+```
+
+**Why the old fallback is gone.** The line used to print the raw `recording_url` when
+archival failed. That URL expires, so it was a dead pointer dressed up as a permanent
+one — and this line is the single durable reference to the audio, read months later by
+someone deciding whether a customer really agreed to a term. A key that turns out not
+to exist is *worse* than no key: it reads as "the recording is filed" and sends the
+reader hunting for a file nobody will find. The still-live URL is logged to CloudWatch
+on failure and rides in the Zapier ledger row, which is exactly where the new text
+points.
+
+`none` and `unavailable` are different facts and are never merged: **`none`** means the
+call produced no audio (a no-answer), **`unavailable`** means it did and we do not have
+it.
+
+The same rule guards the copy in `orphan-match`: an **unconfirmed copy keeps its
+holding object** rather than deleting the only other copy, and reports `key: null`.
 
 ---
 
@@ -473,9 +543,15 @@ record id, so it is the last place to be lenient.
 3. Copy to `SUNDIAL/{sf_record_id}/welcome-call-{YYYY-MM-DD}-{call_id}.mp3`, **dated
    from the holding object's `LastModified`** in Phoenix time — the sweep may run days
    after the call, and the file should be named for the conversation, not the sweep.
+   Then **HEAD the destination** to confirm it landed.
 4. Register Supabase file metadata (skipped if a row for that key exists).
-5. **Backfill the full call result** (see below), then cache + Realtime.
-6. **Delete the holding object last**, only after the copy is confirmed.
+5. **Backfill the full call result** (see below), then cache + Realtime. The log names
+   the key only if step 3 confirmed it.
+6. **Delete the holding object last**, only after the copy is confirmed — an
+   unconfirmed copy keeps its source.
+
+If step 2 finds nothing *and* no destination exists, the endpoint **repairs from
+Retell** instead of 404ing — see [Self-heal](#self-heal--when-neither-object-exists).
 
 ### The backfill (D-055)
 
@@ -488,7 +564,8 @@ started; the ledger is for billing.
 The sweep sends only `{call_id, sf_record_id}`, so the analysis is **re-read from
 Retell** (`GET /v2/get-call/{call_id}`, same API key as create-call) rather than re-sent
 by Zapier. Same data, same authority the webhook used — which is what lets both paths
-share `mapOutcomeToStatus` and `buildResultLogEntry` and emit identical entries.
+share `resolveCallStatus` (connection check, then `mapOutcomeToStatus`) and
+`buildResultLogEntry` and emit identical entries.
 
 **Status rules:**
 
@@ -530,20 +607,103 @@ result could never be written.)
 registered, which is the point; the response says `holdingDeleted: false` and a later
 retry cleans up the duplicate.
 
+### Self-heal — when neither object exists
+
+If there is **no holding object and no destination**, the endpoint no longer answers
+404. It re-reads the call from Retell — which mints a **fresh `recording_url`**, so
+this works long after the webhook's original URL expired — downloads the audio, and
+uploads it straight to the destination key. Only if that also fails, or the call has no
+`recording_url`, does it proceed without the audio.
+
+**The key is rebuilt from the call's own `start_timestamp`** (Phoenix), not from
+`now()`. There is no holding object left to date it from, and a repair that stamped
+today's date would leave the log's existing line dangling and file one conversation
+under two names. One Retell read serves both the heal and the backfill.
+
+**Idempotency is file-aware.** The "log already contains a `Result:` line for this
+`call_id`" guard used to end the whole invocation, which is precisely what made a
+customer with a missing recording unrepairable. A repeat run now skips only the status
+and log writes, and still checks for the recording and heals it if it is gone.
+
+**A repair that produces a key the log does not already name appends a one-line
+correction** — never an edit. Entries are evidence; silently rewriting one destroys the
+record of what the system believed at the time:
+
+```
+── 2026-09-10 11:47 MST · recording recovered · call_id=call_abc123
+Recording: SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_abc123.mp3
+```
+
+The correction line deliberately carries **no `Result:` segment** — `alreadyProcessed`
+matches a line holding both the `call_id` and that marker, and a correction must not be
+mistaken for the result it is correcting.
+
+**404 survives for the true dead end only:** nothing parked, nothing matched, the call
+unrecoverable, *and* its result already logged — i.e. the run genuinely did nothing.
+The body then carries `healAttempted: true` and `healReason`.
+
+> **Incident, 2026-09-10** — customer `a1P7y00000B4iaPEAR`,
+> `call_a15c774e989eb4e8873b58de7d1`. Nothing in this Lambda failed: the webhook parked
+> the orphan correctly (7,317,870 bytes, 20:45 MST) and the sweep copied it onto the
+> record at 11:12 MST. **66 seconds later a portal bulk-delete of that record's Files
+> removed it** — `sundial-delete-file` fired ~9 times between 11:13:34 and 11:13:56 and
+> a fresh document set was uploaded at 11:14:11. The log went on naming a key that no
+> longer existed, and a second sweep could only 404. Repaired by one `orphan-match`
+> invocation on the deployed fix: `healed: true`, same key, same 7,317,870 bytes,
+> `backfill: already_present`, `correction: already_correct` — no duplicate Salesforce
+> entry. The bucket has versioning enabled, so the original bytes were also still
+> recoverable as a non-current version.
+>
+> **Standing risk this does not fix:** the portal's Files tab can delete a compliance
+> recording like any other document, and nothing warns the user. See TASKS.md.
+
 **Responses:**
 
 | Code | When |
 |---|---|
-| 200 | promoted (`already_matched: false`), or already done (`already_matched: true`) |
+| 200 | promoted (`already_matched: false`), already done (`already_matched: true`), or **repaired** (`healed: true`) |
 | 400 | `MISSING_FIELDS`, `INVALID_RECORD_ID`, `INVALID_CALL_ID`, `INVALID_BODY` |
 | 401 | missing/invalid `X-Sundial-Zap-Secret`, or none configured |
-| 404 | `RECORD_NOT_FOUND`, or `RECORDING_NOT_FOUND` (nothing parked and nothing matched) |
+| 404 | `RECORD_NOT_FOUND`, or `RECORDING_NOT_FOUND` (nothing parked, nothing matched, the heal failed, *and* the result was already logged) |
 
 ```json
 { "already_matched": false,
   "key": "SUNDIAL/a1P7y00000AUo6TEAT/welcome-call-2026-08-15-call_abc123.mp3",
   "recordId": "a1P7y00000AUo6TEAT", "callId": "call_abc123", "sizeBytes": 184320,
   "metadata": "registered", "log": "appended", "holdingDeleted": true }
+```
+
+A repair answers with `healed: true` and, when it had to restate the key,
+`correction: "appended"` (`"already_correct"` when the log was already right):
+
+```json
+{ "already_matched": false, "healed": true,
+  "key": "SUNDIAL/a1P7y00000B4iaPEAR/welcome-call-2026-09-09-call_a15c774e989eb4e8873b58de7d1.mp3",
+  "recordId": "a1P7y00000B4iaPEAR", "callId": "call_a15c774e989eb4e8873b58de7d1",
+  "sizeBytes": 7317870, "metadata": "already_registered",
+  "log": "already_present", "backfill": "already_present",
+  "correction": "already_correct", "healReason": null }
+```
+
+**Running a repair by hand.** The endpoint is idempotent, so this is safe to re-run:
+
+```powershell
+$zap = (aws secretsmanager get-secret-value --secret-id sundial/retell/api `
+        --region us-west-1 --query SecretString --output text | ConvertFrom-Json
+       ).zap_orphan_match_secret
+$evt = @{
+  httpMethod = "POST"; path = "/welcome-call/orphan-match"
+  headers = @{ "Content-Type" = "application/json"; "X-Sundial-Zap-Secret" = $zap }
+  body = (@{ call_id = "call_..."; sf_record_id = "a1P..." } | ConvertTo-Json -Compress)
+} | ConvertTo-Json -Depth 6 -Compress
+[System.IO.File]::WriteAllText("$env:TEMP
+epair.json", $evt,
+  (New-Object System.Text.UTF8Encoding $false))   # no BOM
+aws lambda invoke --function-name sundial-welcome-call --region us-west-1 `
+  --cli-binary-format raw-in-base64-out --payload "file://$env:TEMP
+epair.json" `
+  "$env:TEMP
+epair-out.json"
 ```
 
 ---
@@ -597,9 +757,12 @@ identical — only `<origin>` and the recording filename differ. A test asserts 
 byte-for-byte, because the whole point is that a reader never has to know which path
 produced an entry.
 
-`Recording:` prefers the permanent S3 key and falls back to Retell's URL (which
-**expires**) when archival failed. `Duration:` is `m:ss` from `duration_ms`, omitted
-when absent. `Voicemail: yes` is appended when `call_analysis.in_voicemail` is true.
+`Recording:` names the permanent S3 key **only once the object is confirmed present**;
+otherwise `unavailable — see ledger/CloudWatch` (the call had audio we do not hold) or
+`none` (the call produced none). It never prints Retell's URL, which expires — see
+[Only a confirmed key is ever written to the log](#only-a-confirmed-key-is-ever-written-to-the-log).
+`Duration:` is `m:ss` from `duration_ms`, omitted when absent. `Voicemail: yes` is
+appended when `call_analysis.in_voicemail` is true.
 
 `<stamp>` is `YYYY-MM-DD HH:mm MST`, local Phoenix time — Phoenix has no DST, so it is
 MST year-round. Whitespace inside any value is collapsed to single spaces; that is
@@ -639,6 +802,8 @@ would lose the status update as well.
                                     │ Calling │  ← NOT eligible (in flight)
                                     └────┬────┘
                                          │ call_analyzed
+                                         │ 1. connected? no ──► No Answer / Failed - Max Attempts
+                                         │ 2. yes ──► map verification_result:
              ┌───────────────┬───────────┼─────────────┬─────────────────┐
              ▼               ▼           ▼             ▼                 ▼
         ┌──────────┐  ┌──────────────┐ ┌─────────┐ ┌───────────┐ ┌────────────────────┐
@@ -651,6 +816,12 @@ would lose the status update as well.
 
 `No Answer` is the **only** non-terminal outcome — it is what makes the retry Flow
 meaningful, and the attempt ceiling is what makes it terminate.
+
+**The connection check runs before any of those arrows.** A call that never connected
+(dial-failure `disconnection_reason`, `call_status: not_connected`, or no transcript with
+~zero connected time) can only land in `No Answer` or `Failed - Max Attempts`, whatever
+its analysis says. Without it, a ring-out with no voicemail went to the terminal
+`Verified - Exceptions` and silently ended its own retry loop (fixed 2026-09-16).
 
 ---
 

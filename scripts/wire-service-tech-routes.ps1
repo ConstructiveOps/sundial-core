@@ -5,6 +5,9 @@
       sundial-service-board:
         GET  /service/tech/day                         my calls for a day
         GET  /service/tech/price-book                  price-book search for "add what I found"
+        GET  /service/tech/jobs, /jobs/{id}            read-only lists + records (2026-09-16)
+        GET  /service/tech/estimates, /estimates/{id}
+        GET  /service/tech/customers, /customers/{id}
         GET  /service/tech/calls/{id}                  one call, everything on it
         POST /service/tech/calls/{id}/status           on my way / clock in / complete / no-show
         POST /service/tech/calls/{id}/notes            stamped, append-only notes
@@ -77,6 +80,13 @@ Write-Host "==> /service/tech/day and /service/tech/price-book : GET, OPTIONS ->
 $day = Ensure-Resource $tech "day"
 $pb  = Ensure-Resource $tech "price-book"
 foreach ($r in @($day, $pb)) { foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board } }
+
+Write-Host "==> /service/tech/{jobs,estimates,customers} and /{id} : GET, OPTIONS -> $Board" -ForegroundColor Cyan
+foreach ($part in @("jobs", "estimates", "customers")) {
+    $list = Ensure-Resource $tech $part
+    $one  = Ensure-Resource $list "{id}"
+    foreach ($r in @($list, $one)) { foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board } }
+}
 
 Write-Host "==> /service/tech/calls/{id} : GET, OPTIONS -> $Board" -ForegroundColor Cyan
 $calls  = Ensure-Resource $tech "calls"

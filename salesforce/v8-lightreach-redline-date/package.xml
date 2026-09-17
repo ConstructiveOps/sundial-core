@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v8 LIGHTREACH REDLINE DATE CUTOFF - modifies Commission_Redline_PPW__c on both
+  objects (2 CustomFields, NOT additive - this replaces the deployed v3 formula).
+
+  DEPLOY THE PREBUILT ZIP (v8-lightreach-redline-date.zip - Linux-built,
+  forward-slash entries, Workbench-safe). Workbench -> Migration -> Deploy ->
+  Single Package. RUN CHECK ONLY FIRST - that compiles the formulas.
+  If you ever rebuild the zip: Windows Explorer "Send to > Compressed (zipped)
+  folder" on this folder's CONTENTS (package.xml at the zip root). NEVER
+  PowerShell 5.1 Compress-Archive.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.Commission_Redline_PPW__c</members>
+        <members>Sundial_Solar__c.Commission_Redline_PPW__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

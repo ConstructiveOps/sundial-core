@@ -27,3 +27,12 @@ lambdas/*/template.generated.js
 
 # Transient scratch output, anywhere.
 *.tmp
+
+# Cowork's per-session output folder (the desktop app writes deliverables here).
+# Working copies only — everything real is delivered into the repo paths directly.
+/Claude outputs/
+
+# Acumatica reconcile dumps and CloudWatch log captures from hand-diagnosis at the
+# repo root (out-rs.json, out-rsdc.json, sfq_errors.txt). Scratch, never source.
+/out-*.json
+/sfq_errors.txt

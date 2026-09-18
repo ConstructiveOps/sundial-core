@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-club (D-073, 2026-09-18) - the Service Club catalog + membership objects, one
+  pointer field on Sundial_Customer__c, one on Sundial_Estimate__c, and the integration-user
+  permission set for them.
+
+  PRECONDITION: salesforce/service-objects (D-072) is deployed - Sundial_Estimate__c must
+  exist for the Membership__c field.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
+  Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
+  Single Package -> CHECK ONLY first, expect 5/5 components (2 objects + 2 fields + 1
+  permission set), then deploy for real. Assign Sundial_Service_Club to the integration
+  user. Then in the Supabase SQL editor: sql/sundial_service_plan_cache.sql,
+  sql/sundial_membership_cache.sql, sql/2026-09-18_service_club.sql. Then the seed script
+  (scripts/seed-service-club.mjs; the runbook docs/integrations/service-club.md has the exact
+  command - a double dash cannot appear inside this XML comment).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Service_Plan__c</members>
+        <members>Sundial_Membership__c</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>Sundial_Customer__c.Active_Membership__c</members>
+        <members>Sundial_Estimate__c.Membership__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Club</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

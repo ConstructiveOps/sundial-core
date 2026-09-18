@@ -192,6 +192,12 @@ test("adHocLine requires description + unitPrice; linePatchFields refuses unknow
 // ---------------------------------------------------------------------------
 // Router + handler with an in-memory Salesforce
 // ---------------------------------------------------------------------------
+test("matchRoute: the club's public routes strip the stage prefix too and never need a token (D-073)", () => {
+  assert.deepEqual(matchRoute("GET", "/prod/public/club/harmon/plans"), { name: "clubPlans", params: ["harmon"] });
+  assert.deepEqual(matchRoute("POST", "/public/club/harmon/join"), { name: "clubJoin", params: ["harmon"] });
+  assert.equal(matchRoute("GET", "/public/club/harmon/memberships"), null, "the office list is not public");
+});
+
 test("matchRoute strips a stage prefix and captures ids", () => {
   assert.deepEqual(matchRoute("POST", "/prod/service/estimates/abc/lines"), { name: "addLine", params: ["abc"] });
   assert.deepEqual(matchRoute("DELETE", "/service/estimates/a/lines/b"), { name: "deleteLine", params: ["a", "b"] });
@@ -199,7 +205,7 @@ test("matchRoute strips a stage prefix and captures ids", () => {
 });
 
 function fakeSalesforce() {
-  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [], Sundial_Service_Call__c: [], Sundial_User__c: [], Sundial_Tenant__c: [{ Id: TENANT, Name: "harmon" }] };
+  const store = { Sundial_Customer__c: [], Sundial_Estimate__c: [], Sundial_Service_Job__c: [], Sundial_Price_Book_Item__c: [], Sundial_Service_Line__c: [], Sundial_Service_Invoice__c: [], Sundial_Service_Payment__c: [], Sundial_Service_Call__c: [], Sundial_User__c: [], Sundial_Service_Plan__c: [], Sundial_Membership__c: [], Sundial_Tenant__c: [{ Id: TENANT, Name: "harmon" }] };
   let seq = 0;
   const calls = { creates: [], updates: [], deletes: [], queries: [] };
   const fetches = [];
@@ -209,6 +215,8 @@ function fakeSalesforce() {
     cond = cond.trim().replace(/^\(|\)$/g, "");
     let m;
     if ((m = cond.match(/^(\w+) = '(.*)'$/))) return String(rec[m[1]] ?? "").toLowerCase() === m[2].replace(/\\'/g, "'").toLowerCase();
+    if ((m = cond.match(/^(\w+) != '(.*)'$/))) return String(rec[m[1]] ?? "").toLowerCase() !== m[2].toLowerCase();
+    if ((m = cond.match(/^(\w+) != null$/))) return rec[m[1]] != null;
     if ((m = cond.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
     if ((m = cond.match(/^(\w+) LIKE '(.*)'$/))) {
       const v = String(rec[m[1]] ?? "").toLowerCase();
@@ -254,6 +262,7 @@ function fakeSalesforce() {
     // Autonumber names the org assigns (the invoice number is the job number).
     if (obj === "Sundial_Service_Job__c" && !rec.Name) rec.Name = `SVC-${String(store[obj].length + 1).padStart(5, "0")}`;
     if (obj === "Sundial_Service_Payment__c" && !rec.Name) rec.Name = `PAY-${String(store[obj].length + 1).padStart(5, "0")}`;
+    if (obj === "Sundial_Membership__c" && !rec.Name) rec.Name = `MEM-${String(store[obj].length + 1).padStart(5, "0")}`;
     store[obj].push(rec);
     return { ok: true, id: rec.Id };
   };
@@ -293,6 +302,7 @@ function fakeSalesforce() {
       eq(col, val) { filters.push((r) => r[col] === val); return q; },
       is(col, val) { filters.push((r) => (val === null ? r[col] == null : r[col] === val)); return q; },
       lt(col, val) { filters.push((r) => r[col] < val); return q; },
+      gte(col, val) { filters.push((r) => r[col] >= val); return q; },
       in(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
       order(col, { ascending } = {}) { q._order = { col, ascending }; return q; },
       limit(n) { q._limit = n; return q; },
@@ -367,9 +377,13 @@ function makeHandler(fake, identityOverrides = {}) {
       if (fake.putFails) throw new Error("s3 down");
       fake.puts.push({ key, bytes: body.byteLength, contentType });
     },
+    deleteObject: async ({ key }) => {
+      (fake.deletes = fake.deletes || []).push(key);
+    },
     getSecret: async (name) => {
       if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
       if (name === "sundial/stripe" && fake.stripeSecret) return fake.stripeSecret;
+      if (name === "sundial/service-club" && fake.clubSecret) return fake.clubSecret;
       const e = new Error("not found");
       e.name = "ResourceNotFoundException";
       throw e;
@@ -377,6 +391,19 @@ function makeHandler(fake, identityOverrides = {}) {
     fetchUrl: async (url, init) => {
       fake.fetches.push(url);
       if (url.startsWith("https://api.stripe.com/") && fake.stripe) return fake.stripe(url, init);
+      if (url.startsWith("https://hooks.zapier.com/")) {
+        fake.hookBodies = fake.hookBodies || [];
+        fake.hookBodies.push({ url, body: JSON.parse(init.body) });
+        return { ok: !fake.hookFails, status: fake.hookFails ? 500 : 200, json: async () => ({}) };
+      }
+      if (url.startsWith("https://api.solardatapros.com/")) {
+        fake.solarFaxCalls = fake.solarFaxCalls || [];
+        const body = JSON.parse(init.body);
+        fake.solarFaxCalls.push({ url, headers: init.headers, body });
+        if (fake.solarFaxFails) return { ok: true, status: 200, json: async () => ({ success: false, message: "Invalid Api-Key" }) };
+        const action = body.disconnect === "1" ? "disconnected" : "created";
+        return { ok: true, status: 200, json: async () => ({ success: true, message: `User '${body.user.firstName} ${body.user.lastName}' ${action}`, action, account_id: "SFA-1", user_id: "SFU-1" }) };
+      }
       if (url.includes("/streetview/metadata")) {
         const status = fake.streetViewStatus ?? "OK";
         return { ok: true, json: async () => (status === "OK" ? { status, pano_id: "PANO1", location: { lat: 33.4, lng: -112.0 } } : { status }) };
@@ -809,30 +836,47 @@ test("street view: unconfigured without the secret; fetched once by pano id, cac
   assert.ok(fake.fetches[0].includes("source=outdoor"));
   assert.ok(fake.fetches[1].includes("/streetview?") && fake.fetches[1].includes("location=") && fake.fetches[1].includes("source=outdoor"), "the still is asked for by ADDRESS so Google aims the camera at the house");
   assert.ok(!fake.fetches[1].includes("pano="), "never by panorama id — that shows the camera car's heading, i.e. the house across the street");
-  assert.equal(fake.puts.at(-1).key, `SUNDIAL/${jobId}/street-view.jpg`);
+  // The key is stamped so a re-fetch lands at a NEW URL (the browser caches the old one).
+  assert.match(fake.puts.at(-1).key, new RegExp(`^SUNDIAL/${jobId}/street-view-\\d{8}T\\d{6}Z-[0-9a-f]{4}\\.jpg$`));
   assert.equal(fake.puts.at(-1).contentType, "image/jpeg");
-  assert.equal(job.Street_View_Image_Key__c, `SUNDIAL/${jobId}/street-view.jpg`);
-  assert.ok(first.body.url.endsWith(`/SUNDIAL/${jobId}/street-view.jpg`));
+  assert.equal(job.Street_View_Image_Key__c, fake.puts.at(-1).key);
+  assert.ok(first.body.url.endsWith(`/${fake.puts.at(-1).key}`));
+  const firstKey = fake.puts.at(-1).key;
 
   // Second read: served from the job, Google not asked again.
   const second = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
   assert.equal(second.body.cached, true);
   assert.equal(fake.fetches.length, 2);
 
+  // The address changes (the job page clears the pointer): the next read re-asks Google,
+  // writes a NEW key (a new URL — the browser's cache of the old one cannot hide it) and
+  // removes the old file. The deletes are best-effort.
+  fake.deletes = [];
+  job.Street_View_Image_Key__c = null;
+  job.Address_at_Creation__c = "77 New Rd, Tempe, AZ, 85281";
+  const moved = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
+  assert.equal(moved.body.cached, false);
+  assert.notEqual(job.Street_View_Image_Key__c, firstKey, "a fresh key, so a fresh URL");
+  assert.ok(fake.fetches.at(-1).includes(encodeURIComponent("77 New Rd")), "asked for the NEW address");
+  assert.deepEqual(fake.deletes, [], "nothing to delete when the pointer was already cleared — the old file stays until a refresh replaces it");
+  const refreshed = await call(h, "GET", `/service/jobs/${jobId}/street-view`, null, { refresh: "1" });
+  assert.equal(refreshed.body.cached, false);
+  assert.equal(fake.deletes.length, 1, "a refresh removes the file it replaced");
+
   // No imagery → NONE remembered; the next read does not ask Google either.
   fake.streetViewStatus = "ZERO_RESULTS";
   const none = await call(h, "GET", `/service/jobs/${jobId}/street-view`, null, { refresh: "1" });
   assert.equal(none.body.status, "none");
   assert.equal(job.Street_View_Image_Key__c, "NONE");
-  assert.equal(fake.fetches.length, 3);
+  const fetchesAfterNone = fake.fetches.length;
   const noneAgain = await call(h, "GET", `/service/jobs/${jobId}/street-view`);
   assert.equal(noneAgain.body.status, "none");
-  assert.equal(fake.fetches.length, 3);
+  assert.equal(fake.fetches.length, fetchesAfterNone);
 
   // Cross-tenant / unknown job is a 404, never a Google call.
   const nf = await call(h, "GET", `/service/jobs/a0X000000000000AAA/street-view`);
   assert.equal(nf.status, 404);
-  assert.equal(fake.fetches.length, 3);
+  assert.equal(fake.fetches.length, fetchesAfterNone);
 });
 
 test("invoice helpers: money summary, statuses, numbering, payment validation", () => {
@@ -1187,7 +1231,8 @@ test("stripe pure helpers: the Payment / Refund rows an intent becomes, the raw 
   assert.equal(r.Invoice__c, "I1");
   assert.equal(rawBodyOf({ body: Buffer.from("abc").toString("base64"), isBase64Encoded: true }).toString(), "abc");
   assert.equal(rawBodyOf({ body: "abc" }), "abc");
-  assert.deepEqual([...STRIPE_EVENT_TYPES], ["checkout.session.completed", "payment_intent.succeeded", "payment_intent.payment_failed", "charge.refunded"]);
+  // The endpoint's subscription list in the Stripe dashboard: payments + the Service Club (D-073).
+  assert.deepEqual([...STRIPE_EVENT_TYPES], ["checkout.session.completed", "payment_intent.succeeded", "payment_intent.payment_failed", "charge.refunded", "customer.subscription.updated", "customer.subscription.deleted", "invoice.paid", "invoice.payment_failed"]);
 });
 
 test("stripe webhook: signature is the gate (bad / tampered / unknown tenant / not configured); a deposit lands as a Payment row exactly once; the card goes on file", async () => {
@@ -1411,4 +1456,500 @@ test("stripe: a deposit paid before the job exists is deferred, then lands when 
   assert.equal(inv.Status__c, "Paid");
   assert.equal(iss.body.paymentStatus, "Paid");
   assert.ok(!iss.body.warnings.some((w) => /not charged/.test(w)), JSON.stringify(iss.body.warnings));
+});
+
+// ---------------------------------------------------------------------------
+// Service Club (D-073, 2026-09-18): the catalog, the join, the webhook's subscription
+// branch, plan discounts, the office's memberships
+// ---------------------------------------------------------------------------
+import { clubConfigFor, publicPlans, statusFromSubscription, summarizeMemberships, normalizeJoin, planDiscountFields, monthlyEquivalent } from "./club.js";
+
+const CLUB_SECRET = { tenants: { harmon: { solarFactsHookUrl: "https://hooks.zapier.com/catch/1/on", solarFactsCancelHookUrl: "https://hooks.zapier.com/catch/1/off", teamEmail: "service-team@example.com" } } };
+const PLAN_ROWS = (tenantId) => [
+  { Client__c: tenantId, Name: "Monitor Plan", Plan_Code__c: "monitor", Kind__c: "Subscription", Availability__c: "Available", Sort_Order__c: 10, Tagline__c: "Monthly monitoring and support.", Features__c: "Proactive system monitoring\nRemote troubleshooting", Monthly_Price__c: 8.99, Yearly_Price__c: 99.99, Stripe_Product_Id__c: "prod_mon", Stripe_Monthly_Price_Id__c: "price_mon_m", Stripe_Yearly_Price_Id__c: "price_mon_y", Discount_Scope__c: "Labor", Discount_Type__c: "Percent", Discount_Value__c: 10, Discount_Description__c: "10% off repair labor", Includes_Tune_Up__c: false, Includes_Cleaning__c: false },
+  { Client__c: tenantId, Name: "Maintain Plan", Plan_Code__c: "maintain", Kind__c: "Subscription", Availability__c: "Available", Sort_Order__c: 20, Highlight__c: "Most Popular", Monthly_Price__c: 19.99, Yearly_Price__c: 219.99, Stripe_Product_Id__c: "prod_mai", Stripe_Monthly_Price_Id__c: "price_mai_m", Stripe_Yearly_Price_Id__c: "price_mai_y", Discount_Scope__c: "Labor", Discount_Type__c: "Percent", Discount_Value__c: 10, Includes_Tune_Up__c: true, Includes_Cleaning__c: false },
+  { Client__c: tenantId, Name: "Protect Plan", Plan_Code__c: "protect", Kind__c: "Subscription", Availability__c: "Coming Soon", Sort_Order__c: 40, Monthly_Price__c: 39.99, Yearly_Price__c: 439.99, Includes_Tune_Up__c: true, Includes_Cleaning__c: true },
+  { Client__c: tenantId, Name: "Old Plan", Plan_Code__c: "old", Kind__c: "Subscription", Availability__c: "Retired", Sort_Order__c: 90, Monthly_Price__c: 5 },
+  { Client__c: tenantId, Name: "Service Call", Plan_Code__c: "truck-roll", Kind__c: "One-time", Availability__c: "Available", Sort_Order__c: 100, Price__c: 275, Features__c: "A technician at your home" },
+];
+/** A public call: no Authorization header at all. */
+const pub = (h, method, path, body, query) =>
+  h({ requestContext: { http: { method } }, rawPath: path, headers: { origin: "https://portal.example.com" }, body: body ? JSON.stringify(body) : undefined, queryStringParameters: query })
+    .then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
+function clubStripe(fake, stripeCalls, { subStatus = () => "active" } = {}) {
+  let sessions = 0;
+  return async (url, init) => {
+    stripeCalls.push({ url, init, params: init.body ? new URLSearchParams(init.body) : null });
+    const method = init.method;
+    if (url.endsWith("/customers") && method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_club" }) };
+    if (/\/customers\/cus_/.test(url) && method === "GET") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop(), deleted: false }) };
+    if (url.endsWith("/checkout/sessions") && method === "POST") {
+      sessions += 1;
+      return { ok: true, status: 200, json: async () => ({ id: `cs_test_${sessions}`, url: `https://checkout.stripe.com/c/pay/cs_test_${sessions}` }) };
+    }
+    if (/\/subscriptions\/sub_/.test(url) && method === "GET") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop(), status: subStatus(), start_date: 1_789_000_000, current_period_end: 1_791_600_000, cancel_at_period_end: false }) };
+    if (/\/subscriptions\/sub_/.test(url) && method === "POST") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop(), status: "active", cancel_at_period_end: true }) };
+    if (/\/subscriptions\/sub_/.test(url) && method === "DELETE") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop(), status: "canceled" }) };
+    if (url.endsWith("/billing_portal/sessions")) return { ok: true, status: 200, json: async () => ({ id: "bps_1", url: "https://billing.stripe.com/p/session/x" }) };
+    if (url.endsWith("/products") && method === "POST") return { ok: true, status: 200, json: async () => ({ id: "prod_new" }) };
+    if (/\/products\/prod_/.test(url) && method === "GET") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop() }) };
+    if (url.endsWith("/prices") && method === "POST") return { ok: true, status: 200, json: async () => ({ id: `price_new_${stripeCalls.length}` }) };
+    if (/\/prices\/price_/.test(url) && method === "GET") {
+      const id = url.split("/").pop();
+      return { ok: true, status: 200, json: async () => ({ id, active: true, unit_amount: id.endsWith("_m") ? 899 : 9999, recurring: { interval: id.endsWith("_m") ? "month" : "year" }, product: "prod_mon" }) };
+    }
+    if (/\/prices\/price_/.test(url) && method === "POST") return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop(), active: false }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+}
+
+test("club pure helpers: config per tenant, the public catalog, Stripe status mapping, MRR, the join form, the plan discount", () => {
+  assert.deepEqual(clubConfigFor(CLUB_SECRET, "harmon"), { solarFacts: null, solarFactsHookUrl: "https://hooks.zapier.com/catch/1/on", solarFactsCancelHookUrl: "https://hooks.zapier.com/catch/1/off", teamEmail: "service-team@example.com" });
+  assert.equal(clubConfigFor(CLUB_SECRET, "nobody"), null);
+  assert.equal(clubConfigFor({ tenants: { harmon: { solarFactsHookUrl: "https://h" } } }, "harmon").solarFactsCancelHookUrl, "https://h", "cancel hook falls back to the main hook");
+  const plans = publicPlans(PLAN_ROWS(TENANT).map((r, i) => ({ Id: `P${i}`, ...r })));
+  assert.deepEqual(plans.map((p) => [p.code, p.purchasable]), [["monitor", true], ["maintain", true], ["protect", false], ["truck-roll", true]], "Retired is hidden, Coming Soon is shown but not purchasable");
+  assert.equal(plans[0].monthly, 8.99);
+  assert.deepEqual(plans[0].features, ["Proactive system monitoring", "Remote troubleshooting"]);
+  assert.equal(plans[0].discountDescription, "10% off repair labor");
+  assert.equal(plans[3].price, 275);
+  assert.equal(statusFromSubscription({ status: "active", cancel_at_period_end: false, current_period_end: 1_791_600_000 }).status, "Active");
+  assert.equal(statusFromSubscription({ status: "past_due" }).status, "Past Due");
+  assert.equal(statusFromSubscription({ status: "canceled", ended_at: 1_790_000_000 }).endedAt, new Date(1_790_000_000 * 1000).toISOString());
+  assert.equal(statusFromSubscription({ status: "trialing" }).status, "Active");
+  assert.equal(monthlyEquivalent(99.99, "Yearly"), 8.33);
+  const sum = summarizeMemberships([
+    { Status__c: "Active", Service_Plan__c: "P0", Price__c: 8.99, Billing_Interval__c: "Monthly" },
+    { Status__c: "Active", Service_Plan__c: "P1", Price__c: 219.99, Billing_Interval__c: "Yearly" },
+    { Status__c: "Past Due", Service_Plan__c: "P0", Price__c: 8.99, Billing_Interval__c: "Monthly" },
+    { Status__c: "Cancelled", Service_Plan__c: "P0", Price__c: 8.99, Billing_Interval__c: "Monthly" },
+    { Status__c: "Pending", Service_Plan__c: "P1", Price__c: 19.99, Billing_Interval__c: "Monthly" },
+  ], [{ Id: "P0", Name: "Monitor Plan" }, { Id: "P1", Name: "Maintain Plan" }]);
+  assert.equal(sum.total, 5);
+  assert.equal(sum.active, 3, "Active + Past Due are live");
+  assert.equal(sum.mrr, 36.31, "8.99 + 219.99/12 + 8.99");
+  assert.deepEqual(sum.byStatus, { Active: 2, "Past Due": 1, Cancelled: 1, Pending: 1 });
+  assert.equal(sum.byPlan.find((p) => p.planId === "P0").Cancelled, 1);
+  const bad = normalizeJoin({ planCode: "", interval: "weekly", customer: { firstName: "A" } });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.problems, ["planCode is required", "interval must be monthly or yearly", "customer: email|phone"]);
+  const good = normalizeJoin({ planCode: "Monitor", interval: "Yearly", customer: { firstName: "Ann", lastName: "Lee", email: "ann@example.com" } });
+  assert.equal(good.ok, true);
+  assert.equal(good.value.planCode, "monitor");
+  assert.equal(good.value.interval, "Yearly");
+  assert.deepEqual(planDiscountFields({ Discount_Scope__c: "Both", Discount_Type__c: "Percent", Discount_Value__c: 10 }, "M1"), { Discount_Scope__c: "Both", Discount_Type__c: "Percent", Discount_Value__c: 10, Discount_Source__c: "Service Plan", Membership__c: "M1" });
+  assert.equal(planDiscountFields({ Discount_Value__c: 0 }, "M1"), null);
+});
+
+test("club: the public catalog, a join → Pending row + subscription Checkout, the webhook activates it (pointer, SolarFacts, team email), a member's new estimate carries the discount, renewals and cancellation follow Stripe", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.clubSecret = CLUB_SECRET;
+  for (const r of PLAN_ROWS(TENANT)) await fake.deps.sfCreateRecord("Sundial_Service_Plan__c", r);
+  const stripeCalls = [];
+  fake.stripe = clubStripe(fake, stripeCalls);
+  const h = makeHandler(fake);
+  const monitor = fake.store.Sundial_Service_Plan__c[0];
+
+  // The catalog, no login.
+  let r = await pub(h, "GET", "/prod/public/club/harmon/plans");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.configured, true);
+  assert.deepEqual(r.body.plans.map((p) => p.code), ["monitor", "maintain", "protect"]);
+  assert.equal(r.body.plans[2].purchasable, false);
+  assert.deepEqual(r.body.oneTime.map((p) => p.code), ["truck-roll"]);
+  assert.equal(r.body.brand, "Test Electric");
+  assert.equal((await pub(h, "GET", "/public/club/nobody/plans")).status, 404);
+
+  // A Coming Soon plan cannot be joined; a bad form is a 400 with the problems.
+  const customer = { firstName: "Ann", lastName: "Lee", email: "ann@example.com", phone: "602-555-0101", street: "9 Oak St", city: "Mesa", state: "AZ", postalCode: "85201" };
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "protect", interval: "monthly", customer });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "PLAN_NOT_AVAILABLE");
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "monthly", customer: { firstName: "Ann" } });
+  assert.equal(r.status, 400);
+
+  // The join: customer created + tagged, Pending membership, a subscription Checkout on the monthly price.
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "monthly", customer });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.url, "https://checkout.stripe.com/c/pay/cs_test_1");
+  assert.equal(r.body.price, 8.99);
+  const cust = fake.store.Sundial_Customer__c[0];
+  assert.equal(cust.Name, "Ann Lee");
+  assert.equal(cust.Requested_Project_Types__c, "Service");
+  assert.equal(cust.Stripe_Customer_Id__c, "cus_club");
+  const m = fake.store.Sundial_Membership__c[0];
+  assert.equal(m.Status__c, "Pending");
+  assert.equal(m.Service_Plan__c, monitor.Id);
+  assert.equal(m.Billing_Interval__c, "Monthly");
+  assert.equal(m.Price__c, 8.99);
+  assert.equal(m.Source__c, "Online");
+  assert.equal(m.Stripe_Checkout_Session_Id__c, "cs_test_1");
+  assert.equal(m.Customer_Name_at_Creation__c, "Ann Lee");
+  const session = stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  assert.equal(session.params.get("mode"), "subscription");
+  assert.equal(session.params.get("line_items[0][price]"), "price_mon_m");
+  assert.equal(session.params.get("customer"), "cus_club");
+  assert.equal(session.params.get("metadata[membershipId]"), m.Id);
+  assert.equal(session.params.get("subscription_data[metadata][kind]"), "membership");
+  assert.ok(session.params.get("success_url").startsWith("https://portal.example.com/club/joined?session="));
+  assert.ok(fake.activity.some((a) => a.event === "membership_started" && a.record_sf_id === m.Id && a.details.note === "new customer"));
+
+  // The success page's read: Pending until the webhook.
+  r = await pub(h, "GET", "/public/club/harmon/joined", null, { session: "cs_test_1" });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.status, "Pending");
+  assert.equal(r.body.plan.name, "Monitor Plan");
+  assert.equal(r.body.firstName, "Ann");
+  assert.equal((await pub(h, "GET", "/public/club/harmon/joined", null, { session: "cs_nope" })).status, 404);
+
+  // Stripe's checkout.session.completed in subscription mode → Active, the pointer set, SolarFacts told, the team emailed.
+  const meta = { tenant: "harmon", tenantId: TENANT, kind: "membership", membershipId: m.Id, customerId: cust.Id, planId: monitor.Id, planCode: "monitor", interval: "Monthly", source: "Online" };
+  const done = evt("evt_join", "checkout.session.completed", { id: "cs_test_1", object: "checkout.session", mode: "subscription", customer: "cus_club", subscription: "sub_1", created: 1_789_000_000, metadata: meta });
+  r = await send(h, stripeDelivery(done));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.status, "applied");
+  assert.equal(r.body.membershipId, m.Id);
+  assert.equal(m.Status__c, "Active");
+  assert.equal(m.Stripe_Subscription_Id__c, "sub_1");
+  assert.ok(m.Started_At__c);
+  assert.equal(m.Current_Period_End__c, new Date(1_791_600_000 * 1000).toISOString());
+  assert.equal(cust.Active_Membership__c, m.Id);
+  assert.equal(m.SolarFacts_Status__c, "Sent");
+  const hook = fake.hookBodies[0];
+  assert.equal(hook.url, "https://hooks.zapier.com/catch/1/on");
+  assert.equal(hook.body.event, "member.activated");
+  assert.equal(hook.body.customer.email, "ann@example.com");
+  assert.equal(hook.body.plan.code, "monitor");
+  assert.equal(hook.body.membershipNumber, "MEM-00001");
+  const teamMail = fake.emails.find((e) => e.to === "service-team@example.com");
+  assert.match(teamMail.subject, /New Service Club member: Ann Lee — Monitor Plan/);
+  assert.match(teamMail.text, /SolarFax has been sent the connect invite/);
+  assert.equal(fake.stripeEvents.find((e) => e.id === "evt_join").membership_sf_id, m.Id);
+  // Redelivered: nothing changes, no second hook.
+  r = await send(h, stripeDelivery(done));
+  assert.equal(r.body.duplicate, true);
+  assert.equal(fake.hookBodies.length, 1);
+  // The success page now says Active.
+  r = await pub(h, "GET", "/public/club/harmon/joined", null, { session: "cs_test_1" });
+  assert.equal(r.body.status, "Active");
+
+  // Joining again while a member is a 409 — the same person, matched by email.
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "maintain", interval: "yearly", customer: { ...customer, phone: "" } });
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.equal(r.body.code, "ALREADY_MEMBER");
+  assert.equal(fake.store.Sundial_Customer__c.length, 1, "no duplicate customer");
+
+  // The member's NEW estimate carries the plan discount; the office's own discount is not overridden.
+  r = await call(h, "POST", "/service/estimates", { customer: { id: cust.Id }, lines: [{ description: "Repair labor", kind: "Labor", unitPrice: 200 }, { description: "Part", kind: "Material", unitPrice: 100 }] });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(est.Discount_Source__c, "Service Plan");
+  assert.equal(est.Discount_Scope__c, "Labor");
+  assert.equal(est.Discount_Value__c, 10);
+  assert.equal(est.Membership__c, m.Id);
+  assert.equal(est.Discount_Amount__c, 20, "10% of the labor only");
+  assert.equal(est.Total__c, 280);
+  r = await call(h, "POST", "/service/estimates", { customer: { id: cust.Id }, estimate: { discountValue: 25, discountScope: "Both" }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 100 }] });
+  assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Value__c, 25);
+  assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Source__c, undefined);
+  // …and can be put on an existing estimate on demand.
+  r = await call(h, "POST", `/service/estimates/${fake.store.Sundial_Estimate__c[1].Id}/apply-plan-discount`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Value__c, 10);
+  assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Source__c, "Service Plan");
+  assert.equal(r.body.totals.Total__c, 90);
+
+  // The office's views.
+  r = await call(h, "GET", `/service/club/customers/${cust.Id}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.active.number, "MEM-00001");
+  assert.equal(r.body.active.plan.name, "Monitor Plan");
+  assert.equal(r.body.discount.Discount_Value__c, 10);
+  r = await call(h, "GET", "/service/club/memberships", null, { status: "Active" });
+  assert.equal(r.body.memberships.length, 1);
+  assert.equal(r.body.memberships[0].customerName, "Ann Lee");
+  r = await call(h, "GET", "/service/club/memberships", null, { q: "nobody" });
+  assert.equal(r.body.memberships.length, 0);
+  r = await call(h, "GET", "/service/club/report");
+  assert.equal(r.body.active, 1);
+  assert.equal(r.body.mrr, 8.99);
+  assert.deepEqual(r.body.owedVisits, [], "Monitor owes no visit");
+
+  // A renewal paid: last payment + lifetime; a failed one: Past Due + a team email; paid again: Active.
+  r = await send(h, stripeDelivery(evt("evt_inv1", "invoice.paid", { id: "in_1", object: "invoice", subscription: "sub_1", amount_paid: 899, amount_due: 899, created: 1_789_000_000, billing_reason: "subscription_create", status_transitions: { paid_at: 1_789_000_100 } })));
+  assert.equal(r.body.status, "applied");
+  assert.equal(m.Lifetime_Revenue__c, 8.99);
+  assert.equal(m.Last_Payment_Amount__c, 8.99);
+  assert.equal(fake.stripeEvents.find((e) => e.id === "evt_inv1").amount, 8.99);
+  r = await send(h, stripeDelivery(evt("evt_inv2", "invoice.payment_failed", { id: "in_2", object: "invoice", subscription: "sub_1", amount_due: 899, created: 1_791_600_000 })));
+  assert.equal(m.Status__c, "Past Due");
+  assert.equal(m.Payment_Failures__c, 1);
+  assert.match(fake.emails.at(-1).subject, /past due/);
+  const pastDueMails = fake.emails.length;
+  r = await send(h, stripeDelivery(evt("evt_sub_pd", "customer.subscription.updated", { id: "sub_1", object: "subscription", status: "past_due", current_period_end: 1_794_000_000, cancel_at_period_end: false, metadata: meta })));
+  assert.equal(fake.emails.length, pastDueMails, "the team hears about a past-due renewal once");
+  r = await send(h, stripeDelivery(evt("evt_inv3", "invoice.paid", { id: "in_3", object: "invoice", subscription: "sub_1", amount_paid: 899, created: 1_791_700_000 })));
+  assert.equal(m.Status__c, "Active");
+  assert.equal(m.Lifetime_Revenue__c, 17.98);
+  r = await call(h, "GET", "/service/club/report");
+  assert.equal(r.body.revenue.yearToDate, 17.98);
+  // An unknown subscription is ignored, never created.
+  r = await send(h, stripeDelivery(evt("evt_sub_x", "customer.subscription.updated", { id: "sub_other", object: "subscription", status: "active" })));
+  assert.equal(r.body.status, "ignored");
+  assert.equal(fake.store.Sundial_Membership__c.length, 1);
+
+  // The office cancels at period end: Stripe is told, the row stays Active with the flag.
+  r = await call(h, "POST", `/service/club/memberships/${m.Id}/cancel`, { reason: "Sold the house" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const cancelCall = stripeCalls.find((c) => c.url.endsWith("/subscriptions/sub_1") && c.init.method === "POST");
+  assert.equal(cancelCall.params.get("cancel_at_period_end"), "true");
+  assert.equal(m.Status__c, "Active");
+  assert.equal(m.Cancel_At_Period_End__c, true);
+  assert.equal(m.Cancel_Reason__c, "Sold the house");
+  assert.equal(cust.Active_Membership__c, m.Id, "still a member until the period ends");
+  // Stripe confirms the schedule (no second team email for the same cancellation), then ends it.
+  r = await send(h, stripeDelivery(evt("evt_sub_c", "customer.subscription.updated", { id: "sub_1", object: "subscription", status: "active", cancel_at_period_end: true, canceled_at: 1_791_800_000, current_period_end: 1_794_000_000 })));
+  assert.equal(r.body.status, "applied");
+  const emailsBefore = fake.emails.length;
+  r = await send(h, stripeDelivery(evt("evt_sub_d", "customer.subscription.deleted", { id: "sub_1", object: "subscription", status: "canceled", ended_at: 1_794_000_000, canceled_at: 1_791_800_000 })));
+  assert.equal(r.body.status, "applied");
+  assert.equal(m.Status__c, "Cancelled");
+  assert.equal(m.Ended_At__c, new Date(1_794_000_000 * 1000).toISOString());
+  assert.equal(cust.Active_Membership__c, null, "pointer cleared");
+  assert.equal(m.SolarFacts_Status__c, "Cancel Sent");
+  assert.equal(fake.hookBodies.at(-1).url, "https://hooks.zapier.com/catch/1/off");
+  assert.equal(fake.hookBodies.at(-1).body.event, "member.cancelled");
+  assert.equal(fake.emails.length, emailsBefore + 1);
+  assert.match(fake.emails.at(-1).subject, /membership ended/);
+  assert.equal((await call(h, "POST", `/service/club/memberships/${m.Id}/cancel`, {})).status, 409, "already ended");
+  // No longer a member: the discount route says so, and the customer can join again.
+  r = await call(h, "POST", `/service/estimates/${est.Id}/apply-plan-discount`);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "NOT_A_MEMBER");
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "maintain", interval: "yearly", customer });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Membership__c.length, 2);
+  assert.equal(fake.store.Sundial_Membership__c[1].Price__c, 219.99);
+  assert.equal(fake.store.Sundial_Customer__c.length, 1, "matched the same customer by email");
+});
+
+test("club: the SolarFacts hook failing never fails the webhook; the office resends; the manage link emails a portal session and never leaks whether the email is known", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.clubSecret = CLUB_SECRET;
+  fake.hookFails = true;
+  for (const r of PLAN_ROWS(TENANT)) await fake.deps.sfCreateRecord("Sundial_Service_Plan__c", r);
+  const stripeCalls = [];
+  fake.stripe = clubStripe(fake, stripeCalls);
+  const h = makeHandler(fake);
+  let r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "yearly", customer: { firstName: "Bo", lastName: "Ng", email: "bo@example.com" } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const m = fake.store.Sundial_Membership__c[0];
+  const cust = fake.store.Sundial_Customer__c[0];
+  r = await send(h, stripeDelivery(evt("evt_j2", "checkout.session.completed", { id: "cs_test_1", object: "checkout.session", mode: "subscription", customer: "cus_club", subscription: "sub_9", metadata: { tenantId: TENANT, membershipId: m.Id } })));
+  assert.equal(r.status, 200);
+  assert.equal(r.body.status, "applied");
+  assert.equal(m.Status__c, "Active");
+  assert.equal(m.SolarFacts_Status__c, "Failed");
+  assert.match(m.SolarFacts_Last_Error__c, /500/);
+  assert.match(fake.emails.find((e) => e.to === "service-team@example.com").text, /SolarFax was NOT told \(hook answered 500\)/);
+  fake.hookFails = false;
+  r = await call(h, "POST", `/service/club/memberships/${m.Id}/solarfacts`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.event, "member.activated");
+  assert.equal(m.SolarFacts_Status__c, "Sent");
+  assert.equal(m.SolarFacts_Last_Error__c, null);
+  // Manage: a known member's email gets the portal link; an unknown one gets the same 200.
+  r = await pub(h, "POST", "/public/club/harmon/manage", { email: "bo@example.com" });
+  assert.equal(r.status, 200);
+  const portal = stripeCalls.find((c) => c.url.endsWith("/billing_portal/sessions"));
+  assert.equal(portal.params.get("customer"), "cus_club");
+  assert.equal(portal.params.get("return_url"), "https://portal.example.com/club");
+  const mail = fake.emails.find((e) => e.to === "bo@example.com");
+  assert.match(mail.subject, /Manage your Test Electric Service Club membership/);
+  assert.match(mail.html, /https:\/\/billing\.stripe\.com\/p\/session\/x/);
+  assert.equal(r.body.message.includes("If that email"), true);
+  const before = fake.emails.length;
+  r = await pub(h, "POST", "/public/club/harmon/manage", { email: "stranger@example.com" });
+  assert.equal(r.status, 200);
+  assert.equal(fake.emails.length, before, "nothing sent, nothing said");
+  assert.equal(cust.Active_Membership__c, m.Id);
+});
+
+test("club: with SolarFax's API configured the activation creates the member + sends the connect invite, the end of the membership disconnects them, and a refusal is stamped for a resend", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.clubSecret = { tenants: { harmon: { solarFacts: { apiKey: "key-1", accessToken: "tok-1", inviteTemplate: "Harmon Connect" }, solarFactsHookUrl: "https://hooks.zapier.com/catch/1/on", teamEmail: "service-team@example.com" } } };
+  for (const r of PLAN_ROWS(TENANT)) await fake.deps.sfCreateRecord("Sundial_Service_Plan__c", r);
+  const stripeCalls = [];
+  fake.stripe = clubStripe(fake, stripeCalls);
+  const h = makeHandler(fake);
+  let r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "monthly", customer: { firstName: "Ann", lastName: "Lee", email: "ann@example.com", phone: "602-555-0101", street: "9 Oak St", city: "Mesa", state: "AZ", postalCode: "85201" } });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const m = fake.store.Sundial_Membership__c[0];
+  r = await send(h, stripeDelivery(evt("evt_x1", "checkout.session.completed", { id: "cs_test_1", object: "checkout.session", mode: "subscription", customer: "cus_club", subscription: "sub_x", metadata: { tenantId: TENANT, membershipId: m.Id } })));
+  assert.equal(r.body.status, "applied");
+  assert.equal(m.Status__c, "Active");
+  // The API was used, not the hook; both auth headers; the invite body carries the member, the address and the template.
+  assert.equal(fake.solarFaxCalls.length, 1);
+  assert.equal(fake.hookBodies, undefined, "the Zapier hook is only the fallback");
+  const inv = fake.solarFaxCalls[0];
+  assert.equal(inv.url, "https://api.solardatapros.com/api/v1/users");
+  assert.equal(inv.headers["Api-Key"], "key-1");
+  assert.equal(inv.headers["Access-Token"], "tok-1");
+  assert.deepEqual(inv.body.user, { firstName: "Ann", lastName: "Lee", email: "ann@example.com", enableAccess: "1", enableEmails: "1" });
+  assert.deepEqual(inv.body.account, { phone: "602-555-0101", addressOne: "9 Oak St", city: "Mesa", state: "AZ", zip: "85201", isLead: "0" });
+  assert.deepEqual(inv.body.sendEmailTemplate, { Name: "Harmon Connect" });
+  assert.equal(inv.body.disconnect, undefined);
+  assert.equal(inv.body.test, undefined);
+  assert.equal(m.SolarFacts_Status__c, "Sent");
+  assert.equal(m.SolarFacts_Account_Id__c, "SFA-1");
+  assert.equal(m.SolarFacts_User_Id__c, "SFU-1");
+  assert.match(fake.emails.find((e) => e.to === "service-team@example.com").text, /SolarFax has been sent the connect invite/);
+  // The key and token never reach a log line or an email.
+  assert.ok(!fake.emails.some((e) => /key-1|tok-1/.test(e.text + e.html)));
+  // The subscription ends → full disconnect.
+  r = await send(h, stripeDelivery(evt("evt_x2", "customer.subscription.deleted", { id: "sub_x", object: "subscription", status: "canceled", ended_at: 1_794_000_000, canceled_at: 1_791_800_000 })));
+  assert.equal(r.body.status, "applied");
+  assert.equal(m.Status__c, "Cancelled");
+  assert.equal(fake.solarFaxCalls.length, 2);
+  const off = fake.solarFaxCalls[1];
+  assert.equal(off.body.disconnect, "1");
+  assert.equal(off.body.user.email, "ann@example.com");
+  assert.equal(off.body.sendEmailTemplate, undefined, "no invite on the way out");
+  assert.equal(m.SolarFacts_Status__c, "Cancel Sent");
+  assert.match(fake.emails.at(-1).text, /SolarFax has disconnected the member's monitoring/);
+  // SolarFax refusing (success:false) is stamped, never fatal; the office resends once it is fixed.
+  fake.solarFaxFails = true;
+  r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "monthly", customer: { firstName: "Bo", lastName: "Ng", email: "bo@example.com" } });
+  const m2 = fake.store.Sundial_Membership__c[1];
+  r = await send(h, stripeDelivery(evt("evt_x3", "checkout.session.completed", { id: "cs_test_2", object: "checkout.session", mode: "subscription", customer: "cus_club2", subscription: "sub_y", metadata: { tenantId: TENANT, membershipId: m2.Id } })));
+  assert.equal(r.status, 200);
+  assert.equal(m2.Status__c, "Active");
+  assert.equal(m2.SolarFacts_Status__c, "Failed");
+  assert.match(m2.SolarFacts_Last_Error__c, /Invalid Api-Key/);
+  assert.match(fake.emails.find((e) => e.to === "service-team@example.com" && /Bo Ng/.test(e.text)).text, /SolarFax was NOT told \(Invalid Api-Key\)/);
+  fake.solarFaxFails = false;
+  r = await call(h, "POST", `/service/club/memberships/${m2.Id}/solarfacts`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.via, "api");
+  assert.equal(m2.SolarFacts_Status__c, "Sent");
+  assert.equal(m2.SolarFacts_Account_Id__c, "SFA-1");
+});
+
+test("club: the office records a member and sends the join link; a plan price change makes a new Stripe price; a tech is refused", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.clubSecret = CLUB_SECRET;
+  for (const r of PLAN_ROWS(TENANT)) await fake.deps.sfCreateRecord("Sundial_Service_Plan__c", r);
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cy Diaz", First_Name__c: "Cy", Last_Name__c: "Diaz", Primary_Email__c: "cy@example.com", Street__c: "3 Elm", City__c: "Phoenix", State__c: "AZ", Postal_Code__c: "85001" });
+  const stripeCalls = [];
+  fake.stripe = clubStripe(fake, stripeCalls);
+  const h = makeHandler(fake);
+  const cust = fake.store.Sundial_Customer__c[0];
+  let r = await call(h, "POST", "/service/club/memberships", { customerId: cust.Id, planCode: "maintain", interval: "yearly", source: "Migrated", email: true });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.emailed, true);
+  assert.equal(r.body.price, 219.99);
+  const m = fake.store.Sundial_Membership__c[0];
+  assert.equal(m.Source__c, "Migrated");
+  assert.equal(m.Status__c, "Pending");
+  const mail = fake.emails.find((e) => e.to === "cy@example.com");
+  assert.match(mail.subject, /Complete your Test Electric Service Club membership/);
+  assert.match(mail.html, /checkout\.stripe\.com/);
+  // A second link for the same customer while the first is Pending is fine (Pending is not live); an Active one is refused.
+  assert.equal((await call(h, "POST", "/service/club/memberships", { customerId: cust.Id, planCode: "monitor", interval: "monthly" })).status, 201);
+  assert.equal((await call(h, "POST", "/service/club/memberships", { customerId: cust.Id, planCode: "old", interval: "monthly" })).status, 409, "retired plan");
+  assert.equal((await call(h, "POST", "/service/club/memberships", { customerId: "a1Pnope0000000000A", planCode: "monitor" })).status, 400);
+  // A Pending membership cancelled by the office is Expired, nothing asked of Stripe.
+  r = await call(h, "POST", `/service/club/memberships/${m.Id}/cancel`, { reason: "never finished" });
+  assert.equal(r.body.status, "Expired");
+  assert.ok(!stripeCalls.some((c) => c.url.includes("/subscriptions/")));
+
+  // Plans: the office view, and a price edit that mints a new Stripe price and archives the old.
+  r = await call(h, "GET", "/service/club/plans");
+  assert.equal(r.body.plans.length, 5);
+  assert.equal(r.body.stripeMode, "test");
+  const monitor = fake.store.Sundial_Service_Plan__c[0];
+  r = await call(h, "PATCH", `/service/club/plans/${monitor.Id}`, { monthlyPrice: 9.99, availability: "Available", features: ["A", "B"], bogus: 1 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.rejectedFields, ["bogus"]);
+  assert.equal(monitor.Monthly_Price__c, 9.99);
+  assert.equal(monitor.Features__c, "A\nB");
+  const newPrice = stripeCalls.find((c) => c.url.endsWith("/prices") && c.init.method === "POST");
+  assert.equal(newPrice.params.get("unit_amount"), "999");
+  assert.equal(newPrice.params.get("recurring[interval]"), "month");
+  assert.ok(stripeCalls.some((c) => c.url.endsWith("/prices/price_mon_m") && c.init.method === "POST" && c.params.get("active") === "false"), "old monthly price archived");
+  assert.ok(!stripeCalls.some((c) => c.url.endsWith("/prices/price_mon_y") && c.init.method === "POST"), "the yearly price still matches — untouched");
+  assert.notEqual(monitor.Stripe_Monthly_Price_Id__c, "price_mon_m");
+  assert.equal(r.body.plan.monthly, 9.99);
+
+  // A tech (service.tech.self / .read only) is refused before any Salesforce call.
+  const tech = makeHandler(fake, { user: { id: "a1O7y00000TechAAAA", firstName: "Jake" }, access: { level: "Technician", scope: "tech", userId: "a1O7y00000TechAAAA", tenantId: TENANT } });
+  assert.equal((await call(tech, "GET", "/service/club/memberships")).status, 403);
+  assert.equal((await call(tech, "POST", "/service/club/memberships", { customerId: cust.Id, planCode: "monitor" })).status, 403);
+});
+
+test("club: a truck roll bought online is an approved estimate + a job paid as the deposit through the existing webhook; 'call me' is a job for the office", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  fake.clubSecret = CLUB_SECRET;
+  for (const r of PLAN_ROWS(TENANT)) await fake.deps.sfCreateRecord("Sundial_Service_Plan__c", r);
+  const stripeCalls = [];
+  fake.stripe = clubStripe(fake, stripeCalls);
+  const h = makeHandler(fake);
+  const customer = { firstName: "Dee", lastName: "Fox", email: "dee@example.com", phone: "602-555-0199", street: "12 Pine", city: "Tempe", state: "AZ", postalCode: "85281" };
+  let r = await pub(h, "POST", "/public/club/harmon/truck-roll", { customer, issue: "Inverter shows a red light" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.amount, 275);
+  assert.equal(r.body.url, "https://checkout.stripe.com/c/pay/cs_test_1");
+  const est = fake.store.Sundial_Estimate__c[0];
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const line = fake.store.Sundial_Service_Line__c[0];
+  assert.equal(est.Status__c, "Approved");
+  assert.equal(est.Approval_Method__c, "Online");
+  assert.equal(est.Approved_By_Name__c, "Dee Fox");
+  assert.equal(est.Deposit_Required__c, true);
+  assert.equal(est.Deposit_Amount__c, 275);
+  assert.equal(est.Total__c, 275);
+  assert.equal(est.Service_Job__c, job.Id);
+  assert.equal(line.Description__c, "Service Call");
+  assert.equal(line.Kind__c, "Fee");
+  assert.equal(line.Stage__c, "Approved");
+  assert.equal(job.Intake_Channel__c, "Web Form");
+  assert.equal(job.Issue_Description__c, "Inverter shows a red light");
+  assert.equal(job.Needs_Intake_Review__c, true);
+  assert.equal(job.Service_Type__c, "Paid Service");
+  const session = stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  assert.equal(session.params.get("mode"), "payment");
+  assert.equal(session.params.get("line_items[0][price_data][unit_amount]"), "27500");
+  assert.equal(session.params.get("payment_intent_data[metadata][kind]"), "deposit");
+  assert.equal(session.params.get("payment_intent_data[metadata][jobId]"), job.Id);
+  assert.equal(session.params.get("payment_intent_data[setup_future_usage]"), "off_session");
+  assert.match(fake.emails.at(-1).subject, /Online booking started: Dee Fox — Service Call/);
+  // The payment lands through the payments branch, untouched: a Deposit row, the job Deposit Paid.
+  const meta = { tenant: "harmon", tenantId: TENANT, estimateId: est.Id, jobId: job.Id, customerId: fake.store.Sundial_Customer__c[0].Id, invoiceId: "", kind: "deposit" };
+  r = await send(h, stripeDelivery(evt("evt_tr", "payment_intent.succeeded", { id: "pi_tr", object: "payment_intent", amount: 27500, amount_received: 27500, created: 1_789_000_000, latest_charge: "ch_tr", metadata: meta })));
+  assert.equal(r.body.status, "applied", JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Service_Payment__c[0].Amount__c, 275);
+  assert.equal(fake.store.Sundial_Service_Payment__c[0].Type__c, "Deposit");
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  assert.ok(est.Deposit_Paid_At__c);
+
+  // "Call me": a job in intake review, the team emailed, the same customer matched by phone.
+  r = await pub(h, "POST", "/public/club/harmon/request", { customer: { firstName: "Dee", lastName: "Fox", phone: "(602) 555-0199" }, message: "Not sure what's wrong, the bill went up" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.jobNumber, "SVC-00002");
+  assert.equal(fake.store.Sundial_Customer__c.length, 1);
+  const req = fake.store.Sundial_Service_Job__c[1];
+  assert.equal(req.Needs_Intake_Review__c, true);
+  assert.equal(req.Issue_Description__c, "Not sure what's wrong, the bill went up");
+  assert.match(fake.emails.at(-1).subject, /Website service request: Dee Fox \(SVC-00002\)/);
+  assert.match(fake.emails.at(-1).text, /They wrote: Not sure/);
+  // With Stripe off, the truck roll is a 503 with a phone-us message; the request still works.
+  const off = makeHandler({ ...fake, stripeSecret: null });
+  r = await pub(off, "POST", "/public/club/harmon/truck-roll", { customer, issue: "x" });
+  assert.equal(r.status, 503);
+  assert.equal((await pub(off, "GET", "/public/club/harmon/plans")).body.configured, false);
 });

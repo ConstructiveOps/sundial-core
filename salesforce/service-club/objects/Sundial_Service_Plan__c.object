@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Plan__c - the Service Club catalog (D-073): one row per thing sold online,
+  per tenant. Kind Subscription (Monitor / Maintain / Clean / Protect - monthly or yearly) or
+  One-time (a truck roll). The Stripe Product / Price ids are DERIVED from these rows by
+  scripts/seed-service-club.mjs and written back; a price change is a new Stripe Price and an
+  archived old one, never an edit. The member discount is expressed in the estimate's own
+  discount vocabulary so the estimate Lambda can copy it straight onto a new estimate.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Plans</relationshipLabel>
+        <relationshipName>Sundial_Service_Plans</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Plan_Code__c</fullName>
+        <description>Stable key per tenant (monitor / maintain / clean / protect / truck-roll). The seed script upserts on Client + code; the public pages address plans by it.</description>
+        <externalId>false</externalId>
+        <label>Plan Code</label>
+        <length>40</length>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Kind__c</fullName>
+        <description>Subscription = a recurring Stripe subscription (monthly / yearly prices). One-time = paid once through the estimate + deposit path (the truck roll).</description>
+        <externalId>false</externalId>
+        <label>Kind</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Subscription</fullName>
+                    <default>true</default>
+                    <label>Subscription</label>
+                </value>
+                <value>
+                    <fullName>One-time</fullName>
+                    <default>false</default>
+                    <label>One-time</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Availability__c</fullName>
+        <description>Available = on the public page and purchasable. Coming Soon = shown, not purchasable (Protect at launch). Hidden = office only (send-a-link still works). Retired = keeps history, sells nothing.</description>
+        <externalId>false</externalId>
+        <label>Availability</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Available</fullName>
+                    <default>true</default>
+                    <label>Available</label>
+                </value>
+                <value>
+                    <fullName>Coming Soon</fullName>
+                    <default>false</default>
+                    <label>Coming Soon</label>
+                </value>
+                <value>
+                    <fullName>Hidden</fullName>
+                    <default>false</default>
+                    <label>Hidden</label>
+                </value>
+                <value>
+                    <fullName>Retired</fullName>
+                    <default>false</default>
+                    <label>Retired</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Sort_Order__c</fullName>
+        <defaultValue>10</defaultValue>
+        <description>Public page order.</description>
+        <externalId>false</externalId>
+        <label>Sort Order</label>
+        <precision>3</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Highlight__c</fullName>
+        <description>Badge on the public card, e.g. MOST POPULAR. Blank = none.</description>
+        <externalId>false</externalId>
+        <label>Highlight</label>
+        <length>40</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Tagline__c</fullName>
+        <description>One line under the plan name.</description>
+        <externalId>false</externalId>
+        <label>Tagline</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Features__c</fullName>
+        <description>One feature per line, in the order shown on the card.</description>
+        <externalId>false</externalId>
+        <label>Features</label>
+        <length>4000</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>6</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Monthly_Price__c</fullName>
+        <description>Subscription plans: per month.</description>
+        <externalId>false</externalId>
+        <label>Monthly Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Yearly_Price__c</fullName>
+        <description>Subscription plans: per year (blank = no yearly option).</description>
+        <externalId>false</externalId>
+        <label>Yearly Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Price__c</fullName>
+        <description>One-time plans: the amount charged at purchase.</description>
+        <externalId>false</externalId>
+        <label>Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Price_Book_Item_Code__c</fullName>
+        <description>One-time plans: the price-book Item_Code__c that becomes the estimate line (the active version's price wins over Price__c when set). Blank = an ad-hoc line at Price__c.</description>
+        <externalId>false</externalId>
+        <label>Price Book Item Code</label>
+        <length>40</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Product_Id__c</fullName>
+        <description>Written by the seed script.</description>
+        <externalId>false</externalId>
+        <label>Stripe Product Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Monthly_Price_Id__c</fullName>
+        <description>Written by the seed script; replaced (old archived) when Monthly_Price__c changes.</description>
+        <externalId>false</externalId>
+        <label>Stripe Monthly Price Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Yearly_Price_Id__c</fullName>
+        <description>Written by the seed script.</description>
+        <externalId>false</externalId>
+        <label>Stripe Yearly Price Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Discount_Scope__c</fullName>
+        <description>What the member discount applies to on an estimate - the estimate's own Discount_Scope__c values.</description>
+        <externalId>false</externalId>
+        <label>Member Discount Scope</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Labor</fullName>
+                    <default>true</default>
+                    <label>Labor</label>
+                </value>
+                <value>
+                    <fullName>Material</fullName>
+                    <default>false</default>
+                    <label>Material</label>
+                </value>
+                <value>
+                    <fullName>Both</fullName>
+                    <default>false</default>
+                    <label>Both</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Discount_Type__c</fullName>
+        <externalId>false</externalId>
+        <label>Member Discount Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Percent</fullName>
+                    <default>true</default>
+                    <label>Percent</label>
+                </value>
+                <value>
+                    <fullName>Amount</fullName>
+                    <default>false</default>
+                    <label>Amount</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Discount_Value__c</fullName>
+        <description>10 = 10% (Percent) or $10 (Amount). Blank / 0 = the plan carries no estimate discount.</description>
+        <externalId>false</externalId>
+        <label>Member Discount Value</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Discount_Description__c</fullName>
+        <description>How the office and the customer read it, e.g. '10% off repair labor'.</description>
+        <externalId>false</externalId>
+        <label>Member Discount Description</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Includes_Tune_Up__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>The office owes the member one tune-up a year.</description>
+        <externalId>false</externalId>
+        <label>Includes Annual Tune-Up</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Includes_Cleaning__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>The office owes the member one panel cleaning a year.</description>
+        <externalId>false</externalId>
+        <label>Includes Annual Cleaning</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Notes__c</fullName>
+        <externalId>false</externalId>
+        <label>Notes</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Plan</label>
+    <nameField>
+        <label>Plan Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Service Plans</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>ReadWrite</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

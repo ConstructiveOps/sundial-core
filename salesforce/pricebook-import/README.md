@@ -70,3 +70,32 @@ Rebuild after editing the source files or the rules: `node scripts/build-pricebo
 - Re-running the upsert later (after Beth's edits to the source files) is safe: same
   `HCP_Id__c`, updated fields, no new rows — but note that a re-run overwrites Name /
   Description / prices on version 1 only; versions the office has since created are untouched.
+
+## Sharing — why an import can "succeed" and still not show in Sundial (2026-09-18)
+
+The service objects are **Private** (sharing model), and the portal reads Salesforce as the
+**integration user**, which therefore sees only the records it owns or that are shared to it.
+A DataLoader import runs as *you*, so every imported row is owned by you and invisible to the
+integration user — DataLoader's success file says 219, Sundial shows 1 (the item made from the
+portal). `node scripts/diagnose-cache.mjs --object pricebookitem --tenant harmon` shows the
+integration user's view and the owner of what it can see.
+
+**The fix (decided 2026-09-18): the Sundial objects' org-wide default is Public Read/Write
+(internal), external Private.** Salesforce sharing is inert for Sundial by design — one
+integration user serves every portal session, and every access decision is made in
+`lib/access.js` by tenant scope (D-064). The only Salesforce users in the org are Constructive
+Operations staff, who administer every tenant anyway. So there is nothing for a Private OWD to
+protect, and it silently hides admin-created records from the app.
+
+1. Setup → **Sharing Settings** → **Edit** → for every `Sundial_*` object set *Default Internal
+   Access* = **Public Read/Write** and *Default External Access* = **Private** → Save. Salesforce
+   recalculates in the background (a minute or two). Not Read/Write/Transfer — nothing needs to
+   change owners.
+2. The `.object` files in `salesforce/service-objects/` and `salesforce/service-club/` now declare
+   `<sharingModel>ReadWrite</sharingModel>` (and the generators emit it), so a whole-object
+   redeploy can never flip an object back to Private.
+3. Re-run the diagnose script: Salesforce should now report 219 / 162 active; then run the
+   cache resync it prints (`sundial-cache-sync` with `{ "mode": "full", "object": "pricebookitem" }`).
+
+Alternatives kept for the record: an owner-based sharing rule per object (nine rules to
+maintain), or Mass Transfer Records to the integration user (fixes one import, not the next).

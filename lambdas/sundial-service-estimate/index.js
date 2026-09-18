@@ -95,7 +95,7 @@ import {
   S3_BUCKET,
   S3_REGION,
 } from "../../lib/file-access.js";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import {
   EVENTS,
   recordActivity,
@@ -143,6 +143,7 @@ import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js"
 import { createInvoiceHandlers, createMoneyCore } from "./invoice.js";
 import { createStripeHandlers } from "./stripe.js";
 import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
+import { createClubHandlers } from "./club.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
@@ -348,11 +349,30 @@ const ROUTES = [
   // Stripe (D-072 amendment 8, stripe.js): the office's charge, and Stripe's own calls (no login).
   ["POST", /^\/service\/invoices\/([^/]+)\/charge\/?$/, "chargeInvoiceRoute"],
   ["POST", /^\/webhooks\/stripe\/([^/]+)\/?$/, "stripeWebhook"],
+  // Service Club (D-073, club.js). Public: the tenant slug is in the URL, no login.
+  ["GET", /^\/public\/club\/([^/]+)\/plans\/?$/, "clubPlans"],
+  ["POST", /^\/public\/club\/([^/]+)\/join\/?$/, "clubJoin"],
+  ["GET", /^\/public\/club\/([^/]+)\/joined\/?$/, "clubJoined"],
+  ["POST", /^\/public\/club\/([^/]+)\/truck-roll\/?$/, "clubTruckRoll"],
+  ["POST", /^\/public\/club\/([^/]+)\/request\/?$/, "clubRequest"],
+  ["POST", /^\/public\/club\/([^/]+)\/manage\/?$/, "clubManage"],
+  // Office.
+  ["GET", /^\/service\/club\/plans\/?$/, "clubPlansOffice"],
+  ["PATCH", /^\/service\/club\/plans\/([^/]+)\/?$/, "clubPatchPlan"],
+  ["GET", /^\/service\/club\/memberships\/?$/, "clubMemberships"],
+  ["POST", /^\/service\/club\/memberships\/?$/, "clubCreateMembership"],
+  ["POST", /^\/service\/club\/memberships\/([^/]+)\/cancel\/?$/, "clubCancel"],
+  ["POST", /^\/service\/club\/memberships\/([^/]+)\/solarfacts\/?$/, "clubResendSolarFacts"],
+  ["GET", /^\/service\/club\/report\/?$/, "clubReport"],
+  ["GET", /^\/service\/club\/customers\/([^/]+)\/?$/, "clubCustomer"],
+  ["POST", /^\/service\/estimates\/([^/]+)\/apply-plan-discount\/?$/, "applyPlanDiscount"],
 ];
+/** Routes with no bearer token: the Stripe webhook (signature-gated) and the club's public pages. */
+export const PUBLIC_ROUTES = new Set(["stripeWebhook", "clubPlans", "clubJoin", "clubJoined", "clubTruckRoll", "clubRequest", "clubManage"]);
 
 export function matchRoute(method, path) {
   // Strip a stage prefix ("/prod/service/...") if the gateway passes one.
-  const p = (path || "").replace(/^\/[^/]+(?=\/(service|webhooks)\/)/, "");
+  const p = (path || "").replace(/^\/[^/]+(?=\/(service|webhooks|public)\/)/, "");
   for (const [m, re, name] of ROUTES) {
     if (m !== method) continue;
     const hit = p.match(re);
@@ -372,7 +392,12 @@ export function matchRoute(method, path) {
 export const STREET_VIEW_SECRET = "sundial/google-maps";
 export const STREET_VIEW_NONE = "NONE";
 export const STREET_VIEW_SIZE = "640x400";
-export const streetViewKey = (jobId) => buildKey(jobId, "street-view.jpg");
+// The key carries a timestamp (2026-09-18): the S3 URL is what the browser caches, so a
+// re-fetch after an address change MUST land at a new URL or the office keeps seeing the
+// old house. The previous file is deleted best-effort when a new one is written.
+export const streetViewKey = (jobId, at = new Date()) =>
+  buildKey(jobId, `street-view-${at.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z")}-${randomBytes(2).toString("hex")}.jpg`);
+export const isStreetViewKey = (key) => /\/street-view(-\d{8}T\d{6}Z-[0-9a-f]{4})?\.jpg$/.test(String(key || ""));
 
 export function createHandler(deps = {}) {
   const d = {
@@ -390,6 +415,7 @@ export function createHandler(deps = {}) {
     renderPdf: realRenderEstimatePdf,
     putObject: async ({ key, body, contentType }) =>
       s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
+    deleteObject: async ({ key }) => s3().send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
     getSecret: realGetSecret,
@@ -632,6 +658,12 @@ export function createHandler(deps = {}) {
     if (!isTemplate) {
       fields.Sundial_Customer__c = customer.Id;
       Object.assign(fields, snapshotFields(customer));
+      // A Service Club member's estimate starts with the plan's discount (D-073.7) unless
+      // the caller set a discount of its own; the office can change it like any discount.
+      if (extra.Discount_Value__c === undefined) {
+        const disc = await club.discountForCustomer(customer.Id, tenantId);
+        if (disc) Object.assign(fields, disc);
+      }
     }
     if (fields.Sold_By__c === undefined && body?.soldBySelf === true && userId) fields.Sold_By__c = userId;
     for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
@@ -1456,7 +1488,7 @@ export function createHandler(deps = {}) {
       //    facing), which on a residential street is the house across the road. Asked
       //    for a location, Google picks the nearest outdoor panorama AND aims the camera
       //    at the address (2026-09-12: Tim's own house came out as the neighbour's).
-      const key = streetViewKey(job.Id);
+      const key = streetViewKey(job.Id, d.now());
       try {
         const img = await d.fetchUrl(
           `https://maps.googleapis.com/maps/api/streetview?size=${STREET_VIEW_SIZE}&${q}&fov=80&pitch=0`
@@ -1469,6 +1501,16 @@ export function createHandler(deps = {}) {
         return jsonResponse(502, cors, { error: "street_view_failed", code: "STREET_VIEW_FAILED", message: "Couldn't fetch the image." });
       }
       await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Street_View_Image_Key__c: key });
+      // The previous still (a refresh, or an address change that cleared the pointer but not
+      // the file) is removed so the Files tab does not fill with old houses. Best-effort:
+      // the role may lack s3:DeleteObject, and a leftover file is a nuisance, not a fault.
+      if (current && current !== STREET_VIEW_NONE && current !== key && isStreetViewKey(current) && d.deleteObject) {
+        try {
+          await d.deleteObject({ key: current });
+        } catch (e) {
+          console.error("street-view: old image not removed:", e?.message || e);
+        }
+      }
       return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(key), key, cached: false, panoLocation: meta.location ?? null });
     },
   };
@@ -1487,7 +1529,11 @@ export function createHandler(deps = {}) {
   }
   // Money: one core (loaders + settleMoney) shared by the invoice routes and Stripe.
   const money = createMoneyCore(d, { act, markStale, CACHE });
-  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE });
+  // The Service Club (D-073): public join / truck roll / request, the office's memberships,
+  // and the webhook's subscription branch (consulted by stripe.js before the payments branch).
+  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor });
+  Object.assign(H, club.handlers);
+  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club });
   Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
@@ -1509,6 +1555,10 @@ export function createHandler(deps = {}) {
     chargeInvoiceRoute: "service.invoice.write",
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     techAddLines: "service.tech.self",
+    // Service Club (D-073): reads for anyone in the office, writes their own key.
+    clubPlansOffice: "service.club.read", clubMemberships: "service.club.read", clubReport: "service.club.read", clubCustomer: ["service.club.read", "service.estimate.write"],
+    clubPatchPlan: "service.club.write", clubCreateMembership: "service.club.write", clubCancel: "service.club.write", clubResendSolarFacts: "service.club.write",
+    applyPlanDiscount: "service.estimate.write",
   };
 
   return async function handler(event) {
@@ -1526,6 +1576,22 @@ export function createHandler(deps = {}) {
         return await H.stripeWebhook({ params: route.params, event, headers, cors });
       } catch (err) {
         console.error("stripe webhook error:", err?.message || err);
+        return jsonResponse(500, cors, { error: "server_error", route: route.name });
+      }
+    }
+    // The club's public pages (D-073): no login; the tenant is the URL's slug, every write
+    // is a Stripe Checkout the customer completes on Stripe's page or a job for the office.
+    if (PUBLIC_ROUTES.has(route.name)) {
+      let pub = {};
+      if (method === "POST") {
+        const parsed = parseJsonBody(event);
+        if (!parsed.ok && event?.body) return bad(cors, "INVALID_BODY", "Body must be JSON.");
+        pub = parsed.ok ? parsed.data : {};
+      }
+      try {
+        return await H[route.name]({ params: route.params, body: pub, query: event?.queryStringParameters || {}, cors });
+      } catch (err) {
+        console.error(`service-club ${route.name} error:`, err?.sfBody || err?.message || err);
         return jsonResponse(500, cors, { error: "server_error", route: route.name });
       }
     }

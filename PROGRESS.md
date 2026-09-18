@@ -1,5 +1,98 @@
 # Sundial — Progress Log
 
+## 2026-09-18 (evening) — SolarFax by API, Salesforce sharing opened, Street View + Price Book side quests
+
+**SolarFax (Solar Data Pros) is their REST API, not a Zapier hook** (D-073 amendment 1).
+Their docs (solardatapros.crunch.help → API Docs) describe one endpoint, `POST /api/v1/users`
+with `Api-Key` + `Access-Token` headers, that creates-or-updates a user + account, sends a
+named email template, and takes a `disconnect` flag ("full disconnect and data deletion").
+New `lib/solarfacts.js` (`solarFactsConfigFor`, `inviteBody`, `disconnectBody`,
+`createSolarFactsClient` → `invite` / `disconnect`; fetch injectable; key + token never logged)
+and `club.js`'s `postSolarFacts` now: on activation, create the member with the address, login
++ emails on, `newOnly` off, the tenant's white-labelled connect template — **SolarFax emails the
+invite**; on `customer.subscription.deleted` (cancel or lapse — Past Due never disconnects),
+`disconnect`. SolarFax's `account_id` / `user_id` are stamped on the membership (two new fields,
+package regenerated, delta SQL extended). Refusal (`success:false`) or outage → `Failed` + the
+message, named in the team email, never fails the webhook; Resend retries and now reports
+`via: api | hook`. Config `tenants[slug].solarFacts = { apiKey, accessToken, inviteTemplate,
+baseUrl?, test? }` in `sundial/service-club`; the Zapier hook stays as the fallback. Tests:
+`lib/solarfacts.test.js` (4) and a new estimate test walking join → invite → delete → disconnect
+→ refusal → resend against a fake SolarFax (estimate 44). Runbook rewritten: what to ask SolarFax
+support for (key, token, template name, confirm `disconnect`), the secret's shape, the Stripe
+"cancel on failed retries" setting that turns a lapse into the disconnect.
+
+**Salesforce sharing: OWD Public Read/Write (internal), Private (external) on every `Sundial_*`
+object.** The Price Book side quest: the DataLoader upsert succeeded twice, Sundial showed one
+item. `scripts/diagnose-cache.mjs` (new: Salesforce count / active vs cache count, the owners
+of what the integration user can see, the resync command) showed Salesforce itself returning
+1 row — the imported rows are owned by Tim and the objects were Private, so the integration
+user could not see them. Salesforce sharing is inert for Sundial (one integration user, every
+decision in `lib/access.js`, D-064), so the OWD opens: the 7 service `.object` files, the 2 club
+ones and both generators now emit `<sharingModel>ReadWrite</sharingModel>` so a redeploy can
+never flip it back; the pricebook README's new "Sharing" section holds the reasoning and the
+Setup steps (Tim's).
+
+**Street View after an address edit.** The image was cached at a fixed key and the browser kept
+the old bytes: keys are now stamped (`street-view-{stamp}-{4hex}.jpg`), the old object is deleted
+best-effort on refresh, and the portal card re-fetches when the address changes (`<img key>`).
+
+## 2026-09-18 (later) — The Service Club: memberships sold from Sundial, billed by Stripe (D-073)
+
+Workstream S, pulled forward on 9/1, built end to end: solarserviceclub.com's "we'll email you
+an invoice" becomes pick-a-plan → Stripe Checkout → a membership row that follows the
+subscription. The catalog was read off the live site (Monitor $8.99/$99.99, Maintain
+$19.99/$219.99, Clean $39.99/$439.99, Protect Coming Soon at $39.99/$439.99) and lives in
+Salesforce, never in code.
+
+**Salesforce (`scripts/gen-service-club.py` → `salesforce/service-club/`).** Two objects:
+`Sundial_Service_Plan__c` (the catalog: kind Subscription / One-time, availability, prices,
+features, the Stripe product / price ids, the member discount in the estimate's own scope /
+type / value, tune-up + cleaning entitlements) and `Sundial_Membership__c` (MEM-#: customer,
+plan, Pending → Active → Past Due → Cancelled | Expired, interval, price, source Online / Office /
+Migrated, `Stripe_Subscription_Id__c` external id, period end, cancellation stamps, last /
+lifetime payments, SolarFacts hand-off status, customer snapshot). `Active_Membership__c` on
+the customer hub; `Membership__c` on the estimate. Permission set `Sundial_Service_Club`. Cache
+tables + a delta SQL for the pointer columns and `membership_sf_id` on the Stripe ledger.
+Registries (`sf-query`, `cache-sync`, `lib/access.js` OBJECTS) know `serviceplan` / `membership`.
+
+**The catalog is data, Stripe is derived** (`scripts/seed-service-club.mjs --tenant harmon
+--apply`): upserts the five rows by code and creates the Stripe Products / recurring Prices
+from them, ids written back; a price change is a new Price and an archived old one
+(`syncPlanPrices()` in `club.js`, shared with the office's PATCH).
+
+**`lambdas/sundial-service-estimate/club.js`** — everything lives in the estimate Lambda
+because the join, the truck roll and the "call me" reuse its customer / estimate / job code:
+
+- Public, no login, `/public/club/{tenant}/…` (the slug in the URL like the webhook): `plans`,
+  `join` (customer matched by email / phone / address or created + tagged, a Pending row, a
+  `subscription`-mode Checkout with `allow_promotion_codes`), `joined` (the success page's
+  read, polled), `truck-roll` (an Approved estimate + job with the plan's price as the deposit,
+  paid through the existing deposit Checkout and webhook untouched), `request` ("call me": a
+  job in Needs Intake Review), `manage` (emails a Stripe customer-portal link; always 200).
+- The webhook's club branch, consulted before the payments branch: `checkout.session.completed`
+  in subscription mode activates (subscription id, dates, the customer's pointer, the
+  SolarFacts hook, the team email); `customer.subscription.updated / deleted`, `invoice.paid`,
+  `invoice.payment_failed` keep the row current — Past Due on a failed renewal (team emailed
+  once), Cancelled + `Ended_At__c` + pointer cleared + cancel hook + team email at the end. An
+  unknown subscription is `ignored` — a membership is only ever born from our own join.
+- Office (`service.club.read` / `.write`): memberships list, report (counts, MRR at
+  1/12 of yearly, revenue from the ledger, members owed a tune-up / cleaning), one customer's
+  membership, **create** (a Pending row + join link, optionally emailed — Ben's migration of
+  the ~24 members: each enters their own card), cancel (through Stripe, at period end or now;
+  a never-activated row becomes Expired), resend SolarFacts, plans GET / PATCH.
+- Discounts: `createEstimateRecord` puts the member's plan discount on a new estimate
+  (`Discount_Source__c = Service Plan`, `Membership__c`) unless the request set one;
+  `POST /service/estimates/{id}/apply-plan-discount` for an existing one.
+- Config per tenant in Secrets Manager `sundial/service-club` (`solarFactsHookUrl`,
+  `solarFactsCancelHookUrl`, `teamEmail`) — superseded the same evening by the SolarFax API
+  (see the entry above). `lib/stripe.js` gained `del` (immediate cancel).
+  `lib/service-activity.js` gained the four `membership_*` events.
+
+Tests: estimate 43 (+6: helpers, the whole join → webhook → discount → renewals → cancel arc,
+hook failure + resend + manage, office create + plan price change + tech refused, truck roll +
+call me), stripe lib 4, access 177 (matrix + 2 columns). `scripts/wire-service-club-routes.ps1`.
+Runbook `docs/integrations/service-club.md`; D-073 in DECISIONS.md.
+
 ## 2026-09-18 — Addresses, related Service Jobs, the job's photos + files everywhere, GPS on the clock
 
 Tim's list from the evening of the 17th, built as one block.

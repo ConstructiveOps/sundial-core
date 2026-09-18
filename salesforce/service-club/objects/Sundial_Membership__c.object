@@ -1,0 +1,445 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Membership__c - one row per customer x plan x Stripe subscription (D-073). Born
+  Pending by Sundial's own join (never by a webhook), Active when Stripe's checkout completes,
+  then follows the subscription: Past Due on a failed renewal, Cancelled when it ends.
+  Stripe_Subscription_Id__c is the idempotency key for every subscription event. The customer
+  hub's Active_Membership__c points at the one live row.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Sundial_Customer__c</fullName>
+        <description>Required.</description>
+        <externalId>false</externalId>
+        <label>Sundial Customer</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Customer__c</referenceTo>
+        <relationshipLabel>Service Club Memberships</relationshipLabel>
+        <relationshipName>Service_Club_Memberships</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Service_Plan__c</fullName>
+        <description>Required.</description>
+        <externalId>false</externalId>
+        <label>Service Plan</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Service_Plan__c</referenceTo>
+        <relationshipLabel>Memberships</relationshipLabel>
+        <relationshipName>Memberships</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Service Club Memberships</relationshipLabel>
+        <relationshipName>Sundial_Memberships</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Customer_Name_at_Creation__c</fullName>
+        <description>Snapshot at record creation (standard snapshot pattern).</description>
+        <externalId>false</externalId>
+        <label>Customer Name at Creation</label>
+        <length>120</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Address_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Address at Creation</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Primary_Phone_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Phone at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Phone</type>
+    </fields>
+    <fields>
+        <fullName>Primary_Email_at_Creation__c</fullName>
+        <description>Snapshot at record creation.</description>
+        <externalId>false</externalId>
+        <label>Primary Email at Creation</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Email</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <description>Pending (checkout started) -&gt; Active -&gt; Past Due (renewal failed) -&gt; Cancelled (subscription ended) | Expired (pending checkout never completed).</description>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Pending</fullName>
+                    <default>true</default>
+                    <label>Pending</label>
+                </value>
+                <value>
+                    <fullName>Active</fullName>
+                    <default>false</default>
+                    <label>Active</label>
+                </value>
+                <value>
+                    <fullName>Past Due</fullName>
+                    <default>false</default>
+                    <label>Past Due</label>
+                </value>
+                <value>
+                    <fullName>Cancelled</fullName>
+                    <default>false</default>
+                    <label>Cancelled</label>
+                </value>
+                <value>
+                    <fullName>Expired</fullName>
+                    <default>false</default>
+                    <label>Expired</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Billing_Interval__c</fullName>
+        <externalId>false</externalId>
+        <label>Billing Interval</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Monthly</fullName>
+                    <default>true</default>
+                    <label>Monthly</label>
+                </value>
+                <value>
+                    <fullName>Yearly</fullName>
+                    <default>false</default>
+                    <label>Yearly</label>
+                </value>
+                <value>
+                    <fullName>None</fullName>
+                    <default>false</default>
+                    <label>None</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Price__c</fullName>
+        <description>What the member pays per interval, as sold.</description>
+        <externalId>false</externalId>
+        <label>Price</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Source__c</fullName>
+        <description>Online = the public join page. Office = a join link sent from Sundial. Migrated = an existing member moved onto Stripe billing.</description>
+        <externalId>false</externalId>
+        <label>Source</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Online</fullName>
+                    <default>true</default>
+                    <label>Online</label>
+                </value>
+                <value>
+                    <fullName>Office</fullName>
+                    <default>false</default>
+                    <label>Office</label>
+                </value>
+                <value>
+                    <fullName>Migrated</fullName>
+                    <default>false</default>
+                    <label>Migrated</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Stripe_Subscription_Id__c</fullName>
+        <description>External ID - the webhook's idempotency key.</description>
+        <externalId>true</externalId>
+        <label>Stripe Subscription Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Checkout_Session_Id__c</fullName>
+        <description>The session the join minted; the success page looks the membership up by it.</description>
+        <externalId>true</externalId>
+        <label>Stripe Checkout Session Id</label>
+        <length>80</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stripe_Customer_Id__c</fullName>
+        <description>Mirror of the customer hub's, at join time.</description>
+        <externalId>false</externalId>
+        <label>Stripe Customer Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Started_At__c</fullName>
+        <description>When the subscription became Active.</description>
+        <externalId>false</externalId>
+        <label>Started At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Current_Period_End__c</fullName>
+        <description>From Stripe; the next renewal.</description>
+        <externalId>false</externalId>
+        <label>Current Period End</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Cancel_At_Period_End__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Cancelled by the member or the office, still Active until the period ends.</description>
+        <externalId>false</externalId>
+        <label>Cancel At Period End</label>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Cancelled_At__c</fullName>
+        <description>When the cancellation was requested.</description>
+        <externalId>false</externalId>
+        <label>Cancelled At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Ended_At__c</fullName>
+        <description>When the subscription actually ended (Stripe's customer.subscription.deleted).</description>
+        <externalId>false</externalId>
+        <label>Ended At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Cancel_Reason__c</fullName>
+        <externalId>false</externalId>
+        <label>Cancel Reason</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Last_Payment_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Last Payment At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Last_Payment_Amount__c</fullName>
+        <externalId>false</externalId>
+        <label>Last Payment Amount</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Lifetime_Revenue__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Sum of Stripe invoice.paid amounts on this subscription.</description>
+        <externalId>false</externalId>
+        <label>Lifetime Revenue</label>
+        <precision>16</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+    </fields>
+    <fields>
+        <fullName>Payment_Failures__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Count of invoice.payment_failed events.</description>
+        <externalId>false</externalId>
+        <label>Payment Failures</label>
+        <precision>5</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>SolarFacts_Status__c</fullName>
+        <description>The monitoring hand-off (D-073.6): Not Sent -&gt; Sent on activation; Cancel Sent when the subscription ends. Failed / Cancel Failed keep the error and the office's Resend button lights up.</description>
+        <externalId>false</externalId>
+        <label>SolarFacts Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Not Sent</fullName>
+                    <default>true</default>
+                    <label>Not Sent</label>
+                </value>
+                <value>
+                    <fullName>Sent</fullName>
+                    <default>false</default>
+                    <label>Sent</label>
+                </value>
+                <value>
+                    <fullName>Failed</fullName>
+                    <default>false</default>
+                    <label>Failed</label>
+                </value>
+                <value>
+                    <fullName>Cancel Sent</fullName>
+                    <default>false</default>
+                    <label>Cancel Sent</label>
+                </value>
+                <value>
+                    <fullName>Cancel Failed</fullName>
+                    <default>false</default>
+                    <label>Cancel Failed</label>
+                </value>
+                <value>
+                    <fullName>Not Applicable</fullName>
+                    <default>false</default>
+                    <label>Not Applicable</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>SolarFacts_Last_Sent_At__c</fullName>
+        <externalId>false</externalId>
+        <label>SolarFacts Last Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>SolarFacts_Last_Error__c</fullName>
+        <externalId>false</externalId>
+        <label>SolarFacts Last Error</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>SolarFacts_Account_Id__c</fullName>
+        <description>SolarFax's account_id from POST /users (their API), for support lookups.</description>
+        <externalId>false</externalId>
+        <label>SolarFax Account Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>SolarFacts_User_Id__c</fullName>
+        <description>SolarFax's user_id from POST /users.</description>
+        <externalId>false</externalId>
+        <label>SolarFax User Id</label>
+        <length>60</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Notes__c</fullName>
+        <externalId>false</externalId>
+        <label>Notes</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <label>Service Club Membership</label>
+    <nameField>
+        <displayFormat>MEM-{00000}</displayFormat>
+        <label>Membership Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Service Club Memberships</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>ReadWrite</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

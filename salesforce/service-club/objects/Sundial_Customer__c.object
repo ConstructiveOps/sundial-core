@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Customer__c - ONE NEW FIELD ONLY (D-073). package.xml lists it as a CustomField
+  member, so this file adds Active_Membership__c and touches nothing else on the object.
+  NEVER convert this to a whole-object deploy: it would overwrite the live object's settings.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Active_Membership__c</fullName>
+        <description>Lambda-maintained pointer to the customer's one live Service Club membership (Active or Past Due); cleared when it ends. Deployed as a single CustomField, never a whole-object deploy of Sundial_Customer__c.</description>
+        <externalId>false</externalId>
+        <label>Active Membership</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Membership__c</referenceTo>
+        <relationshipLabel>Active Members</relationshipLabel>
+        <relationshipName>Active_Members</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

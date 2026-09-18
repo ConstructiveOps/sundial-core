@@ -419,6 +419,6 @@
     </nameField>
     <pluralLabel>Price Book Items</pluralLabel>
     <searchLayouts/>
-    <sharingModel>Private</sharingModel>
+    <sharingModel>ReadWrite</sharingModel>
     <externalSharingModel>Private</externalSharingModel>
 </CustomObject>

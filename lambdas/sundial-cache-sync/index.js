@@ -90,6 +90,15 @@ const OBJECT_ALLOWLIST = {
     sfObject: "Sundial_Service_Payment__c",
     cacheTable: "sundial_service_payment_cache",
   },
+  // Service Club (D-073).
+  serviceplan: {
+    sfObject: "Sundial_Service_Plan__c",
+    cacheTable: "sundial_service_plan_cache",
+  },
+  membership: {
+    sfObject: "Sundial_Membership__c",
+    cacheTable: "sundial_membership_cache",
+  },
 };
 
 const SF_API_VERSION = "v60.0";
@@ -115,6 +124,8 @@ const CREATED_DATE_SOURCE = {
   serviceline: ["CreatedDate"],
   serviceinvoice: ["CreatedDate"],
   servicepayment: ["CreatedDate"],
+  serviceplan: ["CreatedDate"],
+  membership: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
 

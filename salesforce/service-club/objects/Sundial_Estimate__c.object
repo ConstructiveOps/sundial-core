@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Estimate__c - ONE NEW FIELD ONLY (D-073): Membership__c. Delta deploy; the full
+  object lives in salesforce/service-objects/. Never convert to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Membership__c</fullName>
+        <description>The membership whose plan discount this estimate carries (Discount_Source__c = Service Plan). Deployed as a single CustomField.</description>
+        <externalId>false</externalId>
+        <label>Membership</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Membership__c</referenceTo>
+        <relationshipLabel>Estimates</relationshipLabel>
+        <relationshipName>Estimates</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

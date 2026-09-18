@@ -108,6 +108,16 @@ const OBJECT_ALLOWLIST = {
     sfObject: "Sundial_Service_Payment__c",
     cacheTable: "sundial_service_payment_cache",
   },
+  // Service Club (D-073): the plan catalog (tenant-level, no parent) and memberships
+  // (a customer's). Same inert-until-deployed behaviour as the D-072 objects.
+  serviceplan: {
+    sfObject: "Sundial_Service_Plan__c",
+    cacheTable: "sundial_service_plan_cache",
+  },
+  membership: {
+    sfObject: "Sundial_Membership__c",
+    cacheTable: "sundial_membership_cache",
+  },
 };
 
 // A Salesforce Id is 15 or 18 case-sensitive alphanumerics. Used to shape-check
@@ -140,6 +150,8 @@ const CREATED_DATE_SOURCE = {
   serviceline: ["CreatedDate"],
   serviceinvoice: ["CreatedDate"],
   servicepayment: ["CreatedDate"],
+  serviceplan: ["CreatedDate"],
+  membership: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
 
@@ -233,6 +245,7 @@ const PARENT_FILTER = {
   serviceline: { sfField: "Estimate__c", cacheColumn: "estimate_sf_id" },
   serviceinvoice: { sfField: "Service_Job__c", cacheColumn: "service_job_sf_id" },
   servicepayment: { sfField: "Service_Job__c", cacheColumn: "service_job_sf_id" },
+  membership: { sfField: "Sundial_Customer__c", cacheColumn: "sundial_customer_sf_id" }, // D-073
 };
 
 // ?parentId= is shape-validated with the existing SF_ID_RE (defined above for the
@@ -284,6 +297,14 @@ const SEARCH_FIELDS = {
   servicepayment: {
     cache: ["name", "reference"],
     sf: ["Name", "Reference__c"],
+  },
+  serviceplan: {
+    cache: ["name", "plan_code"],
+    sf: ["Name", "Plan_Code__c"],
+  },
+  membership: {
+    cache: ["name", "customer_name_at_creation", "primary_email_at_creation"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Primary_Email_at_Creation__c"],
   },
 };
 

@@ -140,7 +140,7 @@ def obj_xml(o):
 {nf}
     <pluralLabel>{esc(o['plural'])}</pluralLabel>
     <searchLayouts/>
-    <sharingModel>Private</sharingModel>
+    <sharingModel>ReadWrite</sharingModel>
     <externalSharingModel>Private</externalSharingModel>
 </CustomObject>
 """

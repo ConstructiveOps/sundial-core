@@ -789,6 +789,6 @@
     </nameField>
     <pluralLabel>Service Jobs</pluralLabel>
     <searchLayouts/>
-    <sharingModel>Private</sharingModel>
+    <sharingModel>ReadWrite</sharingModel>
     <externalSharingModel>Private</externalSharingModel>
 </CustomObject>

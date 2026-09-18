@@ -781,6 +781,6 @@
     </nameField>
     <pluralLabel>Service Estimates</pluralLabel>
     <searchLayouts/>
-    <sharingModel>Private</sharingModel>
+    <sharingModel>ReadWrite</sharingModel>
     <externalSharingModel>Private</externalSharingModel>
 </CustomObject>

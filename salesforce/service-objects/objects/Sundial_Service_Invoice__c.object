@@ -313,6 +313,6 @@
     </nameField>
     <pluralLabel>Service Invoices</pluralLabel>
     <searchLayouts/>
-    <sharingModel>Private</sharingModel>
+    <sharingModel>ReadWrite</sharingModel>
     <externalSharingModel>Private</externalSharingModel>
 </CustomObject>

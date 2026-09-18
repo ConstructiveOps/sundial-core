@@ -38,7 +38,7 @@ export const STRIPE_EVENTS_TABLE = "sundial_stripe_events";
 export const TENANT_SF_OBJECT = "Sundial_Tenant__c";
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 /** The events the endpoint should be subscribed to in the Stripe dashboard. */
-export const STRIPE_EVENT_TYPES = Object.freeze(["checkout.session.completed", "payment_intent.succeeded", "payment_intent.payment_failed", "charge.refunded"]);
+export const STRIPE_EVENT_TYPES = Object.freeze(["checkout.session.completed", "payment_intent.succeeded", "payment_intent.payment_failed", "charge.refunded", "customer.subscription.updated", "customer.subscription.deleted", "invoice.paid", "invoice.payment_failed"]);
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const isoFromUnix = (s, fallback) => (Number.isFinite(Number(s)) && Number(s) > 0 ? new Date(Number(s) * 1000).toISOString() : fallback);
@@ -94,7 +94,7 @@ export function rawBodyOf(event) {
 // --- handler factory ---------------------------------------------------------------
 /**
  * @param {object} d   the estimate handler's deps (+ getSecret, fetchUrl)
- * @param {object} h   { money (createMoneyCore), act, markStale, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, brandFor }
+ * @param {object} h   { money (createMoneyCore), act, markStale, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, brandFor, club (D-073: applyEvent for subscription events) }
  */
 export function createStripeHandlers(d, h) {
   const { money, jsonResponse, bad, notFound, CACHE } = h;
@@ -457,7 +457,7 @@ export function createStripeHandlers(d, h) {
       const meta = obj.metadata || {};
       const seen = await ledgerGet(evt.id);
       if (seen && seen.status !== "error") return jsonResponse(200, cors, { received: true, duplicate: true, status: seen.status });
-      const base = { id: evt.id, client_sf_id: tenantId, tenant_id: slug, type: evt.type, kind: meta.kind || null, mode: stripe.config.mode, estimate_sf_id: meta.estimateId || null, job_sf_id: meta.jobId || null, invoice_sf_id: meta.invoiceId || null, payment_intent_id: obj.object === "payment_intent" ? obj.id : typeof obj.payment_intent === "string" ? obj.payment_intent : null, amount: obj.amount_received != null ? fromCents(obj.amount_received) : obj.amount_total != null ? fromCents(obj.amount_total) : obj.amount != null ? fromCents(obj.amount) : null, payload: obj, received_at: d.now().toISOString() };
+      const base = { id: evt.id, client_sf_id: tenantId, tenant_id: slug, type: evt.type, kind: meta.kind || null, mode: stripe.config.mode, estimate_sf_id: meta.estimateId || null, job_sf_id: meta.jobId || null, invoice_sf_id: meta.invoiceId || null, payment_intent_id: obj.object === "payment_intent" ? obj.id : typeof obj.payment_intent === "string" ? obj.payment_intent : null, amount: obj.amount_received != null ? fromCents(obj.amount_received) : obj.amount_paid != null ? fromCents(obj.amount_paid) : obj.amount_total != null ? fromCents(obj.amount_total) : obj.amount != null ? fromCents(obj.amount) : null, payload: obj, received_at: d.now().toISOString() };
       if (meta.tenantId && meta.tenantId !== tenantId) {
         await ledgerPut({ ...base, status: "ignored", error: "metadata.tenantId does not match the URL's tenant" });
         return jsonResponse(200, cors, { received: true, status: "ignored" });
@@ -468,7 +468,11 @@ export function createStripeHandlers(d, h) {
       }
       let result;
       try {
-        if (evt.type === "checkout.session.completed") result = await applyCheckoutCompleted({ stripe, tenantId, slug, session: obj, cors });
+        // The Service Club's events first (a subscription checkout, subscription and
+        // subscription-invoice events); null means "not the club's", so payments handle it.
+        const club = h.club ? await h.club.applyEvent({ stripe, tenantId, slug, evt, cors }) : null;
+        if (club) result = club;
+        else if (evt.type === "checkout.session.completed") result = await applyCheckoutCompleted({ stripe, tenantId, slug, session: obj, cors });
         else if (evt.type === "payment_intent.succeeded") result = await applyIntentSucceeded({ stripe, tenantId, slug, pi: obj, cors });
         else if (evt.type === "payment_intent.payment_failed") result = await applyIntentFailed({ tenantId, slug, pi: obj, cors });
         else if (evt.type === "charge.refunded") result = await applyChargeRefunded({ stripe, tenantId, slug, charge: obj, cors });
@@ -478,7 +482,7 @@ export function createStripeHandlers(d, h) {
         await ledgerPut({ ...base, status: "error", error: String(e?.sfBody || e?.message || e).slice(0, 500) });
         return jsonResponse(500, cors, { error: "apply_failed", code: "STRIPE_APPLY_FAILED" }); // Stripe retries
       }
-      await ledgerPut({ ...base, status: result.status, error: result.reason || null, job_sf_id: result.jobId || base.job_sf_id, invoice_sf_id: result.invoiceId || base.invoice_sf_id, payment_sf_id: result.paymentId || null, applied_at: result.status === "applied" ? d.now().toISOString() : null });
+      await ledgerPut({ ...base, status: result.status, error: result.reason || null, job_sf_id: result.jobId || base.job_sf_id, invoice_sf_id: result.invoiceId || base.invoice_sf_id, payment_sf_id: result.paymentId || null, membership_sf_id: result.membershipId || meta.membershipId || null, applied_at: result.status === "applied" ? d.now().toISOString() : null });
       return jsonResponse(200, cors, { received: true, ...result });
     },
   };

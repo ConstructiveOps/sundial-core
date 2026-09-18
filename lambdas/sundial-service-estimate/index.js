@@ -240,6 +240,9 @@ const ESTIMATE_PATCHABLE = Object.freeze({
   depositType: ["Deposit_Type__c", (v) => v],
   depositValue: ["Deposit_Value__c", numOrNull],
   scopeSummary: ["Scope_Summary__c", strOrNull],
+  // The service address (2026-09-18): a snapshot the office may correct — a typo, a second
+  // property, a move. A Flow mirrors it job <-> estimate; the customer hub is untouched.
+  address: ["Address_at_Creation__c", strOrNull],
   validUntil: ["Valid_Until__c", strOrNull],
   soldById: ["Sold_By__c", strOrNull],
   templateName: ["Template_Name__c", strOrNull],

@@ -108,6 +108,24 @@ Write-Host "==> /service/tech/calls/{id}/estimate-lines : POST, OPTIONS -> $Est"
 $lines = Ensure-Resource $callId "estimate-lines"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $lines $m $Est }
 
+# The job's photos + files (2026-09-18): the office reads / adds at the job's top level
+# (/service/jobs/{id}/photos[/confirm]); a tech reads every visit's photos and the job's
+# files (/service/tech/jobs/{id}/photos, /files).
+Write-Host "==> /service/jobs/{id}/photos [+ /confirm] : GET, POST, OPTIONS (board)" -ForegroundColor Cyan
+$jobs    = Ensure-Resource $service "jobs"
+$jobId   = Ensure-Resource $jobs "{id}"
+$jPhotos = Ensure-Resource $jobId "photos"
+foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jPhotos $m $Board }
+$jConfirm = Ensure-Resource $jPhotos "confirm"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jConfirm $m $Board }
+Write-Host "==> /service/tech/jobs/{id}/photos, /files : GET, OPTIONS (board)" -ForegroundColor Cyan
+$tJobs  = Ensure-Resource $tech "jobs"
+$tJobId = Ensure-Resource $tJobs "{id}"
+foreach ($part in @("photos", "files")) {
+    $r = Ensure-Resource $tJobId $part
+    foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board }
+}
+
 Write-Host "==> Lambda invoke permissions (apigateway)" -ForegroundColor Cyan
 foreach ($pair in @(@($Board, "apigw-service-board"), @($Est, "apigw-service-estimate"))) {
     aws lambda add-permission --function-name $pair[0] --region $Region `

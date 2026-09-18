@@ -474,6 +474,41 @@ export function onMyWayText({ customerName, techFirstName, brandName, jobNumber 
 
 /** Photos live under the job, in a folder per call. */
 export const photoPrefix = (jobId, callId) => `${buildKey(jobId, "photos")}/${callId}/`;
+/** The job's whole photo folder — every call's, plus what the office dropped at the top. */
+export const jobPhotoPrefix = (jobId) => `${buildKey(jobId, "photos")}/`;
+
+/**
+ * Group a job's photo listing by the call each one belongs to (2026-09-18). A key
+ * directly under photos/ (no call folder) is the office's; the tech app and the job
+ * page both show the groups, so a tech sees the other techs' photos on the same job.
+ */
+export function groupJobPhotos(photos, prefix, calls = []) {
+  const byCall = new Map();
+  for (const p of photos) {
+    const rest = p.key.startsWith(prefix) ? p.key.slice(prefix.length) : p.fileName;
+    const slash = rest.indexOf("/");
+    const callId = slash > 0 ? rest.slice(0, slash) : null;
+    const key = callId ?? "office";
+    if (!byCall.has(key)) byCall.set(key, []);
+    byCall.get(key).push({ ...p, fileName: slash > 0 ? rest.slice(slash + 1) : rest, callId });
+  }
+  const callInfo = new Map(calls.map((c) => [c.Id, c]));
+  const groups = [...byCall.entries()].map(([key, list]) => {
+    const c = key === "office" ? null : callInfo.get(key) ?? null;
+    const tech = c?.Tech__r ? [c.Tech__r.First_Name__c, c.Tech__r.Last_Name__c].filter(Boolean).join(" ") : null;
+    return {
+      callId: key === "office" ? null : key,
+      callNumber: c?.Name ?? null,
+      techName: tech,
+      start: c?.Scheduled_Start__c ?? c?.Actual_Start__c ?? null,
+      label: key === "office" ? "Office" : [tech ?? "Visit", c?.Scheduled_Start__c ? new Date(c.Scheduled_Start__c).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null].filter(Boolean).join(" · "),
+      photos: list.sort((a, b) => String(b.lastModified).localeCompare(String(a.lastModified))),
+    };
+  });
+  // Newest group first; the office's folder at the top when it has anything.
+  groups.sort((a, b) => (a.callId === null ? -1 : b.callId === null ? 1 : String(b.start ?? "").localeCompare(String(a.start ?? ""))));
+  return groups;
+}
 
 /** A search box's text → the SOQL LIKE literal, or null when there is nothing to search for. */
 export function likeFor(q) {
@@ -1131,6 +1166,97 @@ export function createTechHandlers(d, h) {
       if (!call || !ownsCall(ctx, call)) return notFound(cors);
       const photos = call.Sundial_Service_Job__c ? await d.listPhotos(photoPrefix(call.Sundial_Service_Job__c, call.Id)) : [];
       return jsonResponse(200, cors, { photos, photosCount: num(call.Photos_Count__c) ?? photos.length });
+    },
+
+    // --- the job's photos + files (2026-09-18) --------------------------------------------
+    // One folder per job (SUNDIAL/{jobId}/photos/{callId}/…, the office's straight under
+    // photos/), so every tech on the job sees every visit's photos, and the office sees
+    // them on the job page without opening each call. Read by the office (service.board.read)
+    // and by a tech (service.tech.read) through two routes onto one handler.
+    async jobPhotos({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const prefix = jobPhotoPrefix(job.Id);
+      const [photos, calls] = await Promise.all([d.listPhotos(prefix).catch((e) => (console.error("job photos list:", e?.message), [])), h.loadJobCalls(job.Id, tenantId)]);
+      const groups = groupJobPhotos(photos, prefix, calls);
+      return jsonResponse(200, cors, { jobId: job.Id, jobNumber: job.Name ?? null, total: photos.length, groups });
+    },
+
+    /** The office adds a photo at the job's top level (no call): presign, then confirm. */
+    async jobPhotoPresign({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const contentType = strOrNull(body?.contentType);
+      if (!contentType || !/^image\//i.test(contentType)) return bad(cors, "NOT_AN_IMAGE", "Only images can be added as photos.");
+      const size = num(body?.size);
+      if (size !== null && size > PHOTO_MAX_BYTES) return bad(cors, "TOO_LARGE", "Photos are capped at 25 MB.");
+      const safe = sanitizeFileName(body?.fileName) || "photo.jpg";
+      const stamp = d.now().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+      const key = `${jobPhotoPrefix(job.Id)}${stamp}-${safe}`;
+      const uploadUrl = await d.presignPut({ key, contentType });
+      return jsonResponse(200, cors, { uploadUrl, key, publicUrl: publicUrlForKey(key), expiresIn: PHOTO_URL_EXPIRY_SECONDS });
+    },
+
+    async jobPhotoConfirm({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const prefix = jobPhotoPrefix(job.Id);
+      const key = strOrNull(body?.key);
+      // The office's keys sit directly under photos/ — never inside a call's folder.
+      if (!key || !key.startsWith(prefix) || key.includes("..") || key.slice(prefix.length).includes("/")) return bad(cors, "KEY_INVALID", "That key does not belong to this job's photo folder.");
+      const supabase = await d.getSupabaseClient();
+      let registered = false;
+      try {
+        if (!(await findFileMetadataByKey(supabase, key))) {
+          await registerFileMetadata(supabase, {
+            s3Key: key,
+            fileName: key.slice(prefix.length),
+            tenantId,
+            sfRecordId: job.Id,
+            sfObjectType: "job",
+            uploadedByUserId: ctx.userId,
+            uploadedByUserName: ctx.actor?.name ?? null,
+            fileSizeBytes: num(body?.size),
+            mimeType: strOrNull(body?.contentType),
+            category: "photo",
+            description: strOrNull(body?.caption)?.slice(0, 255) ?? null,
+            subfolder: "photos",
+          });
+          registered = true;
+        }
+      } catch (e) {
+        console.error("job photo metadata:", e?.message || e);
+      }
+      if (registered) {
+        await h.act(ctx, { event: EVENTS.SERVICE_CALL_PHOTO, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { key, publicUrl: publicUrlForKey(key), caption: strOrNull(body?.caption), via: "office" } });
+      }
+      const photos = await d.listPhotos(prefix).catch(() => []);
+      return jsonResponse(200, cors, { success: true, total: photos.length, groups: groupJobPhotos(photos, prefix, await h.loadJobCalls(job.Id, tenantId)) });
+    },
+
+    /**
+     * The job's Files for the tech app (service.tech.read): everything in the job's folder
+     * except the photos (they have their own section), plus the estimate's folder (the
+     * sent PDFs). Read-only — a tech uploads only photos, only on their own call.
+     */
+    async techJobFiles({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const jobPrefix = `${buildKey(job.Id, "")}`;
+      const photos = jobPhotoPrefix(job.Id);
+      const [jobFiles, estFiles] = await Promise.all([
+        d.listPhotos(jobPrefix).catch((e) => (console.error("job files list:", e?.message), [])),
+        job.Estimate__c ? d.listPhotos(buildKey(job.Estimate__c, "")).catch(() => []) : [],
+      ]);
+      const files = [
+        ...jobFiles.filter((f) => !f.key.startsWith(photos)).map((f) => ({ ...f, source: "job" })),
+        ...estFiles.map((f) => ({ ...f, source: "estimate" })),
+      ].sort((a, b) => String(b.lastModified).localeCompare(String(a.lastModified)));
+      return jsonResponse(200, cors, { jobId: job.Id, files });
     },
 
     // --- read-only lists + records (service.tech.read) ----------------------------------

@@ -23,6 +23,7 @@ import {
   UNSCHEDULED_JOB_STATUSES,
 } from "./index.js";
 import {
+  groupJobPhotos,
   TECH_CUSTOMER_SELECT,
   TECH_ESTIMATE_SELECT,
   TECH_JOB_SELECT,
@@ -984,4 +985,62 @@ test("tech SELECTs only name fields that exist in the object metadata", () => {
   // The customer hub predates the service package (its metadata lives in the org, not
   // this folder) — pin the exact list instead, so a change here is a deliberate one.
   assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate");
+});
+
+// ---------------------------------------------------------------------------
+// The job's photos + files, for the office and for every tech on the job (2026-09-18)
+// ---------------------------------------------------------------------------
+test("job photos: grouped by call (office at the top), the office adds at the top level only, a tech reads all groups + the job's files", async () => {
+  const w = fakeWorld();
+  const office = makeHandler(w);
+  const techH = makeHandler(w, { user: { id: "USR000000000000001", firstName: "Jake", lastName: "Dorsey" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001", actions: ["service.tech.self", "service.tech.read"] } });
+  const jobId = "SVC000000000000003";
+  const at = (n) => `2026-09-1${n}T10:00:00.000Z`;
+  w.photos.push(
+    { key: `SUNDIAL/${jobId}/photos/SC0000000000000001/20260914-a.jpg`, fileName: "x", publicUrl: "u1", size: 1, lastModified: at(4) },
+    { key: `SUNDIAL/${jobId}/photos/SC0000000000000002/20260920-b.jpg`, fileName: "x", publicUrl: "u2", size: 1, lastModified: at(5) },
+    { key: `SUNDIAL/${jobId}/photos/SC0000000000000001/20260914-c.jpg`, fileName: "x", publicUrl: "u3", size: 1, lastModified: at(6) },
+    { key: `SUNDIAL/${jobId}/utility-bill.pdf`, fileName: "x", publicUrl: "u4", size: 1, lastModified: at(1) },
+    { key: `SUNDIAL/EST000000000000003/estimate-v1.pdf`, fileName: "x", publicUrl: "u5", size: 1, lastModified: at(2) },
+  );
+
+  // Pure grouping.
+  const calls = w.store.Sundial_Service_Call__c.map((c) => ({ ...c, Tech__r: { First_Name__c: c.Tech__c === "USR000000000000001" ? "Jake" : "Larry", Last_Name__c: c.Tech__c === "USR000000000000001" ? "Dorsey" : "Ng" } }));
+  const groups = groupJobPhotos(w.photos.filter((p) => p.key.includes("/photos/")), `SUNDIAL/${jobId}/photos/`, calls);
+  assert.deepEqual(groups.map((g) => [g.callId, g.techName, g.photos.length]), [["SC0000000000000002", "Larry Ng", 1], ["SC0000000000000001", "Jake Dorsey", 2]]);
+  assert.equal(groups[1].photos[0].fileName, "20260914-c.jpg"); // newest first inside a group
+  assert.match(groups[0].label, /Larry Ng · Sep 20/);
+
+  // The office's route.
+  let r = await call(office, "GET", `/service/jobs/${jobId}/photos`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.total, 3);
+  assert.equal(r.body.groups.length, 2);
+  // The office adds one at the top: presign under photos/ directly, confirm registers it, and it shows as the Office group.
+  r = await call(office, "POST", `/service/jobs/${jobId}/photos`, { fileName: "panel.jpg", contentType: "image/jpeg", size: 1000 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.match(r.body.key, new RegExp(`^SUNDIAL/${jobId}/photos/\\d{8}T\\d{6}Z-panel\\.jpg$`));
+  assert.equal((await call(office, "POST", `/service/jobs/${jobId}/photos`, { fileName: "notes.pdf", contentType: "application/pdf" })).body.code, "NOT_AN_IMAGE");
+  assert.equal((await call(office, "POST", `/service/jobs/${jobId}/photos/confirm`, { key: `SUNDIAL/${jobId}/photos/SC0000000000000001/sneaky.jpg` })).body.code, "KEY_INVALID");
+  w.photos.push({ key: r.body.key, fileName: "x", publicUrl: "u6", size: 1000, lastModified: at(7) });
+  r = await call(office, "POST", `/service/jobs/${jobId}/photos/confirm`, { key: r.body.key, contentType: "image/jpeg", size: 1000, caption: "Main panel" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.groups[0].callId, null);
+  assert.equal(r.body.groups[0].label, "Office");
+  assert.equal(w.fileRows.at(-1).subfolder ?? w.fileRows.at(-1).sub_folder ?? "photos", "photos");
+  assert.ok(w.activity.some((a) => a.event === "service_call_photo" && a.details.via === "office" && a.record_type === "job"));
+
+  // A tech reads the same groups and the job's files (the estimate's PDF included, the photos excluded).
+  r = await call(techH, "GET", `/service/tech/jobs/${jobId}/photos`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.total, 4);
+  r = await call(techH, "GET", `/service/tech/jobs/${jobId}/files`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.files.map((f) => [f.source, f.key.split("/").pop()]), [["estimate", "estimate-v1.pdf"], ["job", "utility-bill.pdf"]]);
+  // A tech cannot use the office's routes; a rep has none of it; another tenant's job is a 404.
+  assert.equal((await call(techH, "GET", `/service/jobs/${jobId}/photos`)).status, 403);
+  assert.equal((await call(techH, "POST", `/service/jobs/${jobId}/photos`, { fileName: "a.jpg", contentType: "image/jpeg" })).status, 403);
+  const rep = makeHandler(w, { user: { id: "USR000000000000003" }, access: { scope: "own", level: "Sales Rep", tenantId: TENANT, userId: "USR000000000000003", dealerId: "DLR000000000000001" } });
+  assert.equal((await call(rep, "GET", `/service/tech/jobs/${jobId}/files`)).status, 403);
+  assert.equal((await call(office, "GET", "/service/jobs/SVC000000000000099/photos")).status, 404);
 });

@@ -1,5 +1,55 @@
 # Sundial — Progress Log
 
+## 2026-09-18 — Addresses, related Service Jobs, the job's photos + files everywhere, GPS on the clock
+
+Tim's list from the evening of the 17th, built as one block.
+
+**The service address is correctable on both records.** On the job page the address in
+the header is an inline field: click, type, Enter or blur saves through the generic
+`PATCH /sf/job` — with `Geocode_Status__c` → Pending, the lat/lon and
+`Street_View_Image_Key__c` cleared in the same write, so the tech's map and the house
+re-fetch for the new address. On the estimate page it is `InlineText` on the same header
+line, through `PATCH /service/estimates/{id}` (`address` is now in `ESTIMATE_PATCHABLE`,
+locked once Invoiced like everything else). The customer hub is deliberately not touched:
+a second property or a move is not a reason to rewrite the customer. **Tim's Flow mirrors
+job ↔ estimate** (`Address_at_Creation__c` either way), so the two never disagree.
+
+**Service Jobs in the customer's related-records bar.** `src/config/related-records.ts`
+gained a `job` child (chips route to `/service/jobs/{id}`, the stage chip reads
+`Status__c` through the new `stageApiField`), Roofing is switched on, and Commercial has
+a note saying exactly what it needs (`commercial` object key + list route + `PARENT_FILTER`
+entry — Phase 3). The bar now **hides an empty group** instead of printing "No linked
+projects", so a customer with one solar project shows one group. The backend already
+filtered `job` by `sundial_customer_sf_id`; nothing changed server-side.
+
+**One photo folder per job, seen from everywhere.** Photos were already stored under the
+job (`SUNDIAL/{jobId}/photos/{callId}/…`); now they are read as one set.
+`groupJobPhotos()` in `tech.js` groups the listing by call ("Office" for keys straight
+under `photos/`, "Mike R · Sep 16" for a visit; office first, then newest visit), and
+three routes serve it: `GET /service/jobs/{id}/photos` for the office
+(`service.board.read`), `GET /service/tech/jobs/{id}/photos` for a tech
+(`service.tech.read`, same handler), and the office's upload
+`POST /service/jobs/{id}/photos` → S3 PUT → `POST …/photos/confirm` (`files.job.upload`,
+images only, 25 MB, key directly under `photos/` — a key inside a call's folder is
+`KEY_INVALID`, the metadata row is `category: photo`, `subfolder: photos`, the activity
+row is `SERVICE_CALL_PHOTO` via `office`). The job page has a **Photos** card
+(`JobPhotosCard`, grouped, "Add photos"); the tech app's job page has a **Photos**
+section (grouped, read-only — taking and adding photos stays on the tech's own call,
+as Tim wanted) and a **Files** section (`GET /service/tech/jobs/{id}/files`: the job's
+folder minus the photos plus the estimate's folder — the sent PDFs — read-only, so a
+tech can open the utility bill or the estimate PDF the office attached). The file-list
+Lambda's `assertRecordVisible` still denies techs — these reads go through the board
+Lambda under `service.tech.read`, and `lib/access.js` is unchanged.
+
+**GPS where the office can see it.** The clock correction dialog (Fix time) now shows
+each tap's fix — "Left location / Arrived location / End location" as Google Maps links
+under the row, nothing when the phone sent none. The live tech map on the dispatch board
+stays in the tech-map block (TASKS: board follow-ups).
+
+Tests: board 19 (grouping), portal 154 (`JobPhotosCard` 3, `RelatedRecordsBar` 2, tech
+job page photos + files, GPS links). Routes: `scripts/wire-service-tech-routes.ps1`
+(re-runnable) adds the five. Deploy: `sundial-service-estimate`, `sundial-service-board`.
+
 ## 2026-09-17 (evening) — Stripe: card on file, deposits, off-session charges, refunds (D-072 amendment 8)
 
 Tim got a user on Harmon's Stripe account, so payments are built. The shape is the one D-065

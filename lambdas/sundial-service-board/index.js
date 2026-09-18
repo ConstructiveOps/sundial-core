@@ -245,6 +245,12 @@ const ROUTES = [
   // The office's time corrections (tech.js — same clock engine as the phone).
   ["GET", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockGet"],
   ["POST", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockCorrect"],
+  // The job's photos (2026-09-18): the office reads + adds at the top level; a tech reads.
+  ["GET", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotos"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/photos\/confirm\/?$/, "jobPhotoConfirm"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoPresign"],
+  ["GET", /^\/service\/tech\/jobs\/([^/]+)\/photos\/?$/, "techJobPhotos"],
+  ["GET", /^\/service\/tech\/jobs\/([^/]+)\/files\/?$/, "techJobFiles"],
   // The technician app (tech.js). Order matters: "photos/confirm" before "photos".
   ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
   ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
@@ -279,6 +285,11 @@ const ACTION_FOR = Object.freeze({
   cancelCall: "service.call.write",
   clockGet: "service.board.read",
   clockCorrect: "service.call.write",
+  jobPhotos: "service.board.read",
+  jobPhotoPresign: "files.job.upload",
+  jobPhotoConfirm: "files.job.upload",
+  techJobPhotos: "service.tech.read",
+  techJobFiles: "service.tech.read",
   techDay: "service.tech.self",
   techPriceBook: "service.tech.self",
   techCall: "service.tech.self",
@@ -737,6 +748,7 @@ export function createHandler(deps = {}) {
       jsonResponse, bad, notFound, sfError,
     })
   );
+  H.techJobPhotos = H.jobPhotos; // the tech's route: same handler, different action gate
 
   return async function handler(event) {
     const method = httpMethod(event);

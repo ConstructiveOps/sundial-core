@@ -149,6 +149,8 @@ export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
 // Sundial product category, not a Harmon value — Roofing / Commercial pass their own.
 export const PROJECT_TYPE_TAG = "Service";
+/** Customer_Type__c (multi-select, 2026-09-19): the department tag the service module sets / adds — same value, second field. */
+export const CUSTOMER_TYPE_FIELD = "Customer_Type__c";
 
 // Tenant config placeholders — read from Sundial_Tenant__c config when that surface
 // lands (service-workflows.md §12). GET FROM HARMON: validity days, default template.
@@ -346,6 +348,7 @@ const ROUTES = [
   ["POST", /^\/service\/labor\/default-rate\/?$/, "setDefaultRate"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/estimate-lines\/?$/, "techAddLines"], // the tech app (service.tech.self)
+  ["GET", /^\/service\/tech\/jobs\/([^/]+)\/street-view\/?$/, "techJobStreetView"], // the tech app (service.tech.read): the house, read-only
   // Stripe (D-072 amendment 8, stripe.js): the office's charge, and Stripe's own calls (no login).
   ["POST", /^\/service\/invoices\/([^/]+)\/charge\/?$/, "chargeInvoiceRoute"],
   ["POST", /^\/webhooks\/stripe\/([^/]+)\/?$/, "stripeWebhook"],
@@ -552,29 +555,36 @@ export function createHandler(deps = {}) {
       return { ok: false, response: bad(cors, "CUSTOMER_REQUIRED", "Provide customer: { id } or customer: { new: {...} }.") };
     }
     const warnings = [];
-    const values = await picklistValues(CUSTOMER_SF_OBJECT, PROJECT_TYPES_FIELD);
-    const tag = values ? matchPicklist(PROJECT_TYPE_TAG, values) : null;
-    if (!tag) {
-      warnings.push(
-        `${PROJECT_TYPES_FIELD} has no "${PROJECT_TYPE_TAG}" value in this org — customer not tagged. Add the picklist value in Setup.`
-      );
+    // Two department tags, same value: Requested_Project_Types__c (the D-072 tag) and
+    // Customer_Type__c (2026-09-19). Each is guarded by the org's describe — a field or a
+    // picklist value the org lacks is a warning, never a failed create.
+    const tags = [];
+    for (const field of [PROJECT_TYPES_FIELD, CUSTOMER_TYPE_FIELD]) {
+      const values = await picklistValues(CUSTOMER_SF_OBJECT, field);
+      const tag = values ? matchPicklist(PROJECT_TYPE_TAG, values) : null;
+      if (tag) tags.push({ field, tag });
+      else warnings.push(`${field} has no "${PROJECT_TYPE_TAG}" value in this org — customer not tagged there. Add the field / picklist value in Setup.`);
     }
+    const tag = tags.length ? PROJECT_TYPE_TAG : null;
 
     if (spec.id) {
       const customer = await loadCustomer(String(spec.id), tenantId);
       if (!customer) return { ok: false, response: notFound(cors) };
-      if (tag) {
-        const merged = unionProjectTypes(customer[PROJECT_TYPES_FIELD], tag);
-        if (merged) {
-          try {
-            await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, { [PROJECT_TYPES_FIELD]: merged });
-            customer[PROJECT_TYPES_FIELD] = merged;
-            await markStale(CACHE.customer, [customer.Id], tenantId);
-            events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field: PROJECT_TYPES_FIELD, to: merged } });
-          } catch (e) {
-            // Tagging is bookkeeping; the estimate/job still gets created.
-            warnings.push(`Could not tag the customer with ${PROJECT_TYPE_TAG}: ${e?.sfBody || e?.message || e}`);
-          }
+      const upd = {};
+      for (const t of tags) {
+        const merged = unionProjectTypes(customer[t.field], t.tag);
+        if (merged) upd[t.field] = merged;
+      }
+      if (Object.keys(upd).length) {
+        try {
+          await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, upd);
+          Object.assign(customer, upd);
+          await markStale(CACHE.customer, [customer.Id], tenantId);
+          const [field, to] = Object.entries(upd)[0]; // one feed row per pick; `fields` carries both when both changed
+          events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field, to, fields: upd } });
+        } catch (e) {
+          // Tagging is bookkeeping; the estimate/job still gets created.
+          warnings.push(`Could not tag the customer with ${PROJECT_TYPE_TAG}: ${e?.sfBody || e?.message || e}`);
         }
       }
       return { ok: true, customer, created: false, warnings, events };
@@ -613,7 +623,7 @@ export function createHandler(deps = {}) {
         },
       });
       fields.Client__c = tenantId;
-      if (tag) fields[PROJECT_TYPES_FIELD] = tag;
+      for (const t of tags) fields[t.field] = t.tag;
       let created;
       try {
         created = await d.sfCreateRecord(CUSTOMER_SF_OBJECT, fields);
@@ -1513,6 +1523,10 @@ export function createHandler(deps = {}) {
       }
       return jsonResponse(200, cors, { status: "ready", url: publicUrlForKey(key), key, cached: false, panoLocation: meta.location ?? null });
     },
+    /** The tech app's read of the same still (2026-09-19): fetched on first use like the office's, never refreshed from the phone. */
+    async techJobStreetView(args) {
+      return H.jobStreetView({ ...args, query: {} });
+    },
   };
 
   /** The payer's email for a customer-billed document: the customer's current one, else the snapshot. */
@@ -1549,7 +1563,7 @@ export function createHandler(deps = {}) {
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed
-    previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write",
+    previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.invoice.write",

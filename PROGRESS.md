@@ -1,5 +1,46 @@
 # Sundial — Progress Log
 
+## 2026-09-19 — Six small fixes: GPS for the office, the house + diagnosis on the phone, Customer Type, the job's two notes fields, call notes rolled onto the job
+
+Tim's list after the Service Club shipped (item 7 was cut off in his message — still open).
+
+1. **Where the tech clocked, on the job page.** `callToBoard` now carries `clockLog` (every live
+   interval with the phone's GPS at each tap + the geofence tag) and `GET /service/jobs/{id}/calls`
+   carries the job's geocode; the portal's Service calls card shows a strip per call — "On the way
+   7:58 → Arrived 8:31 → Clocked out 10:02", each tap a map pin, the distance from the house
+   ("at the house" / "120 ft away" / "2.3 mi away"), "Geofence verified" or not
+   (`CallClockStrip.tsx`, `geo.ts`). Removed intervals stay in the Fix-time dialog.
+2. **The house on the phone.** `streetViewUrl` (the job's cached still) rides on the tech's job and
+   call views; `HouseImage` sits at the top of both layouts. Not fetched yet → the app asks
+   `GET /service/tech/jobs/{id}/street-view` once (new route on the ESTIMATE Lambda, action
+   `service.tech.read`, refresh disabled; `wire-service-tech-routes.ps1` wires it).
+3. **`Customer_Type__c`** (Tim's multi-select: Solar / Roofing / Commercial / Service). In the
+   repo as a customer delta field in `salesforce/service-objects/` (+ FLS in the permission set),
+   cache column `customer_type` (`sql/2026-09-19_customer_type_job_notes.sql`). Sales → New
+   Customer shows it, defaulted to Solar, and `sundial-sf-update` defaults Solar server-side when
+   the body is silent (describe-guarded). The Service module's `resolveCustomer` (New Estimate /
+   New Job / Service Club join) sets `Service` on a new customer and union-adds it on an existing
+   one — same picklist-guarded path as `Requested_Project_Types__c`. Tech app Customers list:
+   chips All / Solar / Roofing / Commercial / Service (`?type=`, SOQL `INCLUDES`), the type on
+   each row.
+4. **Initial remote diagnosis on the phone** (`remoteDiagnosis` on the tech's job + call views;
+   shown under "The issue"). The field is `Initial_Remote_Diagnosis__c` — Tim's "Internal" was
+   read as that; there is no separate Internal field.
+5. **`Notes_for_Summary__c` + `Notes_From_Service_Calls__c`** on the job (Tim's fields; now in the
+   generator, whole-object package and permission set; cached). On the desktop job layout between
+   Initial remote diagnosis and Summary of work.
+6. **A Complete call's notes roll up onto the job** (D-072 amendment 9, `job-notes.js`): work
+   notes → Notes for summary, private → Notes from service calls, one block per call headed
+   `— SC-00012 · Sep 18, 2026 · Larry Ng`; a later edit replaces the block, emptied notes remove
+   it, office text ahead of the blocks is kept; fires on the tech's Complete tap, the board's
+   status menu, a time correction with `complete`, and on any later notes edit of a Complete
+   call. Best-effort, never fails the tap, marks the job cache stale, logs `job_updated`. Not a
+   Flow (the amendment says why).
+
+Tests: board 19 (+ job-notes 5 new file: header / blocks / append-replace-remove / cap /
+fields), estimate 44 (both tags), portal 170 (+ CallClockStrip 3, tech customers filter, the
+house on the job page). Generator: `MultiselectPicklist` support; `Customer_Type__c` delta.
+
 ## 2026-09-18 (evening) — SolarFax by API, Salesforce sharing opened, Street View + Price Book side quests
 
 **SolarFax (Solar Data Pros) is their REST API, not a Zapier hook** (D-073 amendment 1).

@@ -47,6 +47,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
+import { syncCallNotesToJob } from "./job-notes.js";
 
 export const GOOGLE_SECRET_NAME = "sundial/google-maps"; // { apiKey } — same key the street-view feature uses
 export const ESTIMATE_SF_OBJECT = "Sundial_Estimate__c";
@@ -59,13 +60,15 @@ export const CLOSED_JOB_STATUSES = Object.freeze(["Closed", "Cancelled", "Paid"]
 const LIST_LIMIT = 50;
 export const TECH_JOB_SELECT =
   "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " + // no Job_Type__c: that field is on the price-book item, not the job (2026-09-17)
-  "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Customer_Summary__c, Sundial_Customer__c, Estimate__c, " +
-  "Estimate_Total__c, Bill_To_Type__c, Payment_Status__c, Geocode_Lat__c, Geocode_Lon__c, CreatedDate, SystemModstamp";
+  "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Initial_Remote_Diagnosis__c, Customer_Summary__c, Sundial_Customer__c, Estimate__c, " +
+  "Estimate_Total__c, Bill_To_Type__c, Payment_Status__c, Geocode_Lat__c, Geocode_Lon__c, Street_View_Image_Key__c, CreatedDate, SystemModstamp";
 export const TECH_ESTIMATE_SELECT =
   "Id, Name, Client__c, Status__c, Version__c, Is_Template__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
   "Sundial_Customer__c, Service_Job__c, Subtotal__c, Discount_Amount__c, Tax_Amount__c, Total__c, Deposit_Amount__c, Last_Sent_At__c, Approved_At__c, CreatedDate";
 export const TECH_CUSTOMER_SELECT =
-  "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate";
+  "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate";
+/** Customer_Type__c (multi-select, 2026-09-19): the values the list filter accepts. Anything else is ignored. */
+export const CUSTOMER_TYPES = Object.freeze(["Solar", "Roofing", "Commercial", "Service"]);
 const CLOCK_FUTURE_GRACE_MS = 5 * 60 * 1000;
 const CLOCK_MAX_AGE_MS = 7 * 86400000;
 const PHOTO_URL_EXPIRY_SECONDS = 300;
@@ -77,8 +80,14 @@ const MAX_TEXT_CHARS = 320;
 export const TECH_CALL_EXTRA =
   "Clock_In_Latitude__c, Clock_In_Longitude__c, Clock_Out_Latitude__c, Clock_Out_Longitude__c, " + // Clock_Intervals__c is in CALL_SELECT (the board's PATCH needs it too)
   "Checklist_Template_Key__c, Checklist_State__c, " +
-  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Estimate__c, Sundial_Service_Job__r.Primary_Email_at_Creation__c, " +
-  "Sundial_Service_Job__r.Geocode_Lat__c, Sundial_Service_Job__r.Geocode_Lon__c, Sundial_Service_Job__r.Geocode_Status__c";
+  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Initial_Remote_Diagnosis__c, Sundial_Service_Job__r.Estimate__c, Sundial_Service_Job__r.Primary_Email_at_Creation__c, " +
+  "Sundial_Service_Job__r.Geocode_Lat__c, Sundial_Service_Job__r.Geocode_Lon__c, Sundial_Service_Job__r.Geocode_Status__c, Sundial_Service_Job__r.Street_View_Image_Key__c";
+
+/** The job's cached Street View still as a URL, or null (none yet / Google had no imagery). */
+export function streetViewUrlFor(key) {
+  const k = strOrNull(key);
+  return k && k !== "NONE" ? publicUrlForKey(k) : null;
+}
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 const strOrNull = (v) => {
@@ -530,7 +539,9 @@ export function jobToView(j) {
     phone: j.Primary_Phone_at_Creation__c ?? null,
     email: j.Primary_Email_at_Creation__c ?? null,
     issue: j.Issue_Description__c ?? null,
+    remoteDiagnosis: j.Initial_Remote_Diagnosis__c ?? null,
     summary: j.Customer_Summary__c ?? null,
+    streetViewUrl: streetViewUrlFor(j.Street_View_Image_Key__c),
     estimateId: j.Estimate__c ?? null,
     estimateTotal: j.Estimate_Total__c ?? null,
     billToType: j.Bill_To_Type__c ?? null,
@@ -570,6 +581,7 @@ export function customerToView(c) {
     phone: c.Primary_Phone__c ?? null,
     email: c.Primary_Email__c ?? null,
     projectTypes: c.Requested_Project_Types__c ?? null,
+    customerType: c.Customer_Type__c ?? null,
     createdAt: c.CreatedDate ?? null,
   };
 }
@@ -639,6 +651,8 @@ export function createTechHandlers(d, h) {
     return {
       ...callToBoard(c),
       issue: job.Issue_Description__c ?? null,
+      remoteDiagnosis: job.Initial_Remote_Diagnosis__c ?? null,
+      streetViewUrl: streetViewUrlFor(job.Street_View_Image_Key__c),
       email: job.Primary_Email_at_Creation__c ?? null,
       estimateId: job.Estimate__c ?? null,
       geocode: job.Geocode_Lat__c != null && job.Geocode_Lon__c != null ? { lat: job.Geocode_Lat__c, lng: job.Geocode_Lon__c, status: job.Geocode_Status__c ?? null } : null,
@@ -927,6 +941,8 @@ export function createTechHandlers(d, h) {
         details: { status, from: call.Status__c, at, gps: gps ? { lat: gps.lat, lng: gps.lng } : null, geofence: extra.geofence?.verified ?? null, text: extra.text?.sent ?? null, minutes: fields.Duration_Minutes__c ?? null, via: "tech", eventId },
       });
       await h.markStale(CACHE.call, [call.Id], tenantId);
+      // The call's notes roll up onto the job the moment it is Complete (job-notes.js).
+      if (after.Status__c === "Complete") await syncCallNotesToJob({ d, h: h.notesDeps, ctx, call: after, techName: ctx.actor?.name ?? techName(tech), at: after.Actual_End__c ?? at });
       let jobStatusChanged = null;
       if (job && fields.Status__c && fields.Status__c !== call.Status__c) {
         const calls = await h.loadJobCalls(job.Id, tenantId);
@@ -1022,6 +1038,7 @@ export function createTechHandlers(d, h) {
       await h.markStale(CACHE.call, [call.Id], tenantId);
       let jobStatusChanged = null;
       if (job && status === "Complete" && call.Status__c !== "Complete") {
+        await syncCallNotesToJob({ d, h: h.notesDeps, ctx, call: after, techName: after.Tech__r ? techName(after.Tech__r) : null, at: after.Actual_End__c ?? d.now().toISOString() });
         jobStatusChanged = await h.settleJobStatus(ctx, job, "complete", await h.loadJobCalls(job.Id, tenantId));
       }
       await h.announce(ctx, { kind: "call", action: "updated", call: callToBoard(after), jobStatus: job?.Status__c ?? null, via: "dispatch" });
@@ -1062,6 +1079,8 @@ export function createTechHandlers(d, h) {
       await h.act(ctx, { event: EVENTS.SERVICE_CALL_NOTE, recordType: "servicecall", recordSfId: call.Id, jobSfId: call.Sundial_Service_Job__c ?? null, details: { private: isPrivate, at: r.at, preview: text.slice(0, 140), via: "tech" } });
       await h.markStale(CACHE.call, [call.Id], tenantId);
       const after = { ...call, ...fields };
+      // A note added to a call that is already Complete re-rolls that call's block on the job.
+      if (after.Status__c === "Complete") await syncCallNotesToJob({ d, h: h.notesDeps, ctx, call: after, techName: after.Tech__r ? techName(after.Tech__r) : ctx.actor?.name ?? null, at: after.Actual_End__c ?? r.at });
       await h.announce(ctx, { kind: "call", action: "updated", call: callToBoard(after), jobStatus: call.Sundial_Service_Job__r?.Status__c ?? null, via: "tech" });
       return jsonResponse(200, cors, { success: true, call: callView(after, now.toISOString()) });
     },
@@ -1314,12 +1333,15 @@ export function createTechHandlers(d, h) {
     async techCustomers({ ctx, query }) {
       const { tenantId, cors } = ctx;
       const like = likeFor(query?.q);
+      // ?type=Service narrows to customers whose Customer_Type__c (multi-select) includes it.
+      const type = CUSTOMER_TYPES.find((t) => t.toLowerCase() === String(query?.type || "").trim().toLowerCase()) ?? null;
       const where =
         `Client__c = '${soqlEscapeString(tenantId)}'` +
+        (type ? ` AND Customer_Type__c INCLUDES ('${type}')` : "") +
         (like ? ` AND (Name LIKE ${like} OR Street__c LIKE ${like} OR Primary_Phone__c LIKE ${like} OR Primary_Email__c LIKE ${like})` : "");
       // Without a search the hub is far too big to page through on a phone: the newest 50.
       const rows = await d.sfQuery(`SELECT ${TECH_CUSTOMER_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
-      return jsonResponse(200, cors, { q: strOrNull(query?.q), customers: (rows || []).map(customerToView) });
+      return jsonResponse(200, cors, { q: strOrNull(query?.q), type, customers: (rows || []).map(customerToView) });
     },
     async techCustomer({ ctx, params }) {
       const { tenantId, cors } = ctx;

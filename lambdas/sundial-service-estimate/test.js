@@ -283,6 +283,7 @@ function fakeSalesforce() {
     fields: obj === "Sundial_Customer__c"
       ? [
           { name: "Requested_Project_Types__c", picklistValues: [{ value: "Solar", active: true }, { value: "Service", active: true }] },
+          { name: "Customer_Type__c", picklistValues: [{ value: "Solar", active: true }, { value: "Roofing", active: true }, { value: "Commercial", active: true }, { value: "Service", active: true }] },
           { name: "State__c", picklistValues: [{ value: "AZ", label: "Arizona", active: true }] },
         ]
       : [],
@@ -430,6 +431,7 @@ test("quick-create job with a NEW customer: customer tagged Service, estimate + 
   assert.equal(r.body.customerCreated, true);
   const cust = fake.store.Sundial_Customer__c[0];
   assert.equal(cust.Requested_Project_Types__c, "Service");
+  assert.equal(cust.Customer_Type__c, "Service", "the department tag (2026-09-19) is set the same way");
   assert.equal(cust.State__c, "AZ");
   assert.equal(cust.Client__c, TENANT);
   const est = fake.store.Sundial_Estimate__c[0];
@@ -462,7 +464,7 @@ test("quick-create job with a NEW customer: customer tagged Service, estimate + 
 
 test("new customer that looks like an existing one → 409 with candidates; confirmNew creates anyway; existing id gets Service union-added", async () => {
   const fake = fakeSalesforce();
-  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Bob Ray", Primary_Email__c: "bob@x.com", Requested_Project_Types__c: "Solar" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Bob Ray", Primary_Email__c: "bob@x.com", Requested_Project_Types__c: "Solar", Customer_Type__c: "Solar" });
   const existing = fake.store.Sundial_Customer__c[0];
   const h = makeHandler(fake);
   const dup = await call(h, "POST", "/service/estimates", { customer: { new: { firstName: "Robert", lastName: "Ray", email: "BOB@x.com" } } });
@@ -478,10 +480,11 @@ test("new customer that looks like an existing one → 409 with candidates; conf
   const picked = await call(h, "POST", "/service/estimates", { customer: { id: existing.Id } });
   assert.equal(picked.status, 201);
   assert.equal(existing.Requested_Project_Types__c, "Solar;Service");
-  // A second pick does not rewrite the field.
+  assert.equal(existing.Customer_Type__c, "Solar;Service", "a Solar customer who books service is both");
+  // A second pick does not rewrite the fields.
   const before = fake.calls.updates.length;
   await call(h, "POST", "/service/estimates", { customer: { id: existing.Id } });
-  const tagWrites = fake.calls.updates.slice(before).filter((u) => u.fields.Requested_Project_Types__c);
+  const tagWrites = fake.calls.updates.slice(before).filter((u) => u.fields.Requested_Project_Types__c || u.fields.Customer_Type__c);
   assert.equal(tagWrites.length, 0);
 });
 

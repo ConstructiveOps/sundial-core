@@ -55,7 +55,8 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
-import { applyClockEvent, clockFields, createTechHandlers, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
+import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
+import { syncCallNotesToJob } from "./job-notes.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -100,7 +101,7 @@ export const CALL_SELECT =
 export const JOB_SELECT =
   "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
   "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Sundial_Customer__c, Estimate__c, " +
-  "Estimate_Total__c, Bill_To_Type__c, CreatedDate, SystemModstamp";
+  "Estimate_Total__c, Bill_To_Type__c, Geocode_Lat__c, Geocode_Lon__c, Geocode_Status__c, CreatedDate, SystemModstamp";
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
@@ -154,8 +155,27 @@ export function callToBoard(c) {
     billable: c.Billable_to_Customer__c === true,
     billableHours: c.Billable_Hours__c ?? null,
     billRate: c.Bill_Rate__c ?? null,
+    // The clock as the office sees it on the job page (2026-09-19): every live interval
+    // with the phone's GPS at each tap, plus the geofence tag. Removed intervals stay in
+    // the correction dialog (GET /clock) — this is the plain reading, not the audit.
+    clockLog: clockSummary(c),
     createdAt: c.CreatedDate ?? null,
     modstamp: c.SystemModstamp ?? null,
+  };
+}
+
+/** { intervals: [{ kind, in, arrived, out, gps: { in, arrived, out } }], geofenceVerified } */
+export function clockSummary(c) {
+  const live = liveIntervals(parseIntervals(c.Clock_Intervals__c));
+  return {
+    intervals: live.map((i) => ({
+      kind: i.kind ?? (i.arrived ? "on_site" : "en_route"),
+      in: i.in,
+      arrived: i.arrived ?? null,
+      out: i.out ?? null,
+      gps: { in: i.in_gps ?? null, arrived: i.arrived_gps ?? null, out: i.out_gps ?? null },
+    })),
+    geofenceVerified: c.Geofence_Verified__c === true,
   };
 }
 
@@ -474,6 +494,9 @@ export function createHandler(deps = {}) {
     return next;
   }
 
+  /** What job-notes.js needs to roll a Complete call's notes onto its job. */
+  const notesDeps = { JOB_SF_OBJECT, DEFAULTS, CACHE, EVENTS, markStale, act };
+
   const H = {
     // --- the board ------------------------------------------------------------
     async board({ ctx, query }) {
@@ -523,7 +546,8 @@ export function createHandler(deps = {}) {
       const job = await loadJob(params[0], tenantId);
       if (!job) return notFound(cors);
       const [calls, { techs }] = await Promise.all([loadJobCalls(job.Id, tenantId), loadTechs(tenantId)]);
-      return jsonResponse(200, cors, { jobId: job.Id, jobStatus: job.Status__c ?? null, calls: calls.map(callToBoard), techs, defaults: { callMinutes: DEFAULTS.callMinutes } });
+      const geocode = job.Geocode_Lat__c != null && job.Geocode_Lon__c != null ? { lat: job.Geocode_Lat__c, lng: job.Geocode_Lon__c, status: job.Geocode_Status__c ?? null } : null;
+      return jsonResponse(200, cors, { jobId: job.Id, jobStatus: job.Status__c ?? null, geocode, calls: calls.map(callToBoard), techs, defaults: { callMinutes: DEFAULTS.callMinutes } });
     },
 
     // --- schedule -------------------------------------------------------------
@@ -679,6 +703,11 @@ export function createHandler(deps = {}) {
         details: { fields: changes, via: "dispatch" },
       });
       await markStale(CACHE.call, [call.Id], tenantId);
+      // A Complete call's notes live on the job too (job-notes.js): when the office marks it
+      // Complete from the status menu, or edits the notes of a call that is already Complete.
+      if (after.Status__c === "Complete" && (changes.Status__c || changes.Work_Notes__c || changes.Private_Notes__c)) {
+        await syncCallNotesToJob({ d, h: notesDeps, ctx, call: after, techName: after.Tech__r ? techName(after.Tech__r) : null, at: after.Actual_End__c ?? d.now().toISOString() });
+      }
 
       // Job status follows the call.
       let jobStatusChanged = null;
@@ -745,7 +774,7 @@ export function createHandler(deps = {}) {
     createTechHandlers(d, {
       CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
       callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms,
-      jsonResponse, bad, notFound, sfError,
+      jsonResponse, bad, notFound, sfError, notesDeps,
     })
   );
   H.techJobPhotos = H.jobPhotos; // the tech's route: same handler, different action gate

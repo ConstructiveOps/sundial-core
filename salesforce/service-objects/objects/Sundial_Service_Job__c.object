@@ -463,6 +463,26 @@
         <visibleLines>5</visibleLines>
     </fields>
     <fields>
+        <fullName>Notes_for_Summary__c</fullName>
+        <description>Every Complete call's WORK notes, one block per call (job-notes.js, 2026-09-19) - the raw material for Customer Summary. Lambda-written; the office may edit.</description>
+        <externalId>false</externalId>
+        <label>Notes for Summary</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Notes_From_Service_Calls__c</fullName>
+        <description>Every Complete call's PRIVATE notes, one block per call (job-notes.js, 2026-09-19). Internal only. Lambda-written; the office may edit.</description>
+        <externalId>false</externalId>
+        <label>Notes From Service Calls</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
         <fullName>Office_Notes__c</fullName>
         <description>Internal office log - append-only stamped entries (D-065.8). Separate from tech notes per the 9/9 meeting; tech notes live on Service Calls and are shown here read-only.</description>
         <externalId>false</externalId>

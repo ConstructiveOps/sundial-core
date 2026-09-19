@@ -81,6 +81,9 @@ def field_xml(f):
     elif t == "Picklist":
         p += [f"        <required>{req}</required>", "        <trackTrending>false</trackTrending>", "        <type>Picklist</type>",
               picklist_xml(kw["values"], kw.get("default"), kw.get("restricted", True))]
+    elif t == "MultiselectPicklist":
+        p += [f"        <required>{req}</required>", "        <trackTrending>false</trackTrending>", "        <type>MultiselectPicklist</type>",
+              picklist_xml(kw["values"], kw.get("default"), kw.get("restricted", True)), f"        <visibleLines>{kw.get('visibleLines', 4)}</visibleLines>"]
     elif t == "LongTextArea":
         p += [f"        <length>{kw.get('length', 32768)}</length>", "        <trackTrending>false</trackTrending>",
               "        <type>LongTextArea</type>", f"        <visibleLines>{kw.get('visibleLines', 5)}</visibleLines>"]
@@ -263,6 +266,8 @@ OBJECTS.append(dict(
         F("System_Ownership__c", "System Ownership", "Classification", "Picklist", "Leased / third-party steers the Bill To default.", values=["Customer Owned", "Leased", "Third-Party Owned"]),
         F("Issue_Description__c", "Issue Description", "Narrative", "LongTextArea", "Customer-reported issue at intake (board tooltip reads the first line).", ),
         F("Initial_Remote_Diagnosis__c", "Initial Remote Diagnosis", "Narrative", "LongTextArea", "Remote-first findings before any truck roll.", cache=False),
+        F("Notes_for_Summary__c", "Notes for Summary", "Narrative", "LongTextArea", "Every Complete call's WORK notes, one block per call (job-notes.js, 2026-09-19) - the raw material for Customer Summary. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8),
+        F("Notes_From_Service_Calls__c", "Notes From Service Calls", "Narrative", "LongTextArea", "Every Complete call's PRIVATE notes, one block per call (job-notes.js, 2026-09-19). Internal only. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8),
         F("Office_Notes__c", "Office Notes", "Narrative", "LongTextArea", "Internal office log - append-only stamped entries (D-065.8). Separate from tech notes per the 9/9 meeting; tech notes live on Service Calls and are shown here read-only.", cache=False, length=131072, visibleLines=8),
         F("Customer_Summary__c", "Customer Summary", "Narrative", "LongTextArea", "The customer-facing paragraph for the receipt and the photo job report. AI-drafted from the calls' Work Notes, office-edited before send.", cache=False),
         lk("Originating_Solar_Project__c", "Originating Solar Project", "Context", "Sundial_Solar__c", "Service_Jobs", "Installed system: specs, install date, photos read from here (no Asset object).", "Service Jobs"),
@@ -476,10 +481,17 @@ OBJECTS.append(dict(
     ],
 ))
 
-# ============================ Sundial_Customer__c (ONE field, not whole-object) ============================
+# ============================ Sundial_Customer__c (delta fields, not whole-object) ============================
 CUSTOMER_FIELD = F("Stripe_Customer_Id__c", "Stripe Customer Id", "Payments", "Text",
                    "Stripe customer reference (card on file via SetupIntent; also the Service Club subscription customer). Cards are vaulted in Stripe, never in Salesforce. Deployed as a single CustomField, never a whole-object deploy of Sundial_Customer__c.",
                    length=100, externalId=True)
+# Tim created this one in Setup on 2026-09-19; it is here so the repo is the record (and so the
+# permission set grants the integration user FLS). Which department(s) the customer belongs to:
+# the Sales module defaults Solar, the Service module's popups default/union Service.
+CUSTOMER_TYPE_FIELD = F("Customer_Type__c", "Customer Type", "Classification", "MultiselectPicklist",
+                        "Department(s) this customer belongs to. Sales (New Customer) defaults Solar; New Estimate / New Job / the Service Club join set or add Service. Filterable in the tech app's Customers list.",
+                        values=["Solar", "Roofing", "Commercial", "Service"], visibleLines=4)
+CUSTOMER_DELTA_FIELDS = [CUSTOMER_FIELD, CUSTOMER_TYPE_FIELD]
 
 # ============================ Sundial_User__c (ONE field, not whole-object) ============================
 USER_FIELD = F("Hourly_Bill_Rate__c", "Hourly Bill Rate", "Service", "Currency",
@@ -510,12 +522,13 @@ open(f"{PKG}/objects/Sundial_User__c.object", "w").write(f"""<?xml version="1.0"
 
 open(f"{PKG}/objects/Sundial_Customer__c.object", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Sundial_Customer__c - ONE NEW FIELD ONLY (D-072). package.xml lists it as a CustomField
-  member, so this file adds Stripe_Customer_Id__c and touches nothing else on the object.
+  Sundial_Customer__c - DELTA FIELDS ONLY (D-072 + 2026-09-19). package.xml lists them as
+  CustomField members, so this file adds Stripe_Customer_Id__c and Customer_Type__c and
+  touches nothing else on the object.
   NEVER convert this to a whole-object deploy: it would overwrite the live object's settings.
 -->
 <CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
-{field_xml(CUSTOMER_FIELD)}
+{chr(10).join(field_xml(f) for f in CUSTOMER_DELTA_FIELDS)}
 </CustomObject>
 """)
 
@@ -536,7 +549,7 @@ open(f"{PKG}/package.xml", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
 
   DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
   Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
-  Single Package -> CHECK ONLY first, expect 10/10 components (7 objects + 2 fields + 1
+  Single Package -> CHECK ONLY first, expect 11/11 components (7 objects + 3 fields + 1
   permission set), then deploy for real. Then assign the permission set, re-run verify.
 -->
 <Package xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -546,6 +559,7 @@ open(f"{PKG}/package.xml", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
     </types>
     <types>
         <members>Sundial_Customer__c.Stripe_Customer_Id__c</members>
+        <members>Sundial_Customer__c.Customer_Type__c</members>
         <members>Sundial_User__c.Hourly_Bill_Rate__c</members>
         <name>CustomField</name>
     </types>
@@ -574,7 +588,8 @@ for o in OBJECTS:
             skipped_required.append(f"{o['api']}.{f.api}")
             continue
         fps.append(fp(o["api"], f.api, f.ftype != "Formula"))
-fps.append(fp("Sundial_Customer__c", CUSTOMER_FIELD.api, True))
+for f in CUSTOMER_DELTA_FIELDS:
+    fps.append(fp("Sundial_Customer__c", f.api, True))
 fps.append(fp("Sundial_User__c", USER_FIELD.api, True))
 ops = "\n".join(f"""    <objectPermissions>
         <allowCreate>true</allowCreate>

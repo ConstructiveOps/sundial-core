@@ -814,6 +814,16 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
   // rejects it above, so this assignment is authoritative and un-overridable.)
   const payload = { ...clean, Client__c: tenantId };
 
+  // Customer_Type__c default (2026-09-19): a customer made from the Sales module's New
+  // Customer popup is a Solar customer unless the body says otherwise. The Service module's
+  // popups never come through here (the estimate Lambda creates theirs and tags Service).
+  // Guarded by the describe so an org without the field is untouched.
+  if (objectKey === "customer" && !Object.keys(payload).some((k) => k.toLowerCase() === "customer_type__c")) {
+    const typeDef = (describe.fields || []).find((f) => f.name === "Customer_Type__c" && f.createable === true);
+    const solar = typeDef?.picklistValues?.find((v) => v.active !== false && String(v.value).toLowerCase() === "solar");
+    if (typeDef && solar) payload.Customer_Type__c = solar.value;
+  }
+
   // §2.3 invariant 1: OWNERSHIP IS STAMPED SERVER-SIDE for a sales role, from the
   // AccessContext, exactly as Client__c is. The body cannot reach these — they are in
   // SALES_PROTECTED_FIELDS and were rejected above — so this assignment is the only

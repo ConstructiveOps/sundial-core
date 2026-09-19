@@ -38,6 +38,8 @@ create table if not exists sundial_service_job_cache (
   service_type                           text,        -- Service_Type__c
   system_ownership                       text,        -- System_Ownership__c (Leased / third-party steers the Bill To default.)
   issue_description                      text,        -- Issue_Description__c (Customer-reported issue at intake (board tooltip reads the f...)
+  notes_for_summary                      text,        -- Notes_for_Summary__c (Every Complete call's WORK notes, one block per call (job-no...)
+  notes_from_service_calls               text,        -- Notes_From_Service_Calls__c (Every Complete call's PRIVATE notes, one block per call (job...)
   originating_solar_project_sf_id        text,        -- Originating_Solar_Project__c (Installed system: specs, install date, photos read from here...)
   originating_roofing_project_sf_id      text,        -- Originating_Roofing_Project__c
   originating_commercial_project_sf_id   text,        -- Originating_Commercial_Project__c (Phase 3 object - REMOVE from the package if Sundial_Commerci...)

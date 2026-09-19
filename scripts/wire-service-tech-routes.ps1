@@ -15,6 +15,7 @@
         POST /service/tech/calls/{id}/photos           presigned PUT for a photo
         POST /service/tech/calls/{id}/photos/confirm   register the photo, bump the count
         GET  /service/tech/calls/{id}/photos           list the call's photos
+        GET  /service/tech/jobs/{id}/street-view       the house (estimate Lambda, 2026-09-19)
       sundial-service-estimate:
         POST /service/tech/calls/{id}/estimate-lines   add Proposed "Field" lines to the job's estimate
     plus OPTIONS for CORS on every resource. AWS_PROXY, authorization NONE at the gateway —
@@ -125,6 +126,11 @@ foreach ($part in @("photos", "files")) {
     $r = Ensure-Resource $tJobId $part
     foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board }
 }
+# The house on the phone (2026-09-19): the same Street View still the office's job page
+# fetches, served read-only to the tech app by the ESTIMATE Lambda (the Google key lives there).
+Write-Host "==> /service/tech/jobs/{id}/street-view : GET, OPTIONS -> $Est" -ForegroundColor Cyan
+$tSv = Ensure-Resource $tJobId "street-view"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $tSv $m $Est }
 
 Write-Host "==> Lambda invoke permissions (apigateway)" -ForegroundColor Cyan
 foreach ($pair in @(@($Board, "apigw-service-board"), @($Est, "apigw-service-estimate"))) {

@@ -25,7 +25,7 @@ export const NEW_CUSTOMER_FIELDS = Object.freeze({
 /** The columns the duplicate matcher reads back. */
 export const CANDIDATE_SELECT =
   "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, " +
-  "Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c";
+  "Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c";
 
 const clean = (v) => (v == null ? "" : String(v).trim());
 

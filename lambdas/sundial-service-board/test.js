@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
   createHandler,
+  callToBoard,
   matchRoute,
   pickTechs,
   sortTray,
@@ -74,7 +75,7 @@ function fakeWorld() {
     ],
     Sundial_Customer__c: [
       { Id: "CUS000000000000002", Client__c: TENANT, Primary_Email__c: "bo@example.com" },
-      { Id: "CUS000000000000003", Client__c: TENANT, Name: "Cy Diaz", First_Name__c: "Cy", Last_Name__c: "Diaz", Street__c: "3 Elm St", City__c: "Phoenix", State__c: "AZ", Postal_Code__c: "85001", Primary_Phone__c: "(602) 555-0100", CreatedDate: "2026-06-01T12:00:00Z" },
+      { Id: "CUS000000000000003", Client__c: TENANT, Name: "Cy Diaz", First_Name__c: "Cy", Last_Name__c: "Diaz", Street__c: "3 Elm St", City__c: "Phoenix", State__c: "AZ", Postal_Code__c: "85001", Primary_Phone__c: "(602) 555-0100", Customer_Type__c: "Solar;Service", CreatedDate: "2026-06-01T12:00:00Z" },
       { Id: "CUS000000000000099", Client__c: OTHER, Name: "Cy Other", Primary_Phone__c: "(602) 555-0100" },
     ],
     Sundial_Estimate__c: [
@@ -94,6 +95,8 @@ function fakeWorld() {
   };
   store.Sundial_Service_Job__c[2].Estimate__c = "EST000000000000003"; // SVC-00003 has an estimate
   store.Sundial_Service_Job__c[2].Address_at_Creation__c = "3 Elm St, Phoenix";
+  store.Sundial_Service_Job__c[2].Initial_Remote_Diagnosis__c = "Inverter offline since Tuesday; likely the AC disconnect.";
+  store.Sundial_Service_Job__c[2].Street_View_Image_Key__c = "SUNDIAL/SVC000000000000003/street-view-20260914T120000Z-ab12.jpg";
   store.Sundial_Service_Job__c[2].Primary_Phone_at_Creation__c = "602-555-0100";
   let seq = 10;
   let clock = 0;
@@ -115,6 +118,7 @@ function fakeWorld() {
     if ((m = c.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
     if ((m = c.match(/^(\w+) NOT IN \((.*)\)$/))) return !m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) IN \((.*)\)$/))) return m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
+    if ((m = c.match(/^(\w+) INCLUDES \('(.*)'\)$/))) return String(rec[m[1]] ?? "").split(";").includes(m[2]);
     if ((m = c.match(/^\((.*)\)$/)) && m[1].includes(" OR ")) return m[1].split(" OR ").some((sub) => cond(rec, sub));
     if ((m = c.match(/^([\w.]+) LIKE '%(.*)%'$/))) return String(rec[m[1]] ?? "").toLowerCase().includes(m[2].toLowerCase());
     if ((m = c.match(/^(\w+) (>=|<) (\S+)$/))) {
@@ -347,6 +351,25 @@ test("PATCH /service/calls/{id}: move with baseModstamp; 409 on a stale stamp; r
   const done = await call(h, "PATCH", `/service/calls/${id}`, { status: "Complete", workNotes: "Replaced the disconnect." });
   assert.equal(done.status, 200);
   assert.equal(done.body.jobStatusChanged, null);
+  // The Complete call's notes roll up onto the job (job-notes.js), one block per call.
+  const job3 = w.store.Sundial_Service_Job__c.find((j) => j.Id === "SVC000000000000003");
+  assert.equal(job3.Notes_for_Summary__c, "— SC-00001 · Sep 14, 2026 · Larry Ng\nReplaced the disconnect."); // reassigned to Larry above
+  assert.equal(job3.Notes_From_Service_Calls__c ?? null, null, "no private notes on the call → nothing on the job");
+  assert.ok(w.activity.some((a) => a.event === "job_updated" && a.details.callNotesRolledUp === "SC-00001"));
+  // Editing the Complete call's notes REPLACES its block; a private note lands in the other field.
+  const edited = await call(h, "PATCH", `/service/calls/${id}`, { workNotes: "Replaced the disconnect and the bus bar.", privateNotes: "Dog in the yard." });
+  assert.equal(edited.status, 200);
+  assert.equal(job3.Notes_for_Summary__c, "— SC-00001 · Sep 14, 2026 · Larry Ng\nReplaced the disconnect and the bus bar.");
+  assert.equal(job3.Notes_From_Service_Calls__c, "— SC-00001 · Sep 14, 2026 · Larry Ng\nDog in the yard.");
+  // The job page's calls card reads the clock with GPS per interval and the job's geocode.
+  const jc = await call(h, "GET", "/service/jobs/SVC000000000000003/calls");
+  const mine = jc.body.calls.find((c) => c.id === id);
+  assert.equal(mine.clockLog.intervals.length, 1);
+  assert.equal(mine.clockLog.intervals[0].kind, "on_site");
+  assert.equal(mine.clockLog.intervals[0].out, w.now.toISOString());
+  assert.deepEqual(mine.clockLog.intervals[0].gps, { in: null, arrived: null, out: null }, "office-started clock has no phone GPS");
+  assert.equal(mine.clockLog.geofenceVerified, false);
+  assert.equal("geocode" in jc.body, true);
   assert.equal(w.store.Sundial_Service_Call__c[0].Actual_End__c, w.now.toISOString());
   assert.equal(w.store.Sundial_Service_Call__c[0].Duration_Minutes__c, 45); // closed the interval the office opened
   w.now = NOW;
@@ -667,6 +690,23 @@ test("the day in the field: on my way (texts, closes the other clock) → clock 
   assert.equal(rec().Actual_End__c, "2026-09-14T16:29:00.000Z");
   assert.equal(rec().Clock_Out_Latitude__c, 33.4486);
   assert.equal(r.body.jobStatusChanged, null); // Larry's SC-00002 is still open on the job
+  // The tech's notes rolled up onto the job: work → Notes_for_Summary__c, private → Notes_From_Service_Calls__c (replay ids stripped).
+  assert.equal(job.Notes_for_Summary__c, "— SC-00001 · Sep 14, 2026 · Jake Dorsey\n── Jake Dorsey · Sep 14, 2026, 9:20 AM\nReplaced the 20A breaker; tested under load.");
+  assert.ok(!job.Notes_for_Summary__c.includes("n-1"), "the zero-width replay id never reaches the job");
+  assert.ok(job.Notes_From_Service_Calls__c.startsWith("— SC-00001 · Sep 14, 2026 · Jake Dorsey\n── Jake Dorsey"));
+  assert.ok(job.Notes_From_Service_Calls__c.endsWith("Customer's dog bites."));
+  // The office's view of the same call carries the phone's GPS per tap.
+  const onBoard = r.body.call.clock;
+  assert.equal(onBoard.state, "idle");
+  const rolled = callToBoard(rec());
+  assert.equal(rolled.clockLog.intervals.length, 1);
+  assert.deepEqual(rolled.clockLog.intervals[0].gps.out, { lat: 33.4486, lng: -112.0741 });
+  assert.equal(rolled.clockLog.geofenceVerified, true);
+  // A note added after completion re-rolls that call's block (still one block).
+  r = await call(h, "POST", `/service/tech/calls/${id}/notes`, { body: "Forgot: also tightened the lugs.", at: "2026-09-14T16:31:00Z", eventId: "n-9" });
+  assert.equal(r.status, 200);
+  assert.equal(job.Notes_for_Summary__c.split("— SC-00001").length, 2, "one block for the call");
+  assert.ok(job.Notes_for_Summary__c.endsWith("Forgot: also tightened the lugs."));
   assert.equal(w.activity.filter((a) => a.event === "service_call_clock").length, 4); // other-closed, en route, in, out
   assert.ok(w.broadcasts.some((b) => b.event === "board" && b.payload.via === "tech" && b.payload.call.id === id));
   assert.ok(w.stale.some((s) => s.ids.includes(id)));
@@ -762,7 +802,13 @@ test("read-only lists for the tech app: jobs (open by default, searchable), esti
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.job.customerName, "Cy Diaz");
   assert.equal(r.body.job.address, "3 Elm St, Phoenix");
+  assert.equal(r.body.job.remoteDiagnosis, "Inverter offline since Tuesday; likely the AC disconnect.");
+  assert.equal(r.body.job.streetViewUrl, "https://sfsolproj.s3.us-west-1.amazonaws.com/SUNDIAL/SVC000000000000003/street-view-20260914T120000Z-ab12.jpg");
   assert.deepEqual(r.body.calls.map((c) => [c.techName, c.isMine]), [["Jake Dorsey", true], ["Larry Ng", false]]);
+  // The tech's own call view carries the same two (the call page shows the house + the office's diagnosis).
+  const tc = await call(h, "GET", "/service/tech/calls/SC0000000000000001");
+  assert.equal(tc.body.call.remoteDiagnosis, "Inverter offline since Tuesday; likely the AC disconnect.");
+  assert.ok(tc.body.call.streetViewUrl.endsWith("-ab12.jpg"));
   assert.equal(r.body.estimate.number, "EST-00003");
   assert.equal(r.body.estimate.lines.length, 2);
   assert.equal((await call(h, "GET", "/service/tech/jobs/SVC000000000000099")).status, 404); // other tenant
@@ -778,6 +824,16 @@ test("read-only lists for the tech app: jobs (open by default, searchable), esti
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.deepEqual(r.body.customers.map((c) => c.name), ["Cy Diaz"]); // the other tenant's Cy is not ours
   assert.equal(r.body.customers[0].address, "3 Elm St, Phoenix, AZ, 85001");
+  assert.equal(r.body.customers[0].customerType, "Solar;Service");
+  // ?type= narrows to a Customer_Type__c value (multi-select INCLUDES); an unknown value is ignored.
+  r = await call(h, "GET", "/service/tech/customers", null, { type: "service" });
+  assert.equal(r.body.type, "Service");
+  assert.deepEqual(r.body.customers.map((c) => c.name), ["Cy Diaz"]);
+  r = await call(h, "GET", "/service/tech/customers", null, { type: "Roofing" });
+  assert.deepEqual(r.body.customers, []);
+  r = await call(h, "GET", "/service/tech/customers", null, { type: "bogus" });
+  assert.equal(r.body.type, null);
+  assert.equal(r.body.customers.length, 2);
   r = await call(h, "GET", "/service/tech/customers/CUS000000000000003");
   assert.deepEqual(r.body.jobs.map((j) => j.number), ["SVC-00003"]);
   assert.deepEqual(r.body.estimates.map((e) => e.number), ["EST-00003"]);
@@ -984,7 +1040,7 @@ test("tech SELECTs only name fields that exist in the object metadata", () => {
   }
   // The customer hub predates the service package (its metadata lives in the org, not
   // this folder) — pin the exact list instead, so a change here is a deliberate one.
-  assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, CreatedDate");
+  assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate"); // Customer_Type__c: 2026-09-19, in salesforce/service-objects as a delta field
 });
 
 // ---------------------------------------------------------------------------

@@ -42,8 +42,8 @@
       ]
     ],
     "delete": false,
-    "fields": 42,
-    "cached": 36
+    "fields": 44,
+    "cached": 38
   },
   "servicecall": {
     "sfObject": "Sundial_Service_Call__c",
@@ -131,4 +131,4 @@
     "fields": 16,
     "cached": 12
   }
-}
+}

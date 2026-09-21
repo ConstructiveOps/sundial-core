@@ -48,6 +48,7 @@ import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
 import { syncCallNotesToJob } from "./job-notes.js";
+import { CATEGORIES, fmtTime, jobLabel } from "../../lib/notify.js";
 
 export const GOOGLE_SECRET_NAME = "sundial/google-maps"; // { apiKey } — same key the street-view feature uses
 export const ESTIMATE_SF_OBJECT = "Sundial_Estimate__c";
@@ -622,6 +623,37 @@ export async function realListPhotos(prefix) {
  *           settleJobStatus, act, markStale, announce, sms (createSmsSender), CACHE,
  *           jsonResponse, bad, notFound, sfError
  */
+/**
+ * Price-book search over rows already in hand: every word typed must appear in the
+ * code, name, category or description (case-insensitive); a hit on the code or the
+ * name ranks above one buried in the description. No query → the first `limit` by name.
+ */
+export function priceBookMatches(rows, q, limit = 25) {
+  const words = String(q ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return rows.slice(0, limit);
+  const scored = [];
+  for (const r of rows) {
+    const code = String(r.Item_Code__c ?? "").toLowerCase();
+    const name = String(r.Name ?? "").toLowerCase();
+    const rest = `${r.Category__c ?? ""} ${r.Description__c ?? ""}`.toLowerCase();
+    let score = 0;
+    let ok = true;
+    for (const w of words) {
+      if (code.startsWith(w)) score += 4;
+      else if (code.includes(w)) score += 3;
+      else if (name.includes(w)) score += 2;
+      else if (rest.includes(w)) score += 1;
+      else {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) scored.push({ r, score });
+  }
+  scored.sort((a, b) => b.score - a.score || String(a.r.Name ?? "").localeCompare(String(b.r.Name ?? "")));
+  return scored.slice(0, limit).map((x) => x.r);
+}
+
 export function createTechHandlers(d, h) {
   const { CALL_SF_OBJECT, JOB_SF_OBJECT, CALL_SELECT, DEFAULTS, callToBoard, techName, jsonResponse, bad, notFound, sfError, CACHE } = h;
   const SELECT = `${CALL_SELECT}, ${TECH_CALL_EXTRA}`;
@@ -951,6 +983,24 @@ export function createTechHandlers(d, h) {
       }
       const view = callView(after, d.now().toISOString());
       await h.announce(ctx, { kind: "call", action: "updated", call: callToBoard(after), jobStatus: job?.Status__c ?? null, via: "tech" });
+      // The office's bell (D-074): clocked in / complete / no-show. "On my way" is left to
+      // the board's live blocks — it would ring the office seven times a morning for nothing.
+      if (h.notifier && fields.Status__c && fields.Status__c !== call.Status__c && ["In Progress", "Complete", "No-Show"].includes(fields.Status__c)) {
+        const who = ctx.actor?.name ?? techName(tech) ?? "A tech";
+        const verb = fields.Status__c === "In Progress" ? "clocked in at" : fields.Status__c === "Complete" ? "completed" : "marked a no-show at";
+        await h.notifier.toOffice({
+          tenantId,
+          exceptUserSfId: ctx.userId,
+          category: CATEGORIES.TECH_ACTIVITY,
+          kind: fields.Status__c === "In Progress" ? "clock_in" : fields.Status__c === "Complete" ? "complete" : "no_show",
+          title: `${who} ${verb} ${jobLabel(job ?? call.Sundial_Service_Job__r)}`,
+          body: [`${call.Name ?? "Call"} · ${fmtTime(at, DEFAULTS.timeZone)}`, extra.geofence?.distanceMeters != null && extra.geofence.verified === false ? "Outside the geofence" : null, fields.Status__c === "Complete" && fields.Duration_Minutes__c != null ? `${fields.Duration_Minutes__c} min on site` : null].filter(Boolean).join(" · "),
+          url: job ? `/service/jobs/${job.Id}` : "/service/dispatch",
+          recordType: "servicecall",
+          recordSfId: call.Id,
+          dedupeKey: `tech:${fields.Status__c}:${call.Id}:${eventId ?? at}`,
+        });
+      }
       return jsonResponse(200, cors, { success: true, call: view, jobStatus: job?.Status__c ?? null, jobStatusChanged, closedOthers, ...extra });
     },
 
@@ -1360,13 +1410,17 @@ export function createTechHandlers(d, h) {
     async techPriceBook({ ctx, query }) {
       const { tenantId, cors } = ctx;
       const q = strOrNull(query?.q);
-      const like = q ? `'%${soqlEscapeString(q).replace(/[%_]/g, "")}%'` : null;
-      const rows = await d.sfQuery(
+      // The match runs HERE, not in SOQL (2026-09-21): `Description__c` is a Long Text Area,
+      // and Salesforce refuses LIKE on one ("can not be filtered in a query call"), so every
+      // typed search was a 500 and the phone showed nothing. The active price book is a few
+      // hundred rows — pull it once, match name / code / category / description in JS, and
+      // rank code + name hits first so "1234" finds the item whose code starts with it.
+      const all = await d.sfQuery(
         `SELECT Id, Name, Item_Code__c, Kind__c, Category__c, Description__c, Unit_of_Measure__c, Default_Quantity__c, Price__c, Taxable__c FROM ${ITEM_SF_OBJECT} ` +
-          `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Is_Active__c = true` +
-          (like ? ` AND (Name LIKE ${like} OR Item_Code__c LIKE ${like} OR Description__c LIKE ${like})` : "") +
-          ` ORDER BY Name LIMIT 25`
+          `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Is_Active__c = true ORDER BY Name LIMIT 2000`,
+        { maxRecords: 2000 }
       );
+      const rows = priceBookMatches(all || [], q, 25);
       return jsonResponse(200, cors, {
         q,
         items: (rows || []).map((r) => ({ id: r.Id, name: r.Name ?? null, code: r.Item_Code__c ?? null, kind: r.Kind__c ?? null, category: r.Category__c ?? null, description: r.Description__c ?? null, unit: r.Unit_of_Measure__c ?? null, defaultQuantity: r.Default_Quantity__c ?? null, price: r.Price__c ?? null, taxable: r.Taxable__c === true })),

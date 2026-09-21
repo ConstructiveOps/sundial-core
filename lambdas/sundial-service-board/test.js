@@ -88,7 +88,7 @@ function fakeWorld() {
     ],
     Sundial_Price_Book_Item__c: [
       { Id: "PBI000000000000001", Client__c: TENANT, Name: "Breaker 20A single pole", Item_Code__c: "BRK-20", Kind__c: "Material", Is_Active__c: true, Price__c: 45, Unit_of_Measure__c: "Each", Default_Quantity__c: 1 },
-      { Id: "PBI000000000000002", Client__c: TENANT, Name: "Diagnostic hour", Item_Code__c: "LAB-DIAG", Kind__c: "Labor", Is_Active__c: true, Price__c: 150, Unit_of_Measure__c: "Hour" },
+      { Id: "PBI000000000000002", Client__c: TENANT, Name: "Diagnostic hour", Item_Code__c: "LAB-DIAG", Kind__c: "Labor", Is_Active__c: true, Price__c: 150, Unit_of_Measure__c: "Hour", Description__c: "Troubleshooting time, first hour" },
       { Id: "PBI000000000000003", Client__c: TENANT, Name: "Breaker 20A (old)", Item_Code__c: "BRK-20", Kind__c: "Material", Is_Active__c: false, Price__c: 40 },
       { Id: "PBI000000000000009", Client__c: OTHER, Name: "Breaker 20A theirs", Item_Code__c: "BRK-20", Kind__c: "Material", Is_Active__c: true, Price__c: 1 },
     ],
@@ -178,12 +178,19 @@ function fakeWorld() {
       update: (patch) => ({ in: (col, ids) => ({ eq: async () => { stale.push({ table, ids, patch }); return { error: null }; } }) }),
     }),
   });
+  // Notifications (D-074): recorded, never delivered.
+  const notes = [];
+  const fakeNotifier = {
+    toUsers: async (n) => (notes.push({ to: "users", ...n }), { inserted: n.userSfIds.length, skipped: 0, pushed: 0 }),
+    toOffice: async (n) => (notes.push({ to: "office", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+    toProfile: async (n) => (notes.push({ to: "profile", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+  };
   const world = {
-    store, calls, activity, stale, emails, broadcasts, texts, smsRows, fileRows, photos, fetches,
+    store, calls, activity, stale, emails, broadcasts, texts, smsRows, fileRows, photos, fetches, notes,
     now: NOW,
     geocode: { status: "OK", results: [{ geometry: { location: { lat: 33.4484, lng: -112.074 } } }] },
     deps: {
-      sfQuery, sfCreateRecord, sfUpdateRecord, getSupabaseClient,
+      sfQuery, sfCreateRecord, sfUpdateRecord, getSupabaseClient, notifier: fakeNotifier,
       sendEmail: async (m) => { emails.push(m); return { ok: true, messageId: "m" }; },
       isEmailConfigured: () => true,
       broadcast: async (channel, event, payload) => { broadcasts.push({ channel, event, payload }); return { ok: true }; },
@@ -300,6 +307,57 @@ test("POST /service/jobs/{id}/calls: schedules, moves the job to Scheduled, logs
   assert.equal((await call(h, "POST", "/service/jobs/SVC000000000000001/calls", { techId: "USR000000000000001", start: "2026-09-15T16:00:00Z", end: "2026-09-15T15:00:00Z" })).body.code, "WINDOW_INVALID");
   assert.equal((await call(h, "POST", "/service/jobs/SVC000000000000004/calls", { techId: "USR000000000000001", start: "2026-09-15T16:00:00Z" })).body.code, "JOB_CLOSED");
   assert.equal((await call(h, "POST", "/service/jobs/SVC000000000000099/calls", { techId: "USR000000000000001", start: "2026-09-15T16:00:00Z" })).status, 404); // other tenant's job
+});
+
+test("notifications (D-074): the tech hears scheduled / moved / taken off / cancelled; the office hears clock-in / complete / no-show — never 'on my way'", async () => {
+  const w = fakeWorld();
+  const h = makeHandler(w);
+  // Scheduled onto Jake.
+  const r = await call(h, "POST", "/service/jobs/SVC000000000000001/calls", { techId: "USR000000000000001", start: "2026-09-15T16:00:00Z" });
+  const id = r.body.call.id;
+  assert.equal(w.notes.length, 1);
+  assert.deepEqual([w.notes[0].to, w.notes[0].userSfIds, w.notes[0].category, w.notes[0].kind], ["users", ["USR000000000000001"], "schedule", "scheduled"]);
+  assert.equal(w.notes[0].title, "New call Tue, Sep 15, 9:00 AM: SVC-00001 · Ann Lee");
+  assert.equal(w.notes[0].url, `/tech/calls/${id}`);
+  assert.equal(w.notes[0].dedupeKey, `schedule:scheduled:${id}:USR000000000000001:2026-09-15T16:00:00.000Z`);
+  // Moved: the same tech hears "moved".
+  await call(h, "PATCH", `/service/calls/${id}`, { start: "2026-09-15T18:00:00Z", end: "2026-09-15T20:00:00Z" });
+  assert.equal(w.notes.length, 2);
+  assert.equal(w.notes[1].kind, "moved");
+  assert.ok(w.notes[1].title.startsWith("Moved to Tue, Sep 15, 11:00 AM"));
+  // Reassigned to Mia: Jake is taken off, Mia hears "new call".
+  await call(h, "PATCH", `/service/calls/${id}`, { techId: "USR000000000000002" });
+  assert.deepEqual(w.notes.slice(2).map((n) => [n.kind, n.userSfIds[0]]), [["reassigned_away", "USR000000000000001"], ["scheduled", "USR000000000000002"]]);
+  assert.equal(w.notes[2].url, "/tech");
+  // An office status change (not a tech tap) rings nobody; a notes-only PATCH rings nobody.
+  await call(h, "PATCH", `/service/calls/${id}`, { workNotes: "checked the inverter" });
+  assert.equal(w.notes.length, 4);
+  // Cancelled: Mia hears it, with the reason.
+  await call(h, "POST", `/service/calls/${id}/cancel`, { reason: "Customer rescheduled" });
+  assert.equal(w.notes[4].kind, "cancelled");
+  assert.equal(w.notes[4].userSfIds[0], "USR000000000000002");
+  assert.ok(w.notes[4].body.includes("Reason: Customer rescheduled"));
+  // An unscheduled call: nothing to tell anyone until it is put on the board.
+  const u = await call(h, "POST", "/service/jobs/SVC000000000000001/calls", { techId: "USR000000000000001", unscheduled: true });
+  assert.equal(w.notes.length, 5);
+  await call(h, "PATCH", `/service/calls/${u.body.call.id}`, { start: "2026-09-16T16:00:00Z" });
+  assert.equal(w.notes[5].kind, "scheduled");
+
+  // The tech's day, seen from the office's bell.
+  const tech = makeHandler(w, { user: { id: "USR000000000000001", firstName: "Jake", lastName: "Dorsey" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001" } });
+  const c2 = u.body.call.id;
+  w.now = new Date("2026-09-16T15:30:00Z");
+  await call(tech, "POST", `/service/tech/calls/${c2}/status`, { status: "En Route", textCustomer: false });
+  assert.equal(w.notes.length, 6, "on my way is not an office alert");
+  await call(tech, "POST", `/service/tech/calls/${c2}/status`, { status: "In Progress", gps: { lat: 33.4484, lng: -112.074 }, eventId: "e1" });
+  assert.equal(w.notes[6].to, "office");
+  assert.deepEqual([w.notes[6].category, w.notes[6].kind, w.notes[6].exceptUserSfId], ["tech_activity", "clock_in", "USR000000000000001"]);
+  assert.equal(w.notes[6].title, "Jake Dorsey clocked in at SVC-00001 · Ann Lee");
+  assert.equal(w.notes[6].url, "/service/jobs/SVC000000000000001");
+  assert.equal(w.notes[6].dedupeKey, `tech:In Progress:${c2}:e1`);
+  // A replayed tap (same eventId) is a duplicate on the server and rings nobody again.
+  await call(tech, "POST", `/service/tech/calls/${c2}/status`, { status: "In Progress", eventId: "e1" });
+  assert.equal(w.notes.length, 7);
 });
 
 test("PATCH /service/calls/{id}: move with baseModstamp; 409 on a stale stamp; refuses once started; status progression settles the job", async () => {
@@ -784,6 +842,19 @@ test("GET /service/tech/price-book?q=: active items of this tenant matching name
   assert.deepEqual(r.body.items.map((i) => i.name), ["Breaker 20A single pole"]);
   r = await call(h, "GET", "/service/tech/price-book");
   assert.equal(r.body.items.length, 2);
+  // The match is in the Lambda, not SOQL (Description__c is a Long Text Area, which
+  // Salesforce refuses to LIKE — the 2026-09-21 "nothing comes up" bug): the query it
+  // sends has no LIKE at all, a description word still matches, and so does a number.
+  assert.ok(!w.calls.queries.some((s) => s.includes("Sundial_Price_Book_Item__c") && s.includes("LIKE")), "no LIKE on the price book");
+  r = await call(h, "GET", "/service/tech/price-book", null, { q: "diagnostic" });
+  assert.deepEqual(r.body.items.map((i) => i.code), ["LAB-DIAG"]);
+  r = await call(h, "GET", "/service/tech/price-book", null, { q: "troubleshooting" });
+  assert.deepEqual(r.body.items.map((i) => i.code), ["LAB-DIAG"], "a word only in the description matches");
+  r = await call(h, "GET", "/service/tech/price-book", null, { q: "20" });
+  assert.deepEqual(r.body.items.map((i) => i.code), ["BRK-20"]);
+  r = await call(h, "GET", "/service/tech/price-book", null, { q: "breaker pole" });
+  assert.deepEqual(r.body.items.map((i) => i.code), ["BRK-20"]);
+  assert.deepEqual((await call(h, "GET", "/service/tech/price-book", null, { q: "zzz" })).body.items, []);
 });
 
 test("read-only lists for the tech app: jobs (open by default, searchable), estimates (no templates), customers — tenant-wide, action service.tech.read", async () => {

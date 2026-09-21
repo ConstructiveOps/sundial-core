@@ -855,6 +855,12 @@ test("GET /service/tech/price-book?q=: active items of this tenant matching name
   r = await call(h, "GET", "/service/tech/price-book", null, { q: "breaker pole" });
   assert.deepEqual(r.body.items.map((i) => i.code), ["BRK-20"]);
   assert.deepEqual((await call(h, "GET", "/service/tech/price-book", null, { q: "zzz" })).body.items, []);
+  // The office may use it too (desktop fallback), and can ask for the whole book.
+  const office = makeHandler(w);
+  r = await call(office, "GET", "/service/tech/price-book", null, { limit: "2000" });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.items.length, 2);
+  assert.equal((await call(office, "GET", "/service/tech/price-book", null, { limit: "1" })).body.items.length, 1);
 });
 
 test("read-only lists for the tech app: jobs (open by default, searchable), estimates (no templates), customers — tenant-wide, action service.tech.read", async () => {

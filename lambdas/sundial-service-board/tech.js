@@ -1420,7 +1420,10 @@ export function createTechHandlers(d, h) {
           `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Is_Active__c = true ORDER BY Name LIMIT 2000`,
         { maxRecords: 2000 }
       );
-      const rows = priceBookMatches(all || [], q, 25);
+      // `limit` (default 25, up to the whole book): the office's desktop picker asks for
+      // everything when its cache copy is empty, and filters as you type on its side.
+      const limit = Math.min(2000, Math.max(1, Number.parseInt(String(query?.limit ?? ""), 10) || 25));
+      const rows = priceBookMatches(all || [], q, limit);
       return jsonResponse(200, cors, {
         q,
         items: (rows || []).map((r) => ({ id: r.Id, name: r.Name ?? null, code: r.Item_Code__c ?? null, kind: r.Kind__c ?? null, category: r.Category__c ?? null, description: r.Description__c ?? null, unit: r.Unit_of_Measure__c ?? null, defaultQuantity: r.Default_Quantity__c ?? null, price: r.Price__c ?? null, taxable: r.Taxable__c === true })),

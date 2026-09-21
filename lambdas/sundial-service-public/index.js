@@ -46,8 +46,12 @@ import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate
 import { publicUrlForKey } from "../../lib/file-access.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { ensureStripeCustomer, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
-import { INVOICE_SELECT, INVOICE_SF_OBJECT } from "../sundial-service-estimate/invoice.js";
+import { INVOICE_SELECT, INVOICE_SF_OBJECT, PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "../sundial-service-estimate/invoice.js";
 import { JOB_SF_OBJECT } from "../sundial-service-estimate/fields.js";
+import { REPORT_JOB_SELECT } from "../sundial-service-estimate/report.js";
+import { buildJobReportModel, normalizeReportSections, renderJobReportDocument, reportPhotoChoices } from "../../lib/job-report-document.js";
+import { listRecordFiles, S3_REGION } from "../../lib/file-access.js";
+import { S3Client } from "@aws-sdk/client-s3";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
 
@@ -56,6 +60,9 @@ const ROUTES = [
   ["POST", /^\/public\/estimates\/([^/]+)\/accept\/?$/, "accept"],
   ["POST", /^\/public\/estimates\/([^/]+)\/decline\/?$/, "decline"],
   ["POST", /^\/public\/estimates\/([^/]+)\/checkout\/?$/, "checkout"],
+  // The customer's job report + receipt (D-072 amendment 10): the token is the job's
+  // Report_Public_Token__c, issued by the estimate Lambda's send. Read-only.
+  ["GET", /^\/public\/reports\/([^/]+)\/?$/, "report"],
 ];
 export const CHECKOUT_KINDS = Object.freeze(["setup", "deposit", "balance"]);
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
@@ -147,6 +154,9 @@ function publicSummary(est, totals) {
   };
 }
 
+let _s3 = null;
+const s3Client = () => (_s3 ??= new S3Client({ region: S3_REGION }));
+
 export function createHandler(deps = {}) {
   const d = {
     sfQuery: realSfQuery,
@@ -155,6 +165,7 @@ export function createHandler(deps = {}) {
     getSecret: realGetSecret,
     fetchUrl: undefined, // tests inject a fake Stripe; production uses fetch
     publicBaseUrl: process.env.SERVICE_PUBLIC_BASE_URL || "",
+    listFiles: async (recordId) => listRecordFiles(s3Client(), recordId), // the job report's photos
     now: () => new Date(),
     ...deps,
   };
@@ -395,6 +406,46 @@ export function createHandler(deps = {}) {
       await act(est, EVENTS.ESTIMATE_DECLINED, { reason, online: true }, "Customer");
       return jsonResponse(200, cors, { success: true, status: "Declined" });
     },
+  };
+
+  // --- the customer's job report ------------------------------------------------------
+  H.report = async ({ cors, token }) => {
+    if (!TOKEN_RE.test(token || "")) return jsonResponse(404, cors, { error: "not_found", code: "REPORT_NOT_FOUND" });
+    const rows = await d.sfQuery(`SELECT ${REPORT_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Report_Public_Token__c = '${soqlEscapeString(token)}' LIMIT 2`);
+    const job = rows && rows.length === 1 ? rows[0] : null;
+    if (!job) return jsonResponse(404, cors, { error: "not_found", code: "REPORT_NOT_FOUND" });
+    const exp = job.Report_Token_Expires_At__c ? new Date(job.Report_Token_Expires_At__c).getTime() : 0;
+    if (exp > 0 && exp < d.now().getTime()) return jsonResponse(410, cors, { error: "expired", code: "LINK_EXPIRED", message: "This report link has expired. Please contact us for a fresh one." });
+    const norm = normalizeReportSections(job.Report_Sections__c);
+    const report = norm.ok ? norm.value : { sections: [], receipt: true, intro: "" };
+    const [files, calls, invoice] = await Promise.all([
+      d.listFiles(job.Id).catch((e) => (console.error("public report: photo list failed:", e?.message || e), [])),
+      d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM Sundial_Service_Call__c WHERE Sundial_Service_Job__c = '${soqlEscapeString(job.Id)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' LIMIT 200`).catch(() => []),
+      loadLiveInvoice(job),
+    ]);
+    const payments = invoice ? ((await d.sfQuery(`SELECT ${PAYMENT_SELECT} FROM ${PAYMENT_SF_OBJECT} WHERE Service_Job__c = '${soqlEscapeString(job.Id)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' ORDER BY Received_At__c`)) || []).filter((p) => !p.Invoice__c || p.Invoice__c === invoice.Id) : [];
+    let estimate = null;
+    let lines = [];
+    if (invoice && job.Estimate__c) {
+      const est = await d.sfQuery(`SELECT ${ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' LIMIT 1`);
+      estimate = est?.[0] ?? null;
+      if (estimate) lines = (await loadLines(estimate)).filter((l) => l.Stage__c !== "Removed");
+    }
+    const brand = { ...DEFAULT_BRAND, companyName: deps.brandName || "" };
+    const pdfUrl = job.Report_PDF_S3_Key__c ? publicUrlForKey(job.Report_PDF_S3_Key__c) : null;
+    const model = buildJobReportModel({ job, report, photos: reportPhotoChoices(files, job.Id, calls), invoice, lines, payments, estimate, brand, options: { mode: "customer", pdfUrl } });
+    const { html, title } = renderJobReportDocument({ model });
+    return jsonResponse(200, cors, {
+      html,
+      title,
+      jobNumber: job.Name ?? null,
+      customerName: job.Customer_Name_at_Creation__c ?? null,
+      sentAt: job.Report_Sent_At__c ?? null,
+      pdfUrl,
+      sections: model.sections.length,
+      receipt: !!model.receipt,
+      paid: invoice?.Status__c === "Paid",
+    });
   };
 
   return async function handler(event) {

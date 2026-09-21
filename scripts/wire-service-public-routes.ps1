@@ -7,6 +7,7 @@
       POST   /public/estimates/{token}/accept     { name }   -> Approved (Online)
       POST   /public/estimates/{token}/decline    { reason } -> Declined
       POST   /public/estimates/{token}/checkout   { kind }   -> a Stripe Checkout Session URL (2026-09-17)
+      GET    /public/reports/{token}              the customer's job report + receipt (2026-09-19)
     plus OPTIONS everywhere for CORS. AWS_PROXY, authorization NONE at the gateway
     (there IS no bearer token on these routes — the URL token is the whole credential;
     the Lambda returns 404 for anything it does not recognise), same shape as every
@@ -72,6 +73,12 @@ foreach ($action in @("accept", "decline", "checkout")) {
     $r = Ensure-Resource $token $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
 }
+
+# The customer's job report (2026-09-19): read-only, the token is the job's Report_Public_Token__c.
+Write-Host "==> /public/reports/{token} : GET, OPTIONS" -ForegroundColor Cyan
+$reports  = Ensure-Resource $public "reports"
+$rToken   = Ensure-Resource $reports "{token}"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $rToken $m }
 
 # One invoke permission covering any stage + any method under /public/*.
 Write-Host "==> Lambda invoke permission (apigateway)" -ForegroundColor Cyan

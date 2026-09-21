@@ -353,6 +353,8 @@ function fakeSalesforce() {
   return { store, calls, stale, activity, stripeEvents, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
 }
 
+const JPG_1x1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==", "base64");
+
 function makeHandler(fake, identityOverrides = {}) {
   const identity = {
     tenantId: TENANT,
@@ -381,6 +383,14 @@ function makeHandler(fake, identityOverrides = {}) {
     deleteObject: async ({ key }) => {
       (fake.deletes = fake.deletes || []).push(key);
     },
+    // The job report (D-072 am. 10): the job's S3 folder and the photo bytes for the PDF.
+    listFiles: async (recordId) => (fake.files || []).filter((f) => f.key.startsWith(`SUNDIAL/${recordId}/`)),
+    getObject: async ({ key }) => {
+      (fake.gets = fake.gets || []).push(key);
+      if (fake.getFails) throw new Error("s3 read failed");
+      return { bytes: JPG_1x1, contentType: "image/jpeg" };
+    },
+    sms: fake.sms ?? null,
     getSecret: async (name) => {
       if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
       if (name === "sundial/stripe" && fake.stripeSecret) return fake.stripeSecret;
@@ -1955,4 +1965,117 @@ test("club: a truck roll bought online is an approved estimate + a job paid as t
   r = await pub(off, "POST", "/public/club/harmon/truck-roll", { customer, issue: "x" });
   assert.equal(r.status, 503);
   assert.equal((await pub(off, "GET", "/public/club/harmon/plans")).body.configured, false);
+});
+
+// ---------------------------------------------------------------------------
+// The customer's job report + receipt (D-072 amendment 10)
+// ---------------------------------------------------------------------------
+test("job report: photos to pick from, save (a stranger's photo refused), preview, send = PDF + email with the link, edit after send + resend, partner payer gets no receipt, a text goes out", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const texts = [];
+  fake.sms = { sendText: async (args) => { texts.push(args); return { ok: true, code: null, error: null, to: "+16025550101", message: { id: "m1" } }; } };
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(j.status, 201);
+  const job = fake.store.Sundial_Service_Job__c[0];
+  job.Customer_Summary__c = "Replaced the failed breaker; the array is producing again.";
+  fake.store.Sundial_User__c.push({ Id: USER, Client__c: TENANT, First_Name__c: "Paige", Last_Name__c: "King" });
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Sundial_Service_Job__c: job.Id, Name: "SC-00001", Status__c: "Complete", Scheduled_Start__c: "2026-09-08T16:00:00Z", Tech__c: USER });
+  const callId = fake.store.Sundial_Service_Call__c[0].Id;
+  fake.files = [
+    { key: `SUNDIAL/${job.Id}/photos/${callId}/before.jpg`, publicUrl: "https://s3/before.jpg", size: 100, lastModified: "2026-09-08T17:00:00Z" },
+    { key: `SUNDIAL/${job.Id}/photos/${callId}/after.jpg`, publicUrl: "https://s3/after.jpg", size: 100, lastModified: "2026-09-08T18:00:00Z" },
+    { key: `SUNDIAL/${job.Id}/photos/office.png`, publicUrl: "https://s3/office.png", size: 100, lastModified: "2026-09-09T09:00:00Z" },
+    { key: `SUNDIAL/${job.Id}/estimate-v1.pdf`, publicUrl: "https://s3/e.pdf", size: 100, lastModified: "2026-09-07T09:00:00Z" },
+    { key: `SUNDIAL/OTHERJOB0000000001/photos/x.jpg`, publicUrl: "https://s3/x.jpg", size: 100, lastModified: "2026-09-08T17:00:00Z" },
+  ];
+
+  // 1. Nothing yet: the photos to pick from, the summary, no invoice.
+  let r = await call(h, "GET", `/service/jobs/${job.Id}/report`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.sections, []);
+  assert.equal(r.body.sentCount, 0);
+  assert.deepEqual(r.body.photos.map((p) => [p.fileName, p.visitLabel]), [["before.jpg", "Paige King · Sep 8, 2026"], ["after.jpg", "Paige King · Sep 8, 2026"], ["office.png", "Office"]]);
+  assert.match(r.body.summary, /producing again/);
+  assert.equal(r.body.invoice, null);
+
+  // 2. Save: a photo from another job is refused; then two sections + a text-only one.
+  r = await call(h, "PUT", `/service/jobs/${job.Id}/report`, { sections: [{ photoKey: "SUNDIAL/OTHERJOB0000000001/photos/x.jpg", caption: "nope" }] });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "PHOTO_NOT_ON_JOB");
+  r = await call(h, "PUT", `/service/jobs/${job.Id}/report`, { sections: [{ id: "a", photoKey: fake.files[0].key, caption: "The failed breaker — arc marks on the bus." }, { id: "b", photoKey: fake.files[1].key, caption: "New breaker installed and tested." }, { id: "c", caption: "We also torqued every lug." }] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.sectionCount, 3);
+  assert.ok(job.Report_Updated_At__c);
+  assert.equal(JSON.parse(job.Report_Sections__c).sections.length, 3);
+  assert.equal(r.body.editedSinceSent, false);
+
+  // 3. Preview: the document with the summary, the photos and no receipt (no invoice yet).
+  r = await call(h, "GET", `/service/jobs/${job.Id}/report/preview`);
+  assert.equal(r.status, 200);
+  assert.ok(r.body.html.includes("Summary of work"));
+  assert.ok(r.body.html.includes('src="https://s3/before.jpg"'));
+  assert.ok(r.body.html.includes("torqued every lug"));
+  assert.equal(r.body.receipt, false);
+  assert.ok(r.body.html.includes("PREVIEW"));
+
+  // 4. Invoice + pay, then send: the PDF is rendered with the photo bytes, stored under the job,
+  //    the email carries the link + the PDF, the token + stamps land on the job.
+  assert.equal((await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {})).status, 201);
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal((await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { method: "Check", amount: 275, reference: "1044" })).status, 201);
+  assert.equal(inv.Status__c, "Paid");
+  r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.delivery, "email");
+  assert.equal(r.body.recipient, "ivy@example.com");
+  assert.equal(r.body.sentCount, 1);
+  assert.equal(r.body.publicUrl, "https://portal.example.com/report/TOKEN123");
+  assert.equal(job.Report_Public_Token__c, "TOKEN123");
+  assert.ok(job.Report_Token_Expires_At__c > "2027-09-01");
+  assert.equal(job.Report_PDF_S3_Key__c, `SUNDIAL/${job.Id}/job-report-1.pdf`);
+  assert.ok(fake.puts.some((p) => p.key === job.Report_PDF_S3_Key__c && p.contentType === "application/pdf" && p.bytes > 1000));
+  assert.deepEqual(fake.gets.sort(), [fake.files[1].key, fake.files[0].key].sort(), "both photos were read for the PDF");
+  const mail = fake.emails.at(-1);
+  assert.equal(mail.to, "ivy@example.com");
+  assert.match(mail.subject, /^Receipt and job report for SVC-/);
+  assert.ok(mail.text.includes("https://portal.example.com/report/TOKEN123"));
+  assert.equal(mail.attachments[0].fileName, `${job.Name}-report.pdf`);
+  assert.ok(fake.activity.some((a) => a.event === "job_report_sent" && a.details.sentCount === 1 && a.details.receipt === true));
+  assert.equal(texts.length, 0);
+
+  // 5. Edited after the send → flagged; send again (via Both) → a second PDF, count 2, a text with the link.
+  r = await call(h, "PUT", `/service/jobs/${job.Id}/report`, { sections: [{ id: "a", photoKey: fake.files[0].key, caption: "The failed breaker." }] });
+  assert.equal(r.body.editedSinceSent, false, "same-second stamps: not later than the send"); // now() is frozen in tests
+  r = await call(h, "GET", `/service/jobs/${job.Id}/report`);
+  assert.equal(r.body.sentCount, 1);
+  assert.equal(r.body.sections.length, 1);
+  r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, { via: "Both", message: "Thanks again for having us out." });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.delivery, "both");
+  assert.equal(r.body.sentCount, 2);
+  assert.equal(job.Report_PDF_S3_Key__c, `SUNDIAL/${job.Id}/job-report-2.pdf`);
+  assert.equal(job.Report_Public_Token__c, "TOKEN123", "the link stays the same across sends");
+  assert.ok(fake.emails.at(-1).text.includes("Thanks again for having us out."));
+  assert.equal(texts.length, 1);
+  assert.match(texts[0].body, /Your receipt and job report from Test Electric for SVC-.*: https:\/\/portal\.example\.com\/report\/TOKEN123/);
+  assert.equal(r.body.textedTo, "+16025550101");
+
+  // 6. A partner-billed job: the customer's copy has no receipt; the email subject says "Job report".
+  job.Bill_To_Type__c = "Leasing Partner";
+  r = await call(h, "GET", `/service/jobs/${job.Id}/report/preview`);
+  assert.equal(r.body.receipt, false);
+  assert.ok(!r.body.html.includes("Receipt ·"));
+  r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+  assert.match(fake.emails.at(-1).subject, /^Job report for SVC-/);
+
+  // 7. Empty report → refused; unknown job → 404; a tech is refused.
+  job.Report_Sections__c = JSON.stringify({ sections: [] });
+  job.Customer_Summary__c = null;
+  r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+  assert.equal(r.body.code, "REPORT_EMPTY");
+  assert.equal((await call(h, "GET", "/service/jobs/a1Xnope0000000000A/report")).status, 404);
+  const tech = makeHandler(fake, { access: { level: "Technician", scope: "tech", userId: USER, tenantId: TENANT } });
+  assert.equal((await call(tech, "GET", `/service/jobs/${job.Id}/report`)).status, 403);
 });

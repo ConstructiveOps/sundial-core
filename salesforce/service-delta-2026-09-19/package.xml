@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-delta-2026-09-19 - the 10 field(s) the 2026-09-19 increment adds to the DEPLOYED service
+  objects, plus the regenerated integration-user permission set (so the fields are readable and
+  writable). CustomField members only - nothing here touches object settings. A field that already
+  exists in the org (one Tim created in Setup) is updated in place to this definition.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer Send-to,
+  NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package ->
+  CHECK ONLY first, expect 11/11 components (10 fields + 1 permission set), then deploy
+  for real. Then run the matching sql/2026-09-19_*.sql in the Supabase SQL editor.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Service_Job__c.Notes_for_Summary__c</members>
+        <members>Sundial_Service_Job__c.Notes_From_Service_Calls__c</members>
+        <members>Sundial_Service_Job__c.Report_Sections__c</members>
+        <members>Sundial_Service_Job__c.Report_Public_Token__c</members>
+        <members>Sundial_Service_Job__c.Report_Token_Expires_At__c</members>
+        <members>Sundial_Service_Job__c.Report_Updated_At__c</members>
+        <members>Sundial_Service_Job__c.Report_Sent_At__c</members>
+        <members>Sundial_Service_Job__c.Report_Sent_Count__c</members>
+        <members>Sundial_Service_Job__c.Report_PDF_S3_Key__c</members>
+        <members>Sundial_Customer__c.Customer_Type__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Objects</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

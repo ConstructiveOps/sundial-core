@@ -1,5 +1,30 @@
 # Sundial — Progress Log
 
+## 2026-09-19 (later) — The customer's job report + receipt (D-072 amendment 10)
+
+The close-out document, built the way Tim asked: a **Create Report** popup on the job page
+where the office picks any photo on the job (grouped by the visit it was taken on), writes
+what it shows, "Add another section" — reorder, remove, text-only sections, an optional
+opening line, the receipt toggle. Saved as JSON on the job (`Report_Sections__c` + the
+send stamps; delta package `salesforce/service-delta-2026-09-19/`, which also carries the
+notes fields and `Customer_Type__c`). The header merges the customer / job details and the
+Summary of work; the receipt at the end is the invoice document's own rows, totals and
+payments — left out when a partner pays. Editable after sending; **Send / Send again**
+renders `job-report-{n}.pdf` (pdf-lib with the photos embedded from S3), emails the hosted
+link + the PDF (linked instead of attached over 8 MB), texts the link on request through the
+same SMS sender the board uses. The customer page is `/report/{token}` (public Lambda
+`GET /public/reports/{token}`, sandboxed iframe like the estimate). The job page nudges when a
+Paid / Closed / Awaiting-review job has no report sent; nothing sends itself.
+
+Backend: `lib/job-report-document.js` (normalize, photo choices, model, HTML),
+`lib/job-report-pdf.js` (photos embedded; a photo that cannot be read leaves a labelled
+placeholder), `lambdas/sundial-service-estimate/report.js` (get / save / preview / send),
+the public route, `EVENTS.JOB_REPORT_SENT`, S3 `getObject` + `listFiles` deps, the SMS
+sender in the estimate Lambda, both wire scripts. The generator emits delta packages for
+fields tagged `added=`. Tests: document + PDF 5 (new file), estimate 45 (+1 walking the whole
+arc incl. partner payer + text), public 8 (+1). Portal: `JobReportCard`, `JobReportModal`,
+`PublicReportPage`, `PreviewModal` reports; tests 176 (+6).
+
 ## 2026-09-19 — Six small fixes: GPS for the office, the house + diagnosis on the phone, Customer Type, the job's two notes fields, call notes rolled onto the job
 
 Tim's list after the Service Club shipped (item 7 was cut off in his message — still open).

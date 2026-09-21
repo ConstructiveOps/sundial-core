@@ -58,6 +58,9 @@ create table if not exists sundial_service_job_cache (
   geocode_lat                            numeric,     -- Geocode_Lat__c (Service-address geocode, best-effort at intake; feeds geofen...)
   geocode_lon                            numeric,     -- Geocode_Lon__c
   geocode_status                         text,        -- Geocode_Status__c (Failed/Manual rows fall back to no geofence rather than bloc...)
+  report_updated_at                      timestamptz, -- Report_Updated_At__c (Last edit of the sections (the job page nudges when it is la...)
+  report_sent_at                         timestamptz, -- Report_Sent_At__c (Last time the report went to the customer.)
+  report_sent_count                      numeric,     -- Report_Sent_Count__c
 
   created_date                           timestamptz, -- CreatedDate (list ordering)
   last_synced_at                         timestamptz not null default now(),

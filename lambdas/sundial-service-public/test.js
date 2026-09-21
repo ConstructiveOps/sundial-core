@@ -259,3 +259,58 @@ test("checkout: re-derives the step, finds-or-creates the Stripe customer, build
   assert.equal(r.body.payment.next, null);
   assert.match(r.body.payment.unavailable, /isn't set up/);
 });
+
+// ---------------------------------------------------------------------------
+// The customer's job report + receipt (D-072 amendment 10)
+// ---------------------------------------------------------------------------
+test("report: the token resolves the job; the document carries the sections, the summary and the receipt; wrong / expired tokens are 404 / 410", async () => {
+  const RTOKEN = "rep_abcdefghijklmnopqrstuvwxyz0123";
+  const job = {
+    Id: "SVC000000000000009", Name: "SVC-00009", Client__c: TENANT, Bill_To_Type__c: "Customer", Estimate__c: "EST000000000000001",
+    Customer_Name_at_Creation__c: "Cy Diaz", Address_at_Creation__c: "3 Elm St, Phoenix, AZ 85001", Primary_Email_at_Creation__c: "cy@example.com",
+    Customer_Summary__c: "Replaced the failed breaker.",
+    Report_Sections__c: JSON.stringify({ sections: [{ id: "a", photoKey: "SUNDIAL/SVC000000000000009/photos/SC1/before.jpg", caption: "Arc marks on the bus." }, { id: "b", caption: "Lugs torqued." }] }),
+    Report_Public_Token__c: RTOKEN, Report_Token_Expires_At__c: "2027-09-01T00:00:00Z", Report_Sent_At__c: "2026-09-16T18:00:00Z", Report_PDF_S3_Key__c: "SUNDIAL/SVC000000000000009/job-report-1.pdf",
+  };
+  const invoice = { Id: "INV1", Name: "SVC-00009", Client__c: TENANT, Service_Job__c: job.Id, Status__c: "Paid", Subtotal__c: 395, Discount_Amount__c: 0, Tax_Amount__c: 10.32, Total__c: 405.32, Paid_Amount__c: 405.32, Paid_At__c: "2026-09-16T18:00:00Z", Bill_To_Type__c: "Customer" };
+  const f = fake();
+  const deps = {
+    ...f.deps,
+    sfQuery: async (soql) => {
+      if (soql.includes("FROM Sundial_Service_Job__c")) return soql.includes(`Report_Public_Token__c = '${RTOKEN}'`) ? [{ ...job }] : [];
+      if (soql.includes("FROM Sundial_Service_Invoice__c")) return [{ ...invoice }];
+      if (soql.includes("FROM Sundial_Service_Payment__c")) return [{ Id: "P1", Invoice__c: "INV1", Status__c: "Succeeded", Type__c: "Payment", Method__c: "Card", Amount__c: 405.32, Received_At__c: "2026-09-16T18:00:00Z" }];
+      if (soql.includes("FROM Sundial_Service_Call__c")) return [{ Id: "SC1", Name: "SC-00001", Scheduled_Start__c: "2026-09-14T16:00:00Z", Tech__r: { First_Name__c: "Jake", Last_Name__c: "Dorsey" } }];
+      if (soql.includes("FROM Sundial_Estimate__c") && soql.includes("Id = 'EST000000000000001'")) return [{ ...f.est }];
+      return f.deps.sfQuery(soql);
+    },
+    listFiles: async (id) => [{ key: `SUNDIAL/${id}/photos/SC1/before.jpg`, publicUrl: "https://s3/before.jpg", size: 10, lastModified: "2026-09-14T17:00:00Z" }],
+  };
+  const h = createHandler(deps);
+  const r = await call(h, "GET", `/public/reports/${RTOKEN}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.title, "Job report SVC-00009");
+  assert.equal(r.body.customerName, "Cy Diaz");
+  assert.equal(r.body.sections, 2);
+  assert.equal(r.body.receipt, true);
+  assert.equal(r.body.paid, true);
+  assert.equal(r.body.pdfUrl, "https://sfsolproj.s3.us-west-1.amazonaws.com/SUNDIAL/SVC000000000000009/job-report-1.pdf");
+  assert.ok(r.body.html.includes("Acme Solar"));
+  assert.ok(r.body.html.includes("Replaced the failed breaker."));
+  assert.ok(r.body.html.includes('src="https://s3/before.jpg"'));
+  assert.ok(r.body.html.includes("Jake Dorsey · Sep 14, 2026"));
+  assert.ok(r.body.html.includes("Receipt · SVC-00009"));
+  assert.ok(r.body.html.includes("Standard service call"));
+  assert.ok(r.body.html.includes("Paid in full"));
+  assert.ok(!r.body.html.includes("PREVIEW"));
+  assert.equal((await call(h, "GET", "/public/reports/rep_zzzzzzzzzzzzzzzzzzzzzzzzzzzz")).status, 404);
+  assert.equal((await call(h, "GET", "/public/reports/short")).status, 404);
+  job.Report_Token_Expires_At__c = "2026-01-01T00:00:00Z";
+  assert.equal((await call(h, "GET", `/public/reports/${RTOKEN}`)).status, 410);
+  // A partner-billed job: the customer's page has no receipt even though the invoice is paid.
+  job.Report_Token_Expires_At__c = "2027-09-01T00:00:00Z";
+  job.Bill_To_Type__c = "Manufacturer";
+  const p = await call(h, "GET", `/public/reports/${RTOKEN}`);
+  assert.equal(p.body.receipt, false);
+  assert.ok(!p.body.html.includes("Receipt ·"));
+});

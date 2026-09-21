@@ -87,15 +87,18 @@ import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured 
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
+import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
+import { createSmsSender } from "../../lib/sms-send.js";
 import {
   buildKey,
+  listRecordFiles,
   publicUrlForKey,
   registerFileMetadata,
   findFileMetadataByKey,
   S3_BUCKET,
   S3_REGION,
 } from "../../lib/file-access.js";
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   EVENTS,
   recordActivity,
@@ -143,6 +146,7 @@ import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js"
 import { createInvoiceHandlers, createMoneyCore } from "./invoice.js";
 import { createStripeHandlers } from "./stripe.js";
 import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
+import { createReportHandlers } from "./report.js";
 import { createClubHandlers } from "./club.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
@@ -336,6 +340,10 @@ const ROUTES = [
   ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
   ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/report\/?$/, "getReport"], // the customer's job report (report.js, D-072 am. 10)
+  ["PUT", /^\/service\/jobs\/([^/]+)\/report\/?$/, "saveReport"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/report\/send\/?$/, "sendReport"],
   ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
   ["GET", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "getJobInvoice"],
   ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
@@ -416,8 +424,15 @@ export function createHandler(deps = {}) {
     publicBaseUrl: PUBLIC_BASE_URL,
     brandName: BRAND_NAME,
     renderPdf: realRenderEstimatePdf,
+    renderReportPdf: realRenderJobReportPdf,
     putObject: async ({ key, body, contentType }) =>
       s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
+    // The job report reads the job's photos back out of S3 for the PDF, and lists the job's folder for the picker.
+    getObject: async ({ key }) => {
+      const r = await s3().send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+      return { bytes: new Uint8Array(await r.Body.transformToByteArray()), contentType: r.ContentType ?? null };
+    },
+    listFiles: async (recordId) => listRecordFiles(s3(), recordId),
     deleteObject: async ({ key }) => s3().send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
@@ -1552,6 +1567,10 @@ export function createHandler(deps = {}) {
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
   Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
+  // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
+  // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
+  if (!d.sms) d.sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, now: d.now, ...(d.sendSms ? { sendSms: d.sendSms } : {}), ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
+  Object.assign(H, createReportHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, loadJobCalls: (jobId, tenantId) => d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 200`) }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
   const ACTION_FOR = {
@@ -1568,6 +1587,7 @@ export function createHandler(deps = {}) {
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.invoice.write",
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
+    getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", sendReport: "service.estimate.send",
     techAddLines: "service.tech.self",
     // Service Club (D-073): reads for anyone in the office, writes their own key.
     clubPlansOffice: "service.club.read", clubMemberships: "service.club.read", clubReport: "service.club.read", clubCustomer: ["service.club.read", "service.estimate.write"],

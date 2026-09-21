@@ -114,6 +114,14 @@ foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobSv $m }
 Write-Host "==> /service/jobs/{id}/invoice : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobInv = Ensure-Resource $jobId "invoice"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobInv $m }
+# The customer's job report + receipt (2026-09-19, report.js): the office builds, previews and sends it.
+Write-Host "==> /service/jobs/{id}/report : GET, PUT, OPTIONS ; /preview : GET ; /send : POST" -ForegroundColor Cyan
+$jobRep = Ensure-Resource $jobId "report"
+foreach ($m in @("GET", "PUT", "OPTIONS")) { Wire-Method $jobRep $m }
+$jobRepPv = Ensure-Resource $jobRep "preview"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobRepPv $m }
+$jobRepSend = Ensure-Resource $jobRep "send"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepSend $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }

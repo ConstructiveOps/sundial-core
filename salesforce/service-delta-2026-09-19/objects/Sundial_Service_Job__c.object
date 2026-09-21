@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Job__c - the fields added on 2026-09-19 ONLY. package.xml lists them as CustomField members,
+  so this file adds them and touches nothing else on the object. NEVER convert this to a
+  whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Notes_for_Summary__c</fullName>
+        <description>Every Complete call's WORK notes, one block per call (job-notes.js, 2026-09-19) - the raw material for Customer Summary. Lambda-written; the office may edit.</description>
+        <externalId>false</externalId>
+        <label>Notes for Summary</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Notes_From_Service_Calls__c</fullName>
+        <description>Every Complete call's PRIVATE notes, one block per call (job-notes.js, 2026-09-19). Internal only. Lambda-written; the office may edit.</description>
+        <externalId>false</externalId>
+        <label>Notes From Service Calls</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Report_Sections__c</fullName>
+        <description>The report as the office built it: JSON { version, sections: [{ id, photoKey, caption }], receipt }. Lambda-written from the portal's Create Report popup; never hand-edited.</description>
+        <externalId>false</externalId>
+        <label>Report Sections</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>6</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Report_Public_Token__c</fullName>
+        <description>The hosted report page's credential (/report/{token}); issued on the first send, renewed on every send.</description>
+        <externalId>true</externalId>
+        <label>Report Public Token</label>
+        <length>128</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Report_Token_Expires_At__c</fullName>
+        <externalId>false</externalId>
+        <label>Report Token Expires At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Report_Updated_At__c</fullName>
+        <description>Last edit of the sections (the job page nudges when it is later than the last send).</description>
+        <externalId>false</externalId>
+        <label>Report Updated At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Report_Sent_At__c</fullName>
+        <description>Last time the report went to the customer.</description>
+        <externalId>false</externalId>
+        <label>Report Sent At</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Report_Sent_Count__c</fullName>
+        <externalId>false</externalId>
+        <label>Report Sent Count</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Report_PDF_S3_Key__c</fullName>
+        <description>SUNDIAL/{jobId}/job-report-{n}.pdf - the PDF of the last send.</description>
+        <externalId>false</externalId>
+        <label>Report PDF S3 Key</label>
+        <length>255</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+</CustomObject>

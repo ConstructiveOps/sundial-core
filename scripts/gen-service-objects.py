@@ -266,8 +266,8 @@ OBJECTS.append(dict(
         F("System_Ownership__c", "System Ownership", "Classification", "Picklist", "Leased / third-party steers the Bill To default.", values=["Customer Owned", "Leased", "Third-Party Owned"]),
         F("Issue_Description__c", "Issue Description", "Narrative", "LongTextArea", "Customer-reported issue at intake (board tooltip reads the first line).", ),
         F("Initial_Remote_Diagnosis__c", "Initial Remote Diagnosis", "Narrative", "LongTextArea", "Remote-first findings before any truck roll.", cache=False),
-        F("Notes_for_Summary__c", "Notes for Summary", "Narrative", "LongTextArea", "Every Complete call's WORK notes, one block per call (job-notes.js, 2026-09-19) - the raw material for Customer Summary. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8),
-        F("Notes_From_Service_Calls__c", "Notes From Service Calls", "Narrative", "LongTextArea", "Every Complete call's PRIVATE notes, one block per call (job-notes.js, 2026-09-19). Internal only. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8),
+        F("Notes_for_Summary__c", "Notes for Summary", "Narrative", "LongTextArea", "Every Complete call's WORK notes, one block per call (job-notes.js, 2026-09-19) - the raw material for Customer Summary. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8, added="2026-09-19"),
+        F("Notes_From_Service_Calls__c", "Notes From Service Calls", "Narrative", "LongTextArea", "Every Complete call's PRIVATE notes, one block per call (job-notes.js, 2026-09-19). Internal only. Lambda-written; the office may edit.", cache=True, length=131072, visibleLines=8, added="2026-09-19"),
         F("Office_Notes__c", "Office Notes", "Narrative", "LongTextArea", "Internal office log - append-only stamped entries (D-065.8). Separate from tech notes per the 9/9 meeting; tech notes live on Service Calls and are shown here read-only.", cache=False, length=131072, visibleLines=8),
         F("Customer_Summary__c", "Customer Summary", "Narrative", "LongTextArea", "The customer-facing paragraph for the receipt and the photo job report. AI-drafted from the calls' Work Notes, office-edited before send.", cache=False),
         lk("Originating_Solar_Project__c", "Originating Solar Project", "Context", "Sundial_Solar__c", "Service_Jobs", "Installed system: specs, install date, photos read from here (no Asset object).", "Service Jobs"),
@@ -289,6 +289,15 @@ OBJECTS.append(dict(
         F("Geocode_Lon__c", "Geocode Longitude", "Location", "Number", "", sys=True, precision=18, scale=15),
         F("Geocode_Status__c", "Geocode Status", "Location", "Picklist", "Failed/Manual rows fall back to no geofence rather than blocking clock-ins.", sys=True, values=["Pending", "Geocoded", "Failed", "Manual"], default="Pending"),
         F("Street_View_Image_Key__c", "Street View Image Key", "Location", "Text", "S3 key of the street-view still fetched once at geocode time (9/9 ask). Blank = none available.", cache=False, sys=True, length=255),
+        # The customer's job report (D-072 amendment 10, 2026-09-19): the office builds it one
+        # section at a time (a photo + a description), edits it after sending, sends again.
+        F("Report_Sections__c", "Report Sections", "Job Report", "LongTextArea", "The report as the office built it: JSON { version, sections: [{ id, photoKey, caption }], receipt }. Lambda-written from the portal's Create Report popup; never hand-edited.", cache=False, sys=True, length=131072, visibleLines=6, added="2026-09-19"),
+        F("Report_Public_Token__c", "Report Public Token", "Job Report", "Text", "The hosted report page's credential (/report/{token}); issued on the first send, renewed on every send.", cache=False, sys=True, length=128, externalId=True, added="2026-09-19"),
+        F("Report_Token_Expires_At__c", "Report Token Expires At", "Job Report", "DateTime", "", cache=False, sys=True, added="2026-09-19"),
+        F("Report_Updated_At__c", "Report Updated At", "Job Report", "DateTime", "Last edit of the sections (the job page nudges when it is later than the last send).", cache=True, sys=True, added="2026-09-19"),
+        F("Report_Sent_At__c", "Report Sent At", "Job Report", "DateTime", "Last time the report went to the customer.", cache=True, sys=True, added="2026-09-19"),
+        F("Report_Sent_Count__c", "Report Sent Count", "Job Report", "Number", "", cache=True, sys=True, precision=18, scale=0, added="2026-09-19"),
+        F("Report_PDF_S3_Key__c", "Report PDF S3 Key", "Job Report", "Text", "SUNDIAL/{jobId}/job-report-{n}.pdf - the PDF of the last send.", cache=False, sys=True, length=255, added="2026-09-19"),
     ],
 ))
 
@@ -490,7 +499,7 @@ CUSTOMER_FIELD = F("Stripe_Customer_Id__c", "Stripe Customer Id", "Payments", "T
 # the Sales module defaults Solar, the Service module's popups default/union Service.
 CUSTOMER_TYPE_FIELD = F("Customer_Type__c", "Customer Type", "Classification", "MultiselectPicklist",
                         "Department(s) this customer belongs to. Sales (New Customer) defaults Solar; New Estimate / New Job / the Service Club join set or add Service. Filterable in the tech app's Customers list.",
-                        values=["Solar", "Roofing", "Commercial", "Service"], visibleLines=4)
+                        values=["Solar", "Roofing", "Commercial", "Service"], visibleLines=4, added="2026-09-19")
 CUSTOMER_DELTA_FIELDS = [CUSTOMER_FIELD, CUSTOMER_TYPE_FIELD]
 
 # ============================ Sundial_User__c (ONE field, not whole-object) ============================
@@ -743,6 +752,64 @@ def legend(wb):
         for c in row: c.font = Font(name="Arial", size=10); c.alignment = Alignment(vertical="top", wrap_text=True)
     ws["A2"].fill = PatternFill("solid", fgColor=YELLOW)
     ws.column_dimensions["A"].width = 30; ws.column_dimensions["B"].width = 100
+
+# ---------------------------------------------------------------------------
+# Delta packages: fields tagged added="YYYY-MM-DD" also get their own CustomField-only
+# package (salesforce/service-delta-YYYY-MM-DD/), so an increment deploys without a
+# whole-object deploy of the live objects. The permission set is the full regenerated one.
+# ---------------------------------------------------------------------------
+
+deltas = {}
+for o in OBJECTS:
+    for f in o["fields"]:
+        if f.kw.get("added"): deltas.setdefault(f.kw["added"], []).append((o["api"], f))
+for f in CUSTOMER_DELTA_FIELDS:
+    if f.kw.get("added"): deltas.setdefault(f.kw["added"], []).append(("Sundial_Customer__c", f))
+for day, items in deltas.items():
+    ddir = f"{ROOT}/salesforce/service-delta-{day}"
+    os.makedirs(f"{ddir}/objects", exist_ok=True); os.makedirs(f"{ddir}/permissionsets", exist_ok=True)
+    by_obj = {}
+    for api, f in items: by_obj.setdefault(api, []).append(f)
+    for api, fs in by_obj.items():
+        open(f"{ddir}/objects/{api}.object", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  {api} - the fields added on {day} ONLY. package.xml lists them as CustomField members,
+  so this file adds them and touches nothing else on the object. NEVER convert this to a
+  whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+{chr(10).join(field_xml(f) for f in fs)}
+</CustomObject>
+""")
+    members = "\n".join(f"        <members>{api}.{f.api}</members>" for api, f in items)
+    n = len(items) + 1
+    open(f"{ddir}/package.xml", "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-delta-{day} - the {len(items)} field(s) the {day} increment adds to the DEPLOYED service
+  objects, plus the regenerated integration-user permission set (so the fields are readable and
+  writable). CustomField members only - nothing here touches object settings. A field that already
+  exists in the org (one Tim created in Setup) is updated in place to this definition.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer Send-to,
+  NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package ->
+  CHECK ONLY first, expect {n}/{n} components ({len(items)} fields + 1 permission set), then deploy
+  for real. Then run the matching sql/{day}_*.sql in the Supabase SQL editor.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+{members}
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Objects</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>
+""")
+    import shutil as _sh
+    _sh.copyfile(f"{PKG}/permissionsets/Sundial_Service_Objects.permissionset", f"{ddir}/permissionsets/Sundial_Service_Objects.permissionset")
+    print(f"service-delta-{day}: {len(items)} fields -> {ddir}")
 
 by_api = {o["api"]: o for o in OBJECTS}
 books = {

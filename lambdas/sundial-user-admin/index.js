@@ -34,7 +34,8 @@ import {
   httpMethod,
   isAllowedOrigin,
 } from "../../lib/http.js";
-import { isEmailConfigured, sendEmail } from "../../lib/email.js";
+import { isEmailConfigured } from "../../lib/email.js";
+import { authLink, mintAndSend } from "../../lib/auth-email.js";
 
 const SF_OBJECT = "Sundial_User__c";
 export const ACCESS_LEVELS = new Set([
@@ -207,57 +208,15 @@ const RESET_PASSWORD_URL = `${PORTAL_BASE_URL}/reset-password`;
 
 // --- The invite link, and why WE send it (2026-09-22) -----------------------------
 //
-// An invite link is a ONE-TIME token. Supabase's own invite email (`inviteUserByEmail`)
-// carries `{{ .ConfirmationURL }}` unless the dashboard template is hand-edited, and that
-// URL is Supabase's /auth/v1/verify — a GET that SPENDS the token. Mail security
-// scanners (Microsoft Defender Safe Links, Mimecast, Gmail) prefetch every link in a
-// message within minutes of delivery, so the human who clicks a few minutes later sees
-// "Email link is invalid or has expired". docs/integrations/auth-email-ses.md Part B2
-// explains the template edit that avoids it — and a template is a dashboard setting
-// that can be reverted, re-created or forgotten on a new project with no diff anywhere.
-//
-// So the link shape now lives in code: `generateLink({ type: "invite" })` creates the
-// auth user and hands back the UNSPENT token hash (no email is sent by Supabase), and we
-// email `/reset-password?token_hash=…&type=invite` through SES ourselves. Loading that
-// page redeems nothing; only a human who submits a password does (verifyOtp on submit —
-// harmon-crm ResetPasswordPage.tsx). A scanner cannot burn it.
-//
-// FALLBACK: without EMAIL_FROM (SES not wired on this Lambda) the old Supabase invite
-// is used, and then the dashboard template MUST be the token_hash shape. Logged loudly.
-const INVITE_TOKEN_TYPE = "invite";
-
-/** The invite email: plain, one button, the unspent link. Pure — tests pin it. */
-export function buildInviteEmail({ firstName, email, link, portalBase, invitedBy }) {
-  const hello = firstName ? `Hi ${firstName},` : "Hello,";
-  const who = invitedBy ? `${invitedBy} has` : "You have been";
-  const subject = "You're invited to Sundial";
-  const text = [
-    hello,
-    "",
-    `${who} set up a Sundial account for ${email}. Choose a password to get started:`,
-    "",
-    link,
-    "",
-    "This link can only be used once. If you weren't expecting it, you can ignore this email.",
-    "",
-    `Sundial · ${portalBase}`,
-  ].join("\n");
-  const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const html = `<div style="font-family:sans-serif;font-size:15px;line-height:1.5;color:#0f172a">
-<p>${esc(hello)}</p>
-<p>${esc(who)} set up a Sundial account for <strong>${esc(email)}</strong>. Choose a password to get started:</p>
-<p><a href="${esc(link)}" style="display:inline-block;padding:12px 22px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600">Set my password</a></p>
-<p style="color:#64748b;font-size:13px">Or paste this into your browser:<br>${esc(link)}</p>
-<p style="color:#64748b;font-size:13px">This link can only be used once. If you weren't expecting it, you can ignore this email.</p>
-<p style="color:#64748b;font-size:13px">Sundial · <a href="${esc(portalBase)}" style="color:#64748b">${esc(portalBase)}</a></p>
-</div>`;
-  return { subject, text, html };
-}
-
-/** The unspent-token link the page redeems on submit. */
-export function inviteLink(tokenHash, base = RESET_PASSWORD_URL) {
-  return `${base}?token_hash=${encodeURIComponent(tokenHash)}&type=${INVITE_TOKEN_TYPE}`;
-}
+// An invite link is a ONE-TIME token, and Supabase's own invite email points at a URL
+// that SPENDS it on a GET — which a corporate mail scanner does within minutes of
+// delivery. lib/auth-email.js explains the whole story; the short version is that the
+// Lambda now mints the link (`generateLink`, Supabase sends nothing) and emails it
+// through SES with the token unspent, so only a person submitting a password redeems
+// it. Without EMAIL_FROM the old Supabase invite is used (logged loudly) and the
+// dashboard's Invite template MUST be the token_hash shape (auth-email-ses.md B2).
+export { buildInviteEmail } from "../../lib/auth-email.js";
+export const inviteLink = (tokenHash, base = RESET_PASSWORD_URL) => authLink(tokenHash, "invite", base);
 
 /**
  * Create the invited auth user and get the invite to them.
@@ -269,17 +228,9 @@ async function inviteAuthUser(supabase, email, { firstName, invitedBy }) {
     const res = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL });
     return res.error ? { error: res.error } : { data: res.data, via: "supabase" };
   }
-  const gen = await supabase.auth.admin.generateLink({ type: INVITE_TOKEN_TYPE, email, options: { redirectTo: RESET_PASSWORD_URL } });
-  if (gen.error) return { error: gen.error };
-  const tokenHash = gen.data?.properties?.hashed_token ?? null;
-  if (!tokenHash) {
-    // The user exists now, but we have nothing to send. Say so rather than pretend.
-    return { data: gen.data, via: "ses", warning: "Supabase returned no token hash for the invite; nothing was emailed." };
-  }
-  const mail = buildInviteEmail({ firstName, email, link: inviteLink(tokenHash), portalBase: PORTAL_BASE_URL, invitedBy });
-  const sent = await sendEmail({ to: email, subject: mail.subject, text: mail.text, html: mail.html });
-  if (!sent.ok) return { data: gen.data, via: "ses", warning: `The invite email could not be sent: ${sent.error}` };
-  return { data: gen.data, via: "ses" };
+  const r = await mintAndSend(supabase, { type: "invite", email, firstName, invitedBy, redirectTo: RESET_PASSWORD_URL });
+  if (!r.ok) return { error: r.error };
+  return { data: { user: r.user }, via: "ses", ...(r.sent ? {} : { warning: r.reason }) };
 }
 
 // --- CORS (shared lib/http.js: localhost + portal domain + *.vercel.app; GET/POST/PATCH) ---
@@ -674,6 +625,11 @@ async function handleUpdate(identity, event, cors) {
   }
   const b = parsed.data;
 
+  // { resendInvite: true } — its own path (2026-09-22): re-issue the set-password link
+  // for a user who never finished (or lost) their invite. Rides on PATCH so it needs no
+  // new API Gateway route (see the /admin/dealers note above for why that matters).
+  if (b.resendInvite === true) return await handleResendInvite(identity, id, cors);
+
   // Explicitly reject disallowed fields (never mass-assignable here).
   const DISALLOWED = [
     "superAdmin", "super_admin", "Super_Admin__c",
@@ -874,6 +830,79 @@ async function handleUpdate(identity, event, cors) {
 
   const resp = { success: true, id: recordId };
   if (supabaseBanFailed) resp.supabaseBanFailed = true;
+  return jsonResponse(200, cors, resp);
+}
+
+// === PATCH /admin/users/{id} { resendInvite: true } ========================
+//
+// Re-send the set-password link. Three states a user can be in, one answer each:
+//   - invited but never finished  → a fresh INVITE link (generateLink type "invite"
+//                                   re-issues for an unconfirmed user)
+//   - already has a password      → a RECOVERY link (same page, type=recovery) — the
+//                                   office's "they forgot / never got the email" button
+//   - auth user deleted (Tim cleaned up in Supabase) but the Sundial_User__c remains
+//                                 → the invite creates a NEW auth user and the record's
+//                                   Supabase_User_Id__c is re-pointed at it — no
+//                                   Salesforce deletion needed to re-invite anyone.
+// Inactive users are refused: reactivate first, then resend.
+async function handleResendInvite(identity, id, cors) {
+  const rows = await sfQuery(
+    `SELECT Id, Email__c, First_Name__c, Supabase_User_Id__c, Active__c FROM ${SF_OBJECT} ` +
+      `WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(identity.tenantId)}' LIMIT 1`
+  );
+  if (!rows || rows.length === 0) return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  const u = rows[0];
+  const email = trimStr(u.Email__c);
+  if (!email) return jsonResponse(400, cors, { error: "no_email", code: "NO_EMAIL", message: "This user has no email address on their record." });
+  if (u.Active__c === false) return jsonResponse(409, cors, { error: "inactive", code: "USER_INACTIVE", message: "Reactivate this user before re-sending their invite." });
+
+  const supabase = await getSupabaseClient();
+  const invitedBy = [identity?.user?.firstName, identity?.user?.lastName].filter(Boolean).join(" ") || null;
+  const masked = email.replace(/^(.).*(@.*)$/, "$1…$2");
+
+  if (!isEmailConfigured() || typeof supabase.auth.admin.generateLink !== "function") {
+    // No SES on this Lambda: Supabase's own emails (dashboard templates MUST be the
+    // token_hash shape). An unfinished invite is re-invited; a finished one gets a reset.
+    console.warn("user-admin: EMAIL_FROM not set — resend goes through Supabase's own email.");
+    const inv = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    if (!inv.error) return jsonResponse(200, cors, { success: true, id: u.Id, linkType: "invite", inviteVia: "supabase" });
+    if (!isAlreadyRegistered(inv.error)) return jsonResponse(502, cors, { error: "resend_failed", code: "RESEND_FAILED", message: inv.error.message });
+    const rec = await supabase.auth.resetPasswordForEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    if (rec.error) return jsonResponse(502, cors, { error: "resend_failed", code: "RESEND_FAILED", message: rec.error.message });
+    return jsonResponse(200, cors, { success: true, id: u.Id, linkType: "recovery", inviteVia: "supabase" });
+  }
+
+  // Try the invite first (new or unfinished user); an already-confirmed user gets a
+  // recovery link — the same page, a different word on the button.
+  let r = await mintAndSend(supabase, { type: "invite", email, firstName: trimStr(u.First_Name__c), invitedBy, redirectTo: RESET_PASSWORD_URL });
+  let linkType = "invite";
+  if (!r.ok && isAlreadyRegistered(r.error)) {
+    r = await mintAndSend(supabase, { type: "recovery", email, firstName: trimStr(u.First_Name__c), redirectTo: RESET_PASSWORD_URL });
+    linkType = "recovery";
+  }
+  if (!r.ok) {
+    console.error(`user-admin: resend for ${masked} failed: ${r.error?.message || r.error}`);
+    return jsonResponse(502, cors, { error: "resend_failed", code: "RESEND_FAILED", message: r.error?.message || "Supabase refused to issue a link." });
+  }
+
+  // The auth user behind the record may be new (deleted and re-created): re-point the
+  // record so the next sign-in resolves. Internal id, never from request input.
+  let relinked = false;
+  const authId = trimStr(r.user?.id);
+  if (authId && authId !== trimStr(u.Supabase_User_Id__c)) {
+    try {
+      await sfUpdateRecord(SF_OBJECT, u.Id, { Supabase_User_Id__c: authId });
+      relinked = true;
+    } catch (e) {
+      console.error(`user-admin: resend for ${masked}: could not re-point Supabase_User_Id__c: ${e?.message || e}`);
+      return jsonResponse(502, cors, { error: "sf_update_failed", code: "SF_UPDATE_FAILED", message: "The link was sent, but the user record could not be re-linked to the login. Try again." });
+    }
+  }
+  if (!r.sent) console.error(`user-admin: resend for ${masked}: ${r.reason}`);
+  const resp = { success: true, id: u.Id, linkType, inviteVia: r.sent ? "ses" : "none", inviteSent: r.sent };
+  if (!r.sent) resp.inviteWarning = r.reason;
+  if (relinked) resp.relinked = true;
+  console.log(`user-admin: resend ${linkType} for ${masked}: sent=${r.sent}${relinked ? " (relinked)" : ""}`);
   return jsonResponse(200, cors, resp);
 }
 

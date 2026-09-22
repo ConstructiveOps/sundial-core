@@ -105,6 +105,12 @@ See DECISIONS.md D-043 for the access model.
 
 ### Salesforce Operations
 
+
+#### `POST /auth/forgot` (public, 2026-09-22)
+
+**Lambda:** `sundial-auth-proxy` · **Auth:** none — the person cannot sign in. Body `{ "email" }`. **Always `200 { ok, message }`** with the same body whether or not the address has an account (no user enumeration); garbage is ignored. The Lambda mints the recovery link (`auth.admin.generateLink({ type: "recovery" })` — Supabase sends nothing) and emails `{PORTAL_BASE_URL}/reset-password?token_hash=…&type=recovery` through SES (`lib/auth-email.js`), so a mail scanner's prefetch cannot spend the token; the page redeems it only on submit. Per-IP and per-address limiter (10 / hour, best-effort, per warm container). Without `EMAIL_FROM` on this Lambda it falls back to Supabase's own reset email (the dashboard's Reset Password template must then be the token_hash shape). The login page calls this first and falls back to `supabase.auth.resetPasswordForEmail` only when the route cannot be reached. Wire script: `scripts/wire-auth-forgot-route.ps1`.
+
+**Invites** are the same idea on `POST /admin/users` (`credentialMode: "invite"`): `generateLink({ type: "invite" })` + our email; the response carries `inviteVia: "ses" | "supabase"` and `inviteWarning` when SES refused the send. **Re-send** with `PATCH /admin/users/{id} { "resendInvite": true }` → `{ success, id, linkType: "invite" | "recovery", inviteVia, inviteSent, inviteWarning?, relinked? }`: an unfinished invite gets a fresh invite link, a finished one a recovery link; if the login had been deleted in Supabase the invite creates a new one and the record's `Supabase_User_Id__c` is re-pointed (`relinked: true`). `409 USER_INACTIVE` for an inactive user, `404` cross-tenant. Nothing needs deleting in Salesforce to re-invite anyone.
 #### `GET /sf/{object}`
 
 **Lambda:** `sundial-sf-query`
@@ -796,7 +802,7 @@ Quick reference of which Lambda handles which routes:
 
 | Lambda | Routes |
 |---|---|
-| `sundial-auth-proxy` | GET /auth/me |
+| `sundial-auth-proxy` | GET /auth/me, POST /auth/forgot (public — the reset link Sundial sends itself, 2026-09-22) |
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
@@ -806,7 +812,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-delete-file` | DELETE /files/by-id/{fileId} |
 | `sundial-budget` | POST /projects/{recordId}/budget/recalc |
 | `sundial-acumatica-budget-push` | POST /projects/{recordId}/budget/push, POST /projects/{recordId}/budget/attributes-sync |
-| `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} |
+| `sundial-user-admin` | GET /admin/users, POST /admin/users, PATCH /admin/users/{id} (incl. `{ resendInvite: true }`) |
 | `sundial-aurora-push` | POST /customers/{recordId}/design-request/submit |
 | `sundial-service-estimate` | GET /service/jobs/{id}/activity, GET /service/estimates/{id}/{activity\|preview}, POST /service/estimates, GET+PATCH /service/estimates/{id}, POST /service/estimates/{id}/lines, PATCH+DELETE /service/estimates/{id}/lines/{lineId}, POST /service/estimates/{id}/{add-template\|recalculate\|send\|approve\|decline\|create-job\|apply-plan-discount}, GET+PUT /service/jobs/{id}/report, GET /service/jobs/{id}/report/preview, POST /service/jobs/{id}/report/send, POST /service/jobs, POST /service/price-book-items, PATCH /service/price-book-items/{id}, POST /service/price-book-items/{id}/{new-version\|deactivate}, POST /service/invoices/{id}/charge, POST /webhooks/stripe/{tenant} (Stripe's signature is the gate); **Service Club (D-073):** GET+PATCH /service/club/plans[/{id}], GET+POST /service/club/memberships, POST /service/club/memberships/{id}/{cancel\|solarfacts}, GET /service/club/report, GET /service/club/customers/{id}; public (no login) GET /public/club/{tenant}/{plans\|joined}, POST /public/club/{tenant}/{join\|truck-roll\|request\|manage} |
 | `sundial-service-board` | GET /service/board, GET+POST /service/jobs/{id}/calls, PATCH /service/calls/{id}, POST /service/calls/{id}/cancel, GET+POST /service/calls/{id}/clock, GET+POST /service/jobs/{id}/photos[/confirm], GET /service/tech/jobs/{id}/{photos\|files}; **the tech app:** GET /service/tech/day, GET /service/tech/price-book, GET /service/tech/calls/{id}, POST …/status, …/notes, …/checklist, …/photos, …/photos/confirm, GET …/photos |

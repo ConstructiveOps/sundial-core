@@ -1,5 +1,26 @@
 # Sundial — Progress Log
 
+## 2026-09-22 — Invite and reset links that survive mail scanners; resend from Manage Users; forgot-password by Sundial
+
+The "invite links arrive expired within minutes" report: the link was Supabase's
+`/auth/v1/verify`, which spends the one-time token on a GET, and Microsoft's Safe Links
+opens every link in a message minutes after delivery. The dashboard template that had
+been avoiding it had reverted. The link shape now lives in code: `lib/auth-email.js`
+mints the link with `auth.admin.generateLink` (Supabase sends nothing) and emails
+`/reset-password?token_hash=…&type=invite|recovery` through SES — the page redeems it
+only when a person submits a password. `sundial-user-admin` invites this way (fallback
+to Supabase's email without `EMAIL_FROM`, logged) and `PATCH /admin/users/{id}
+{ resendInvite: true }` re-issues a link — invite for the unfinished, recovery for the
+finished — re-pointing `Supabase_User_Id__c` when the login had been deleted, so nothing
+is ever deleted in Salesforce to re-invite. `sundial-auth-proxy` gains the public
+`POST /auth/forgot` (always 200, per-IP / per-address limiter, SES, Supabase fallback)
+and `createHandler(deps)` so it is testable without module mocks;
+`scripts/wire-auth-forgot-route.ps1`. Portal: Manage Users "Send invite / Resend link",
+the login page's Forgot password → `/auth/forgot` with the old call as fallback.
+`sql/2026-09-21_user_delete_rules.sql` lets a login be deleted (comments SET NULL,
+mentions CASCADE). Tests: auth-email 5, forgot 5, user-admin pure 9 + handler (+7,
+module-mock suite), portal 197.
+
 ## 2026-09-21 — Notifications: the bell, browser pop-ups and push, for techs and the office (D-074)
 
 One notifier for the whole backend (`lib/notify.js`): a row in Supabase

@@ -209,8 +209,13 @@ Project: **`qfsdpkwxahakegjnyijj`** (the portal's Supabase project).
 > the estimate Lambda uses); without it the Lambda falls back to Supabase's invite email,
 > which is only safe while the Invite template below is intact. The response reports
 > `inviteVia: "ses" | "supabase"` and, if SES refused the send, `inviteWarning`.
-> The **Reset Password** template below still matters — "Forgot password" on the login
-> page goes through Supabase's own email.
+> **"Forgot password" is ours too** (same day): the login page calls `POST /auth/forgot`
+> on `sundial-auth-proxy`, which mints the recovery link and emails it through SES —
+> so **`EMAIL_FROM` on `sundial-auth-proxy`** as well, and `scripts/wire-auth-forgot-route.ps1`
+> once. Until the route is wired the page falls back to Supabase's reset email, which is
+> why the Reset Password template below should still be the token_hash shape. **Re-send**
+> a link from Manage Users ("Send invite" / "Resend link") — never delete a Salesforce user
+> record to re-invite; the button re-points the record if the login was deleted.
 
 **Authentication → Emails → Templates.** Two templates need editing: **Reset Password**
 and **Invite user**.

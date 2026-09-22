@@ -70,6 +70,8 @@ function resetCtx() {
   ctx.emails = [];
   ctx.emailConfigured = false;
   ctx.emailResult = { ok: true, messageId: "ses-1" };
+  ctx.generateLink = null; // (args) => result, to script a specific outcome
+  ctx.resets = [];
 }
 resetCtx();
 
@@ -122,7 +124,8 @@ function supabaseStub() {
         // 2026-09-22: the invite link is minted here (unspent token hash) and emailed by us.
         generateLink: async (args) => {
           ctx.authCalls.push({ op: "generateLink", args });
-          return { data: { user: { id: TARGET_UID }, properties: { hashed_token: "HASH123", verification_type: "invite" } }, error: null };
+          if (ctx.generateLink) return ctx.generateLink(args);
+          return { data: { user: { id: TARGET_UID }, properties: { hashed_token: "HASH123", verification_type: args.type } }, error: null };
         },
         listUsers: async () => ({ data: { users: [] }, error: null }),
         deleteUser: async (id) => {
@@ -134,6 +137,7 @@ function supabaseStub() {
           return { error: null };
         },
       },
+      resetPasswordForEmail: async (email, opts) => (ctx.resets.push({ email, opts }), { data: {}, error: null }),
     },
   };
 }
@@ -745,4 +749,66 @@ test("CREATE invite whose email fails to send still creates the user and says so
   assert.ok(!body.inviteSent);
   assert.match(body.inviteWarning, /SES said no/);
   assert.equal(ctx.created.length, 1, "the Sundial user is still created");
+});
+
+// ===========================================================================
+// Resend (2026-09-22): PATCH { resendInvite: true } — never a delete anywhere.
+// ===========================================================================
+
+const userRow = (over = {}) => [{ Id: TARGET_ID, Email__c: "zz.newuser@example.com", First_Name__c: "ZZ", Supabase_User_Id__c: TARGET_UID, Active__c: true, ...over }];
+
+test("RESEND for an unfinished invite: a fresh invite link, emailed by us, nothing else touched", async () => {
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow()];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  const body = parse(res);
+  assert.equal(body.linkType, "invite");
+  assert.equal(body.inviteVia, "ses");
+  assert.equal(body.inviteSent, true);
+  assert.ok(!body.relinked);
+  assert.deepEqual(ctx.authCalls.map((c) => [c.op, c.args?.type]), [["generateLink", "invite"]]);
+  assert.equal(ctx.emails.length, 1);
+  assert.ok(ctx.emails[0].text.includes("/reset-password?token_hash=HASH123&type=invite"));
+  assert.equal(ctx.updated.length, 0, "the record already points at this login");
+  // The tenant scope is in the lookup.
+  assert.match(ctx.queries[0], new RegExp(`Client__c = '${TENANT}'`));
+});
+
+test("RESEND for someone who already has a password: a RECOVERY link on the same page", async () => {
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow()];
+  ctx.generateLink = (args) =>
+    args.type === "invite"
+      ? { data: null, error: { message: "A user with this email address has already been registered", status: 422 } }
+      : { data: { user: { id: TARGET_UID }, properties: { hashed_token: "RHASH" } }, error: null };
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(parse(res).linkType, "recovery");
+  assert.deepEqual(ctx.authCalls.map((c) => c.args?.type), ["invite", "recovery"]);
+  assert.equal(ctx.emails[0].subject, "Reset your Sundial password");
+  assert.ok(ctx.emails[0].text.includes("token_hash=RHASH&type=recovery"));
+});
+
+test("RESEND after the login was deleted in Supabase: a NEW auth user, and the record is re-pointed at it", async () => {
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow({ Supabase_User_Id__c: "old-uuid-gone" })];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(parse(res).relinked, true);
+  assert.deepEqual(ctx.updated, [{ sfObject: "Sundial_User__c", id: TARGET_ID, fields: { Supabase_User_Id__c: TARGET_UID } }]);
+});
+
+test("RESEND refuses an inactive user, 404s a cross-tenant id, and falls back to Supabase's emails without SES", async () => {
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow({ Active__c: false })];
+  assert.equal(parse(await handler(patchEvent(TARGET_ID, { resendInvite: true }))).code, "USER_INACTIVE");
+  ctx.queryRows = [[]];
+  assert.equal((await handler(patchEvent(TARGET_ID, { resendInvite: true }))).statusCode, 404);
+  ctx.emailConfigured = false;
+  ctx.queryRows = [userRow()];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(parse(res).inviteVia, "supabase");
+  assert.deepEqual(ctx.authCalls.map((c) => c.op), ["inviteUserByEmail"]);
+  assert.equal(ctx.emails.length, 0);
 });

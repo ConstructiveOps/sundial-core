@@ -1,4 +1,4 @@
-// sundial-auth-proxy — GET /auth/me
+// sundial-auth-proxy — GET /auth/me, POST /auth/forgot
 //
 // Verifies the caller's Supabase access token, resolves the matching
 // Sundial_User__c record, and returns the user's identity + tenant scope.
@@ -10,9 +10,12 @@
 //
 // See docs/api-endpoints.md (GET /auth/me).
 
-import { resolveIdentity } from "../../lib/identity.js";
+import { resolveIdentity as realResolveIdentity } from "../../lib/identity.js";
 import { profileScopeColumns } from "../../lib/access.js";
-import { getSupabaseClient } from "../../lib/supabase.js";
+import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
+import { parseJsonBody } from "../../lib/http.js";
+import { isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
+import { mintAndSend as realMintAndSend, portalBaseUrl } from "../../lib/auth-email.js";
 
 // --- CORS ------------------------------------------------------------------
 
@@ -50,7 +53,7 @@ function corsHeaders(origin) {
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     Vary: "Origin",
   };
 }
@@ -106,7 +109,7 @@ function mapIdentityError(code) {
 // profiles under RLS). This is a pure side effect — it never affects the HTTP
 // response, and it NEVER throws: all errors are caught and logged so a profile
 // write failure cannot break login. Value-safe: logs no tokens/secrets/PII bodies.
-async function upsertProfile(identity) {
+async function upsertProfile(identity, getSupabaseClient = realGetSupabaseClient) {
   try {
     const u = identity?.user || {};
     // id MUST be the auth.users UUID (the verified token sub) for RLS to match.
@@ -169,9 +172,81 @@ async function upsertProfile(identity) {
   }
 }
 
+// --- POST /auth/forgot — "Forgot password", sent by us (2026-09-22) ---------------
+//
+// The login page used to call supabase.auth.resetPasswordForEmail from the browser,
+// which sends Supabase's own Reset Password email — and that email's link spends the
+// one-time token on a GET unless the dashboard template is hand-edited (see
+// lib/auth-email.js for the mail-scanner story). This route mints the recovery link
+// server-side and emails it through SES with the token unspent; the page redeems it
+// only on submit.
+//
+// PUBLIC (no JWT — the person cannot sign in, that is the point), so:
+//   - ALWAYS 200 with the same body. Whether the address has an account is never
+//     revealed (user enumeration); an unknown email simply sends nothing.
+//   - Best-effort per-IP + per-email limiter (module scope, so per warm container —
+//     a speed bump for a script, not a control; the same honest limit as the club
+//     signup receiver). Ten per address per hour is more than any human needs.
+//   - Nothing about the email is logged beyond a masked form.
+// Without EMAIL_FROM on this Lambda it falls back to Supabase's own reset email (the
+// dashboard's Reset Password template must then be the token_hash shape).
+export const FORGOT_LIMIT = { perKey: 10, windowMs: 60 * 60 * 1000, maxTracked: 5000 };
+const forgotHits = new Map(); // key → number[] (timestamps)
+function forgotAllowed(key, now = Date.now()) {
+  if (!key) return true;
+  const list = (forgotHits.get(key) || []).filter((t) => now - t < FORGOT_LIMIT.windowMs);
+  if (list.length >= FORGOT_LIMIT.perKey) {
+    forgotHits.set(key, list);
+    return false;
+  }
+  list.push(now);
+  if (forgotHits.size > FORGOT_LIMIT.maxTracked) forgotHits.clear();
+  forgotHits.set(key, list);
+  return true;
+}
+const maskEmail = (e) => String(e).replace(/^(.).*(@.*)$/, "$1…$2");
+
+async function handleForgot(d, event, headers, cors) {
+  const done = () => jsonResponse(200, cors, { ok: true, message: "If that address has a Sundial account, a reset link is on its way." });
+  const parsed = parseJsonBody(event);
+  const email = String(parsed.ok ? parsed.data?.email ?? "" : "").trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return done();
+  const ip = String(headers["x-forwarded-for"] || event?.requestContext?.identity?.sourceIp || "").split(",")[0].trim();
+  if (!forgotAllowed(`ip:${ip}`) || !forgotAllowed(`email:${email}`)) {
+    console.warn(`auth/forgot: rate limit hit for ${maskEmail(email)}`);
+    return done();
+  }
+  const redirectTo = `${portalBaseUrl()}/reset-password`;
+  try {
+    const supabase = await d.getSupabaseClient();
+    if (!d.isEmailConfigured()) {
+      console.warn("auth/forgot: EMAIL_FROM not set — using Supabase's own reset email (its Reset Password template MUST be the token_hash shape).");
+      const r = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
+      if (r.error) console.warn(`auth/forgot: Supabase reset for ${maskEmail(email)}: ${r.error.message}`);
+      return done();
+    }
+    const r = await d.mintAndSend(supabase, { type: "recovery", email, redirectTo });
+    if (!r.ok) console.log(`auth/forgot: no link for ${maskEmail(email)} (${r.error?.message || "refused"})`); // unknown address, most likely
+    else if (!r.sent) console.error(`auth/forgot: ${maskEmail(email)}: ${r.reason}`);
+    else console.log(`auth/forgot: reset link sent to ${maskEmail(email)}`);
+  } catch (err) {
+    console.error("auth/forgot error:", err?.message || String(err));
+  }
+  return done();
+}
+
 // --- handler ---------------------------------------------------------------
 
-export const handler = async (event) => {
+/** Dependencies are injectable so forgot.test.js can drive the real router without module mocks. */
+export function createHandler(deps = {}) {
+  const d = {
+    resolveIdentity: realResolveIdentity,
+    getSupabaseClient: realGetSupabaseClient,
+    isEmailConfigured: realIsEmailConfigured,
+    mintAndSend: realMintAndSend,
+    ...deps,
+  };
+  return async (event) => {
   // Support both REST (v1, httpMethod) and HTTP API (v2, requestContext.http).
   const method =
     event?.requestContext?.http?.method || event?.httpMethod || "GET";
@@ -183,11 +258,17 @@ export const handler = async (event) => {
     return { statusCode: 204, headers: cors, body: "" };
   }
 
+  // The one public route on this Lambda: no token, no identity, always 200.
+  const path = event?.rawPath || event?.path || "";
+  if (method === "POST" && /\/auth\/forgot\/?$/.test(path)) {
+    return await handleForgot(d, event, headers, cors);
+  }
+
   try {
     // Resolve identity (verify token + load Sundial_User__c + tenant).
     let identity;
     try {
-      identity = await resolveIdentity(headers["authorization"]);
+      identity = await d.resolveIdentity(headers["authorization"]);
     } catch (err) {
       const mapped = mapIdentityError(err?.code);
       if (mapped) return jsonResponse(mapped.status, cors, mapped.body);
@@ -198,7 +279,7 @@ export const handler = async (event) => {
     // public.profiles row current for Supabase RLS. Awaited so the write finishes
     // before the Lambda returns/freezes; upsertProfile swallows all errors so a
     // profile-write failure can never break login.
-    await upsertProfile(identity);
+    await upsertProfile(identity, d.getSupabaseClient);
 
     // Success. ADDITIVE: the existing `user` and `tenant` keys are byte-identical to
     // what this endpoint returned before, so an un-updated client is unaffected.
@@ -219,3 +300,6 @@ export const handler = async (event) => {
     return jsonResponse(500, cors, { error: "server_error" });
   }
 };
+}
+
+export const handler = createHandler();

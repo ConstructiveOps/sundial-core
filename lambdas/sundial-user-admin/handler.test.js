@@ -67,6 +67,9 @@ function resetCtx() {
   ctx.updateError = null;
   ctx.authCalls = [];
   ctx.banCalls = [];
+  ctx.emails = [];
+  ctx.emailConfigured = false;
+  ctx.emailResult = { ok: true, messageId: "ses-1" };
 }
 resetCtx();
 
@@ -116,6 +119,11 @@ function supabaseStub() {
           ctx.authCalls.push({ op: "inviteUserByEmail", email, opts });
           return { data: { user: { id: TARGET_UID } }, error: null };
         },
+        // 2026-09-22: the invite link is minted here (unspent token hash) and emailed by us.
+        generateLink: async (args) => {
+          ctx.authCalls.push({ op: "generateLink", args });
+          return { data: { user: { id: TARGET_UID }, properties: { hashed_token: "HASH123", verification_type: "invite" } }, error: null };
+        },
         listUsers: async () => ({ data: { users: [] }, error: null }),
         deleteUser: async (id) => {
           ctx.authCalls.push({ op: "deleteUser", id });
@@ -129,6 +137,16 @@ function supabaseStub() {
     },
   };
 }
+
+mock.module("../../lib/email.js", {
+  exports: {
+    isEmailConfigured: () => ctx.emailConfigured,
+    sendEmail: async (msg) => {
+      ctx.emails.push(msg);
+      return ctx.emailResult;
+    },
+  },
+});
 
 mock.module("../../lib/supabase.js", {
   exports: {
@@ -670,4 +688,61 @@ test("GET /admin/dealers returns ACTIVE dealers only, tenant-scoped", async () =
   assert.match(q, /Active__c = true/);
   assert.match(q, new RegExp(`Client__c = '${TENANT}'`));
   assert.ok(!/Sundial_User__c/.test(q), "the dealers route must not query users");
+});
+
+// ===========================================================================
+// Invites (2026-09-22): the link is minted here and emailed unspent, so a mail
+// scanner's prefetch cannot burn it. Supabase's own invite email is only the fallback.
+// ===========================================================================
+
+test("CREATE invite with SES: generateLink (no Supabase email) + our email carrying the unspent token_hash link", async () => {
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = true;
+
+  const res = await handler(postEvent(createBody({ credentialMode: "invite", tempPassword: undefined })));
+
+  assert.equal(res.statusCode, 201, res.body);
+  const body = parse(res);
+  assert.equal(body.inviteSent, true);
+  assert.equal(body.inviteVia, "ses");
+  assert.ok(!("inviteWarning" in body));
+  assert.deepEqual(ctx.authCalls.map((c) => c.op), ["generateLink"], "never inviteUserByEmail when we send");
+  assert.equal(ctx.authCalls[0].args.type, "invite");
+  assert.equal(ctx.authCalls[0].args.email, "zz.newuser@example.com");
+  assert.equal(ctx.emails.length, 1);
+  const mail = ctx.emails[0];
+  assert.equal(mail.to, "zz.newuser@example.com");
+  assert.match(mail.subject, /invited to Sundial/);
+  // The load-bearing part: OUR page, token unspent, redeemed only on submit.
+  assert.ok(mail.text.includes("/reset-password?token_hash=HASH123&type=invite"), mail.text);
+  assert.ok(mail.html.includes("/reset-password?token_hash=HASH123&amp;type=invite"), "html-escaped link");
+  assert.ok(!/auth\/v1\/verify/.test(mail.text + mail.html), "never Supabase's verify URL");
+  assert.ok(mail.text.includes("Hi ZZ,"));
+  assert.equal(ctx.created[0].fields.Supabase_User_Id__c, TARGET_UID);
+});
+
+test("CREATE invite when SES is NOT configured falls back to Supabase's invite email", async () => {
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = false;
+
+  const res = await handler(postEvent(createBody({ credentialMode: "invite", tempPassword: undefined })));
+
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(parse(res).inviteVia, "supabase");
+  assert.deepEqual(ctx.authCalls.map((c) => c.op), ["inviteUserByEmail"]);
+  assert.equal(ctx.emails.length, 0);
+});
+
+test("CREATE invite whose email fails to send still creates the user and says so (inviteSent false + inviteWarning)", async () => {
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = true;
+  ctx.emailResult = { ok: false, error: "SES said no" };
+
+  const res = await handler(postEvent(createBody({ credentialMode: "invite", tempPassword: undefined })));
+
+  assert.equal(res.statusCode, 201, res.body);
+  const body = parse(res);
+  assert.ok(!body.inviteSent);
+  assert.match(body.inviteWarning, /SES said no/);
+  assert.equal(ctx.created.length, 1, "the Sundial user is still created");
 });

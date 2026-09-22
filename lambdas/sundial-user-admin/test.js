@@ -20,6 +20,8 @@ import {
   DEFAULT_HIERARCHY_LEVEL,
   SALES_ACCESS_LEVELS,
   deriveHierarchyLevel,
+  buildInviteEmail,
+  inviteLink,
 } from "./index.js";
 
 // The live Hierarchy_Level__c picklist, confirmed by describe against the org on
@@ -117,4 +119,27 @@ test("the map itself carries no entry that grants more than it should", () => {
       assert.equal(level, "Sales Rep", `only "Sales Rep" may map to the TEMP guard's value`);
     }
   }
+});
+
+// --- The invite email (2026-09-22) ------------------------------------------------
+test("inviteLink is our page with the UNSPENT token hash, redeemed on submit — never Supabase's verify URL", () => {
+  assert.equal(inviteLink("abc+/=", "https://sundial.harmonelectric.net/reset-password"), "https://sundial.harmonelectric.net/reset-password?token_hash=abc%2B%2F%3D&type=invite");
+  assert.ok(!inviteLink("x").includes("auth/v1/verify"));
+});
+
+test("buildInviteEmail: greets by name, names the inviter, carries the link in text and (escaped) html", () => {
+  const link = "https://sundial.harmonelectric.net/reset-password?token_hash=H&type=invite";
+  const m = buildInviteEmail({ firstName: "Dana", email: "dana@example.com", link, portalBase: "https://sundial.harmonelectric.net", invitedBy: "Tim Murphy" });
+  assert.equal(m.subject, "You're invited to Sundial");
+  assert.ok(m.text.startsWith("Hi Dana,"));
+  assert.ok(m.text.includes("Tim Murphy has set up a Sundial account for dana@example.com"));
+  assert.ok(m.text.includes(link));
+  assert.ok(m.html.includes('href="https://sundial.harmonelectric.net/reset-password?token_hash=H&amp;type=invite"'));
+  assert.ok(m.html.includes("Set my password"));
+  const anon = buildInviteEmail({ firstName: null, email: "x@y.z", link, portalBase: "https://p", invitedBy: null });
+  assert.ok(anon.text.startsWith("Hello,"));
+  assert.ok(anon.text.includes("You have been set up"));
+  // Nothing in the email can break out of the HTML.
+  const evil = buildInviteEmail({ firstName: "<b>x</b>", email: "a@b.c", link, portalBase: "https://p", invitedBy: null });
+  assert.ok(!evil.html.includes("<b>x</b>"));
 });

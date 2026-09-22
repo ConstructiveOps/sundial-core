@@ -34,6 +34,7 @@ import {
   httpMethod,
   isAllowedOrigin,
 } from "../../lib/http.js";
+import { isEmailConfigured, sendEmail } from "../../lib/email.js";
 
 const SF_OBJECT = "Sundial_User__c";
 export const ACCESS_LEVELS = new Set([
@@ -203,6 +204,83 @@ const DEALER_REQUIRED = {
 // which now only redirects) so a lost env var still produces a working link.
 const PORTAL_BASE_URL = (process.env.PORTAL_BASE_URL || "https://sundial.harmonelectric.net").replace(/\/+$/, "");
 const RESET_PASSWORD_URL = `${PORTAL_BASE_URL}/reset-password`;
+
+// --- The invite link, and why WE send it (2026-09-22) -----------------------------
+//
+// An invite link is a ONE-TIME token. Supabase's own invite email (`inviteUserByEmail`)
+// carries `{{ .ConfirmationURL }}` unless the dashboard template is hand-edited, and that
+// URL is Supabase's /auth/v1/verify — a GET that SPENDS the token. Mail security
+// scanners (Microsoft Defender Safe Links, Mimecast, Gmail) prefetch every link in a
+// message within minutes of delivery, so the human who clicks a few minutes later sees
+// "Email link is invalid or has expired". docs/integrations/auth-email-ses.md Part B2
+// explains the template edit that avoids it — and a template is a dashboard setting
+// that can be reverted, re-created or forgotten on a new project with no diff anywhere.
+//
+// So the link shape now lives in code: `generateLink({ type: "invite" })` creates the
+// auth user and hands back the UNSPENT token hash (no email is sent by Supabase), and we
+// email `/reset-password?token_hash=…&type=invite` through SES ourselves. Loading that
+// page redeems nothing; only a human who submits a password does (verifyOtp on submit —
+// harmon-crm ResetPasswordPage.tsx). A scanner cannot burn it.
+//
+// FALLBACK: without EMAIL_FROM (SES not wired on this Lambda) the old Supabase invite
+// is used, and then the dashboard template MUST be the token_hash shape. Logged loudly.
+const INVITE_TOKEN_TYPE = "invite";
+
+/** The invite email: plain, one button, the unspent link. Pure — tests pin it. */
+export function buildInviteEmail({ firstName, email, link, portalBase, invitedBy }) {
+  const hello = firstName ? `Hi ${firstName},` : "Hello,";
+  const who = invitedBy ? `${invitedBy} has` : "You have been";
+  const subject = "You're invited to Sundial";
+  const text = [
+    hello,
+    "",
+    `${who} set up a Sundial account for ${email}. Choose a password to get started:`,
+    "",
+    link,
+    "",
+    "This link can only be used once. If you weren't expecting it, you can ignore this email.",
+    "",
+    `Sundial · ${portalBase}`,
+  ].join("\n");
+  const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const html = `<div style="font-family:sans-serif;font-size:15px;line-height:1.5;color:#0f172a">
+<p>${esc(hello)}</p>
+<p>${esc(who)} set up a Sundial account for <strong>${esc(email)}</strong>. Choose a password to get started:</p>
+<p><a href="${esc(link)}" style="display:inline-block;padding:12px 22px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600">Set my password</a></p>
+<p style="color:#64748b;font-size:13px">Or paste this into your browser:<br>${esc(link)}</p>
+<p style="color:#64748b;font-size:13px">This link can only be used once. If you weren't expecting it, you can ignore this email.</p>
+<p style="color:#64748b;font-size:13px">Sundial · <a href="${esc(portalBase)}" style="color:#64748b">${esc(portalBase)}</a></p>
+</div>`;
+  return { subject, text, html };
+}
+
+/** The unspent-token link the page redeems on submit. */
+export function inviteLink(tokenHash, base = RESET_PASSWORD_URL) {
+  return `${base}?token_hash=${encodeURIComponent(tokenHash)}&type=${INVITE_TOKEN_TYPE}`;
+}
+
+/**
+ * Create the invited auth user and get the invite to them.
+ * @returns {Promise<{ error?: object, data?: object, via?: "ses"|"supabase", warning?: string }>}
+ */
+async function inviteAuthUser(supabase, email, { firstName, invitedBy }) {
+  if (!isEmailConfigured() || typeof supabase.auth.admin.generateLink !== "function") {
+    console.warn("user-admin: EMAIL_FROM not set — falling back to Supabase's invite email; its Invite template MUST use the token_hash link shape (auth-email-ses.md Part B2).");
+    const res = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    return res.error ? { error: res.error } : { data: res.data, via: "supabase" };
+  }
+  const gen = await supabase.auth.admin.generateLink({ type: INVITE_TOKEN_TYPE, email, options: { redirectTo: RESET_PASSWORD_URL } });
+  if (gen.error) return { error: gen.error };
+  const tokenHash = gen.data?.properties?.hashed_token ?? null;
+  if (!tokenHash) {
+    // The user exists now, but we have nothing to send. Say so rather than pretend.
+    return { data: gen.data, via: "ses", warning: "Supabase returned no token hash for the invite; nothing was emailed." };
+  }
+  const mail = buildInviteEmail({ firstName, email, link: inviteLink(tokenHash), portalBase: PORTAL_BASE_URL, invitedBy });
+  const sent = await sendEmail({ to: email, subject: mail.subject, text: mail.text, html: mail.html });
+  if (!sent.ok) return { data: gen.data, via: "ses", warning: `The invite email could not be sent: ${sent.error}` };
+  return { data: gen.data, via: "ses" };
+}
 
 // --- CORS (shared lib/http.js: localhost + portal domain + *.vercel.app; GET/POST/PATCH) ---
 function corsHeaders(origin) {
@@ -480,10 +558,13 @@ async function handleCreate(identity, event, cors) {
   let authUserId = null;
   let freshlyCreated = false; // only a FRESH user is deleted on compensation
   let inviteSent = false;
+  let inviteVia = null;
+  let inviteWarning = null;
   try {
+    const invitedBy = [identity?.user?.firstName, identity?.user?.lastName].filter(Boolean).join(" ") || null;
     const res =
       credentialMode === "invite"
-        ? await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL })
+        ? await inviteAuthUser(supabase, email, { firstName, invitedBy })
         : await supabase.auth.admin.createUser({
             email,
             password: tempPassword,
@@ -507,7 +588,12 @@ async function handleCreate(identity, event, cors) {
     } else {
       authUserId = res.data?.user?.id ?? null;
       freshlyCreated = true;
-      if (credentialMode === "invite") inviteSent = true;
+      if (credentialMode === "invite") {
+        inviteVia = res.via ?? null;
+        inviteWarning = res.warning ?? null;
+        inviteSent = !inviteWarning;
+        if (inviteWarning) console.error(`user-admin: invite for ${email.replace(/^(.).*(@.*)$/, "$1…$2")}: ${inviteWarning}`);
+      }
     }
   } catch (e) {
     console.error("supabase auth step threw:", e?.message || String(e));
@@ -551,6 +637,8 @@ async function handleCreate(identity, event, cors) {
       resp.dealerName = dealer.name;
     }
     if (inviteSent) resp.inviteSent = true;
+    if (inviteVia) resp.inviteVia = inviteVia;
+    if (inviteWarning) resp.inviteWarning = inviteWarning;
     return jsonResponse(201, cors, resp);
   } catch (sfErr) {
     // Compensating action: delete the FRESH auth user so we don't orphan it. Never

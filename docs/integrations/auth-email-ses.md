@@ -198,7 +198,19 @@ Project: **`qfsdpkwxahakegjnyijj`** (the portal's Supabase project).
 
 ---
 
-## Part B2 — Email templates (REQUIRED — the link shape is load-bearing)
+## Part B2 — Email templates (the link shape is load-bearing)
+
+> **2026-09-22 — invites no longer depend on the Invite template.** `sundial-user-admin`
+> now mints the invite itself (`auth.admin.generateLink({ type: "invite" })` — the user is
+> created, Supabase sends nothing) and emails
+> `https://sundial.harmonelectric.net/reset-password?token_hash=…&type=invite` through SES
+> (`lib/email.js`). The link shape is in code, tested, and cannot be reverted from a
+> dashboard. **Requires `EMAIL_FROM` on the `sundial-user-admin` Lambda** (the same address
+> the estimate Lambda uses); without it the Lambda falls back to Supabase's invite email,
+> which is only safe while the Invite template below is intact. The response reports
+> `inviteVia: "ses" | "supabase"` and, if SES refused the send, `inviteWarning`.
+> The **Reset Password** template below still matters — "Forgot password" on the login
+> page goes through Supabase's own email.
 
 **Authentication → Emails → Templates.** Two templates need editing: **Reset Password**
 and **Invite user**.

@@ -459,7 +459,15 @@ export function createClubHandlers(d, h) {
       return fail(e?.message || e);
     }
   }
-  async function notifyTeam(cfg, { subject, lines }) {
+  /**
+   * Tell the team: the office's bell + push (D-074, when `bell` names the tenant), and the
+   * club's team email (when one is configured). The bell goes first — it needs no SES.
+   * bell = { tenantId, category, kind, url?, recordType?, recordSfId?, dedupeKey }
+   */
+  async function notifyTeam(cfg, { subject, lines, bell }) {
+    if (bell?.tenantId && h.notifier) {
+      await h.notifier.toOffice({ tenantId: bell.tenantId, category: bell.category, kind: bell.kind, title: subject, body: lines[0] ?? null, url: bell.url ?? null, recordType: bell.recordType ?? null, recordSfId: bell.recordSfId ?? null, dedupeKey: bell.dedupeKey ?? null });
+    }
     if (!cfg?.teamEmail || !d.isEmailConfigured?.()) return { sent: false };
     try {
       const text = lines.join("\n");
@@ -633,6 +641,7 @@ export function createClubHandlers(d, h) {
         plan?.Includes_Tune_Up__c ? "This plan includes an annual tune-up — schedule the first one." : null,
         sf.sent ? `SolarFax has been sent the connect invite${sf.test ? " (SolarFax TEST mode — no real user was created)" : ""}.` : `SolarFax was NOT told (${sf.reason}) — resend from Sundial once it is set up.`,
       ].filter(Boolean),
+      bell: { tenantId, category: "money", kind: "club_join", url: `/service/club?membership=${encodeURIComponent(m.Id)}`, recordType: "membership", recordSfId: m.Id, dedupeKey: `club:join:${m.Id}` },
     });
     return { status: "applied", membershipId: m.Id, subscriptionId: subId, solarFacts: sf.sent };
   }
@@ -670,17 +679,18 @@ export function createClubHandlers(d, h) {
       await notifyTeam(cfg, {
         subject: `Service Club membership ended: ${m.Customer_Name_at_Creation__c ?? "customer"} — ${plan?.Name ?? "plan"}`,
         lines: [`${m.Customer_Name_at_Creation__c ?? "A customer"}'s ${plan?.Name ?? ""} membership (${m.Name ?? m.Id}) has ended.`, m.Cancel_Reason__c ? `Reason: ${m.Cancel_Reason__c}` : null, sf?.sent ? "SolarFax has disconnected the member's monitoring." : `SolarFax was NOT told (${sf?.reason}) — resend from Sundial.`].filter(Boolean),
+        bell: { tenantId, category: "money", kind: "club_ended", url: `/service/club?membership=${encodeURIComponent(m.Id)}`, recordType: "membership", recordSfId: m.Id, dedupeKey: `club:ended:${m.Id}` },
       });
     } else {
       if (LIVE_STATUSES.has(from.status)) await setActivePointer(m.Sundial_Customer__c, m.Id, tenantId);
       await h.act(ctx, { event: EVENTS.MEMBERSHIP_UPDATED, recordType: "membership", recordSfId: m.Id, details: { from: before, to: from.status, cancelAtPeriodEnd: from.cancelAtPeriodEnd, currentPeriodEnd: from.currentPeriodEnd, via: "stripe" } });
       if (from.status === "Past Due" && before !== "Past Due") {
-        await notifyTeam(cfg, { subject: `Service Club payment past due: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"}'s ${plan?.Name ?? ""} renewal failed (${m.Name ?? m.Id}). Stripe will retry; the member can update their card from the "Manage my membership" link.`, `Phone: ${m.Primary_Phone_at_Creation__c ?? "—"} · Email: ${m.Primary_Email_at_Creation__c ?? "—"}`] });
+        await notifyTeam(cfg, { subject: `Service Club payment past due: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"}'s ${plan?.Name ?? ""} renewal failed (${m.Name ?? m.Id}). Stripe will retry; the member can update their card from the "Manage my membership" link.`, `Phone: ${m.Primary_Phone_at_Creation__c ?? "—"} · Email: ${m.Primary_Email_at_Creation__c ?? "—"}`], bell: { tenantId, category: "money", kind: "club_past_due", url: `/service/club?membership=${encodeURIComponent(m.Id)}`, recordType: "membership", recordSfId: m.Id, dedupeKey: `club:pastdue:${m.Id}:${from.currentPeriodEnd ?? now}` } });
       }
       // The first time we hear of a scheduled cancellation (the member did it in the
       // portal, or the office here): tell the team now; the end itself comes later.
       if (upd.Cancelled_At__c && from.cancelAtPeriodEnd) {
-        await notifyTeam(cfg, { subject: `Service Club cancellation scheduled: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"} cancelled their ${plan?.Name ?? ""} membership (${m.Name ?? m.Id}); it stays active until ${from.currentPeriodEnd ? new Date(from.currentPeriodEnd).toLocaleDateString("en-US") : "the period ends"}.`] });
+        await notifyTeam(cfg, { subject: `Service Club cancellation scheduled: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"} cancelled their ${plan?.Name ?? ""} membership (${m.Name ?? m.Id}); it stays active until ${from.currentPeriodEnd ? new Date(from.currentPeriodEnd).toLocaleDateString("en-US") : "the period ends"}.`], bell: { tenantId, category: "money", kind: "club_cancel_scheduled", url: `/service/club?membership=${encodeURIComponent(m.Id)}`, recordType: "membership", recordSfId: m.Id, dedupeKey: `club:cancel:${m.Id}:${upd.Cancelled_At__c}` } });
       }
     }
     return { status: "applied", membershipId: m.Id, to: from.status, solarFacts: sf?.sent ?? null };
@@ -703,7 +713,7 @@ export function createClubHandlers(d, h) {
       // the row already Past Due, so the team hears exactly once).
       if (upd.Status__c === "Past Due") {
         const plan = await loadPlan(m.Service_Plan__c, tenantId);
-        await notifyTeam(await clubConfig(slug), { subject: `Service Club payment past due: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"}'s ${plan?.Name ?? ""} renewal failed (${m.Name ?? m.Id}, $${fromCents(invoice.amount_due).toFixed(2)}). Stripe will retry; the member can update their card from the "Manage my membership" link.`, `Phone: ${m.Primary_Phone_at_Creation__c ?? "—"} · Email: ${m.Primary_Email_at_Creation__c ?? "—"}`] });
+        await notifyTeam(await clubConfig(slug), { subject: `Service Club payment past due: ${m.Customer_Name_at_Creation__c ?? "customer"}`, lines: [`${m.Customer_Name_at_Creation__c ?? "A member"}'s ${plan?.Name ?? ""} renewal failed (${m.Name ?? m.Id}, $${fromCents(invoice.amount_due).toFixed(2)}). Stripe will retry; the member can update their card from the "Manage my membership" link.`, `Phone: ${m.Primary_Phone_at_Creation__c ?? "—"} · Email: ${m.Primary_Email_at_Creation__c ?? "—"}`], bell: { tenantId, category: "money", kind: "club_past_due", url: `/service/club?membership=${encodeURIComponent(m.Id)}`, recordType: "membership", recordSfId: m.Id, dedupeKey: `club:pastdue:${m.Id}:${invoice.id}` } });
       }
       return { status: "applied", membershipId: m.Id, failed: true };
     }
@@ -870,7 +880,7 @@ export function createClubHandlers(d, h) {
         return jsonResponse(502, cors, { error: "stripe_error", code: "STRIPE_ERROR", message: "We couldn't start the payment. Please give us a call — your request has been received." });
       }
       const cfg = await clubConfig(t.slug);
-      await notifyTeam(cfg, { subject: `Online booking started: ${name} — ${plan.Name}`, lines: [`${name} is booking a ${plan.Name} online ($${money(totals.depositAmount).toFixed(2)}). The job is on the board once they pay; if they don't, it stays in Needs Intake Review.`, `Address: ${customer.Street__c ? [customer.Street__c, customer.City__c, customer.State__c, customer.Postal_Code__c].filter(Boolean).join(", ") : "—"}`, `Phone: ${customer.Primary_Phone__c ?? "—"} · Email: ${customer.Primary_Email__c ?? "—"}`, issue ? `The issue: ${issue}` : null].filter(Boolean) });
+      await notifyTeam(cfg, { subject: `Online booking started: ${name} — ${plan.Name}`, lines: [`${name} is booking a ${plan.Name} online ($${money(totals.depositAmount).toFixed(2)}). The job is on the board once they pay; if they don't, it stays in Needs Intake Review.`, `Address: ${customer.Street__c ? [customer.Street__c, customer.City__c, customer.State__c, customer.Postal_Code__c].filter(Boolean).join(", ") : "—"}`, `Phone: ${customer.Primary_Phone__c ?? "—"} · Email: ${customer.Primary_Email__c ?? "—"}`, issue ? `The issue: ${issue}` : null].filter(Boolean), bell: { tenantId: t.tenantId, category: "customer_message", kind: "booking", url: `/service/jobs/${job.id}`, recordType: "job", recordSfId: job.id, dedupeKey: `club:booking:${job.id}` } });
       return jsonResponse(200, cors, { url: session.url, jobId: job.id, estimateId: est.id, amount: money(totals.depositAmount), mode: stripe.config.mode });
     },
 
@@ -903,7 +913,7 @@ export function createClubHandlers(d, h) {
       const number = jobRow?.[0]?.Name ?? null;
       const name = customer.Name || [customer.First_Name__c, customer.Last_Name__c].filter(Boolean).join(" ");
       const cfg = await clubConfig(t.slug);
-      await notifyTeam(cfg, { subject: `Website service request: ${name}${number ? ` (${number})` : ""}`, lines: [`${name} asked for a call from the website.`, `Phone: ${customer.Primary_Phone__c ?? "—"} · Email: ${customer.Primary_Email__c ?? "—"}`, `Address: ${[customer.Street__c, customer.City__c, customer.State__c, customer.Postal_Code__c].filter(Boolean).join(", ") || "—"}`, message ? `They wrote: ${message}` : "They didn't describe the issue.", `The job is in Needs Intake Review in Sundial.`] });
+      await notifyTeam(cfg, { subject: `Website service request: ${name}${number ? ` (${number})` : ""}`, lines: [`${name} asked for a call from the website.`, `Phone: ${customer.Primary_Phone__c ?? "—"} · Email: ${customer.Primary_Email__c ?? "—"}`, `Address: ${[customer.Street__c, customer.City__c, customer.State__c, customer.Postal_Code__c].filter(Boolean).join(", ") || "—"}`, message ? `They wrote: ${message}` : "They didn't describe the issue.", `The job is in Needs Intake Review in Sundial.`], bell: { tenantId: t.tenantId, category: "customer_message", kind: "call_me", url: `/service/jobs/${job.id}`, recordType: "job", recordSfId: job.id, dedupeKey: `request:${job.id}` } });
       return jsonResponse(201, cors, { success: true, jobNumber: number });
     },
 

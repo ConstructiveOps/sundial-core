@@ -43,6 +43,7 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord } from "../sundial-service-estimate/totals.js";
 import { LINE_SELECT, LINE_SF_OBJECT } from "../sundial-service-estimate/pricebook.js";
 import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate/fields.js";
+import { createNotifier } from "../../lib/notify.js";
 import { publicUrlForKey } from "../../lib/file-access.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { ensureStripeCustomer, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
@@ -169,6 +170,8 @@ export function createHandler(deps = {}) {
     now: () => new Date(),
     ...deps,
   };
+  // Notifications (D-074): the office's bell when a customer approves / declines online.
+  const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env });
   const stripeFor = (slug) => stripeForTenant(slug, { getSecret: d.getSecret, ...(d.fetchUrl ? { fetchUrl: d.fetchUrl } : {}) });
 
   async function loadByToken(token) {
@@ -305,6 +308,12 @@ export function createHandler(deps = {}) {
       }
       Object.assign(est, fields);
       await act(est, EVENTS.ESTIMATE_APPROVED, { method: "Online", approvedBy: name, version: fields.Approved_Version__c, amount: totals.total }, `Customer: ${name}`);
+      await notifier.toOffice({
+        tenantId: est.Client__c, category: "money", kind: "estimate_approved",
+        title: `Approved online: ${est.Name ?? "estimate"} · ${est.Customer_Name_at_Creation__c ?? name} — $${Number(totals.total || 0).toFixed(2)}`,
+        body: `Signed by ${name} (v${fields.Approved_Version__c})${est.Service_Job__c ? "" : " · no job yet — Create Job to schedule it"}`,
+        url: `/service/estimates/${est.Id}`, recordType: "estimate", recordSfId: est.Id, dedupeKey: `money:approved:${est.Id}:${fields.Approved_Version__c}`,
+      });
       let payment = null;
       try {
         payment = await paymentFor(est);
@@ -404,6 +413,12 @@ export function createHandler(deps = {}) {
       }
       est.Status__c = "Declined";
       await act(est, EVENTS.ESTIMATE_DECLINED, { reason, online: true }, "Customer");
+      await notifier.toOffice({
+        tenantId: est.Client__c, category: "money", kind: "estimate_declined",
+        title: `Declined online: ${est.Name ?? "estimate"} · ${est.Customer_Name_at_Creation__c ?? "customer"}`,
+        body: reason ? `Reason: ${reason}` : "No reason given",
+        url: `/service/estimates/${est.Id}`, recordType: "estimate", recordSfId: est.Id, dedupeKey: `money:declined:${est.Id}:${est.Version__c ?? ""}`,
+      });
       return jsonResponse(200, cors, { success: true, status: "Declined" });
     },
   };

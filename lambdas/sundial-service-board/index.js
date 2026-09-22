@@ -57,6 +57,7 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
 import { syncCallNotesToJob } from "./job-notes.js";
+import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -368,6 +369,36 @@ export function createHandler(deps = {}) {
   };
   // The tech's "on my way" text goes through the same sender as the office's panel.
   const sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, broadcast: d.broadcast, now: d.now, env: d.env, ...(d.sendSms ? { sendSms: d.sendSms } : {}) });
+  // Notifications (D-074): the tech's bell / phone when the office changes their board.
+  // Best-effort like every other side effect here; never a reason to fail the write.
+  const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, broadcast: d.broadcast, now: d.now, env: d.env });
+  /**
+   * Tell a tech about their call. kind: scheduled | moved | reassigned_away | cancelled.
+   * The dedupe key carries the call's modstamp-ish `stamp` so a genuine second move rings
+   * again while a retried request does not.
+   */
+  async function notifyTech(ctx, { kind, techId, call, job, stamp }) {
+    if (!techId) return;
+    const when = call?.Scheduled_Start__c ? fmtWhen(call.Scheduled_Start__c, DEFAULTS.timeZone) : null;
+    const label = jobLabel(job ?? call?.Sundial_Service_Job__r);
+    const title =
+      kind === "scheduled" ? `New call${when ? ` ${when}` : ""}: ${label}` :
+      kind === "moved" ? `Moved to ${when ?? "a new time"}: ${label}` :
+      kind === "reassigned_away" ? `Taken off your board: ${label}` :
+      `Cancelled${when ? ` (${when})` : ""}: ${label}`;
+    await notifier.toUsers({
+      tenantId: ctx.tenantId,
+      userSfIds: [techId],
+      category: CATEGORIES.SCHEDULE,
+      kind,
+      title,
+      body: [job?.Address_at_Creation__c ?? call?.Sundial_Service_Job__r?.Address_at_Creation__c, kind === "cancelled" && call?.Cancel_Reason__c ? `Reason: ${call.Cancel_Reason__c}` : null].filter(Boolean).join(" · ") || null,
+      url: kind === "reassigned_away" || kind === "cancelled" ? "/tech" : `/tech/calls/${call.Id}`,
+      recordType: "servicecall",
+      recordSfId: call?.Id ?? null,
+      dedupeKey: `schedule:${kind}:${call?.Id}:${techId}:${stamp ?? ""}`,
+    });
+  }
 
   // --- side effects, all best-effort ---------------------------------------------
   async function markStale(table, ids, tenantId) {
@@ -604,6 +635,7 @@ export function createHandler(deps = {}) {
       if (body?.notifyCustomer === true && !unscheduled) notify = await notifyCustomer(ctx, { kind: "scheduled", job, call: call || fields, tech });
       const shaped = call ? callToBoard(call) : { id: created.id, jobId: job.Id, techId: tech?.Id ?? null, start: unscheduled ? null : start, end: unscheduled ? null : end, status: fields.Status__c };
       await announce(ctx, { kind: "call", action: "created", call: shaped, jobStatus: job.Status__c });
+      if (tech && !unscheduled) await notifyTech(ctx, { kind: "scheduled", techId: tech.Id, call: call || { Id: created.id, ...fields }, job, stamp: start });
       return jsonResponse(201, cors, { success: true, call: shaped, jobStatus: job.Status__c, jobStatusChanged: jobStatus, ...notify });
     },
 
@@ -728,6 +760,21 @@ export function createHandler(deps = {}) {
       }
       const shaped = callToBoard(after);
       await announce(ctx, { kind: "call", action: "updated", call: shaped, jobStatus: job?.Status__c ?? null });
+      // The tech's board changed under them (D-074): a new tech hears "new call", the old
+      // one "taken off", a window change "moved". Only for calls that are actually on the
+      // board — an Unscheduled call's tech has nothing to be told yet.
+      if (after.Status__c !== "Unscheduled" && (changes.Tech__c || changes.Scheduled_Start__c || changes.Scheduled_End__c || (changes.Status__c && wasUnscheduled))) {
+        const jobForNote = job || (call.Sundial_Service_Job__c ? await loadJob(call.Sundial_Service_Job__c, tenantId) : null);
+        const stamp = after.Scheduled_Start__c ?? d.now().toISOString();
+        if (changes.Tech__c) {
+          if (changes.Tech__c.from) await notifyTech(ctx, { kind: "reassigned_away", techId: changes.Tech__c.from, call: after, job: jobForNote, stamp });
+          await notifyTech(ctx, { kind: "scheduled", techId: changes.Tech__c.to, call: after, job: jobForNote, stamp });
+        } else if (wasUnscheduled) {
+          await notifyTech(ctx, { kind: "scheduled", techId: after.Tech__c, call: after, job: jobForNote, stamp });
+        } else {
+          await notifyTech(ctx, { kind: "moved", techId: after.Tech__c, call: after, job: jobForNote, stamp });
+        }
+      }
       return jsonResponse(200, cors, { success: true, call: shaped, changed: Object.keys(changes), jobStatusChanged, ...notify });
     },
 
@@ -766,6 +813,7 @@ export function createHandler(deps = {}) {
       if (body?.notifyCustomer === true) notify = await notifyCustomer(ctx, { kind: "cancelled", job, call, tech: call.Tech__r, reason });
       const shaped = callToBoard({ ...call, Status__c: "Cancelled", Cancel_Reason__c: reason });
       await announce(ctx, { kind: "call", action: "cancelled", call: shaped, jobStatus: job?.Status__c ?? null });
+      if (call.Tech__c && call.Status__c !== "Unscheduled") await notifyTech(ctx, { kind: "cancelled", techId: call.Tech__c, call: { ...call, Cancel_Reason__c: reason }, job, stamp: d.now().toISOString() });
       return jsonResponse(200, cors, { success: true, call: shaped, jobStatusChanged, ...notify });
     },
   };
@@ -773,7 +821,7 @@ export function createHandler(deps = {}) {
     H,
     createTechHandlers(d, {
       CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
-      callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms,
+      callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier,
       jsonResponse, bad, notFound, sfError, notesDeps,
     })
   );

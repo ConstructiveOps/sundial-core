@@ -75,6 +75,7 @@ function makeFake(overrides = {}) {
     store,
     broadcasts,
     sends,
+    notes: [],
     secret: { accountSid: "ACxxx", authToken: AUTH_TOKEN, fromNumber: "+14805550100", tenantNumbers: {}, defaultTenant: "harmon" },
     sendResult: { ok: true, sid: "SM1", status: "queued" },
     ...overrides,
@@ -97,6 +98,10 @@ function makeFake(overrides = {}) {
         const likeM = soql.match(/LIKE '%(\d+)'/);
         return store.jobs.filter((j) => String(j.Primary_Phone_at_Creation__c ?? "").replace(/\D/g, "").endsWith(likeM[1])).sort((a, b) => (a.CreatedDate < b.CreatedDate ? 1 : -1));
       }
+      if (soql.includes("FROM Sundial_Service_Call__c")) {
+        const jobM = soql.match(/Sundial_Service_Job__c = '([^']+)'/);
+        return (store.calls || []).filter((c) => c.Sundial_Service_Job__c === jobM?.[1] && ["Scheduled", "En Route", "In Progress"].includes(c.Status__c));
+      }
       if (soql.includes("FROM Sundial_Customer__c")) {
         const idM = soql.match(/WHERE Id = '([^']+)'/);
         if (idM) return store.customers.filter((c) => c.Id === idM[1]);
@@ -109,6 +114,11 @@ function makeFake(overrides = {}) {
     getSecret: async (name) => {
       if (fake.secretFails) throw new Error("denied");
       return name === "sundial/twilio" ? fake.secret : null;
+    },
+    // Notifications (D-074): recorded, never delivered.
+    notifier: {
+      toOffice: async (n) => (fake.notes.push({ to: "office", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+      toUsers: async (n) => (fake.notes.push({ to: "users", ...n }), { inserted: n.userSfIds.length, skipped: 0, pushed: 0 }),
     },
     broadcast: async (channel, event, payload) => (broadcasts.push({ channel, event, payload }), { ok: true }),
     sendSms: async (creds, msg) => (sends.push({ creds, msg }), fake.sendResult),
@@ -318,6 +328,37 @@ test("inbound: a reply to a text we sent lands on that job; broadcast; redeliver
   assert.equal(fake.broadcasts.at(-1).payload.kind, "received");
   await twilioPost(fake.handler, "/sms/inbound", params);
   assert.equal(fake.store.sms.filter((m) => m.provider_sid === "SMin1").length, 1);
+});
+
+test("inbound rings the office, and the tech on that job today (D-074); a redelivery rings nobody; unmatched rings the office only", async () => {
+  const fake = makeFake();
+  seedJob(fake);
+  fake.store.sms.push({ id: 1, client_sf_id: TENANT, job_sf_id: "J1", customer_sf_id: "CU1", direction: "out", from_number: "+14805550100", to_number: "+16025551212", body: "?", status: "sent", created_at: "2026-09-15T10:00:00Z" });
+  fake.store.calls = [
+    { Id: "C1", Sundial_Service_Job__c: "J1", Tech__c: "T-today", Status__c: "Scheduled", Scheduled_Start__c: "2026-09-15T20:00:00Z" }, // today (Phoenix) at 1 pm
+    { Id: "C2", Sundial_Service_Job__c: "J1", Tech__c: "T-tomorrow", Status__c: "Scheduled", Scheduled_Start__c: "2026-09-16T16:00:00Z" },
+    { Id: "C3", Sundial_Service_Job__c: "J1", Tech__c: "T-live", Status__c: "In Progress", Scheduled_Start__c: "2026-09-14T16:00:00Z" }, // still clocked in from yesterday
+  ];
+  const params = { From: "+1 (602) 555-1212", To: "+14805550100", Body: "Gate code is 4412", MessageSid: "SMin9", NumMedia: "0" };
+  await twilioPost(fake.handler, "/sms/inbound", params);
+  assert.equal(fake.notes.length, 2);
+  const office = fake.notes[0];
+  assert.deepEqual([office.to, office.category, office.kind], ["office", "customer_message", "text"]);
+  assert.equal(office.title, "Text from Ann Lee · SVC-00001");
+  assert.equal(office.body, "Gate code is 4412");
+  assert.equal(office.url, "/service/jobs/J1");
+  assert.equal(office.dedupeKey, "sms:SMin9");
+  const tech = fake.notes[1];
+  assert.deepEqual([tech.to, tech.category, tech.userSfIds.sort()], ["users", "customer_text", ["T-live", "T-today"]]);
+  assert.equal(tech.url, "/tech/jobs/J1");
+  // Twilio redelivers: the row is a duplicate and nothing rings.
+  await twilioPost(fake.handler, "/sms/inbound", params);
+  assert.equal(fake.notes.length, 2);
+  // Unmatched: the office hears it (no job), no tech does.
+  await twilioPost(fake.handler, "/sms/inbound", { From: "+19995550000", To: "+14805550100", Body: "who dis", MessageSid: "S3" });
+  assert.equal(fake.notes.length, 3);
+  assert.equal(fake.notes[2].title, "Text from (999) 555-0000 (no job matched)");
+  assert.equal(fake.notes[2].url, "/service");
 });
 
 test("inbound matching order: open job by phone beats a closed one; customer hub fallback; unmatched is stored with no job", async () => {

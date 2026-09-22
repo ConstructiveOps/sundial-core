@@ -40,6 +40,7 @@ const ctx = {
   recordVisible: true,
   rpcError: null,
   rpcCalls: [], // { fn, args }
+  bells: [], // in-app notifications handed to lib/notify.js (D-074)
 };
 
 function baseMention(over = {}) {
@@ -88,6 +89,7 @@ function resetCtx() {
   ctx.recordVisible = true;
   ctx.rpcError = null;
   ctx.rpcCalls = [];
+  ctx.bells = [];
   delete process.env.COMMENT_NOTIFY_SECRET;
   delete process.env.PORTAL_BASE_URL;
 }
@@ -189,6 +191,14 @@ mock.module("../../lib/supabase.js", {
 const content = await import("./content.js");
 const { handler } = await import("./index.js");
 const { clearConfigCache, DEFAULT_PORTAL_BASE_URL } = await import("./config.js");
+const { setDefaultNotifier } = await import("./notify.js");
+// The bell + push side (D-074) is recorded, never delivered.
+setDefaultNotifier({
+  toProfile: async (n) => {
+    ctx.bells.push(n);
+    return { inserted: 1, skipped: 0, pushed: 0 };
+  },
+});
 
 function fresh() {
   resetCtx();
@@ -328,6 +338,16 @@ test("a mention with no preferences row SENDS — absence means alerts on", asyn
   assert.equal(msg.subject, "Tim Murphy mentioned you on HOLLAND, DANA");
   assert.ok(msg.text.includes("Can you check the roof pitch"));
   assert.ok(msg.text.includes(`${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`));
+
+  // The bell rang too (D-074): same label, a portal path, keyed on the mention id.
+  assert.equal(ctx.bells.length, 1);
+  const bell = ctx.bells[0];
+  assert.equal(bell.profileId, RECIPIENT);
+  assert.equal(bell.tenantId, "harmon");
+  assert.equal(bell.category, "mention");
+  assert.equal(bell.title, "Tim Murphy mentioned you on HOLLAND, DANA");
+  assert.equal(bell.url, `/customers/${RECORD_ID}`);
+  assert.equal(bell.dedupeKey, `mention:${MENTION_ID}`);
 });
 
 test("a successful send stamps notified_at", async () => {
@@ -370,6 +390,7 @@ test("alerts off skips", async () => {
   assert.equal(parse(res).reason, "alerts_disabled");
   assert.equal(ctx.sent.length, 0);
   assert.equal(ctx.updates.length, 0); // NOT stamped — re-enabling must be replayable
+  assert.equal(ctx.bells.length, 1, "email off is not bell off (D-074)");
 });
 
 test("an explicit alerts-on row sends", async () => {
@@ -391,6 +412,7 @@ test("self-mention skips — never email someone their own words", async () => {
   const res = await handler(hookEvent());
   assert.equal(res.statusCode, 200);
   assert.equal(parse(res).reason, "self_mention");
+  assert.equal(ctx.bells.length, 0, "no bell either");
   assert.equal(ctx.sent.length, 0);
 });
 
@@ -446,6 +468,7 @@ test("a cross-tenant mention is refused rather than emailed", async () => {
   const res = await handler(hookEvent());
   assert.equal(res.statusCode, 200);
   assert.equal(parse(res).reason, "cross_tenant");
+  assert.equal(ctx.bells.length, 0, "no bell either");
   assert.equal(ctx.sent.length, 0);
 });
 

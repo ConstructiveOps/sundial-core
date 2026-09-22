@@ -26,6 +26,7 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
   ];
   const updates = [];
   const activity = [];
+  const notes = [];
   const deps = {
     sfQuery: async (soql) => {
       if (soql.includes("FROM Sundial_Estimate__c")) return soql.includes(`Public_Token__c = '${TOKEN}'`) ? [{ ...est }] : [];
@@ -41,8 +42,10 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
     getSupabaseClient: async () => ({ from: () => ({ insert: async (row) => { activity.push(row); return { error: null }; } }) }),
     now: () => NOW,
     brandName: "Acme Solar",
+    // Notifications (D-074): recorded, never delivered.
+    notifier: { toOffice: async (n) => (notes.push(n), { inserted: 1, skipped: 0, pushed: 0 }) },
   };
-  return { est, lines, updates, activity, deps };
+  return { est, lines, updates, activity, notes, deps };
 }
 const call = (h, method, path, body) =>
   h({ requestContext: { http: { method } }, rawPath: path, headers: { origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined })
@@ -109,6 +112,12 @@ test("accept: needs a name; approves online, promotes Proposed lines, writes the
   const again = await call(h, "POST", `/public/estimates/${TOKEN}/accept`, { name: "Ann Lee" });
   assert.equal(again.body.alreadyApproved, true);
   assert.equal(f.activity.filter((a) => a.event === "estimate_approved").length, 1);
+  // The office's bell (D-074): once, keyed on the approved version.
+  assert.equal(f.notes.length, 1);
+  assert.deepEqual([f.notes[0].category, f.notes[0].kind, f.notes[0].tenantId], ["money", "estimate_approved", f.est.Client__c]);
+  assert.equal(f.notes[0].title, `Approved online: ${f.est.Name} · ${f.est.Customer_Name_at_Creation__c} — $405.32`);
+  assert.equal(f.notes[0].url, `/service/estimates/${f.est.Id}`);
+  assert.equal(f.notes[0].dedupeKey, `money:approved:${f.est.Id}:1`);
 });
 
 test("accept on a declined/unsent estimate is 409; decline works and refuses after approval", async () => {
@@ -122,6 +131,8 @@ test("accept on a declined/unsent estimate is 409; decline works and refuses aft
   assert.equal(dec.status, 200);
   assert.equal(g.est.Status__c, "Declined");
   assert.equal(g.est.Declined_Reason__c, "Too expensive");
+  assert.equal(g.notes[0].kind, "estimate_declined");
+  assert.equal(g.notes[0].body, "Reason: Too expensive");
   const k = fake({ status: "Approved" });
   assert.equal((await call(createHandler(k.deps), "POST", `/public/estimates/${TOKEN}/decline`, {})).status, 409);
 });

@@ -258,10 +258,22 @@ export function createStripeHandlers(d, h) {
     if (invoice && invoice.Status__c !== "Void") settled = await money.settleMoney({ invoice, job, tenantId, ctx });
     else settled = await money.settleJobWithoutInvoice({ job, tenantId });
     if (!duplicate) {
+      const amount = fromCents(pi.amount_received ?? pi.amount);
       await h.act(ctx, {
         event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: paymentId, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? meta.estimateId ?? null,
-        details: { invoice: invoice?.Name ?? null, type: kind === "deposit" ? "Deposit" : "Payment", method: "Card", amount: fromCents(pi.amount_received ?? pi.amount), reference: pi.id, paid: settled.summary?.paid ?? null, balance: settled.balance ?? null, invoiceStatus: invoice?.Status__c ?? null, via: "stripe", kind, mode: stripe.config.mode },
+        details: { invoice: invoice?.Name ?? null, type: kind === "deposit" ? "Deposit" : "Payment", method: "Card", amount, reference: pi.id, paid: settled.summary?.paid ?? null, balance: settled.balance ?? null, invoiceStatus: invoice?.Status__c ?? null, via: "stripe", kind, mode: stripe.config.mode },
       });
+      // The office's bell (D-074): money arrived. Keyed on the PaymentIntent, like the row.
+      if (h.notifier) {
+        const label = [job.Name, job.Customer_Name_at_Creation__c].filter(Boolean).join(" · ");
+        const paidOff = invoice && invoice.Status__c === "Paid"; // settleMoney mutates the invoice it settled
+        await h.notifier.toOffice({
+          tenantId, category: "money", kind: kind === "deposit" ? "deposit_paid" : "invoice_paid",
+          title: `${kind === "deposit" ? "Deposit" : "Payment"} received: $${amount.toFixed(2)} on ${label || "a job"}`,
+          body: invoice ? `${invoice.Name}${paidOff ? " is paid in full" : settled?.balance != null ? ` · balance $${Number(settled.balance).toFixed(2)}` : ""}` : "Paid online by card",
+          url: `/service/jobs/${job.Id}`, recordType: "job", recordSfId: job.Id, dedupeKey: `money:paid:${pi.id}`,
+        });
+      }
     }
     return { status: "applied", paymentId, jobId: job.Id, invoiceId: invoice?.Id ?? null, amount: fromCents(pi.amount_received ?? pi.amount), duplicate };
   }
@@ -275,6 +287,14 @@ export function createStripeHandlers(d, h) {
     await d.sfUpdateRecord(PAYMENT_SF_OBJECT, existing.Id, { Status__c: "Failed", Failure_Reason__c: String(reason).slice(0, 255) });
     await h.markStale(CACHE.payment, [existing.Id], tenantId);
     await h.act(systemCtx(tenantId, slug, cors), { event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: existing.Id, jobSfId: existing.Service_Job__c ?? null, details: { type: existing.Type__c, method: "Card", amount: cents(existing.Amount__c), failed: true, reason, reference: pi.id, via: "stripe" } });
+    if (h.notifier) {
+      await h.notifier.toOffice({
+        tenantId, category: "money", kind: "payment_failed",
+        title: `Card payment failed: $${(Number(existing.Amount__c) || 0).toFixed(2)}${existing.Service_Job__c ? "" : " (no job)"}`,
+        body: String(reason).slice(0, 200),
+        url: existing.Service_Job__c ? `/service/jobs/${existing.Service_Job__c}` : "/service/invoices", recordType: existing.Service_Job__c ? "job" : null, recordSfId: existing.Service_Job__c ?? null, dedupeKey: `money:failed:${pi.id}`,
+      });
+    }
     return { status: "applied", paymentId: existing.Id, failed: true, reason };
   }
 

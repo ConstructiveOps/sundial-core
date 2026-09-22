@@ -350,7 +350,14 @@ function fakeSalesforce() {
       },
     }),
   });
-  return { store, calls, stale, activity, stripeEvents, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient } };
+  // Notifications (D-074): recorded, never delivered.
+  const notes = [];
+  const notifier = {
+    toOffice: async (n) => (notes.push({ to: "office", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+    toUsers: async (n) => (notes.push({ to: "users", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+    toProfile: async (n) => (notes.push({ to: "profile", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
+  };
+  return { store, calls, stale, activity, stripeEvents, notes, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
 }
 
 const JPG_1x1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==", "base64");
@@ -1637,6 +1644,9 @@ test("club: the public catalog, a join → Pending row + subscription Checkout, 
   assert.equal(hook.body.membershipNumber, "MEM-00001");
   const teamMail = fake.emails.find((e) => e.to === "service-team@example.com");
   assert.match(teamMail.subject, /New Service Club member: Ann Lee — Monitor Plan/);
+  const joinBell = fake.notes.find((n) => n.kind === "club_join");
+  assert.deepEqual([joinBell.to, joinBell.category, joinBell.url, joinBell.dedupeKey], ["office", "money", `/service/club?membership=${m.Id}`, `club:join:${m.Id}`]);
+  assert.equal(joinBell.title, teamMail.subject);
   assert.match(teamMail.text, /SolarFax has been sent the connect invite/);
   assert.equal(fake.stripeEvents.find((e) => e.id === "evt_join").membership_sf_id, m.Id);
   // Redelivered: nothing changes, no second hook.
@@ -1699,6 +1709,7 @@ test("club: the public catalog, a join → Pending row + subscription Checkout, 
   assert.equal(m.Status__c, "Past Due");
   assert.equal(m.Payment_Failures__c, 1);
   assert.match(fake.emails.at(-1).subject, /past due/);
+  assert.equal(fake.notes.filter((n) => n.kind === "club_past_due").length, 1, "the team hears once");
   const pastDueMails = fake.emails.length;
   r = await send(h, stripeDelivery(evt("evt_sub_pd", "customer.subscription.updated", { id: "sub_1", object: "subscription", status: "past_due", current_period_end: 1_794_000_000, cancel_at_period_end: false, metadata: meta })));
   assert.equal(fake.emails.length, pastDueMails, "the team hears about a past-due renewal once");
@@ -1735,6 +1746,7 @@ test("club: the public catalog, a join → Pending row + subscription Checkout, 
   assert.equal(fake.hookBodies.at(-1).body.event, "member.cancelled");
   assert.equal(fake.emails.length, emailsBefore + 1);
   assert.match(fake.emails.at(-1).subject, /membership ended/);
+  assert.equal(fake.notes.at(-1).kind, "club_ended");
   assert.equal((await call(h, "POST", `/service/club/memberships/${m.Id}/cancel`, {})).status, 409, "already ended");
   // No longer a member: the discount route says so, and the customer can join again.
   r = await call(h, "POST", `/service/estimates/${est.Id}/apply-plan-discount`);
@@ -1949,11 +1961,21 @@ test("club: a truck roll bought online is an approved estimate + a job paid as t
   assert.equal(fake.store.Sundial_Service_Payment__c[0].Type__c, "Deposit");
   assert.equal(job.Payment_Status__c, "Deposit Paid");
   assert.ok(est.Deposit_Paid_At__c);
+  // The office's bell (D-074): the booking, then the deposit — each keyed so a replay is silent.
+  const booking = fake.notes.find((n) => n.kind === "booking");
+  assert.deepEqual([booking.to, booking.category, booking.url, booking.dedupeKey], ["office", "customer_message", `/service/jobs/${job.Id}`, `club:booking:${job.Id}`]);
+  assert.match(booking.title, /^Online booking started: Dee Fox/);
+  const dep = fake.notes.find((n) => n.kind === "deposit_paid");
+  assert.equal(dep.title, `Deposit received: $275.00 on ${job.Name} · Dee Fox`);
+  assert.equal(dep.dedupeKey, "money:paid:pi_tr");
 
   // "Call me": a job in intake review, the team emailed, the same customer matched by phone.
   r = await pub(h, "POST", "/public/club/harmon/request", { customer: { firstName: "Dee", lastName: "Fox", phone: "(602) 555-0199" }, message: "Not sure what's wrong, the bill went up" });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.equal(r.body.jobNumber, "SVC-00002");
+  const callMe = fake.notes.find((n) => n.kind === "call_me");
+  assert.equal(callMe.title, "Website service request: Dee Fox (SVC-00002)");
+  assert.equal(callMe.body, "Dee Fox asked for a call from the website.");
   assert.equal(fake.store.Sundial_Customer__c.length, 1);
   const req = fake.store.Sundial_Service_Job__c[1];
   assert.equal(req.Needs_Intake_Review__c, true);

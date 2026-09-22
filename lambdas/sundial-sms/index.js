@@ -37,6 +37,7 @@ import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.j
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { broadcast as realBroadcast, recordChannel } from "../../lib/realtime.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
+import { CATEGORIES, createNotifier, jobLabel } from "../../lib/notify.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { digitsOf, last10, mediaFrom, parseFormBody, prettyPhone, requestUrls, sendSms as realSendSms, toE164, validateSignature } from "../../lib/twilio.js";
 import {
@@ -115,6 +116,63 @@ export function createHandler(deps = {}) {
     env: d.env,
   });
   const config = sender.config;
+  // Notifications (D-074): an inbound text rings the office, and the tech who is on
+  // that job today. Best-effort, after the row is stored.
+  const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, broadcast: d.broadcast, now: d.now, env: d.env });
+  const CALL_SF_OBJECT = "Sundial_Service_Call__c";
+  /** The tech(s) on this job today: live (En Route / In Progress) or scheduled for today's local date. */
+  async function techsOnJobToday(tenantId, jobId) {
+    const rows = await d.sfQuery(
+      `SELECT Id, Tech__c, Status__c, Scheduled_Start__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' ` +
+        `AND Client__c = '${soqlEscapeString(tenantId)}' AND Status__c IN ('Scheduled', 'En Route', 'In Progress') ORDER BY Scheduled_Start__c LIMIT 50`
+    );
+    const tz = d.env.SERVICE_TIMEZONE || "America/Phoenix";
+    const today = d.now().toLocaleDateString("en-CA", { timeZone: tz });
+    return [...new Set((rows || []).filter((c) => c.Tech__c && (c.Status__c !== "Scheduled" || (c.Scheduled_Start__c && new Date(c.Scheduled_Start__c).toLocaleDateString("en-CA", { timeZone: tz }) === today))).map((c) => c.Tech__c))];
+  }
+  async function notifyInbound(tenantId, match, row) {
+    let job = null;
+    try {
+      job = match.jobId ? await loadJob(match.jobId, tenantId) : null;
+    } catch (e) {
+      console.error("sms inbound: job lookup for the notification failed:", e?.message || e);
+    }
+    const from = job?.Customer_Name_at_Creation__c ?? prettyPhone(row.from_number);
+    const preview = row.body?.trim() || (row.media?.length ? `📷 ${row.media.length} photo${row.media.length === 1 ? "" : "s"}` : "(empty)");
+    const url = job ? `/service/jobs/${job.Id}` : "/service";
+    await notifier.toOffice({
+      tenantId,
+      category: CATEGORIES.CUSTOMER_MESSAGE,
+      kind: "text",
+      title: `Text from ${from}${job ? ` · ${job.Name}` : " (no job matched)"}`,
+      body: preview,
+      url,
+      recordType: job ? "job" : null,
+      recordSfId: job?.Id ?? null,
+      dedupeKey: `sms:${row.provider_sid}`,
+    });
+    if (job) {
+      try {
+        const techs = await techsOnJobToday(tenantId, job.Id);
+        if (techs.length) {
+          await notifier.toUsers({
+            tenantId,
+            userSfIds: techs,
+            category: CATEGORIES.CUSTOMER_TEXT,
+            kind: "text",
+            title: `${from} texted: ${jobLabel(job)}`,
+            body: preview,
+            url: `/tech/jobs/${job.Id}`,
+            recordType: "job",
+            recordSfId: job.Id,
+            dedupeKey: `sms:${row.provider_sid}`,
+          });
+        }
+      } catch (e) {
+        console.error("sms inbound: tech lookup for the notification failed:", e?.message || e);
+      }
+    }
+  }
 
   const tenantIdCache = new Map(); // slug → { id, at }
   async function tenantIdForSlug(slug) {
@@ -287,7 +345,10 @@ export function createHandler(deps = {}) {
         return twiml(500); // let Twilio retry
       }
       console.log(`sms inbound: sid ${params.MessageSid} tenant ${slug} (${tenantId}) matched=${match.how} job=${match.jobId ?? "-"} stored=${data?.length ? "new" : "duplicate"}`);
-      if (data?.[0]) await announce(tenantId, match.jobId, { kind: "received", message: messageToView(data[0]) });
+      if (data?.[0]) {
+        await announce(tenantId, match.jobId, { kind: "received", message: messageToView(data[0]) });
+        await notifyInbound(tenantId, match, data[0]);
+      }
       return twiml(200);
     },
 

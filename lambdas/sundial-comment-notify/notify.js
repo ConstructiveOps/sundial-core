@@ -21,6 +21,16 @@
 import { getSupabaseClient } from "../../lib/supabase.js";
 import { isEmailConfigured, sendEmail } from "../../lib/email.js";
 import { buildMentionEmail, recordLabel, recordLink } from "./content.js";
+import { CATEGORIES, createNotifier } from "../../lib/notify.js";
+
+// The bell + push side of a mention (D-074), built once per warm container. Injectable
+// for tests through handleMention's third argument.
+let defaultNotifier = null;
+const notifierFor = (opts) => opts?.notifier ?? (defaultNotifier ??= createNotifier());
+/** Test hook: swap the module-level notifier (index.js gives handleMention no deps). */
+export function setDefaultNotifier(n) {
+  defaultNotifier = n;
+}
 
 export const MENTIONS_TABLE = "comment_mentions";
 export const COMMENTS_TABLE = "comments";
@@ -106,7 +116,7 @@ export async function lookupRecipientEmail(supabase, userId) {
  * @param {{ portalBaseUrl: string }} cfg
  * @returns {Promise<{ status: number, body: object }>}
  */
-export async function handleMention(payload, cfg, { now = new Date() } = {}) {
+export async function handleMention(payload, cfg, { now = new Date(), notifier = undefined } = {}) {
   const mentionId = str(payload?.mention_id);
   const commentIdIn = str(payload?.comment_id);
   const mentionedUserIdIn = str(payload?.mentioned_user_id);
@@ -198,12 +208,10 @@ export async function handleMention(payload, cfg, { now = new Date() } = {}) {
       `comment-notify: preferences lookup failed for ${mention.mentioned_user_id} (${prefsErr.message}) — defaulting to alerts ON.`
     );
   }
-  if (prefs?.comment_email_alerts === false) {
-    console.log(
-      `comment-notify: ${mention.mentioned_user_id} has comment_email_alerts off — skipping.`
-    );
-    return skip("alerts_disabled", { mentionId: mention.id });
-  }
+  // Email off is decided here but acted on AFTER the bell (step 8b): the in-app
+  // notification has its own switch (notify_prefs.mention) and must not be silenced by
+  // the email one.
+  const emailOff = prefs?.comment_email_alerts === false;
 
   // --- 6) Tenant guard -----------------------------------------------------
   // Defence in depth. The mention was inserted by a browser under RLS, which already
@@ -290,6 +298,30 @@ export async function handleMention(payload, cfg, { now = new Date() } = {}) {
     label,
     url,
   });
+
+  // --- 8b) The bell + push (D-074) -----------------------------------------
+  // Every check above (self-mention, tenant, visibility) has passed, so the recipient
+  // may see this record. Keyed on the mention id: a pg_net redelivery rings nobody twice.
+  // Best-effort — lib/notify.js never throws — and never stamps notified_at.
+  await notifierFor({ notifier }).toProfile({
+    tenantId: comment.tenant_id ?? profile?.tenant_id ?? null,
+    profileId: mention.mentioned_user_id,
+    category: CATEGORIES.MENTION,
+    kind: "comment",
+    title: `${comment.author_name || "Someone"} mentioned you on ${label}`,
+    body: comment.body,
+    url: recordLink("", comment.record_object, comment.record_id).url,
+    recordType: comment.record_object,
+    recordSfId: comment.record_id,
+    dedupeKey: `mention:${mention.id}`,
+  });
+
+  if (emailOff) {
+    console.log(
+      `comment-notify: ${mention.mentioned_user_id} has comment_email_alerts off — bell only, no email.`
+    );
+    return skip("alerts_disabled", { mentionId: mention.id });
+  }
 
   // --- 9) SES may not be wired yet -----------------------------------------
   // Checked here rather than at the top so the skip reasons above still get evaluated

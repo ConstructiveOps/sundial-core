@@ -1,5 +1,44 @@
 # Sundial — Progress Log
 
+## 2026-09-21 — Notifications: the bell, browser pop-ups and push, for techs and the office (D-074)
+
+One notifier for the whole backend (`lib/notify.js`): a row in Supabase
+`sundial_notifications` (the bell — the browser reads its own rows under RLS and marks
+them read), a Realtime broadcast on `user:{profile_id}:notify` (an open tab rings at
+once, and shows a native pop-up when it is not in front), and Web Push through `web-push`
+to every device the person turned on (VAPID pair in Secrets Manager `sundial/push`,
+subscriptions written only by the new `sundial-notify` Lambda from the verified JWT).
+Recipients are auth uuids; a call's `Tech__c` is translated through
+`profiles.sundial_user_id`. Every emitter names a `dedupeKey`, so a replayed webhook, a
+retried sweep or a double tap rings nobody twice. Best-effort throughout — never a reason
+to fail the write.
+
+Who hears what (Tim's scope): techs — a call scheduled / moved / taken off / cancelled on
+their board (dispatch board + job page), a customer text on a job they are on today
+(`sundial-sms` inbound), @-mentions, and the reminders from the `sundial-notify` sweep
+(EventBridge every 5 minutes: one hour before each call, tomorrow's calls at 5 pm local);
+the office — a tech clocking in / completing / no-show (tech taps only; "on my way" is
+deliberately silent) and a call still `Scheduled` 30 minutes past its start, money +
+approvals (approved / declined online, deposit / invoice paid, a failed card, club join /
+ended / past due / cancellation scheduled), customer messages (inbound texts, website
+call-me, online bookings — the club's team emails now ring the bell first), @-mentions
+(regardless of the email switch). Each category switches off in
+`user_preferences.notify_prefs`; a missing key is ON.
+
+Backend: `lib/notify.js` (+ 6 tests), `lambdas/sundial-notify/index.js` (config /
+subscribe / unsubscribe / test + the sweep; 8 tests), `sql/sundial_notifications.sql`,
+`notify.self` in `lib/access.js` (every signed-in scope), emitters in the board, tech,
+sms, public, stripe, club and comment-notify code, `scripts/wire-notify-routes.ps1`
+(routes + the EventBridge rule), runbook `docs/integrations/push-notifications.md`.
+Suites: board 20, sms 15, public 8, estimate 45, comment-notify (bell pinned), access 
+updated. Portal: `NotificationsProvider`, the header `NotificationBell`, Settings →
+Notifications (`NotificationSettingsModal`: push on this device, a test, the audience's
+four switches, browser pop-ups) from the gear, the mobile More sheet and the tech app's
+More sheet, the tech app's push banner, `public/sw.js` push + click handlers (offline
+fallback narrowed to `/tech/*`), `src/lib/push.ts`, `src/lib/notify-api.ts`; the Service
+jobs list's **Report** column ("Not sent" once the work is done, the sent date after).
+Portal tests 190 (+11). Tim's item 7 from 09-19: there was none.
+
 ## 2026-09-19 (later) — The customer's job report + receipt (D-072 amendment 10)
 
 The close-out document, built the way Tim asked: a **Create Report** popup on the job page

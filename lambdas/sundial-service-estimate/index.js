@@ -89,6 +89,7 @@ import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../..
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
 import { createSmsSender } from "../../lib/sms-send.js";
+import { createNotifier } from "../../lib/notify.js";
 import {
   buildKey,
   listRecordFiles,
@@ -440,6 +441,8 @@ export function createHandler(deps = {}) {
     fetchUrl: (url, init) => fetch(url, init), // Street View (GET) and Stripe (POST) share it
     ...deps,
   };
+  // Notifications (D-074): the office's bell for money + club + website events (stripe.js, club.js).
+  if (!d.notifier) d.notifier = createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env, ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
 
   // Brand block for the document. Per-tenant config when that surface lands
   // (service-workflows.md §12); until then SERVICE_BRAND_NAME, else the tenant slug, so
@@ -1560,9 +1563,9 @@ export function createHandler(deps = {}) {
   const money = createMoneyCore(d, { act, markStale, CACHE });
   // The Service Club (D-073): public join / truck roll / request, the office's memberships,
   // and the webhook's subscription branch (consulted by stripe.js before the payments branch).
-  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor });
+  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
-  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club });
+  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier });
   Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;

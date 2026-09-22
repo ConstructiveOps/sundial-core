@@ -206,3 +206,20 @@ On the received message, **"Show original" must report SPF, DKIM and DMARC all P
 and SPF must show `mail.sundialcrm.com` — not `amazonses.com`.** The `amazonses.com`
 form means SPF passes without *aligning* to the From domain, which is the state the
 custom MAIL FROM exists to fix.
+
+## Attachments: always declare `ContentTransferEncoding: BASE64` (2026-09-22)
+
+The estimate, invoice and job-report emails attach their PDF through
+`Content.Simple.Attachments` (SES builds the MIME; no `ses:SendRawEmail` needed). The
+SES v2 API reference says the attachment's `ContentTransferEncoding` defaults to
+`BASE64`. **In practice SES applies `SEVEN_BIT` when the field is omitted** — the SDK
+base64-encodes the bytes on the wire, but the MIME SES builds declares the part as 7-bit
+text: every byte above 0x7F is replaced with U+FFFD and every LF becomes CRLF. The
+customer gets a "PDF" a few KB long that will not open (EST-00002 v1 was the first one
+seen; the copy in S3 was fine, which is the tell — the bytes left the Lambda intact).
+
+`lib/email.js` → `buildAttachments()` now sets `ContentTransferEncoding: "BASE64"` on every
+attachment, and `lib/email.test.js` runs the real SDK serializer against a fake transport
+to pin that the declaration is there and the bytes round-trip exactly. Any Lambda that
+attaches a file gets the fix on its next `.\deploy.ps1` (the estimate Lambda is the one
+that matters: `sundial-service-estimate`). Nothing to change in the AWS console.

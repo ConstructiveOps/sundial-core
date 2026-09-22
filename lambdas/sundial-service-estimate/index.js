@@ -22,6 +22,8 @@
 //   GET    /service/estimates/{id}/preview          read-only rendered document (what the customer sees)
 //   GET    /service/jobs/{id}/activity              the job's activity feed (newest first)
 //   GET    /service/jobs/{id}/street-view           the house: Google Street View still, fetched once, cached in S3
+//   GET    /service/address/suggest?q=&session=     address lookup for customer create (Google Places, key server-side; address.js)
+//   GET    /service/address/place/{placeId}?session=  → the picked address as street / city / state / postalCode
 //   POST   /service/jobs/{id}/invoice               issue the job's invoice (estimate lines frozen)   ┐
 //   GET    /service/jobs/{id}/invoice               the job's current invoice + payments             │
 //   GET    /service/invoices/{id}                   one invoice + payments                           │ invoice.js
@@ -149,6 +151,7 @@ import { createStripeHandlers } from "./stripe.js";
 import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
 import { createReportHandlers } from "./report.js";
 import { createClubHandlers } from "./club.js";
+import { createAddressHandlers } from "./address.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 
 // The module's product-history tag on the customer (D-072 amendment). "Service" is a
@@ -341,6 +344,8 @@ const ROUTES = [
   ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
   ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
+  ["GET", /^\/service\/address\/suggest\/?$/, "suggestAddress"], // address lookup for customer create (address.js, 2026-09-22)
+  ["GET", /^\/service\/address\/place\/([^/]+)\/?$/, "resolveAddress"],
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/?$/, "getReport"], // the customer's job report (report.js, D-072 am. 10)
   ["PUT", /^\/service\/jobs\/([^/]+)\/report\/?$/, "saveReport"],
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
@@ -1569,6 +1574,7 @@ export function createHandler(deps = {}) {
   Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
+  Object.assign(H, createAddressHandlers(d, { jsonResponse, bad }));
   Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
   // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
@@ -1586,6 +1592,7 @@ export function createHandler(deps = {}) {
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed
     previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
+    suggestAddress: "service.estimate.write", resolveAddress: "service.estimate.write", // whoever can make an estimate can make its customer
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.invoice.write",

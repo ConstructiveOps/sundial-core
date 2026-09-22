@@ -422,6 +422,31 @@ function makeHandler(fake, identityOverrides = {}) {
         const action = body.disconnect === "1" ? "disconnected" : "created";
         return { ok: true, status: 200, json: async () => ({ success: true, message: `User '${body.user.firstName} ${body.user.lastName}' ${action}`, action, account_id: "SFA-1", user_id: "SFU-1" }) };
       }
+      if (url.startsWith("https://places.googleapis.com/v1/places:autocomplete")) {
+        fake.placesCalls = fake.placesCalls || [];
+        fake.placesCalls.push({ url, headers: init.headers, body: JSON.parse(init.body) });
+        if (fake.placesFails) return { ok: false, status: 403, json: async () => ({ error: { message: "This API project is not authorized" } }) };
+        return { ok: true, status: 200, json: async () => ({ suggestions: [
+          { placePrediction: { placeId: "PID1", text: { text: "1 Palm Ln, Mesa, AZ 85201, USA" }, structuredFormat: { mainText: { text: "1 Palm Ln" }, secondaryText: { text: "Mesa, AZ 85201, USA" } } } },
+          { placePrediction: { placeId: "PID2", text: { text: "1 Palm Ln #4, Mesa, AZ 85201, USA" }, structuredFormat: { mainText: { text: "1 Palm Ln #4" }, secondaryText: { text: "Mesa, AZ 85201, USA" } } } },
+          { queryPrediction: { text: { text: "palm lane" } } },
+        ] }) };
+      }
+      if (url.startsWith("https://places.googleapis.com/v1/places/")) {
+        fake.placesCalls = fake.placesCalls || [];
+        fake.placesCalls.push({ url, headers: init.headers });
+        return { ok: true, status: 200, json: async () => ({ id: "PID2", formattedAddress: "1 Palm Ln #4, Mesa, AZ 85201, USA", location: { latitude: 33.41, longitude: -111.83 }, addressComponents: [
+          { longText: "4", shortText: "4", types: ["subpremise"] },
+          { longText: "1", shortText: "1", types: ["street_number"] },
+          { longText: "Palm Lane", shortText: "Palm Ln", types: ["route"] },
+          { longText: "Mesa", shortText: "Mesa", types: ["locality", "political"] },
+          { longText: "Maricopa County", shortText: "Maricopa County", types: ["administrative_area_level_2", "political"] },
+          { longText: "Arizona", shortText: "AZ", types: ["administrative_area_level_1", "political"] },
+          { longText: "United States", shortText: "US", types: ["country", "political"] },
+          { longText: "85201", shortText: "85201", types: ["postal_code"] },
+          { longText: "1234", shortText: "1234", types: ["postal_code_suffix"] },
+        ] }) };
+      }
       if (url.includes("/streetview/metadata")) {
         const status = fake.streetViewStatus ?? "OK";
         return { ok: true, json: async () => (status === "OK" ? { status, pano_id: "PANO1", location: { lat: 33.4, lng: -112.0 } } : { status }) };
@@ -829,6 +854,51 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   assert.equal(fake.emails.at(-1).attachments.length, 0);
 });
 
+
+test("address lookup (2026-09-22): unconfigured without the secret; suggestions via Google Places with the key server-side and the session passed through; a pick resolves to the four form fields", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  // No key → the form just types; never an error in the office's face.
+  const u = await call(h, "GET", "/service/address/suggest", null, { q: "1 palm", session: "sess-0123456789" });
+  assert.equal(u.status, 200);
+  assert.deepEqual(u.body, { status: "unconfigured", suggestions: [] });
+  assert.equal(fake.fetches.length, 0);
+
+  fake.googleKey = "K";
+  // Too short → nothing asked of Google.
+  const short = await call(h, "GET", "/service/address/suggest", null, { q: "1 " });
+  assert.deepEqual(short.body, { status: "ok", suggestions: [] });
+  assert.equal(fake.fetches.length, 0);
+
+  const s = await call(h, "GET", "/service/address/suggest", null, { q: "1 palm ln", session: "sess-0123456789" });
+  assert.equal(s.status, 200);
+  assert.equal(s.body.status, "ok");
+  assert.deepEqual(s.body.suggestions, [
+    { placeId: "PID1", main: "1 Palm Ln", secondary: "Mesa, AZ 85201, USA", text: "1 Palm Ln, Mesa, AZ 85201, USA" },
+    { placeId: "PID2", main: "1 Palm Ln #4", secondary: "Mesa, AZ 85201, USA", text: "1 Palm Ln #4, Mesa, AZ 85201, USA" },
+  ], "query predictions (not places) are dropped");
+  const ac = fake.placesCalls[0];
+  assert.equal(ac.headers["X-Goog-Api-Key"], "K", "the key rides in the header, server-side");
+  assert.equal(ac.body.sessionToken, "sess-0123456789");
+  assert.deepEqual(ac.body.includedRegionCodes, ["us"]);
+  assert.equal(ac.body.locationBias, undefined, "no bias unless the secret carries one");
+  assert.ok(!ac.url.includes("K"), "never the key in a URL");
+
+  const p = await call(h, "GET", "/service/address/place/PID2", null, { session: "sess-0123456789" });
+  assert.equal(p.status, 200);
+  assert.deepEqual(p.body.address, { street: "1 Palm Ln #4", city: "Mesa", state: "AZ", postalCode: "85201", formatted: "1 Palm Ln #4, Mesa, AZ 85201, USA", lat: 33.41, lng: -111.83 });
+  const pc = fake.placesCalls[1];
+  assert.equal(pc.headers["X-Goog-FieldMask"], "id,formattedAddress,addressComponents,location");
+  assert.ok(pc.url.endsWith("/places/PID2?sessionToken=sess-0123456789"));
+
+  // A bad place id is a 400, never a Google call; Google refusing is a 502 with a plain message.
+  const badId = await call(h, "GET", "/service/address/place/no%20way!");
+  assert.equal(badId.status, 400);
+  fake.placesFails = true;
+  const down = await call(h, "GET", "/service/address/suggest", null, { q: "1 palm ln" });
+  assert.equal(down.status, 502);
+  assert.equal(down.body.code, "ADDRESS_LOOKUP_FAILED");
+});
 
 test("street view: unconfigured without the secret; fetched once by pano id, cached in S3 + on the job; NONE remembered; refresh re-asks", async () => {
   const fake = fakeSalesforce();

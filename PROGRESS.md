@@ -1,5 +1,29 @@
 # Sundial — Progress Log
 
+## 2026-09-22 (later) — The PDF attachment that would not open; the job from the tech's call; address lookup on customer create
+
+Three from Tim's list. **The attachment:** every estimate / invoice / job-report email
+carried a "PDF" a few KB long that no viewer would open. The bytes left the Lambda
+intact (S3's copy was fine, the SDK base64-encodes `RawContent`); the SES v2 API
+reference says an attachment's `ContentTransferEncoding` defaults to `BASE64`, and it
+does not — SES applies `SEVEN_BIT` when the field is omitted and builds the MIME part as
+7-bit text, so every byte above 0x7F became U+FFFD and every LF a CRLF (the delivered
+`EST-00002-v1.pdf` showed exactly that). `lib/email.js` → `buildAttachments()` now
+declares `BASE64` on every attachment; `lib/email.test.js` (new, 4) runs the real SDK
+serializer against a capturing transport and pins that the declaration is there and
+the bytes round-trip. One deploy of `sundial-service-estimate` fixes all three sends.
+**The tech app:** the job number on the call page is a link and there is an explicit
+"Open the job" under Directions / phone (`/tech/jobs/{id}` already existed; there was no
+way to it from a call). **Address lookup** (Harmon's ask): `address.js` in the estimate
+Lambda proxies Google Places API (New) — `GET /service/address/suggest` and
+`GET /service/address/place/{placeId}`, key from `sundial/google-maps` server-side like
+Street View, one Google session per address entry, US-only, optional territory bias in
+the secret; `scripts/wire-address-lookup-routes.ps1`. Portal: `AddressLookup` replaces
+the Street box in the New Estimate / New Job popup's "New customer" form — suggestions
+as the office types, a pick fills street / city / state / ZIP, "unconfigured" makes it a
+plain box, Google down keeps what was typed. Tests: estimate 46, email 4, portal 201.
+Console step for Tim: enable **Places API (New)** on the key's Google Cloud project.
+
 ## 2026-09-22 — Invite and reset links that survive mail scanners; resend from Manage Users; forgot-password by Sundial
 
 The "invite links arrive expired within minutes" report: the link was Supabase's

@@ -1,5 +1,20 @@
 # Sundial — Progress Log
 
+## 2026-09-23 (later) — Dispatch board: the invoice border and a real hover card
+
+Harmon's ask: see the job's money on the board without opening it, and more on hover.
+`sundial-service-board`: the call select carries the job's `Issue_Description__c` and
+`Payment_Status__c`; the board read looks up the live (non-void) invoice per job in the
+window in one query; `invoiceStateFor()` turns job status / payment status / invoice
+status into `not_invoiced` · `invoiced` · `sent` · `paid` (`BoardCall.invoiceState`, plus
+`invoiceStatus`, `paymentStatus`, `issueDescription`). Board suite 21. Portal: the card's
+border is the money (red / amber / green, `callCardInfo.ts`), the fill stays the call's
+status; `CallHoverCard` replaces the browser's plain `title` tooltip — customer, job # ·
+call #, call status, the job's stage (`jobStatus`), the invoice in words, time + tech,
+address, the phone as a tel: link, and the issue's first line with "more" for the rest;
+fixed-positioned from the card so the day grid's absolutely placed blocks are untouched.
+Tests: hover card 5, portal 222.
+
 ## 2026-09-23 — The Customer in the Service module: its own tab, list, board and page (D-075)
 
 Harmon's ask: the Customer as the **pre-estimate record** for Service — every call and

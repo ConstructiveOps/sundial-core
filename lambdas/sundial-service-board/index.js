@@ -97,7 +97,25 @@ export const CALL_SELECT =
   "Sundial_Service_Job__r.Name, Sundial_Service_Job__r.Status__c, Sundial_Service_Job__r.Priority__c, " +
   "Sundial_Service_Job__r.Service_Type__c, Sundial_Service_Job__r.Customer_Name_at_Creation__c, " +
   "Sundial_Service_Job__r.Address_at_Creation__c, Sundial_Service_Job__r.Primary_Phone_at_Creation__c, " +
-  "Sundial_Service_Job__r.Bill_To_Type__c, Sundial_Service_Job__r.Sundial_Customer__c";
+  "Sundial_Service_Job__r.Bill_To_Type__c, Sundial_Service_Job__r.Sundial_Customer__c, " +
+  // The hover card + the invoice border on the dispatch board (2026-09-23).
+  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Payment_Status__c";
+
+export const INVOICE_SF_OBJECT = "Sundial_Service_Invoice__c";
+
+/**
+ * Where the job's money stands, for the card's border (2026-09-23): `not_invoiced` (red),
+ * `invoiced` (issued, not yet sent — amber), `sent` (amber), `paid` (green). The job's own
+ * status (`settleMoney` moves it Invoiced ↔ Paid) and Payment_Status__c answer without an
+ * invoice row in hand; the live invoice's status, when the board looked it up, says
+ * whether it went out. Void invoices are not live and are never passed here.
+ */
+export function invoiceStateFor({ jobStatus, paymentStatus, invoiceStatus }) {
+  if (jobStatus === "Paid" || paymentStatus === "Paid" || invoiceStatus === "Paid") return "paid";
+  if (invoiceStatus === "Sent" || invoiceStatus === "Partially Paid") return "sent";
+  if (invoiceStatus === "Issued" || invoiceStatus === "Draft" || jobStatus === "Invoiced") return "invoiced";
+  return "not_invoiced";
+}
 
 export const JOB_SELECT =
   "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
@@ -124,9 +142,15 @@ const isoOrNull = (v) => {
 export const soqlDateTime = (iso) => new Date(iso).toISOString().replace(/\.\d{3}Z$/, "Z");
 const techName = (r) => [r?.First_Name__c, r?.Last_Name__c].filter(Boolean).join(" ").trim() || r?.Email__c || r?.Id || null;
 
-/** The board shape of one call — what the portal renders and what the broadcast carries. */
-export function callToBoard(c) {
+/**
+ * The board shape of one call — what the portal renders and what the broadcast carries.
+ * `invoiceByJob` (the board read only) maps job id → the live invoice's status; a
+ * broadcast of one call derives the state from the job alone, which is right whenever
+ * the job's status has settled (Invoiced / Paid) and "not invoiced" otherwise.
+ */
+export function callToBoard(c, invoiceByJob = null) {
   const job = c.Sundial_Service_Job__r || {};
+  const invoiceStatus = invoiceByJob?.get?.(c.Sundial_Service_Job__c) ?? null;
   return {
     id: c.Id,
     number: c.Name ?? null,
@@ -137,6 +161,10 @@ export function callToBoard(c) {
     customerName: job.Customer_Name_at_Creation__c ?? null,
     address: job.Address_at_Creation__c ?? null,
     phone: job.Primary_Phone_at_Creation__c ?? null,
+    issueDescription: job.Issue_Description__c ?? null,
+    paymentStatus: job.Payment_Status__c ?? null,
+    invoiceStatus,
+    invoiceState: invoiceStateFor({ jobStatus: job.Status__c ?? null, paymentStatus: job.Payment_Status__c ?? null, invoiceStatus }),
     priority: job.Priority__c ?? null,
     serviceType: job.Service_Type__c ?? null,
     billToType: job.Bill_To_Type__c ?? null,
@@ -487,6 +515,27 @@ export function createHandler(deps = {}) {
     );
     return pickTechs(rows || []);
   }
+  /** job id → the live (non-void) invoice's status, for the jobs given. Never throws. */
+  async function loadInvoiceStatuses(tenantId, jobIds) {
+    const ids = [...new Set((jobIds || []).filter((id) => SF_ID_RE.test(id || "")))];
+    const map = new Map();
+    if (!ids.length) return map;
+    try {
+      for (let i = 0; i < ids.length; i += 200) {
+        const chunk = ids.slice(i, i + 200);
+        const rows = await d.sfQuery(
+          `SELECT Service_Job__c, Status__c FROM ${INVOICE_SF_OBJECT} WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+            `AND Service_Job__c IN (${chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ")}) AND Status__c != 'Void' ORDER BY CreatedDate`
+        );
+        // Several live rows for one job should not happen (one invoice per job, D-072 am. 5); the latest wins.
+        for (const r of rows || []) if (r.Service_Job__c) map.set(r.Service_Job__c, r.Status__c ?? null);
+      }
+    } catch (e) {
+      console.error("board: invoice lookup failed:", e?.message || e);
+    }
+    return map;
+  }
+
   async function loadJobCalls(jobId, tenantId) {
     return (
       (await d.sfQuery(
@@ -561,13 +610,17 @@ export function createHandler(deps = {}) {
       // A job whose next step already exists as an unscheduled call shows as THAT card,
       // not twice.
       const jobsWithCalls = new Set((unscheduledCalls || []).map((c) => c.Sundial_Service_Job__c));
+      // The live invoice per job in the window (2026-09-23): one query, void ones left out,
+      // so the card's border can say not invoiced / sent / paid. Best-effort: a failed
+      // lookup leaves the state to the job's own status.
+      const invoiceByJob = await loadInvoiceStatuses(tenantId, [...(calls || []), ...(unscheduledCalls || [])].map((c) => c.Sundial_Service_Job__c));
       return jsonResponse(200, cors, {
         window: { from, to },
         techs,
         techsSource: source,
-        calls: (calls || []).map(callToBoard),
+        calls: (calls || []).map((c) => callToBoard(c, invoiceByJob)),
         unscheduled: sortTray((unscheduled || []).filter((j) => !jobsWithCalls.has(j.Id)).map((j) => jobToTray(j, now))),
-        unscheduledCalls: (unscheduledCalls || []).map(callToBoard),
+        unscheduledCalls: (unscheduledCalls || []).map((c) => callToBoard(c, invoiceByJob)),
         defaults: { callMinutes: DEFAULTS.callMinutes, timeZone: DEFAULTS.timeZone },
       });
     },

@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import {
   createHandler,
   callToBoard,
+  invoiceStateFor,
   matchRoute,
   pickTechs,
   sortTray,
@@ -62,10 +63,15 @@ function fakeWorld() {
       { Id: "USR000000000000003", Client__c: TENANT, Active__c: true, First_Name__c: "Beth", Last_Name__c: "Office", Access_Level__c: "Admin", Default_Department__c: "Office" },
       { Id: "USR000000000000009", Client__c: OTHER, Active__c: true, First_Name__c: "Not", Last_Name__c: "Ours", Access_Level__c: "Technician" },
     ],
+    // The board's invoice-border lookup (2026-09-23): SVC-00003 has a Sent invoice; a void one on SVC-00001 must not count.
+    Sundial_Service_Invoice__c: [
+      { Id: "INV000000000000001", Client__c: TENANT, Service_Job__c: "SVC000000000000003", Status__c: "Sent", CreatedDate: "2026-09-12T00:00:00Z" },
+      { Id: "INV000000000000002", Client__c: TENANT, Service_Job__c: "SVC000000000000001", Status__c: "Void", CreatedDate: "2026-09-12T00:00:00Z" },
+    ],
     Sundial_Service_Job__c: [
       { Id: "SVC000000000000001", Client__c: TENANT, Name: "SVC-00001", Status__c: "Ready to Schedule", Priority__c: "Standard", Service_Type__c: "Paid Service", Customer_Name_at_Creation__c: "Ann Lee", Address_at_Creation__c: "1 Main St, Phoenix", Primary_Email_at_Creation__c: "ann@example.com", Sundial_Customer__c: "CUS000000000000001", Estimate__c: "EST000000000000001", CreatedDate: "2026-09-10T12:00:00Z", SystemModstamp: "2026-09-10T12:00:00Z" },
       { Id: "SVC000000000000002", Client__c: TENANT, Name: "SVC-00002", Status__c: "New", Priority__c: "Emergency", Service_Type__c: "Warranty", Customer_Name_at_Creation__c: "Bo Chen", Sundial_Customer__c: "CUS000000000000002", CreatedDate: "2026-09-13T12:00:00Z", SystemModstamp: "2026-09-13T12:00:00Z" },
-      { Id: "SVC000000000000003", Client__c: TENANT, Name: "SVC-00003", Status__c: "Scheduled", Priority__c: "High", Customer_Name_at_Creation__c: "Cy Diaz", Sundial_Customer__c: "CUS000000000000003", CreatedDate: "2026-09-01T12:00:00Z", SystemModstamp: "2026-09-01T12:00:00Z" },
+      { Id: "SVC000000000000003", Client__c: TENANT, Name: "SVC-00003", Status__c: "Scheduled", Priority__c: "High", Customer_Name_at_Creation__c: "Cy Diaz", Issue_Description__c: "Breaker trips under load\nHappens most afternoons", Payment_Status__c: "None", Sundial_Customer__c: "CUS000000000000003", CreatedDate: "2026-09-01T12:00:00Z", SystemModstamp: "2026-09-01T12:00:00Z" },
       { Id: "SVC000000000000004", Client__c: TENANT, Name: "SVC-00004", Status__c: "Closed", Customer_Name_at_Creation__c: "Done Deal", CreatedDate: "2026-08-01T12:00:00Z", SystemModstamp: "2026-08-01T12:00:00Z" },
       { Id: "SVC000000000000099", Client__c: OTHER, Name: "SVC-99999", Status__c: "Ready to Schedule", CreatedDate: "2026-09-01T12:00:00Z", SystemModstamp: "2026-09-01T12:00:00Z" },
     ],
@@ -115,6 +121,7 @@ function fakeWorld() {
     c = c.trim();
     let m;
     if ((m = c.match(/^([\w.]+) = '(.*)'$/))) return String(rec[m[1]] ?? "") === m[2];
+    if ((m = c.match(/^([\w.]+) != '(.*)'$/))) return String(rec[m[1]] ?? "") !== m[2];
     if ((m = c.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
     if ((m = c.match(/^(\w+) NOT IN \((.*)\)$/))) return !m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) IN \((.*)\)$/))) return m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
@@ -244,6 +251,17 @@ test("pure helpers: routes, tech pick, tray order, SOQL datetimes, the customer'
   assert.equal(formatWindow("2026-09-14T16:00:00Z", "2026-09-14T18:00:00Z", "America/Phoenix"), "Monday, September 14, 9:00 AM – 11:00 AM");
 });
 
+test("invoiceStateFor: the card's border from the job's status / payment status and the live invoice", () => {
+  assert.equal(invoiceStateFor({ jobStatus: "Scheduled", paymentStatus: "None", invoiceStatus: null }), "not_invoiced");
+  assert.equal(invoiceStateFor({ jobStatus: "Awaiting Office Review", paymentStatus: "Deposit Paid", invoiceStatus: null }), "not_invoiced", "a deposit is not an invoice");
+  assert.equal(invoiceStateFor({ jobStatus: "Invoiced", paymentStatus: "None", invoiceStatus: null }), "invoiced", "a broadcast without the lookup still knows the job is invoiced");
+  assert.equal(invoiceStateFor({ jobStatus: "Invoiced", paymentStatus: "None", invoiceStatus: "Issued" }), "invoiced");
+  assert.equal(invoiceStateFor({ jobStatus: "Invoiced", paymentStatus: "None", invoiceStatus: "Sent" }), "sent");
+  assert.equal(invoiceStateFor({ jobStatus: "Invoiced", paymentStatus: "Partially Paid", invoiceStatus: "Partially Paid" }), "sent");
+  assert.equal(invoiceStateFor({ jobStatus: "Paid", paymentStatus: "Paid", invoiceStatus: "Paid" }), "paid");
+  assert.equal(invoiceStateFor({ jobStatus: "Invoiced", paymentStatus: "Paid", invoiceStatus: null }), "paid");
+});
+
 test("GET /service/board: calls in the window only, the tray in priority/age order, tenant-scoped", async () => {
   const w = fakeWorld();
   const h = makeHandler(w);
@@ -256,6 +274,12 @@ test("GET /service/board: calls in the window only, the tray in priority/age ord
   assert.equal(c.customerName, "Cy Diaz");
   assert.equal(c.techName, "Jake Dorsey");
   assert.equal(c.modstamp, "2026-09-12T10:00:00Z");
+  // The hover card + the invoice border (2026-09-23): the job's issue and money, the live invoice's status.
+  assert.equal(c.issueDescription, "Breaker trips under load\nHappens most afternoons");
+  assert.equal(c.paymentStatus, "None");
+  assert.equal(c.invoiceStatus, "Sent");
+  assert.equal(c.invoiceState, "sent");
+  assert.ok(w.calls.queries.some((q) => q.includes("FROM Sundial_Service_Invoice__c") && q.includes("Status__c != 'Void'")));
   // Tray: Emergency SVC-00002 first, then Ready-to-Schedule SVC-00001; Scheduled + Closed excluded; other tenant excluded.
   assert.deepEqual(r.body.unscheduled.map((j) => j.jobNumber), ["SVC-00002", "SVC-00001"]);
   assert.equal(r.body.unscheduled[1].ageDays, 4);

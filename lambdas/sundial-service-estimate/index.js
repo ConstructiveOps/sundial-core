@@ -15,6 +15,8 @@
 //   POST   /service/estimates/{id}/decline          { reason }
 //   POST   /service/estimates/{id}/create-job       the Create Job button
 //   POST   /service/jobs                            quick-create: estimate + job in one go
+//   POST   /service/customers                       the Service module's New Customer / Add to Service (D-075): select-or-create,
+//                                                   duplicate guard, tagged Service, Service_Stage__c = New — no estimate, no job
 //   POST   /service/price-book-items                create version 1
 //   PATCH  /service/price-book-items/{id}           in-place edit (only while unreferenced)
 //   POST   /service/price-book-items/{id}/new-version   the "Update" clone
@@ -159,6 +161,10 @@ export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 export const PROJECT_TYPE_TAG = "Service";
 /** Customer_Type__c (multi-select, 2026-09-19): the department tag the service module sets / adds — same value, second field. */
 export const CUSTOMER_TYPE_FIELD = "Customer_Type__c";
+// D-075: the Service module's own pipeline on the customer (docs/service-customer-layout.md).
+export const SERVICE_STAGE_FIELD = "Service_Stage__c";
+export const SERVICE_STAGE_NEW = "New";
+export const SERVICE_REQUEST_TYPE_FIELD = "Service_Request_Type__c";
 
 // Tenant config placeholders — read from Sundial_Tenant__c config when that surface
 // lands (service-workflows.md §12). GET FROM HARMON: validity days, default template.
@@ -337,6 +343,7 @@ const ROUTES = [
   ["POST", /^\/service\/estimates\/([^/]+)\/decline\/?$/, "declineEstimate"],
   ["POST", /^\/service\/estimates\/([^/]+)\/create-job\/?$/, "createJobFromEstimate"],
   ["POST", /^\/service\/jobs\/?$/, "createJob"],
+  ["POST", /^\/service\/customers\/?$/, "createServiceCustomer"], // the Service module's own New Customer (D-075)
   ["POST", /^\/service\/price-book-items\/?$/, "createItem"],
   ["PATCH", /^\/service\/price-book-items\/([^/]+)\/?$/, "patchItem"],
   ["POST", /^\/service\/price-book-items\/([^/]+)\/new-version\/?$/, "newItemVersion"],
@@ -1284,6 +1291,71 @@ export function createHandler(deps = {}) {
       return jsonResponse(201, cors, { success: true, jobId: job.id, estimateId: est.Id, rejectedFields: job.rejected, stripeApplied: stripeDeferred.applied });
     },
 
+    // The Service module's New Customer and its "Add to Service" button (D-075,
+    // docs/service-customer-layout.md). The same select-or-create the popups use —
+    // duplicate guard, the Service tag on both department fields — then the Service
+    // pipeline is opened: Service_Stage__c = New (never overwriting a stage already set),
+    // plus whatever the office typed about the request. Every field is describe-guarded:
+    // an org without the D-075 fields still gets its customer, with a warning.
+    async createServiceCustomer({ ctx, body }) {
+      const { tenantId, cors } = ctx;
+      const r = await resolveCustomer(body, ctx, cors);
+      if (!r.ok) return r.response;
+      const { customer, created, warnings, events } = r;
+      const upd = {};
+      const stageValues = await picklistValues(CUSTOMER_SF_OBJECT, SERVICE_STAGE_FIELD);
+      const newStage = stageValues ? matchPicklist(SERVICE_STAGE_NEW, stageValues) : null;
+      if (!stageValues) warnings.push(`${SERVICE_STAGE_FIELD} is not in this org yet — deploy salesforce/service-customer-2026-09-23/.`);
+      else if (!newStage) warnings.push(`${SERVICE_STAGE_FIELD} has no "${SERVICE_STAGE_NEW}" value.`);
+      else {
+        // The candidate select cannot name the field (an org without it would break every
+        // popup), so an existing customer's current stage is read here, guarded.
+        let currentStage = null;
+        if (!created) {
+          const rows = await d.sfQuery(`SELECT ${SERVICE_STAGE_FIELD} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
+          currentStage = rows?.[0]?.[SERVICE_STAGE_FIELD] ?? null;
+          customer[SERVICE_STAGE_FIELD] = currentStage;
+        }
+        if (created || !currentStage) upd[SERVICE_STAGE_FIELD] = newStage;
+      }
+      const req = body?.request && typeof body.request === "object" ? body.request : {};
+      if (typeof req.requestType === "string" && req.requestType.trim()) {
+        const values = await picklistValues(CUSTOMER_SF_OBJECT, SERVICE_REQUEST_TYPE_FIELD);
+        const m = values ? matchPicklist(req.requestType.trim(), values) : null;
+        if (m) upd[SERVICE_REQUEST_TYPE_FIELD] = m;
+        else warnings.push(`Request type "${req.requestType}" is not a ${SERVICE_REQUEST_TYPE_FIELD} value — left blank.`);
+      }
+      if (typeof req.description === "string" && req.description.trim()) upd.Description__c = req.description.trim().slice(0, 32000);
+      if (typeof req.assignedTo === "string" && SF_ID_RE.test(req.assignedTo)) {
+        upd.Assigned_To__c = req.assignedTo;
+        upd.Assigned_Date__c = d.now().toISOString().slice(0, 10);
+      }
+      if (typeof req.nextFollowUp === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.nextFollowUp)) upd.Next_Follow_Up_Date__c = req.nextFollowUp;
+      if (typeof req.leadSource === "string" && req.leadSource.trim()) {
+        const values = await picklistValues(CUSTOMER_SF_OBJECT, "Lead_Source__c");
+        const m = values ? matchPicklist(req.leadSource.trim(), values) : null;
+        if (m) upd.Lead_Source__c = m;
+        else warnings.push(`Lead source "${req.leadSource}" is not a Lead_Source__c value — left blank.`);
+      }
+      if (Object.keys(upd).length) {
+        try {
+          await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, upd);
+          await markStale(CACHE.customer, [customer.Id], tenantId);
+          events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field: SERVICE_STAGE_FIELD, to: upd[SERVICE_STAGE_FIELD] ?? null, fields: upd, service: true } });
+        } catch (e) {
+          warnings.push(`Customer saved, but the Service fields were not: ${e?.sfBody || e?.message || e}`);
+        }
+      }
+      await flushEvents(ctx, events, {});
+      return jsonResponse(created ? 201 : 200, cors, {
+        success: true,
+        customerId: customer.Id,
+        customerCreated: created,
+        serviceStage: upd[SERVICE_STAGE_FIELD] ?? customer[SERVICE_STAGE_FIELD] ?? null,
+        warnings,
+      });
+    },
+
     async createJob({ ctx, body }) {
       const { tenantId, userId, cors } = ctx;
       // Path A: convert an existing estimate. Path B: quick-create estimate + job.
@@ -1588,6 +1660,7 @@ export function createHandler(deps = {}) {
     addTemplate: "service.estimate.write", recalculate: "service.estimate.write", sendEstimate: "service.estimate.send",
     approveEstimate: "service.estimate.send", declineEstimate: "service.estimate.send",
     createJobFromEstimate: "service.job.create", createJob: "service.job.create",
+    createServiceCustomer: "service.estimate.write", // a lead is not an estimate yet; whoever can start one can log one
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed

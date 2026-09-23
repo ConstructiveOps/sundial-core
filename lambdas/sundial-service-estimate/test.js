@@ -279,12 +279,20 @@ function fakeSalesforce() {
     if (i >= 0) store[obj].splice(i, 1);
     return { ok: true };
   };
+  const flags = {}; // test switches read by the fakes below (fake.flags.*)
   const describeObject = async (obj) => ({
     fields: obj === "Sundial_Customer__c"
       ? [
           { name: "Requested_Project_Types__c", picklistValues: [{ value: "Solar", active: true }, { value: "Service", active: true }] },
           { name: "Customer_Type__c", picklistValues: [{ value: "Solar", active: true }, { value: "Roofing", active: true }, { value: "Commercial", active: true }, { value: "Service", active: true }] },
           { name: "State__c", picklistValues: [{ value: "AZ", label: "Arizona", active: true }] },
+          // D-075 (2026-09-23): the Service pipeline fields. `fake.noServiceFields` hides them
+          // to pin the "org without the package" path.
+          ...(flags.noServiceFields ? [] : [
+            { name: "Service_Stage__c", picklistValues: ["New", "Contact Attempt Made", "In Progress", "Waiting on Customer", "Waiting on Other Department", "Estimate Created", "Resolved", "Closed"].map((value) => ({ value, active: true })) },
+            { name: "Service_Request_Type__c", picklistValues: ["System Not Producing", "Monitoring Offline", "Roof Leak", "General Question", "Other"].map((value) => ({ value, active: true })) },
+            { name: "Lead_Source__c", picklistValues: ["Web", "Referral", "Previous Customer", "Harmon Direct"].map((value) => ({ value, active: true })) },
+          ]),
         ]
       : [],
   });
@@ -357,7 +365,7 @@ function fakeSalesforce() {
     toUsers: async (n) => (notes.push({ to: "users", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
     toProfile: async (n) => (notes.push({ to: "profile", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
   };
-  return { store, calls, stale, activity, stripeEvents, notes, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
+  return { store, calls, stale, activity, stripeEvents, notes, flags, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
 }
 
 const JPG_1x1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==", "base64");
@@ -458,6 +466,57 @@ function makeHandler(fake, identityOverrides = {}) {
 const call = (h, method, path, body, query) =>
   h({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer x", origin: "http://localhost:5173" }, body: body ? JSON.stringify(body) : undefined, queryStringParameters: query })
     .then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
+
+test("POST /service/customers (D-075): a NEW customer is tagged Service and opened at Service_Stage New with the request; an existing customer is tagged without losing its stage; the duplicate guard still applies; an org without the fields still gets its customer", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  const r = await call(h, "POST", "/service/customers", {
+    customer: { new: { firstName: "Nora", lastName: "Quinn", phone: "602-555-0177", street: "9 Ash Ct", city: "Mesa", state: "AZ", postalCode: "85201" } },
+    request: { requestType: "Roof Leak", description: "Water stain under the array after the storm", assignedTo: "a0U000000000001AAA", nextFollowUp: "2026-09-25", leadSource: "Web" },
+  });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.customerCreated, true);
+  assert.equal(r.body.serviceStage, "New");
+  const cust = fake.store.Sundial_Customer__c.find((c) => c.Id === r.body.customerId);
+  assert.equal(cust.Customer_Type__c, "Service");
+  assert.equal(cust.Requested_Project_Types__c, "Service");
+  assert.equal(cust.Service_Stage__c, "New");
+  assert.equal(cust.Service_Request_Type__c, "Roof Leak");
+  assert.equal(cust.Description__c, "Water stain under the array after the storm");
+  assert.equal(cust.Assigned_To__c, "a0U000000000001AAA");
+  assert.ok(cust.Assigned_Date__c, "assigning stamps the date");
+  assert.equal(cust.Next_Follow_Up_Date__c, "2026-09-25");
+  assert.equal(cust.Lead_Source__c, "Web");
+  assert.ok(fake.activity.some((a) => a.event === "customer_created" && a.record_sf_id === cust.Id));
+  assert.ok(fake.activity.some((a) => a.event === "customer_tagged" && a.details.service === true));
+  assert.deepEqual(r.body.warnings, []);
+
+  // The same phone again → the duplicate guard (409), unless confirmNew.
+  const dup = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "N", lastName: "Q", phone: "(602) 555-0177" } } });
+  assert.equal(dup.status, 409);
+  assert.equal(dup.body.code, "DUPLICATE_CANDIDATES");
+
+  // An old solar customer who calls in: tagged, stage opened at New — once.
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Old Solar", Primary_Email__c: "old@x.com", Customer_Type__c: "Solar", Requested_Project_Types__c: "Solar", Service_Stage__c: "In Progress" });
+  const oldId = fake.store.Sundial_Customer__c.at(-1).Id;
+  const add = await call(h, "POST", "/service/customers", { customer: { id: oldId } });
+  assert.equal(add.status, 200);
+  assert.equal(add.body.customerCreated, false);
+  assert.equal(add.body.serviceStage, "In Progress", "a stage already set is never overwritten");
+  const old = fake.store.Sundial_Customer__c.find((c) => c.Id === oldId);
+  assert.equal(old.Customer_Type__c, "Solar;Service");
+  assert.equal(old.Service_Stage__c, "In Progress");
+  const plain = await call(h, "POST", "/service/customers", { customer: { id: oldId }, request: { requestType: "Not a type" } });
+  assert.match(plain.body.warnings.join(" "), /Request type "Not a type"/);
+
+  // The org without the package: the customer is created and the reason is said.
+  fake.flags.noServiceFields = true;
+  const h2 = makeHandler(fake);
+  const bare = await call(h2, "POST", "/service/customers", { customer: { new: { firstName: "Bare", lastName: "Org", email: "bare@x.com" } } });
+  assert.equal(bare.status, 201);
+  assert.equal(bare.body.serviceStage, null);
+  assert.match(bare.body.warnings.join(" "), /Service_Stage__c is not in this org yet/);
+});
 
 test("quick-create job with a NEW customer: customer tagged Service, estimate + job linked 1:1, lines snapshotted, totals stored", async () => {
   const fake = fakeSalesforce();

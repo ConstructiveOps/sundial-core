@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Customer__c - the four Service fields added on 2026-09-23 ONLY (D-075, docs/service-customer-layout.md).
+  package.xml lists them as CustomField members, so this file adds them and touches nothing else on the
+  object. NEVER convert this to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Service_Stage__c</fullName>
+        <description>The Service module's pipeline for an incoming contact (D-075). Set to New by every Service create and by Add to Service; the office moves it. Independent of Stage__c (the solar sales pipeline) and of Status__c (the hub lifecycle).</description>
+        <externalId>false</externalId>
+        <label>Service Stage</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>New</fullName>
+                    <default>false</default>
+                    <label>New</label>
+                </value>
+                <value>
+                    <fullName>Contact Attempt Made</fullName>
+                    <default>false</default>
+                    <label>Contact Attempt Made</label>
+                </value>
+                <value>
+                    <fullName>In Progress</fullName>
+                    <default>false</default>
+                    <label>In Progress</label>
+                </value>
+                <value>
+                    <fullName>Waiting on Customer</fullName>
+                    <default>false</default>
+                    <label>Waiting on Customer</label>
+                </value>
+                <value>
+                    <fullName>Waiting on Other Department</fullName>
+                    <default>false</default>
+                    <label>Waiting on Other Department</label>
+                </value>
+                <value>
+                    <fullName>Estimate Created</fullName>
+                    <default>false</default>
+                    <label>Estimate Created</label>
+                </value>
+                <value>
+                    <fullName>Resolved</fullName>
+                    <default>false</default>
+                    <label>Resolved</label>
+                </value>
+                <value>
+                    <fullName>Closed</fullName>
+                    <default>false</default>
+                    <label>Closed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Service_Request_Type__c</fullName>
+        <description>What the customer contacted Service about (D-075). One value per contact; the details go in Description__c.</description>
+        <externalId>false</externalId>
+        <label>Service Request Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>System Not Producing</fullName>
+                    <default>false</default>
+                    <label>System Not Producing</label>
+                </value>
+                <value>
+                    <fullName>Monitoring Offline</fullName>
+                    <default>false</default>
+                    <label>Monitoring Offline</label>
+                </value>
+                <value>
+                    <fullName>Inverter / Equipment Fault</fullName>
+                    <default>false</default>
+                    <label>Inverter / Equipment Fault</label>
+                </value>
+                <value>
+                    <fullName>Battery Issue</fullName>
+                    <default>false</default>
+                    <label>Battery Issue</label>
+                </value>
+                <value>
+                    <fullName>Roof Leak</fullName>
+                    <default>false</default>
+                    <label>Roof Leak</label>
+                </value>
+                <value>
+                    <fullName>Panel Damage</fullName>
+                    <default>false</default>
+                    <label>Panel Damage</label>
+                </value>
+                <value>
+                    <fullName>Removal &amp; Reinstall</fullName>
+                    <default>false</default>
+                    <label>Removal &amp; Reinstall</label>
+                </value>
+                <value>
+                    <fullName>Electrical / Panel Upgrade</fullName>
+                    <default>false</default>
+                    <label>Electrical / Panel Upgrade</label>
+                </value>
+                <value>
+                    <fullName>Add-On (Battery, EV Charger, Panels)</fullName>
+                    <default>false</default>
+                    <label>Add-On (Battery, EV Charger, Panels)</label>
+                </value>
+                <value>
+                    <fullName>Maintenance / Cleaning</fullName>
+                    <default>false</default>
+                    <label>Maintenance / Cleaning</label>
+                </value>
+                <value>
+                    <fullName>Billing or Finance Question</fullName>
+                    <default>false</default>
+                    <label>Billing or Finance Question</label>
+                </value>
+                <value>
+                    <fullName>Warranty Question</fullName>
+                    <default>false</default>
+                    <label>Warranty Question</label>
+                </value>
+                <value>
+                    <fullName>General Question</fullName>
+                    <default>false</default>
+                    <label>General Question</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Service_Resolution__c</fullName>
+        <description>How an open Service request ended (D-075): answered on the phone, referred out, turned into an estimate / job, or dropped. Empty while the request is open.</description>
+        <externalId>false</externalId>
+        <label>Service Resolution</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Resolved by Phone</fullName>
+                    <default>false</default>
+                    <label>Resolved by Phone</label>
+                </value>
+                <value>
+                    <fullName>Referred to Manufacturer</fullName>
+                    <default>false</default>
+                    <label>Referred to Manufacturer</label>
+                </value>
+                <value>
+                    <fullName>Referred to Finance Partner</fullName>
+                    <default>false</default>
+                    <label>Referred to Finance Partner</label>
+                </value>
+                <value>
+                    <fullName>Referred to Another Department</fullName>
+                    <default>false</default>
+                    <label>Referred to Another Department</label>
+                </value>
+                <value>
+                    <fullName>Estimate Created</fullName>
+                    <default>false</default>
+                    <label>Estimate Created</label>
+                </value>
+                <value>
+                    <fullName>Job Created</fullName>
+                    <default>false</default>
+                    <label>Job Created</label>
+                </value>
+                <value>
+                    <fullName>Not Interested</fullName>
+                    <default>false</default>
+                    <label>Not Interested</label>
+                </value>
+                <value>
+                    <fullName>No Response</fullName>
+                    <default>false</default>
+                    <label>No Response</label>
+                </value>
+                <value>
+                    <fullName>Duplicate</fullName>
+                    <default>false</default>
+                    <label>Duplicate</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Service_Resolved_Date__c</fullName>
+        <description>When the Service request ended (D-075) - the Flow's closed signal and the cycle-time report's end date.</description>
+        <externalId>false</externalId>
+        <label>Service Resolved Date</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+</CustomObject>

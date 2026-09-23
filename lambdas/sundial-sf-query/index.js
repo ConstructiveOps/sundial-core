@@ -1206,6 +1206,23 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
 // means paging never shifts rows as they are re-synced. Only the rows ON THE PAGE
 // are freshness-checked and refreshed — we never scan the whole (e.g. 32k-row)
 // table on a read. Generic across every allowlisted object (customer/solar/…).
+// ?op=includes: the multi-select value may carry spaces, parentheses, commas, & and /
+// (picklist values do) but never the PostgREST wildcard, a quote or a backslash.
+const INCLUDES_VALUE_RE = /^[A-Za-z0-9 ,()&\/.'-]{1,80}$/;
+
+/**
+ * The PostgREST `or` expression for "multi-select column INCLUDES value" on a cache
+ * column that holds Salesforce's "A;B;C" string: the value alone, first, last, or in the
+ * middle. Quoted so commas and parentheses inside the value stay literal.
+ */
+export function includesOrExpr(column, value) {
+  // Double-quoted PostgREST string: a `"` or `\` would need escaping and a `*` is the
+  // wildcard — INCLUDES_VALUE_RE refuses all three before this is reached.
+  const v = String(value);
+  const q = (pattern) => `${column}.like."${pattern}"`;
+  return [`${column}.eq."${v}"`, q(`${v};*`), q(`*;${v}`), q(`*;${v};*`)].join(",");
+}
+
 async function handleListRead(ctx) {
   const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, searchFields, parentFilter, qs, cors, shadow, objectKey, enforce, access } =
     ctx;
@@ -1264,6 +1281,13 @@ async function handleListRead(ctx) {
   let filterFieldName = null;
   let filterColumn = null;
   let filterValue = null;
+  // ?op=includes (2026-09-23, D-075): a multi-select picklist membership test instead of
+  // equality — the Service module lists the customers whose Customer_Type__c INCLUDES
+  // "Service" ("Solar;Service" must match). Anything but "includes" is equality, as before.
+  const filterOp = String(qs.op || "").toLowerCase() === "includes" ? "includes" : "eq";
+  if (filterOp === "includes" && qs.value != null && !INCLUDES_VALUE_RE.test(String(qs.value))) {
+    return jsonResponse(400, cors, { error: "invalid_filter_value", code: "INVALID_FILTER_VALUE" });
+  }
   if (qs.field && qs.value != null) {
     const match = fields.find(
       (f) => f.name.toLowerCase() === String(qs.field).toLowerCase()
@@ -1310,7 +1334,7 @@ async function handleListRead(ctx) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
       createdDateSources, cors, selectFields, selectList,
-      filterFieldName, filterValue,
+      filterFieldName, filterValue, filterOp,
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT),
       offset,
       parentSfField: parentFilter.sfField,
@@ -1379,7 +1403,7 @@ async function handleListRead(ctx) {
       q = q.eq(parentFilter.cacheColumn, parentId);
     }
     if (filterColumn && columnSet.has(filterColumn)) {
-      q = q.eq(filterColumn, filterValue);
+      q = filterOp === "includes" ? q.or(includesOrExpr(filterColumn, filterValue)) : q.eq(filterColumn, filterValue);
     }
     // Order newest-first by created_date WHEN the cache actually has that column;
     // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
@@ -1416,14 +1440,15 @@ async function handleListRead(ctx) {
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-      selectFields, selectList, filterFieldName, filterValue,
+      selectFields, selectList, filterFieldName, filterValue, filterOp,
       parentSfField: parentId ? parentFilter.sfField : null,
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
       shadow, objectKey, enforce, access,
       shadowPath: "list.live.cold",
-      shadowFilters: parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
+      // An INCLUDES filter is not an equality the shadow count can replay — uncomparable.
+      shadowFilters: filterOp === "includes" ? null : parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
   }
 
@@ -1514,18 +1539,22 @@ async function handleListRead(ctx) {
   // SHADOW: the main path, and the cheap one — for tenant scope the new filter IS this
   // query's filter, so no second query is issued at all (see shadow.js). Every caller
   // filter this query applied is handed over so the comparison is like-for-like.
-  await shadow.list({
-    path: "list.cache",
-    cacheTable,
-    oldCount: records.length,
-    oldTotal: adjustedTotal,
-    filters: [
-      ...(parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : []),
-      ...(filterColumn && columnSet.has(filterColumn)
-        ? [{ column: filterColumn, value: filterValue }]
-        : []),
-    ],
-  });
+  // An ?op=includes filter is not an equality the shadow count can replay — skipped, the
+  // same "uncomparable" rule the live paths apply with shadowFilters === null.
+  if (filterOp !== "includes") {
+    await shadow.list({
+      path: "list.cache",
+      cacheTable,
+      oldCount: records.length,
+      oldTotal: adjustedTotal,
+      filters: [
+        ...(parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : []),
+        ...(filterColumn && columnSet.has(filterColumn)
+          ? [{ column: filterColumn, value: filterValue }]
+          : []),
+      ],
+    });
+  }
   return jsonResponse(200, cors, {
     source,
     count: records.length, // rows in THIS page (backward compatible)
@@ -1545,7 +1574,7 @@ async function handleListRead(ctx) {
 async function listColdCacheFallback(ctx) {
   const {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-    selectFields, selectList, filterFieldName, filterValue, limit, offset,
+    selectFields, selectList, filterFieldName, filterValue, filterOp, limit, offset,
     parentSfField, parentId, searchTerm, searchSfFields,
     shadow, objectKey, shadowPath, shadowFilters, enforce, access,
   } = ctx;
@@ -1562,7 +1591,9 @@ async function listColdCacheFallback(ctx) {
     where += ` AND ${parentSfField} = '${soqlEscapeString(parentId)}'`;
   }
   if (filterFieldName) {
-    where += ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
+    where += filterOp === "includes"
+      ? ` AND ${filterFieldName} INCLUDES ('${soqlEscapeString(filterValue)}')`
+      : ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
   }
   // ?q= name search: OR of LIKE '%term%' across the object's SF name fields, ANDed
   // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.

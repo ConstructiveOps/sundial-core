@@ -1,5 +1,37 @@
 # Sundial — Progress Log
 
+## 2026-09-23 — The Customer in the Service module: its own tab, list, board and page (D-075)
+
+Harmon's ask: the Customer as the **pre-estimate record** for Service — every call and
+email lands there, stays a Lead until an estimate is warranted, is assigned to a person
+in any department, and is tracked open / unresolved. The Sales page (the whole solar
+pipeline) stays untouched. Built from the layout schema `docs/service-customer-layout.md`,
+written first from the full field dump. **Salesforce:** four fields —
+`Service_Stage__c` (the board: New → Contact Attempt Made → In Progress → Waiting on
+Customer → Waiting on Other Department → Estimate Created → Resolved → Closed),
+`Service_Request_Type__c`, `Service_Resolution__c`, `Service_Resolved_Date__c` — in
+`salesforce/service-customer-2026-09-23/` with the permission set; `Stage__c` and
+`Status__c` are left as they are. Everything else on the page is an existing field.
+**Cache:** `sql/2026-09-23_service_customer.sql` adds the ten customer-cache columns the
+list reads (the four + `assigned_to_sf_id`, dates, `description`); one full customer
+resync. **Backend:** `sundial-sf-query` gains `?op=includes` (a multi-select membership
+filter, cache + live + skipped by the shadow count; `includes.test.js`, 2) so the Service
+list is the customers tagged Service; `sundial-service-estimate` gains
+`POST /service/customers` (the popups' select-or-create, then `Service_Stage__c = New`
+without overwriting a stage, plus the typed request — every Service field
+describe-guarded; estimate suite 47) and `scripts/wire-service-customers-route.ps1`.
+**Portal:** Service → **Customers** tab: `ServiceCustomersPage` (table / board by Service
+stage; filters stage — default open — / assignee incl. "mine" and unassigned / status /
+request type; search across the whole hub with "Not in Service yet" on an untagged row;
+New Customer / New Estimate / New Job), `NewServiceCustomerModal` (the picker + the
+request), `ServiceCustomerDetailPage` (header with Status + Service stage chips, the
+member badge, DNC warnings, phone / email / maps links, the assignee's NAME, the
+follow-up with overdue in red; **Create Estimate / Create Job** with the customer
+pre-picked; **Add to Service** on an untagged customer; four side tabs from
+`src/config/service-customer-config.ts` — Request, Contact, Property, System & Accounts —
+plus Files; the persistent Comments panel; the related bar now with Estimates).
+Tests: helpers 7, list 3, page 4; portal 215/215.
+
 ## 2026-09-22 (later) — The PDF attachment that would not open; the job from the tech's call; address lookup on customer create
 
 Three from Tim's list. **The attachment:** every estimate / invoice / job-report email

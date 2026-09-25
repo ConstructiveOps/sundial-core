@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Linked_Roofing_Project__c</fullName>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <description>The roofing project created from this customer by the Roofing module (mirror of Linked_Solar_Project__c). Written by POST /roofing/projects.</description>
+        <externalId>false</externalId>
+        <label>Linked Roofing Project</label>
+        <referenceTo>Sundial_Roofing__c</referenceTo>
+        <relationshipLabel>Customers (Linked Roofing Project)</relationshipLabel>
+        <relationshipName>Linked_Customers</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+</CustomObject>

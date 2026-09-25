@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  roofing-revamp-2026-09-24 - the Roofing module revamp fields. CustomField members only, nothing
+  here touches object settings or any field it does not name.
+
+  Sundial_Roofing__c
+    NEW  Sold_With_Solar__c, Sourced_From__c, Lead_Source__c (formula), Roof_Type__c, Payment_Type__c,
+         Deposit_Received__c, Deposit_Amount__c, Deposit_Received_Date__c, Final_Payment_Status__c,
+         Final_Payment_Received_Date__c, Notes__c, Budget_Push_Status__c, Budget_Pushed_At__c,
+         Budget_Push_Error__c, Project_Created_in_Acumatica__c, Cost_Per_Square_Shingle/Tile_All_In/No_Tax__c
+    REPLACED VALUE SET  Stage__c  (placeholder "Stage 1" -> the 11-stage roofing pipeline)
+    NEW DEFAULTS (45 existing fields redeployed verbatim from the July package with the
+         2026-09-24 budget master prices: 4 labor rates, roll-off / misc qty + cost, 38 material prices)
+  Sundial_Customer__c
+    NEW  Roofing_Stage__c, Roofing_Request_Type__c   (the D-075 Service pattern, for Roofing)
+  PermissionSet  Sundial_Roofing_Revamp  (assign to the integration user after deploy)
+
+  NOT in this package: Sundial_Customer__c.Linked_Roofing_Project__c - see
+  ../roofing-revamp-2026-09-24-linked-lookup/ (deploy only if Setup shows it missing).
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; use the prebuilt
+  roofing-revamp-2026-09-24.zip, or Linux/WSL zip - NEVER PowerShell 5.1 Compress-Archive)
+  -> Workbench -> Migration -> Deploy -> Single Package -> CHECK ONLY first, expect
+  68/68 components, then deploy for real. Then assign the permission set to the
+  integration user, run sql/2026-09-24_roofing_revamp.sql in the Supabase SQL editor, and run a
+  full customer + roofing cache resync.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Roofing__c.Sold_With_Solar__c</members>
+        <members>Sundial_Roofing__c.Sourced_From__c</members>
+        <members>Sundial_Roofing__c.Lead_Source__c</members>
+        <members>Sundial_Roofing__c.Roof_Type__c</members>
+        <members>Sundial_Roofing__c.Payment_Type__c</members>
+        <members>Sundial_Roofing__c.Deposit_Received__c</members>
+        <members>Sundial_Roofing__c.Deposit_Amount__c</members>
+        <members>Sundial_Roofing__c.Deposit_Received_Date__c</members>
+        <members>Sundial_Roofing__c.Final_Payment_Status__c</members>
+        <members>Sundial_Roofing__c.Final_Payment_Received_Date__c</members>
+        <members>Sundial_Roofing__c.Notes__c</members>
+        <members>Sundial_Roofing__c.Budget_Push_Status__c</members>
+        <members>Sundial_Roofing__c.Budget_Pushed_At__c</members>
+        <members>Sundial_Roofing__c.Budget_Push_Error__c</members>
+        <members>Sundial_Roofing__c.Project_Created_in_Acumatica__c</members>
+        <members>Sundial_Roofing__c.Cost_Per_Square_Shingle_All_In__c</members>
+        <members>Sundial_Roofing__c.Cost_Per_Square_Shingle_No_Tax__c</members>
+        <members>Sundial_Roofing__c.Cost_Per_Square_Tile_All_In__c</members>
+        <members>Sundial_Roofing__c.Cost_Per_Square_Tile_No_Tax__c</members>
+        <members>Sundial_Roofing__c.Stage__c</members>
+        <members>Sundial_Roofing__c.Labor_Rate_Modified__c</members>
+        <members>Sundial_Roofing__c.Labor_Rate_Recoat__c</members>
+        <members>Sundial_Roofing__c.Labor_Rate_Shingle__c</members>
+        <members>Sundial_Roofing__c.Labor_Rate_Tile__c</members>
+        <members>Sundial_Roofing__c.Mat_ABC_Proguard_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Birdstop_Metal_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Boral_Ply_40_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Drip_Edge_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Drip_Edge_Painted_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Fontana_G40_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_GAF_Felt_Buster_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_15_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_15_Alum_Sleeve_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_15_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_2_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_2_Alum_Sleeve_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_2_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_3_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_3_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Jack_4_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_210_Cement_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_A200_Flashing_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_A310_Tan_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_A310_White_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_SA_APP_Cap_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Mulehide_SA_Base_Sheet_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Nails_125_Coil_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Nails_1_Simplex_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Nails_75_EG_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_OC_Oakridge_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_OC_Starter_Strip_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Ridge_Shingles_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_TTop_4_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_TTop_4_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_TTop_7_Alum_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_TTop_7_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Tile_Pan_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Valley_18_W_Galv_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_Valley_24_3Rib_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_WB_Flat_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_WB_Hips_Cost__c</members>
+        <members>Sundial_Roofing__c.Mat_WB_Ridge_Cost__c</members>
+        <members>Sundial_Roofing__c.Misc_Other_Cost__c</members>
+        <members>Sundial_Roofing__c.Misc_Other_Qty__c</members>
+        <members>Sundial_Roofing__c.Roll_Off_Qty__c</members>
+        <members>Sundial_Customer__c.Roofing_Stage__c</members>
+        <members>Sundial_Customer__c.Roofing_Request_Type__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Roofing_Revamp</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

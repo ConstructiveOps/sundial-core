@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Roofing_Stage__c</fullName>
+        <description>The Roofing module's OWN pre-project pipeline on the customer hub (mirror of Service_Stage__c, D-075). Stage__c stays the solar sales pipeline; Status__c stays the hub lifecycle. Set to New by POST /roofing/customers on a new or untracked customer, never overwriting an existing stage. Project Created is stamped when a Sundial_Roofing__c is created from the customer.</description>
+        <externalId>false</externalId>
+        <label>Roofing Stage</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>New</fullName>
+                <default>false</default>
+                <label>New</label>
+            </value>
+            <value>
+                <fullName>Contact Attempt Made</fullName>
+                <default>false</default>
+                <label>Contact Attempt Made</label>
+            </value>
+            <value>
+                <fullName>Inspection Scheduled</fullName>
+                <default>false</default>
+                <label>Inspection Scheduled</label>
+            </value>
+            <value>
+                <fullName>Quoted</fullName>
+                <default>false</default>
+                <label>Quoted</label>
+            </value>
+            <value>
+                <fullName>Project Created</fullName>
+                <default>false</default>
+                <label>Project Created</label>
+            </value>
+            <value>
+                <fullName>Lost</fullName>
+                <default>false</default>
+                <label>Lost</label>
+            </value>
+            <value>
+                <fullName>Closed</fullName>
+                <default>false</default>
+                <label>Closed</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Roofing_Request_Type__c</fullName>
+        <description>What the customer is asking the Roofing department for.</description>
+        <externalId>false</externalId>
+        <label>Roofing Request Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Reroof</fullName>
+                <default>false</default>
+                <label>Reroof</label>
+            </value>
+            <value>
+                <fullName>Repair</fullName>
+                <default>false</default>
+                <label>Repair</label>
+            </value>
+            <value>
+                <fullName>Reroof with Solar</fullName>
+                <default>false</default>
+                <label>Reroof with Solar</label>
+            </value>
+            <value>
+                <fullName>Inspection Only</fullName>
+                <default>false</default>
+                <label>Inspection Only</label>
+            </value>
+            <value>
+                <fullName>Other</fullName>
+                <default>false</default>
+                <label>Other</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+</CustomObject>

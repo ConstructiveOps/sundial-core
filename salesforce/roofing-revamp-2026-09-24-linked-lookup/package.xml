@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  OPTIONAL companion to roofing-revamp-2026-09-24. docs/salesforce-schema.md designs
+  Sundial_Customer__c.Linked_Roofing_Project__c but nothing in the repo proves it was ever created.
+  Setup -> Object Manager -> Sundial Customer -> Fields: if Linked_Roofing_Project__c is ALREADY
+  there, skip this package entirely. If it is missing, deploy this (check-only first, 2/2).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.Linked_Roofing_Project__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Roofing_Linked_Lookup</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

@@ -1,0 +1,1027 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Sold_With_Solar__c</fullName>
+        <description>Budget master 2026-09-24 cell B4. Drives every markup and the commission rate: Yes = 35% markup / 2.5% commission, No = 20% markup / 1.5% commission. The roofing budget engine writes the four *_Markup_Percent__c fields and Commission_Rate_Percent__c from this value on every recalc; a blank value is a calc error (SOLD_WITH_SOLAR_MISSING).</description>
+        <externalId>false</externalId>
+        <label>Sold With Solar</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Yes</fullName>
+                <default>false</default>
+                <label>Yes</label>
+            </value>
+            <value>
+                <fullName>No</fullName>
+                <default>false</default>
+                <label>No</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Sourced_From__c</fullName>
+        <description>Layout sheet: where the job was sourced from. Resi Job = came out of a residential solar sale, Service Job = came out of a service call, Direct = roofing-only lead.</description>
+        <externalId>false</externalId>
+        <label>Sourced From</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>false</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Resi Job</fullName>
+                <default>false</default>
+                <label>Resi Job</label>
+            </value>
+            <value>
+                <fullName>Service Job</fullName>
+                <default>false</default>
+                <label>Service Job</label>
+            </value>
+            <value>
+                <fullName>Direct</fullName>
+                <default>false</default>
+                <label>Direct</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Lead_Source__c</fullName>
+        <description>Layout sheet: lead source. Read-through to the customer hub's Lead_Source__c so it never drifts; edit it on the customer.</description>
+        <externalId>false</externalId>
+        <formula>TEXT(Sundial_Customer__r.Lead_Source__c)</formula>
+        <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+        <label>Lead Source</label>
+        <length>255</length>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Roof_Type__c</fullName>
+        <description>Layout sheet: roof type(s) on the job. Multi-select because one roof can carry shingle and a flat section. Values mirror Sundial_Customer__c.Roof_Type__c with Flat/Foam split per the layout sheet.</description>
+        <externalId>false</externalId>
+        <label>Roof Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>MultiselectPicklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Asphalt Shingle</fullName>
+                <default>false</default>
+                <label>Asphalt Shingle</label>
+            </value>
+            <value>
+                <fullName>Clay Tile</fullName>
+                <default>false</default>
+                <label>Clay Tile</label>
+            </value>
+            <value>
+                <fullName>Concrete Tile</fullName>
+                <default>false</default>
+                <label>Concrete Tile</label>
+            </value>
+            <value>
+                <fullName>Flat Built Up</fullName>
+                <default>false</default>
+                <label>Flat Built Up</label>
+            </value>
+            <value>
+                <fullName>Foam</fullName>
+                <default>false</default>
+                <label>Foam</label>
+            </value>
+            <value>
+                <fullName>Metal</fullName>
+                <default>false</default>
+                <label>Metal</label>
+            </value>
+            <value>
+                <fullName>Wood Shake</fullName>
+                <default>false</default>
+                <label>Wood Shake</label>
+            </value>
+            <value>
+                <fullName>Other</fullName>
+                <default>false</default>
+                <label>Other</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+        <visibleLines>4</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Payment_Type__c</fullName>
+        <description>Layout sheet: how the customer is paying. Unrestricted so the office can add values in Setup.</description>
+        <externalId>false</externalId>
+        <label>Payment Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>false</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Cash</fullName>
+                <default>false</default>
+                <label>Cash</label>
+            </value>
+            <value>
+                <fullName>Check</fullName>
+                <default>false</default>
+                <label>Check</label>
+            </value>
+            <value>
+                <fullName>Credit Card</fullName>
+                <default>false</default>
+                <label>Credit Card</label>
+            </value>
+            <value>
+                <fullName>Financed</fullName>
+                <default>false</default>
+                <label>Financed</label>
+            </value>
+            <value>
+                <fullName>Insurance Claim</fullName>
+                <default>false</default>
+                <label>Insurance Claim</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Deposit_Received__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Layout sheet: deposit has been received.</description>
+        <externalId>false</externalId>
+        <label>Deposit Received</label>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Deposit_Amount__c</fullName>
+        <description>Amount of the deposit received.</description>
+        <externalId>false</externalId>
+        <label>Deposit Amount</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Deposit_Received_Date__c</fullName>
+        <description>Date the deposit was received.</description>
+        <externalId>false</externalId>
+        <label>Deposit Received Date</label>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Final_Payment_Status__c</fullName>
+        <description>Layout sheet: final payment lifecycle - Billed / Invoiced / Received.</description>
+        <externalId>false</externalId>
+        <label>Final Payment</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Not Billed</fullName>
+                <default>false</default>
+                <label>Not Billed</label>
+            </value>
+            <value>
+                <fullName>Billed</fullName>
+                <default>false</default>
+                <label>Billed</label>
+            </value>
+            <value>
+                <fullName>Invoiced</fullName>
+                <default>false</default>
+                <label>Invoiced</label>
+            </value>
+            <value>
+                <fullName>Received</fullName>
+                <default>false</default>
+                <label>Received</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Final_Payment_Received_Date__c</fullName>
+        <description>Date the final payment was received.</description>
+        <externalId>false</externalId>
+        <label>Final Payment Received Date</label>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Notes__c</fullName>
+        <description>Layout sheet: free-form notes for the roofing job.</description>
+        <externalId>false</externalId>
+        <label>Notes</label>
+        <length>32000</length>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Budget_Push_Status__c</fullName>
+        <description>Written only by the roofing budget-push Lambda: Pushing (accepted, worker running) -&gt; Pushed / Failed. Mirror of Sundial_Solar__c.Budget_Push_Status__c.</description>
+        <externalId>false</externalId>
+        <label>Budget Push Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>Pushing</fullName>
+                <default>false</default>
+                <label>Pushing</label>
+            </value>
+            <value>
+                <fullName>Pushed</fullName>
+                <default>false</default>
+                <label>Pushed</label>
+            </value>
+            <value>
+                <fullName>Failed</fullName>
+                <default>false</default>
+                <label>Failed</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Budget_Pushed_At__c</fullName>
+        <description>When the last successful Acumatica ProjectBudget push finished.</description>
+        <externalId>false</externalId>
+        <label>Budget Pushed At</label>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Budget_Push_Error__c</fullName>
+        <description>Last push error, or a downstream warning when status is Pushed. Null on a clean push.</description>
+        <externalId>false</externalId>
+        <label>Budget Push Error</label>
+        <length>32768</length>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>3</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Project_Created_in_Acumatica__c</fullName>
+        <description>Set by the Acumatica push (Layer 1) when the Acumatica Project exists for this roofing job. Idempotency marker - mirror of Sundial_Solar__c.Project_Created_in_Acumatica__c.</description>
+        <externalId>false</externalId>
+        <label>Project Created in Acumatica</label>
+        <required>false</required>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Cost_Per_Square_Shingle_All_In__c</fullName>
+        <description>Budget master A142: Total reroof proposal cost / shingle squares (includes tax). Blank when shingle squares = 0.</description>
+        <externalId>false</externalId>
+        <label>Cost / Sq Shingle (All In)</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Cost_Per_Square_Shingle_No_Tax__c</fullName>
+        <description>Budget master A146: proposal cost less taxes / shingle squares.</description>
+        <externalId>false</externalId>
+        <label>Cost / Sq Shingle (No Tax)</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Cost_Per_Square_Tile_All_In__c</fullName>
+        <description>Budget master A150: Total reroof proposal cost / tile squares (includes tax).</description>
+        <externalId>false</externalId>
+        <label>Cost / Sq Tile (All In)</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Cost_Per_Square_Tile_No_Tax__c</fullName>
+        <description>Budget master A154: proposal cost less taxes / tile squares.</description>
+        <externalId>false</externalId>
+        <label>Cost / Sq Tile (No Tax)</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <trackTrending>false</trackTrending>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Stage__c</fullName>
+        <description>Roofing project pipeline. Replaces the placeholder Stage 1 value (records still carrying Stage 1 keep it as an inactive value; move them in the portal).</description>
+        <externalId>false</externalId>
+        <label>Stage</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+            <value>
+                <fullName>New</fullName>
+                <default>false</default>
+                <label>New</label>
+            </value>
+            <value>
+                <fullName>Inspection Scheduled</fullName>
+                <default>false</default>
+                <label>Inspection Scheduled</label>
+            </value>
+            <value>
+                <fullName>Budget In Progress</fullName>
+                <default>false</default>
+                <label>Budget In Progress</label>
+            </value>
+            <value>
+                <fullName>Proposal Sent</fullName>
+                <default>false</default>
+                <label>Proposal Sent</label>
+            </value>
+            <value>
+                <fullName>Sold</fullName>
+                <default>false</default>
+                <label>Sold</label>
+            </value>
+            <value>
+                <fullName>Scheduled</fullName>
+                <default>false</default>
+                <label>Scheduled</label>
+            </value>
+            <value>
+                <fullName>In Progress</fullName>
+                <default>false</default>
+                <label>In Progress</label>
+            </value>
+            <value>
+                <fullName>Complete</fullName>
+                <default>false</default>
+                <label>Complete</label>
+            </value>
+            <value>
+                <fullName>Invoiced</fullName>
+                <default>false</default>
+                <label>Invoiced</label>
+            </value>
+            <value>
+                <fullName>Paid</fullName>
+                <default>false</default>
+                <label>Paid</label>
+            </value>
+            <value>
+                <fullName>Cancelled</fullName>
+                <default>false</default>
+                <label>Cancelled</label>
+            </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Labor_Rate_Modified__c</fullName>
+        <defaultValue>112</defaultValue>
+        <description>Labor cost per square, modified bitumen. Budget master 2026-09-24: 4 man-hours @ $28 avg.</description>
+        <externalId>false</externalId>
+        <label>Labor Rate per Sq - Modified</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Labor_Rate_Recoat__c</fullName>
+        <defaultValue>140</defaultValue>
+        <description>Labor cost per square, recoat (flat). Budget master 2026-09-24: 5 man-hours @ $28 avg.</description>
+        <externalId>false</externalId>
+        <label>Labor Rate per Sq - Recoat</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Labor_Rate_Shingle__c</fullName>
+        <defaultValue>168</defaultValue>
+        <description>Labor cost per square, shingle. Budget master 2026-09-24: 6 man-hours @ $28 avg.</description>
+        <externalId>false</externalId>
+        <label>Labor Rate per Sq - Shingle</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Labor_Rate_Tile__c</fullName>
+        <defaultValue>224</defaultValue>
+        <description>Labor cost per square, tile. Budget master 2026-09-24: 8 man-hours @ $28 avg.</description>
+        <externalId>false</externalId>
+        <label>Labor Rate per Sq - Tile</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_ABC_Proguard_Cost__c</fullName>
+        <defaultValue>88.25</defaultValue>
+        <description>Unit cost: ABC Proguard 10 SQ. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>ABC Proguard 10 SQ Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Birdstop_Metal_Cost__c</fullName>
+        <defaultValue>10.87</defaultValue>
+        <description>Unit cost: Birdstop Metal. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Birdstop Metal Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Boral_Ply_40_Cost__c</fullName>
+        <defaultValue>48.75</defaultValue>
+        <description>Unit cost: Boral Ply 40 2SQ/RI. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Boral Ply 40 2SQ/RI Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Drip_Edge_Galv_Cost__c</fullName>
+        <defaultValue>8.95</defaultValue>
+        <description>Unit cost: 2x2 Drip Edge Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>2x2 Drip Edge Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Drip_Edge_Painted_Cost__c</fullName>
+        <defaultValue>8.95</defaultValue>
+        <description>Unit cost: 2x2 Drip Edge Painted. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>2x2 Drip Edge Painted Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Fontana_G40_Cost__c</fullName>
+        <defaultValue>47.5</defaultValue>
+        <description>Unit cost: Fontana G40. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Fontana G40 Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_GAF_Felt_Buster_Cost__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Unit cost: GAF Felt Buster 10 SQ. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>GAF Felt Buster 10 SQ Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_15_Alum_Cost__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Unit cost: 1.5in Jack Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>1.5in Jack Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_15_Alum_Sleeve_Cost__c</fullName>
+        <defaultValue>24.12</defaultValue>
+        <description>Unit cost: 1.5in Jack Alum w/ Sleeve. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>1.5in Jack Alum w/ Sleeve Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_15_Galv_Cost__c</fullName>
+        <defaultValue>9.68</defaultValue>
+        <description>Unit cost: 1.5in Jack Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>1.5in Jack Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_2_Alum_Cost__c</fullName>
+        <defaultValue>34.54</defaultValue>
+        <description>Unit cost: 2in Jack Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>2in Jack Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_2_Alum_Sleeve_Cost__c</fullName>
+        <defaultValue>24.12</defaultValue>
+        <description>Unit cost: 2in Jack Alum w/ Sleeve. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>2in Jack Alum w/ Sleeve Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_2_Galv_Cost__c</fullName>
+        <defaultValue>9.07</defaultValue>
+        <description>Unit cost: 2in Jack Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>2in Jack Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_3_Alum_Cost__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Unit cost: 3in Jack Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>3in Jack Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_3_Galv_Cost__c</fullName>
+        <defaultValue>13</defaultValue>
+        <description>Unit cost: 3in Jack Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>3in Jack Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Jack_4_Alum_Cost__c</fullName>
+        <defaultValue>34.54</defaultValue>
+        <description>Unit cost: 4in Jack Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>4in Jack Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_210_Cement_Cost__c</fullName>
+        <defaultValue>57.23</defaultValue>
+        <description>Unit cost: Mulehide 210 Plastic Cement 5 Gal. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide 210 Plastic Cement 5 Gal Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_A200_Flashing_Cost__c</fullName>
+        <defaultValue>62.1</defaultValue>
+        <description>Unit cost: Mulehide A-200 Flashing 2 Gal. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide A-200 Flashing 2 Gal Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_A310_Tan_Cost__c</fullName>
+        <defaultValue>97.91</defaultValue>
+        <description>Unit cost: Mulehide A-310 5 Gal Tan. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide A-310 5 Gal Tan Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_A310_White_Cost__c</fullName>
+        <defaultValue>97.91</defaultValue>
+        <description>Unit cost: Mulehide A-310 5 Gal White. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide A-310 5 Gal White Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_SA_APP_Cap_Cost__c</fullName>
+        <defaultValue>127.99</defaultValue>
+        <description>Unit cost: Mulehide SA-APP Cap Sheet. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide SA-APP Cap Sheet Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Mulehide_SA_Base_Sheet_Cost__c</fullName>
+        <defaultValue>137.99</defaultValue>
+        <description>Unit cost: Mulehide SA Base Sheet. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Mulehide SA Base Sheet Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Nails_125_Coil_Cost__c</fullName>
+        <defaultValue>50.99</defaultValue>
+        <description>Unit cost: 1.25 Coil Nails. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>1.25 Coil Nails Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Nails_1_Simplex_Cost__c</fullName>
+        <defaultValue>23.99</defaultValue>
+        <description>Unit cost: 1in Simplex Nails. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>1in Simplex Nails Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Nails_75_EG_Cost__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Unit cost: .75 EG Nails. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>.75 EG Nails Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_OC_Oakridge_Cost__c</fullName>
+        <defaultValue>43.67</defaultValue>
+        <description>Unit cost: OC Oakridge. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>OC Oakridge Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_OC_Starter_Strip_Cost__c</fullName>
+        <defaultValue>84.71</defaultValue>
+        <description>Unit cost: OC Starter Strip. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>OC Starter Strip Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Ridge_Shingles_Cost__c</fullName>
+        <defaultValue>100.77</defaultValue>
+        <description>Unit cost: Ridge Shingles. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Ridge Shingles Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_TTop_4_Alum_Cost__c</fullName>
+        <defaultValue>24.12</defaultValue>
+        <description>Unit cost: 4in T-Top Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>4in T-Top Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_TTop_4_Galv_Cost__c</fullName>
+        <defaultValue>12.1</defaultValue>
+        <description>Unit cost: 4in T-Top Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>4in T-Top Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_TTop_7_Alum_Cost__c</fullName>
+        <defaultValue>28.12</defaultValue>
+        <description>Unit cost: 7in T-Top Aluminum. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>7in T-Top Aluminum Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_TTop_7_Galv_Cost__c</fullName>
+        <defaultValue>16.93</defaultValue>
+        <description>Unit cost: 7in T-Top Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>7in T-Top Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Tile_Pan_Galv_Cost__c</fullName>
+        <defaultValue>20.87</defaultValue>
+        <description>Unit cost: 4x6x1 Tile Pan Galv. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>4x6x1 Tile Pan Galv Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Valley_18_W_Galv_Cost__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Unit cost: 18in W-Valley Galv w/ Hem. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>18in W-Valley Galv w/ Hem Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_Valley_24_3Rib_Cost__c</fullName>
+        <defaultValue>32.35</defaultValue>
+        <description>Unit cost: 24in 3-Rib Galv Valley w/ Hem. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>24in 3-Rib Galv Valley w/ Hem Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_WB_Flat_Cost__c</fullName>
+        <defaultValue>108.17</defaultValue>
+        <description>Unit cost: Weatherblock Flat. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Weatherblock Flat Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_WB_Hips_Cost__c</fullName>
+        <defaultValue>47.79</defaultValue>
+        <description>Unit cost: Weatherblock Hips. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Weatherblock Hips Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Mat_WB_Ridge_Cost__c</fullName>
+        <defaultValue>93.08</defaultValue>
+        <description>Unit cost: Weatherblock Ridge. Editable per project; default is current catalog price.</description>
+        <externalId>false</externalId>
+        <label>Weatherblock Ridge Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Misc_Other_Cost__c</fullName>
+        <defaultValue>350</defaultValue>
+        <description>Misc other cost per unit. Budget master 2026-09-24: $350, includes the $100 delivery fee from the supplier.</description>
+        <externalId>false</externalId>
+        <label>Misc Other Cost</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>2</scale>
+        <trackHistory>false</trackHistory>
+        <type>Currency</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Misc_Other_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Quantity for other miscellaneous cost line.</description>
+        <externalId>false</externalId>
+        <label>Misc Other Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackHistory>false</trackHistory>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Roll_Off_Qty__c</fullName>
+        <defaultValue>0</defaultValue>
+        <description>Number of roll-off dumpsters for the job.</description>
+        <externalId>false</externalId>
+        <label>Roll-Off Qty</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackHistory>false</trackHistory>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+</CustomObject>

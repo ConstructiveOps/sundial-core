@@ -410,6 +410,7 @@ function makeHandler(fake, identityOverrides = {}) {
       if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
       if (name === "sundial/stripe" && fake.stripeSecret) return fake.stripeSecret;
       if (name === "sundial/service-club" && fake.clubSecret) return fake.clubSecret;
+      if (name === "sundial/brand" && fake.brandSecret) return fake.brandSecret; // the tenant's logo + footer links (2026-09-24)
       const e = new Error("not found");
       e.name = "ResourceNotFoundException";
       throw e;
@@ -454,6 +455,10 @@ function makeHandler(fake, identityOverrides = {}) {
           { longText: "85201", shortText: "85201", types: ["postal_code"] },
           { longText: "1234", shortText: "1234", types: ["postal_code_suffix"] },
         ] }) };
+      }
+      if (url.startsWith("https://cdn.example.com/")) {
+        // The brand's logo (2026-09-24): a real JPEG so the PDF can embed it.
+        return { ok: true, status: 200, arrayBuffer: async () => JPG_1x1.buffer.slice(JPG_1x1.byteOffset, JPG_1x1.byteOffset + JPG_1x1.byteLength) };
       }
       if (url.includes("/streetview/metadata")) {
         const status = fake.streetViewStatus ?? "OK";
@@ -826,6 +831,41 @@ test("renderEstimateDocument: escapes, hides markup, shows discount/tax/deposit 
   assert.ok(html.includes("PREVIEW"));
   assert.ok(html.includes("1.50 Hour"));
   assert.ok(html.includes("Acme Solar") && html.includes("ROC #1"));
+});
+
+test("the tenant's brand on the documents (2026-09-24): sundial/brand → logo on the preview page and IN the sent PDF, the terms + Service Club links in the footer; an unconfigured tenant still prints a name", async () => {
+  const fake = fakeSalesforce();
+  fake.brandSecret = {
+    default: { termsUrl: "https://club.example.com/terms" },
+    harmon: { companyName: "Test Service", logoUrl: "https://cdn.example.com/logo.jpg", tagline: "Solar service, done right", licenseLine: "ROC #000000", clubUrl: "https://club.example.com/", clubBlurb: "Join the club for member pricing." },
+  };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Br", Primary_Email__c: "br@example.com" });
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  const p = await call(h, "GET", `/service/estimates/${c.body.id}/preview`);
+  assert.equal(p.status, 200);
+  assert.ok(p.body.html.includes('<img class="logo" src="https://cdn.example.com/logo.jpg"'), "the page shows the logo");
+  assert.ok(p.body.html.includes("Solar service, done right"));
+  assert.ok(p.body.html.includes("ROC #000000"));
+  assert.ok(p.body.html.includes('href="https://club.example.com/terms"'), "the default block's terms link");
+  assert.ok(p.body.html.includes("Join the club for member pricing."), "the tenant's club copy");
+  assert.ok(p.body.html.includes('href="https://club.example.com/"'));
+
+  const s1 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s1.status, 200);
+  const pdf = fake.emails[0].attachments[0].content;
+  const raw = Buffer.from(pdf).toString("latin1");
+  assert.ok(/\/Subtype\s*\/Image/.test(raw), "the sent PDF embeds the logo");
+  assert.ok(fake.fetches.filter((u) => u === "https://cdn.example.com/logo.jpg").length === 1, "fetched once, then cached");
+
+  // The same handler, a tenant with no block: the name from the env fallback, no logo, only the default links.
+  const other = makeHandler(fake, { tenantSlug: "other" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Oth" });
+  const c2 = await call(other, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[1].Id } });
+  const p2 = await call(other, "GET", `/service/estimates/${c2.body.id}/preview`);
+  assert.ok(!p2.body.html.includes('class="logo"'));
+  assert.ok(p2.body.html.includes('href="https://club.example.com/terms"'));
+  assert.ok(!p2.body.html.includes("club.example.com/\""));
 });
 
 test("GET …/preview returns the rendered document for a tenant-owned estimate, 404 otherwise", async () => {

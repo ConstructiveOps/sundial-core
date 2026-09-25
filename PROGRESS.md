@@ -1,5 +1,20 @@
 # Sundial — Progress Log
 
+## 2026-09-24 — The brand on every customer document: logo, terms and the Service Club
+
+The estimate, the invoice and the job report — hosted page and PDF — now carry the
+tenant's identity from Secrets Manager `sundial/brand` (`lib/brand.js`, keyed by tenant
+slug, cached five minutes; nothing Harmon-specific in code): the **logo** (shown by URL on
+the page, embedded in the PDF from bytes the loader fetches once and keeps a day — a
+failed fetch prints the company name instead), the tagline / address / phone / license
+lines, and a footer block with **Terms & Conditions** and **Solar Service Club**, each a
+label, a line of copy (the tenant's, else a generic default) and the link. One
+`brandBlock()` in `lib/estimate-document.js` feeds all three builders; `drawLogo()` +
+`footerLinkLines()` in `lib/estimate-pdf.js` serve both PDF painters. The estimate Lambda
+warms the brand per request so `brandFor(ctx)` stays synchronous for its callers; the
+public Lambda resolves the slug from the record's tenant. Tests: brand 5, estimate-pdf 5,
+estimate 48 (an end-to-end: secret → logo on the preview and in the sent PDF), public 8.
+
 ## 2026-09-23 (later) — Dispatch board: the invoice border and a real hover card
 
 Harmon's ask: see the job's money on the board without opening it, and more on hover.

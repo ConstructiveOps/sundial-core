@@ -46,6 +46,7 @@ import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate
 import { createNotifier } from "../../lib/notify.js";
 import { publicUrlForKey } from "../../lib/file-access.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
+import { createBrandLoader } from "../../lib/brand.js";
 import { ensureStripeCustomer, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
 import { INVOICE_SELECT, INVOICE_SF_OBJECT, PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "../sundial-service-estimate/invoice.js";
 import { JOB_SF_OBJECT } from "../sundial-service-estimate/fields.js";
@@ -173,6 +174,18 @@ export function createHandler(deps = {}) {
   // Notifications (D-074): the office's bell when a customer approves / declines online.
   const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env });
   const stripeFor = (slug) => stripeForTenant(slug, { getSecret: d.getSecret, ...(d.fetchUrl ? { fetchUrl: d.fetchUrl } : {}) });
+  // The tenant's brand on the hosted pages (2026-09-24, lib/brand.js): logo by URL, the
+  // identity lines, the terms + Service Club footer. No logo bytes here — the pages are HTML.
+  const brands = d.brands ?? createBrandLoader({ getSecret: d.getSecret, env: { ...process.env, ...(deps.brandName ? { SERVICE_BRAND_NAME: deps.brandName } : {}) } });
+  async function brandFor(tenantId) {
+    try {
+      const slug = await tenantSlug(tenantId);
+      return await brands.brandFor({ tenantSlug: slug });
+    } catch (e) {
+      console.error("public brand:", e?.message || e);
+      return { ...DEFAULT_BRAND, companyName: deps.brandName || "" };
+    }
+  }
 
   async function loadByToken(token) {
     if (!TOKEN_RE.test(token || "")) return null;
@@ -264,7 +277,7 @@ export function createHandler(deps = {}) {
           console.error("public view stamp failed:", e?.message || e);
         }
       }
-      const brand = { ...DEFAULT_BRAND, companyName: deps.brandName || "" };
+      const brand = await brandFor(est.Client__c);
       const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, options: { mode: "customer" } });
       let payment = null;
       try {
@@ -446,7 +459,7 @@ export function createHandler(deps = {}) {
       estimate = est?.[0] ?? null;
       if (estimate) lines = (await loadLines(estimate)).filter((l) => l.Stage__c !== "Removed");
     }
-    const brand = { ...DEFAULT_BRAND, companyName: deps.brandName || "" };
+    const brand = await brandFor(job.Client__c);
     const pdfUrl = job.Report_PDF_S3_Key__c ? publicUrlForKey(job.Report_PDF_S3_Key__c) : null;
     const model = buildJobReportModel({ job, report, photos: reportPhotoChoices(files, job.Id, calls), invoice, lines, payments, estimate, brand, options: { mode: "customer", pdfUrl } });
     const { html, title } = renderJobReportDocument({ model });

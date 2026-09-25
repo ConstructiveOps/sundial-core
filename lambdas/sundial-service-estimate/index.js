@@ -94,6 +94,7 @@ import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-p
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
+import { createBrandLoader } from "../../lib/brand.js";
 import {
   buildKey,
   listRecordFiles,
@@ -456,13 +457,24 @@ export function createHandler(deps = {}) {
   // Notifications (D-074): the office's bell for money + club + website events (stripe.js, club.js).
   if (!d.notifier) d.notifier = createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env, ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
 
-  // Brand block for the document. Per-tenant config when that surface lands
-  // (service-workflows.md §12); until then SERVICE_BRAND_NAME, else the tenant slug, so
-  // the layout can be reviewed. The identity block is a GET-FROM-HARMON item.
-  const brandFor = (ctx) => ({
-    ...DEFAULT_BRAND,
-    companyName: d.brandName || (ctx.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : ""),
-  });
+  // The tenant's brand on every document (2026-09-24, lib/brand.js): Secrets Manager
+  // `sundial/brand` keyed by slug — logo, identity lines, the terms and Service Club links.
+  // The dispatcher warms it (with the logo bytes, for the PDFs) before a handler runs, so
+  // `brandFor(ctx)` stays synchronous for the many callers that hand it to a builder.
+  // Unconfigured: SERVICE_BRAND_NAME, else the tenant slug, so the layout can be reviewed.
+  if (!d.brands) d.brands = createBrandLoader({ getSecret: d.getSecret, fetchUrl: d.fetchUrl, env: { ...process.env, ...(d.brandName ? { SERVICE_BRAND_NAME: d.brandName } : {}) } });
+  const brandFor = (ctx) => {
+    const b = ctx?.brand ?? d.brands.cached(ctx?.tenantSlug ?? null) ?? { ...DEFAULT_BRAND, companyName: d.brandName || "" };
+    if (!b.companyName) b.companyName = ctx?.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
+    return b;
+  };
+  const warmBrand = async (tenantSlug) => {
+    try {
+      await d.brands.brandFor({ tenantSlug }, { withLogo: true });
+    } catch (e) {
+      console.error("brand warm:", e?.message || e);
+    }
+  };
 
   // --- describe cache (picklist guards) ------------------------------------------
   const describeCache = new Map();
@@ -1699,6 +1711,7 @@ export function createHandler(deps = {}) {
     // The club's public pages (D-073): no login; the tenant is the URL's slug, every write
     // is a Stripe Checkout the customer completes on Stripe's page or a job for the office.
     if (PUBLIC_ROUTES.has(route.name)) {
+      await warmBrand(route.params[0] ?? null); // the slug is the first path segment on every public club route
       let pub = {};
       if (method === "POST") {
         const parsed = parseJsonBody(event);
@@ -1736,6 +1749,7 @@ export function createHandler(deps = {}) {
 
     try {
       const u = identity?.user ?? {};
+      await warmBrand(identity?.tenantSlug ?? null);
       const ctx = {
         tenantId,
         tenantSlug: identity?.tenantSlug ?? null,

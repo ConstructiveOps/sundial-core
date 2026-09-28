@@ -36,3 +36,7 @@ lambdas/*/template.generated.js
 # repo root (out-rs.json, out-rsdc.json, sfq_errors.txt). Scratch, never source.
 /out-*.json
 /sfq_errors.txt
+
+# Migration pulls (HCP, Sunbase): customer data, never committed. scripts/hcp-pull.mjs
+# writes here by default (docs/migration.md).
+/migration/

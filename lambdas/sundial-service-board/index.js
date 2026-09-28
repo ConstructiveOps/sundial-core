@@ -921,7 +921,9 @@ export function createHandler(deps = {}) {
       };
       return await H[route.name]({ ctx, params: route.params, body, query: event?.queryStringParameters || {} });
     } catch (err) {
-      console.error(`service-board ${route.name} error:`, err?.sfBody || err?.message || err);
+      // the stack, not just the message: a TypeError deep in a view function is otherwise a
+      // bare "Cannot read properties of undefined" in CloudWatch (2026-09-25, the tech day 500)
+      console.error(`service-board ${route.name} error:`, err?.sfBody || err?.stack || err?.message || err);
       return jsonResponse(500, cors, { error: "server_error", route: route.name });
     }
   };

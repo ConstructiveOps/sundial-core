@@ -81,7 +81,10 @@ const MAX_TEXT_CHARS = 320;
 export const TECH_CALL_EXTRA =
   "Clock_In_Latitude__c, Clock_In_Longitude__c, Clock_Out_Latitude__c, Clock_Out_Longitude__c, " + // Clock_Intervals__c is in CALL_SELECT (the board's PATCH needs it too)
   "Checklist_Template_Key__c, Checklist_State__c, " +
-  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Initial_Remote_Diagnosis__c, Sundial_Service_Job__r.Estimate__c, Sundial_Service_Job__r.Primary_Email_at_Creation__c, " +
+  // Issue_Description__c is NOT repeated here: it joined the board's CALL_SELECT on 2026-09-23 (the hover
+  // card) and Salesforce refuses a query that names a field twice — every tech-day request 500'd for
+  // two days (2026-09-25). tech.test.js now asserts the combined list has no duplicates.
+  "Sundial_Service_Job__r.Initial_Remote_Diagnosis__c, Sundial_Service_Job__r.Estimate__c, Sundial_Service_Job__r.Primary_Email_at_Creation__c, " +
   "Sundial_Service_Job__r.Geocode_Lat__c, Sundial_Service_Job__r.Geocode_Lon__c, Sundial_Service_Job__r.Geocode_Status__c, Sundial_Service_Job__r.Street_View_Image_Key__c";
 
 /** The job's cached Street View still as a URL, or null (none yet / Google had no imagery). */
@@ -796,11 +799,21 @@ export function createTechHandlers(d, h) {
       const bounds = dayBounds(date, DEFAULTS.timeZone);
       if (!bounds) return bad(cors, "DATE_INVALID", "date must be YYYY-MM-DD.");
       const me = `Tech__c = '${soqlEscapeString(tech.Id)}'`;
-      const [day, active, unscheduled] = await Promise.all([
+      const [day, active, unscheduled, upcoming] = await Promise.all([
         loadTechCalls(`${me} AND Scheduled_Start__c >= ${h.soqlDateTime(bounds.from)} AND Scheduled_Start__c < ${h.soqlDateTime(bounds.to)}`, tenantId),
         loadTechCalls(`${me} AND Status__c IN ('En Route', 'In Progress')`, tenantId),
         loadTechCalls(`${me} AND Status__c = 'Unscheduled'`, tenantId, "CreatedDate"),
+        // The tech's next working day after this one: an empty day is not a broken app, and
+        // the phone can offer "Next: Mon Sep 28 · 3 calls" instead of a blank (2026-09-25,
+        // Larry's first look at a Friday with all his work on the following Monday).
+        loadTechCalls(`${me} AND Scheduled_Start__c >= ${h.soqlDateTime(bounds.to)} AND Status__c != 'Cancelled'`, tenantId),
       ]);
+      let next = null;
+      if (upcoming.length) {
+        const nextDate = localDate(new Date(upcoming[0].Scheduled_Start__c), DEFAULTS.timeZone);
+        const onThatDay = upcoming.filter((c) => localDate(new Date(c.Scheduled_Start__c), DEFAULTS.timeZone) === nextDate);
+        next = { date: nextDate, start: upcoming[0].Scheduled_Start__c, count: onThatDay.length };
+      }
       const seen = new Set();
       const calls = [];
       for (const c of [...day, ...active]) {
@@ -817,6 +830,7 @@ export function createTechHandlers(d, h) {
         tech: { id: tech.Id, name: techName(tech) },
         calls,
         unscheduled: unscheduled.map((c) => callView(c, now.toISOString())),
+        next,
         activeCallId: activeCall?.id ?? null,
         serverTime: now.toISOString(),
       });

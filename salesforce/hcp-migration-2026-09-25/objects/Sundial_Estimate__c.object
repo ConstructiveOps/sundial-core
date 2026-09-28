@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Estimate__c - HCP_Id__c ONLY (the Housecall Pro migration key, 2026-09-25, docs/migration.md).
+  package.xml lists it as a CustomField member, so this file adds it and touches nothing else on the
+  object. NEVER convert this to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>HCP_Id__c</fullName>
+        <description>Housecall Pro migration key: the HCP estimate this came from (or job:{id}:estimate for an estimate made for a job that had none). Written only by scripts/hcp-import.mjs (upsert on this field); blank on anything born in Sundial.</description>
+        <externalId>true</externalId>
+        <label>HCP Id</label>
+        <length>64</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>true</unique>
+        <caseSensitive>true</caseSensitive>
+    </fields>
+</CustomObject>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  hcp-migration-2026-09-25 - HCP_Id__c (Text 64, external id, unique) on the seven objects the Housecall
+  Pro import writes: customer, estimate, service job, service call, service line, service invoice, service
+  payment (the price book already has its own). Plus the integration-user permission set regenerated with
+  the seven grants. CustomField members only - nothing here touches object settings or any other field.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer Send-to,
+  NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package ->
+  CHECK ONLY first, expect 8/8 components (7 fields + 1 permission set), then deploy for real.
+  Then run sql/2026-09-25_hcp_id.sql in the Supabase SQL editor (the cache columns) before the import.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Customer__c.HCP_Id__c</members>
+        <members>Sundial_Estimate__c.HCP_Id__c</members>
+        <members>Sundial_Service_Job__c.HCP_Id__c</members>
+        <members>Sundial_Service_Call__c.HCP_Id__c</members>
+        <members>Sundial_Service_Line__c.HCP_Id__c</members>
+        <members>Sundial_Service_Invoice__c.HCP_Id__c</members>
+        <members>Sundial_Service_Payment__c.HCP_Id__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Objects</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

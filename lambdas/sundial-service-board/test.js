@@ -23,6 +23,7 @@ import {
   formatWindow,
   soqlDateTime,
   UNSCHEDULED_JOB_STATUSES,
+  CALL_SELECT,
 } from "./index.js";
 import {
   groupJobPhotos,
@@ -49,6 +50,7 @@ import {
   parseIntervals,
   photoPrefix,
   DEFAULT_CHECKLIST,
+  TECH_CALL_EXTRA,
 } from "./tech.js";
 
 const TENANT = "a1W7y000007AszBEAS";
@@ -617,6 +619,16 @@ test("tech helpers: the clock log, day bounds, stamped notes, the checklist gate
   assert.equal(photoPrefix("SVC1", "SC1"), "SUNDIAL/SVC1/photos/SC1/");
 });
 
+test("the tech SELECT names no field twice (Salesforce refuses a duplicate; the 2026-09-25 tech-day 500)", () => {
+  const all = `${CALL_SELECT}, ${TECH_CALL_EXTRA}`.split(",").map((s) => s.trim()).filter(Boolean);
+  const dupes = all.filter((f, i) => all.indexOf(f) !== i);
+  assert.deepEqual(dupes, [], `duplicate field(s) in the tech call query: ${dupes.join(", ")}`);
+  for (const list of [TECH_JOB_SELECT, TECH_ESTIMATE_SELECT, TECH_CUSTOMER_SELECT, CALL_SELECT]) {
+    const fields = list.split(",").map((s) => s.trim());
+    assert.equal(new Set(fields).size, fields.length, `duplicate in: ${list.slice(0, 60)}…`);
+  }
+});
+
 test("GET /service/tech/day: only my calls that day (+ anything I'm mid-way through); the board itself is off limits to a tech", async () => {
   const w = fakeWorld();
   const h = makeHandler(w, JAKE);
@@ -635,6 +647,9 @@ test("GET /service/tech/day: only my calls that day (+ anything I'm mid-way thro
   // Larry sees his own (next week, so nothing today)
   const larry = await call(makeHandler(w, LARRY), "GET", "/service/tech/day", null, { date: "2026-09-14" });
   assert.deepEqual(larry.body.calls, []);
+  // …but the phone is told where his work is (an empty day is not a broken app)
+  assert.deepEqual(larry.body.next, { date: "2026-09-20", start: "2026-09-20T16:00:00.000Z", count: 1 });
+  assert.equal(r.body.next, null, "Jake has nothing after the 14th in the fixture");
   // the dispatch board is not a tech route
   const board = await call(h, "GET", "/service/board", null, { from: "2026-09-14T07:00:00Z", to: "2026-09-15T07:00:00Z" });
   assert.equal(board.status, 403);

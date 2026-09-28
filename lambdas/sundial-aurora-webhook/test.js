@@ -31,7 +31,7 @@ function resetCtx() {
 }
 
 mock.module("../../lib/secrets.js", {
-  exports: {
+  namedExports: {
     getSecret: async (name) => {
       if (name === "sundial/aurora/webhook") {
         if (ctx.dedicatedThrows) throw new Error("ResourceNotFoundException");
@@ -43,7 +43,7 @@ mock.module("../../lib/secrets.js", {
 });
 
 mock.module("../../lib/sqs.js", {
-  exports: {
+  namedExports: {
     sendMessage: async (queueUrl, body) => {
       if (ctx.sendThrows) throw new Error(ctx.sendThrows);
       ctx.sent.push({ queueUrl, body });

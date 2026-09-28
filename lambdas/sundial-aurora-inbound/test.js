@@ -202,7 +202,7 @@ class FakeAuroraError extends Error {
 }
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     sfQuery: async (soql) => {
       ctx.soqlSeen.push(soql);
@@ -289,7 +289,7 @@ const takeOrThrow = (key) => {
 };
 
 mock.module("../../lib/aurora.js", {
-  exports: {
+  namedExports: {
     AuroraError: FakeAuroraError,
     getAgreement: async () => takeOrThrow("agreement"),
     getDesignSummary: async () => takeOrThrow("design"),
@@ -312,7 +312,7 @@ mock.module("../../lib/aurora.js", {
 });
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => ({
       from: () => ({
         insert: () => ({ select: () => ({ maybeSingle: async () => ({ data: { id: "m" }, error: null }) }) }),
@@ -322,7 +322,7 @@ mock.module("../../lib/supabase.js", {
 });
 
 mock.module("@aws-sdk/client-s3", {
-  exports: {
+  namedExports: {
     S3Client: class {
       async send(cmd) {
         if (ctx.s3Throws) throw new Error(ctx.s3Throws);
@@ -345,7 +345,7 @@ mock.module("@aws-sdk/client-s3", {
 });
 
 mock.module("./notify.js", {
-  exports: {
+  namedExports: {
     sendSignedNotification: async (args) => {
       ctx.emails.push(args);
       return ctx.emailResult;

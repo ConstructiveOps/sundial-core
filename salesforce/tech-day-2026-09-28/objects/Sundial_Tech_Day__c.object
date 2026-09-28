@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Tech_Day__c - one technician's working day (D-076, 2026-09-28): clock in for the day,
+  clock out for the day, and the note on the hours spent outside calls. A row is born by the
+  phone's "Start my day" tap OR by the first clock-in on a service call (Start_Kind__c = Call);
+  "Clock out for the day" closes it, and is refused while any of the tech's calls is still on
+  the clock. Written only by lambdas/sundial-service-board/day.js, never by a Flow.
+
+  The weekly payroll report (GET /service/payroll) is computed live from these rows plus the
+  service calls' Clock_Intervals__c: hours by job, and everything inside the day's span that
+  no call accounts for is "Time Outside Calls".
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <enableActivities>false</enableActivities>
+    <enableBulkApi>true</enableBulkApi>
+    <enableFeeds>false</enableFeeds>
+    <enableHistory>false</enableHistory>
+    <enableReports>true</enableReports>
+    <enableSearch>true</enableSearch>
+    <enableSharing>true</enableSharing>
+    <enableStreamingApi>true</enableStreamingApi>
+    <fields>
+        <fullName>Client__c</fullName>
+        <description>Tenant isolation anchor (D-034/D-035). Every Lambda query filters on this.</description>
+        <externalId>false</externalId>
+        <label>Client</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_Tenant__c</referenceTo>
+        <relationshipLabel>Tech Days</relationshipLabel>
+        <relationshipName>Sundial_Tech_Days</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Tech__c</fullName>
+        <description>The technician whose day this is (a Sundial_User__c). One row per tech per calendar day (Day_Key__c).</description>
+        <externalId>false</externalId>
+        <label>Tech</label>
+        <deleteConstraint>Restrict</deleteConstraint>
+        <referenceTo>Sundial_User__c</referenceTo>
+        <relationshipLabel>Tech Days</relationshipLabel>
+        <relationshipName>Tech_Days</relationshipName>
+        <required>true</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Work_Date__c</fullName>
+        <description>The calendar day in the tenant's timezone (America/Phoenix for Harmon). Set once, never moves.</description>
+        <externalId>false</externalId>
+        <label>Work Date</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Date</type>
+    </fields>
+    <fields>
+        <fullName>Day_Key__c</fullName>
+        <description>Idempotency key: {tech id}:{YYYY-MM-DD}. The phone's start / end / note taps upsert on it, so a replayed tap finds its own day instead of making a second one.</description>
+        <externalId>true</externalId>
+        <label>Day Key</label>
+        <length>64</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>true</unique>
+        <caseSensitive>true</caseSensitive>
+    </fields>
+    <fields>
+        <fullName>Day_Start__c</fullName>
+        <description>When the tech clocked in for the day - tapped on the phone, or set by the first clock-in on a call (a call clock-in auto-starts the day, D-076). Derived from Day_Log__c.</description>
+        <externalId>false</externalId>
+        <label>Day Start</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Day_End__c</fullName>
+        <description>When the tech clocked out for the day. Blank while the day is open. Refused while a call is still on the clock. Derived from Day_Log__c.</description>
+        <externalId>false</externalId>
+        <label>Day End</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>DateTime</type>
+    </fields>
+    <fields>
+        <fullName>Status__c</fullName>
+        <description>Open while the day has a start and no end; Closed once the tech clocked out for the day.</description>
+        <externalId>false</externalId>
+        <label>Status</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Open</fullName>
+                    <default>true</default>
+                    <label>Open</label>
+                </value>
+                <value>
+                    <fullName>Closed</fullName>
+                    <default>false</default>
+                    <label>Closed</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Start_Kind__c</fullName>
+        <description>Where the day started: Warehouse (the tap on the phone away from a call), Call (auto-started by the first clock-in on a service call), Other.</description>
+        <externalId>false</externalId>
+        <label>Start Kind</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Warehouse</fullName>
+                    <default>false</default>
+                    <label>Warehouse</label>
+                </value>
+                <value>
+                    <fullName>Call</fullName>
+                    <default>false</default>
+                    <label>Call</label>
+                </value>
+                <value>
+                    <fullName>Other</fullName>
+                    <default>false</default>
+                    <label>Other</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Start_Call__c</fullName>
+        <description>The service call whose clock-in started the day, when Start_Kind__c = Call.</description>
+        <externalId>false</externalId>
+        <label>Start Call</label>
+        <deleteConstraint>SetNull</deleteConstraint>
+        <referenceTo>Sundial_Service_Call__c</referenceTo>
+        <relationshipLabel>Started Tech Days</relationshipLabel>
+        <relationshipName>Started_Tech_Days</relationshipName>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Lookup</type>
+    </fields>
+    <fields>
+        <fullName>Start_Latitude__c</fullName>
+        <description>GPS at the day's start (null when no fix - never blocks).</description>
+        <externalId>false</externalId>
+        <label>Start Latitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Start_Longitude__c</fullName>
+        <description>GPS at the day's start.</description>
+        <externalId>false</externalId>
+        <label>Start Longitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>End_Latitude__c</fullName>
+        <description>GPS at the day's end.</description>
+        <externalId>false</externalId>
+        <label>End Latitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>End_Longitude__c</fullName>
+        <description>GPS at the day's end.</description>
+        <externalId>false</externalId>
+        <label>End Longitude</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>15</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Day_Log__c</fullName>
+        <description>Append-only JSON log of the day's events [{ kind: start|end|note, at, gps?, eventId?, via }] - the phone's own tap times and ids, so an offline replay is a no-op. Day_Start__c / Day_End__c are derived from it.</description>
+        <externalId>false</externalId>
+        <label>Day Log</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>House_Notes__c</fullName>
+        <description>The tech's end-of-day note on what the hours outside calls were spent on (parts run, shop time, training). Shown on the weekly payroll report next to the Time Outside Calls total.</description>
+        <externalId>false</externalId>
+        <label>House Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Outside_Minutes__c</fullName>
+        <description>Minutes between Day_Start__c and Day_End__c not clocked to any service call, computed when the day is closed (the payroll report recomputes it live; this is the stored copy for Salesforce reports).</description>
+        <externalId>false</externalId>
+        <label>Outside Minutes</label>
+        <precision>18</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+    <label>Tech Day</label>
+    <nameField>
+        <displayFormat>DAY-{00000}</displayFormat>
+        <label>Tech Day Number</label>
+        <type>AutoNumber</type>
+    </nameField>
+    <pluralLabel>Tech Days</pluralLabel>
+    <searchLayouts/>
+    <sharingModel>ReadWrite</sharingModel>
+    <externalSharingModel>Private</externalSharingModel>
+</CustomObject>

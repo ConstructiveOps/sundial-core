@@ -65,7 +65,7 @@ function rawCreatedReferralLine(body, overrides = {}) {
 }
 
 mock.module("../../lib/acumatica.js", {
-  exports: {
+  namedExports: {
     getAcumaticaEntity: async () => ({ ok: true, status: 200, data: ctx.lines }),
     putAcumaticaEntity: async (_entity, body) => {
       ctx.puts.push(body);
@@ -93,7 +93,7 @@ mock.module("../../lib/acumatica.js", {
   },
 });
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     sfQuery: async () => [],
     soqlEscapeString: (v) => String(v),
     sfUpdateRecord: async () => ({ ok: true }),

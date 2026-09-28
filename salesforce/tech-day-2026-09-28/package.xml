@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  tech-day-2026-09-28 (D-076) - the technician's DAY clock: Sundial_Tech_Day__c, one row per
+  tech per working day (clock in for the day, clock out for the day, the end-of-day note on the
+  hours spent outside calls), plus the integration-user permission set for it. The weekly payroll
+  report is computed live from these rows and the calls' clock logs - nothing else to deploy.
+
+  PRECONDITION: salesforce/service-objects (D-072) is deployed - Start_Call__c looks up
+  Sundial_Service_Call__c.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer Send-to,
+  NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package ->
+  CHECK ONLY first, expect 2/2 components (1 object + 1 permission set), then deploy for real.
+  Assign Sundial_Tech_Day to the integration user. No Supabase table: the board Lambda reads
+  these rows straight from Salesforce (the scheduling path is never cached, D-072 amendment 4).
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Tech_Day__c</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>Sundial_Tech_Day</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

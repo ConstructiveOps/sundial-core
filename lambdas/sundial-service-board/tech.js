@@ -1,7 +1,7 @@
 // tech.js — the technician app's backend (D-072 amendment 7, docs/pwa-architecture.md).
 // Mounted by index.js under /service/tech/*; every route needs `service.tech.self`.
 //
-//   GET  /service/tech/day?date=YYYY-MM-DD        my calls that day (+ anything I'm mid-way through)
+//   GET  /service/tech/day?date=YYYY-MM-DD        my calls that day (+ anything I'm mid-way through) + my day clock (day.js)
 //   GET  /service/tech/calls/{id}                 one call: job, clock, checklist, photos, estimate, other techs
 //   POST /service/tech/calls/{id}/status          { status, at?, gps?, eventId?, message?, textCustomer?, note? }
 //   POST /service/tech/calls/{id}/notes           { body, private?, at?, eventId? }
@@ -478,6 +478,22 @@ export function dayBounds(dateStr, timeZone) {
   return { from: localMidnightUtc(y, mo, d, timeZone).toISOString(), to: localMidnightUtc(y, mo, d + 1, timeZone).toISOString() };
 }
 
+/**
+ * The time a phone tap happened: the tap's own `at` (the offline queue replays with the
+ * original times), else now. Refused when it is in the future, more than a week old, or
+ * before the last event already in the log (`floor`).
+ */
+export function resolveEventAt(v, now, floor) {
+  if (v == null || v === "") return { at: now.toISOString() };
+  const t = Date.parse(String(v));
+  if (!Number.isFinite(t)) return { error: ["AT_INVALID", "at must be an ISO datetime."] };
+  if (t > now.getTime() + CLOCK_FUTURE_GRACE_MS) return { error: ["AT_FUTURE", "That time is in the future."] };
+  if (t < now.getTime() - CLOCK_MAX_AGE_MS) return { error: ["AT_TOO_OLD", "That time is more than a week ago — ask the office to correct it."] };
+  const at = new Date(t).toISOString();
+  if (floor && at < floor) return { error: ["AT_OUT_OF_ORDER", `That time is before the last clock event on this call (${floor}).`] };
+  return { at };
+}
+
 /** The "on my way" text. `first` = the customer's first name, `tech` = the tech's. */
 export function onMyWayText({ customerName, techFirstName, brandName, jobNumber }) {
   const first = customerName ? String(customerName).split(" ")[0] : "there";
@@ -744,17 +760,8 @@ export function createTechHandlers(d, h) {
     return point;
   }
 
-  // --- the event time -------------------------------------------------------------
-  function resolveAt(v, now, floor) {
-    if (v == null || v === "") return { at: now.toISOString() };
-    const t = Date.parse(String(v));
-    if (!Number.isFinite(t)) return { error: ["AT_INVALID", "at must be an ISO datetime."] };
-    if (t > now.getTime() + CLOCK_FUTURE_GRACE_MS) return { error: ["AT_FUTURE", "That time is in the future."] };
-    if (t < now.getTime() - CLOCK_MAX_AGE_MS) return { error: ["AT_TOO_OLD", "That time is more than a week ago — ask the office to correct it."] };
-    const at = new Date(t).toISOString();
-    if (floor && at < floor) return { error: ["AT_OUT_OF_ORDER", `That time is before the last clock event on this call (${floor}).`] };
-    return { at };
-  }
+  // --- the event time (shared with the day clock in day.js) -------------------------
+  const resolveAt = resolveEventAt;
 
   /** Close whatever the tech has open on OTHER calls (leaving for the next job). */
   async function closeOtherClocks(ctx, tech, exceptCallId, at, gps) {
@@ -799,7 +806,7 @@ export function createTechHandlers(d, h) {
       const bounds = dayBounds(date, DEFAULTS.timeZone);
       if (!bounds) return bad(cors, "DATE_INVALID", "date must be YYYY-MM-DD.");
       const me = `Tech__c = '${soqlEscapeString(tech.Id)}'`;
-      const [day, active, unscheduled, upcoming] = await Promise.all([
+      const [day, active, unscheduled, upcoming, dayRow] = await Promise.all([
         loadTechCalls(`${me} AND Scheduled_Start__c >= ${h.soqlDateTime(bounds.from)} AND Scheduled_Start__c < ${h.soqlDateTime(bounds.to)}`, tenantId),
         loadTechCalls(`${me} AND Status__c IN ('En Route', 'In Progress')`, tenantId),
         loadTechCalls(`${me} AND Status__c = 'Unscheduled'`, tenantId, "CreatedDate"),
@@ -807,6 +814,8 @@ export function createTechHandlers(d, h) {
         // the phone can offer "Next: Mon Sep 28 · 3 calls" instead of a blank (2026-09-25,
         // Larry's first look at a Friday with all his work on the following Monday).
         loadTechCalls(`${me} AND Scheduled_Start__c >= ${h.soqlDateTime(bounds.to)} AND Status__c != 'Cancelled'`, tenantId),
+        // The day clock (D-076): today's row, or the one still open from an earlier date.
+        h.days ? h.days.loadDay(tech.Id, date, tenantId).catch(() => null) : null,
       ]);
       let next = null;
       if (upcoming.length) {
@@ -832,6 +841,7 @@ export function createTechHandlers(d, h) {
         unscheduled: unscheduled.map((c) => callView(c, now.toISOString())),
         next,
         activeCallId: activeCall?.id ?? null,
+        day: h.days ? h.days.view(dayRow, now.toISOString()) : null,
         serverTime: now.toISOString(),
       });
     },
@@ -978,6 +988,8 @@ export function createTechHandlers(d, h) {
         }
       }
       const after = (await loadTechCall(call.Id, tenantId)) || { ...call, ...fields };
+      // Clocking in on a call starts the tech's day when nothing has yet (D-076) — best-effort.
+      if (h.days && ["En Route", "In Progress"].includes(status) && "Clock_Intervals__c" in fields) extra.day = await h.days.autoStart({ ctx, tech, call, at, gps });
       await h.act(ctx, {
         event: EVENTS.SERVICE_CALL_CLOCK,
         recordType: "servicecall",

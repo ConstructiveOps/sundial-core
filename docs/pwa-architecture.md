@@ -29,6 +29,12 @@ Five slots on the bottom bar — **Today · Jobs · Estimates · Customers · Mo
 
 `GET /service/tech/calls/{id}` adds `otherTechs` (the job's other calls), `photos` (S3 listing of `SUNDIAL/{jobId}/photos/{callId}/`), a read-only `estimate` (number, status, total, lines with `addedByThisCall`), and `geofenceMeters`.
 
+## The day clock (D-076, 2026-09-28)
+
+The Today page's **My day** card. A day starts with "Start my day" (the warehouse tap) **or by the first clock-in on a call** — the phone never needs two taps — and ends with "Clock out for the day", which asks for the tech's note on the hours outside calls (parts runs, shop time, training) and is **refused while a call is still on the clock** (`409 DAY_CALL_OPEN`; the button is disabled with the reason). A closed day shows its span and note; the note can be edited (latest wins) and "Start again" reopens the day. Server side: `Sundial_Tech_Day__c`, one row per tech per day, an append-only `Day_Log__c` with the taps' own times and ids (`day.js`). The weekly payroll report (`/service/payroll`, Admins) is computed from these rows and the calls' clock logs: hours by job, and the day's span minus its call time as **Time Outside Calls**, with the note beside it.
+
+Offline: a day tap is queue kind `day` (`callId = DAY_ID`). A day **end** waits for anything queued ahead of it — a call clock-out still in the queue must land first or the server would refuse the end.
+
 ## The clock
 
 One append-only log per call in `Clock_Intervals__c`:

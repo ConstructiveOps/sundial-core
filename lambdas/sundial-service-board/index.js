@@ -56,6 +56,7 @@ import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJso
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
+import { createDayHandlers } from "./day.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
 
@@ -300,7 +301,13 @@ const ROUTES = [
   ["POST", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoPresign"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/photos\/?$/, "techJobPhotos"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/files\/?$/, "techJobFiles"],
-  // The technician app (tech.js). Order matters: "photos/confirm" before "photos".
+  // The techs' last clocked spots for the dispatch map, and the Admin payroll report (day.js, D-076).
+  ["GET", /^\/service\/techs\/locations\/?$/, "techLocations"],
+  ["GET", /^\/service\/payroll\/?$/, "payroll"],
+  // The technician app (tech.js). Order matters: "photos/confirm" before "photos", "day/start" before "day".
+  ["POST", /^\/service\/tech\/day\/start\/?$/, "techDayStart"],
+  ["POST", /^\/service\/tech\/day\/end\/?$/, "techDayEnd"],
+  ["POST", /^\/service\/tech\/day\/note\/?$/, "techDayNote"],
   ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
   ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
   ["GET", /^\/service\/tech\/jobs\/?$/, "techJobs"],
@@ -340,6 +347,11 @@ const ACTION_FOR = Object.freeze({
   techJobPhotos: "service.tech.read",
   techJobFiles: "service.tech.read",
   techDay: "service.tech.self",
+  techDayStart: "service.tech.self",
+  techDayEnd: "service.tech.self",
+  techDayNote: "service.tech.self",
+  techLocations: "service.board.read",
+  payroll: "service.payroll.read", // Admin / Executive only (lib/access.js ACTION_LEVELS)
   techPriceBook: "service.tech.self",
   techCall: "service.tech.self",
   techStatus: "service.tech.self",
@@ -870,12 +882,16 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, cors, { success: true, call: shaped, jobStatusChanged, ...notify });
     },
   };
+  // The day clock + locations + payroll (day.js); the tech handlers get its `ops` so a call
+  // clock-in can start the day and GET /service/tech/day can report it.
+  const days = createDayHandlers(d, { CALL_SF_OBJECT, CALL_SELECT, DEFAULTS, loadTech, loadTechs, soqlDateTime, jsonResponse, bad, sfError });
+  Object.assign(H, days.handlers);
   Object.assign(
     H,
     createTechHandlers(d, {
       CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
       callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier,
-      jsonResponse, bad, notFound, sfError, notesDeps,
+      jsonResponse, bad, notFound, sfError, notesDeps, days: days.ops,
     })
   );
   H.techJobPhotos = H.jobPhotos; // the tech's route: same handler, different action gate

@@ -79,7 +79,7 @@ resetCtx();
 // Module mocks
 // ---------------------------------------------------------------------------
 mock.module("../../lib/identity.js", {
-  exports: {
+  namedExports: {
     resolveIdentity: async () => {
       if (ctx.identityError) throw ctx.identityError;
       return ctx.identity;
@@ -89,7 +89,7 @@ mock.module("../../lib/identity.js", {
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     // Real escaping — a test that produced a quote-breaking value should not pass.
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     sfQuery: async (soql) => {
@@ -143,7 +143,7 @@ function supabaseStub() {
 }
 
 mock.module("../../lib/email.js", {
-  exports: {
+  namedExports: {
     isEmailConfigured: () => ctx.emailConfigured,
     sendEmail: async (msg) => {
       ctx.emails.push(msg);
@@ -153,7 +153,7 @@ mock.module("../../lib/email.js", {
 });
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => supabaseStub(),
     getSupabaseConfig: async () => ({ url: "https://x.supabase.co", serviceRoleKey: "svc" }),
   },

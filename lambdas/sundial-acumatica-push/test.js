@@ -55,7 +55,7 @@ function resetCtx() {
 }
 
 mock.module("../../lib/acumatica.js", {
-  exports: {
+  namedExports: {
     putAcumaticaEntity: async (entity, body) => {
       ctx.puts.push({ entity, body });
       if (entity === "Customer") {
@@ -104,7 +104,7 @@ mock.module("../../lib/acumatica.js", {
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     getSalesforceToken: async () => ({ access_token: "t", instance_url: "https://sf.test" }),
     sfQuery: async (soql) => {
       const object = /FROM\s+(\w+)/.exec(soql)?.[1];
@@ -115,13 +115,13 @@ mock.module("../../lib/salesforce.js", {
 });
 
 mock.module("../../lib/identity.js", {
-  exports: {
+  namedExports: {
     resolveIdentity: async () => ({ tenantId: "a0X000000000001", accessLevel: "admin" }),
   },
 });
 
 mock.module("../../lib/access-enforce.js", {
-  exports: {
+  namedExports: {
     alwaysEnforcedAccess: (identity) => identity,
     assertAction: () => null, // allowed
   },

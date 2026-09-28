@@ -258,11 +258,11 @@ const RECORDING_URL = "https://recordings.retellai.com/call_abc123.wav";
 // Module mocks
 // ---------------------------------------------------------------------------
 mock.module("../../lib/secrets.js", {
-  exports: { getSecret: async () => ctx.secret, clearSecretCache: () => {} },
+  namedExports: { getSecret: async () => ctx.secret, clearSecretCache: () => {} },
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     describeObject: async () => ({ fields: ctx.describeFields }),
     sfQuery: async (soql) => {
@@ -343,7 +343,7 @@ function s3Command(op) {
 }
 
 mock.module("@aws-sdk/client-s3", {
-  exports: {
+  namedExports: {
     PutObjectCommand: s3Command("PutObject"),
     HeadObjectCommand: s3Command("HeadObject"),
     CopyObjectCommand: s3Command("CopyObject"),
@@ -419,14 +419,14 @@ mock.module("@aws-sdk/client-s3", {
 });
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => supabaseStub(),
     getSupabaseConfig: async () => ({ url: SUPABASE_URL, serviceRoleKey: "svc-key" }),
   },
 });
 
 mock.module("../../lib/realtime.js", {
-  exports: {
+  namedExports: {
     recordChannel: (t, o, id) => `tenant:${t}:${o}:${id}`,
     broadcast: async (channel, eventName, payload) => {
       ctx.broadcasts.push({ channel, eventName, payload });

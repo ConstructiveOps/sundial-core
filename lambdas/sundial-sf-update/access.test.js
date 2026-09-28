@@ -56,11 +56,11 @@ function reset() {
 }
 
 mock.module("../../lib/identity.js", {
-  exports: { resolveIdentity: async () => ctx.identity },
+  namedExports: { resolveIdentity: async () => ctx.identity },
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     getSalesforceToken: async () => ({
       access_token: "tok",
@@ -79,7 +79,7 @@ mock.module("../../lib/salesforce.js", {
 });
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => ({
       from: () => ({
         update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),

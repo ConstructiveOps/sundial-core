@@ -99,11 +99,11 @@ resetCtx();
 // Module mocks
 // ---------------------------------------------------------------------------
 mock.module("../../lib/secrets.js", {
-  exports: { getSecret: async () => ctx.secret, clearSecretCache: () => {} },
+  namedExports: { getSecret: async () => ctx.secret, clearSecretCache: () => {} },
 });
 
 mock.module("../../lib/email.js", {
-  exports: {
+  namedExports: {
     isEmailConfigured: () => ctx.emailConfigured,
     sendEmail: async (msg) => {
       ctx.sent.push(msg);
@@ -181,7 +181,7 @@ function supabaseStub() {
 }
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => supabaseStub(),
     getSupabaseConfig: async () => ({ url: "https://x.supabase.co", serviceRoleKey: "svc" }),
   },

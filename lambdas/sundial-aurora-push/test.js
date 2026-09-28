@@ -139,7 +139,7 @@ function fullCustomer(overrides = {}) {
 
 // --- module mocks (registered once, at top level so they persist) ------------
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     sfQuery: async (soql) => {
       ctx.soqlSeen.push(soql);
@@ -153,7 +153,7 @@ mock.module("../../lib/salesforce.js", {
 });
 
 mock.module("../../lib/identity.js", {
-  exports: {
+  namedExports: {
     resolveIdentity: async () => {
       if (ctx.identityError) throw ctx.identityError;
       return ctx.identity;
@@ -162,7 +162,7 @@ mock.module("../../lib/identity.js", {
 });
 
 mock.module("../../lib/secrets.js", {
-  exports: {
+  namedExports: {
     getSecret: async () => ({
       base_url: "https://api.aurorasolar.com/v1",
       tenant_id: "aurora-tenant-uuid",
@@ -172,7 +172,7 @@ mock.module("../../lib/secrets.js", {
 });
 
 mock.module("../../lib/email.js", {
-  exports: {
+  namedExports: {
     isEmailConfigured: () => ctx.emailConfigured,
     sendEmail: async (msg) => {
       ctx.emailsSent.push(msg);

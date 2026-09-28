@@ -92,14 +92,14 @@ class Q {
 }
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => ({ from: (t) => new Q(t) }),
     getSupabaseConfig: async () => ({ url: "https://x.supabase.co", serviceRoleKey: "k" }),
   },
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     getSalesforceToken: async () => ({ access_token: "t", instance_url: "https://i" }),
     // Answers "which of these ids still exist" from ctx.sfLive, ALWAYS returning
     // the 18-char form the way Salesforce does.

@@ -77,11 +77,11 @@ function identityFor(accessLevel, { userId = REP_A, dealer = { id: DEALER, activ
 // --- module mocks ----------------------------------------------------------
 
 mock.module("../../lib/identity.js", {
-  exports: { resolveIdentity: async () => ctx.identity },
+  namedExports: { resolveIdentity: async () => ctx.identity },
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     getSalesforceToken: async () => ({
       access_token: "tok",
@@ -109,7 +109,7 @@ for (const [name, value] of Object.entries(realAccess)) {
     return value(...args);
   };
 }
-mock.module("../../lib/access.js", { exports: accessMock });
+mock.module("../../lib/access.js", { namedExports: accessMock });
 
 /**
  * Chainable PostgREST stand-in.
@@ -230,7 +230,7 @@ function orMatches(group, row) {
 }
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => ({ from: (t) => makeQueryBuilder(t) }),
     getSupabaseConfig: async () => ({
       url: "https://supa.example.co",

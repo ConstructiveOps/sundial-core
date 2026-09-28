@@ -52,6 +52,7 @@ import {
   DEFAULT_CHECKLIST,
   TECH_CALL_EXTRA,
 } from "./tech.js";
+import { DAY_SELECT, buildPayroll, dayFields, dayFromLog, lastLocations, parseDayLog, unionMs, weekBounds, weekMonday } from "./day.js";
 
 const TENANT = "a1W7y000007AszBEAS";
 const OTHER = "a1W7y000007OTHERAS";
@@ -94,6 +95,7 @@ function fakeWorld() {
       { Id: "LIN000000000000001", Client__c: TENANT, Estimate__c: "EST000000000000003", Description__c: "Diagnostic", Kind__c: "Labor", Quantity__c: 1, Unit_Price__c: 150, Line_Total__c: 150, Stage__c: "Approved", Sort_Order__c: 10 },
       { Id: "LIN000000000000002", Client__c: TENANT, Estimate__c: "EST000000000000003", Description__c: "Breaker 20A", Kind__c: "Material", Quantity__c: 2, Unit_Price__c: 150, Line_Total__c: 300, Stage__c: "Proposed", Sort_Order__c: 20, Added_By_Service_Call__c: "SC0000000000000001" },
     ],
+    Sundial_Tech_Day__c: [],
     Sundial_Price_Book_Item__c: [
       { Id: "PBI000000000000001", Client__c: TENANT, Name: "Breaker 20A single pole", Item_Code__c: "BRK-20", Kind__c: "Material", Is_Active__c: true, Price__c: 45, Unit_of_Measure__c: "Each", Default_Quantity__c: 1 },
       { Id: "PBI000000000000002", Client__c: TENANT, Name: "Diagnostic hour", Item_Code__c: "LAB-DIAG", Kind__c: "Labor", Is_Active__c: true, Price__c: 150, Unit_of_Measure__c: "Hour", Description__c: "Troubleshooting time, first hour" },
@@ -124,16 +126,18 @@ function fakeWorld() {
     let m;
     if ((m = c.match(/^([\w.]+) = '(.*)'$/))) return String(rec[m[1]] ?? "") === m[2];
     if ((m = c.match(/^([\w.]+) != '(.*)'$/))) return String(rec[m[1]] ?? "") !== m[2];
+    if ((m = c.match(/^(\w+) != null$/))) return rec[m[1]] !== null && rec[m[1]] !== undefined;
+    if ((m = c.match(/^(\w+) = null$/))) return rec[m[1]] === null || rec[m[1]] === undefined;
     if ((m = c.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
     if ((m = c.match(/^(\w+) NOT IN \((.*)\)$/))) return !m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) IN \((.*)\)$/))) return m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) INCLUDES \('(.*)'\)$/))) return String(rec[m[1]] ?? "").split(";").includes(m[2]);
     if ((m = c.match(/^\((.*)\)$/)) && m[1].includes(" OR ")) return m[1].split(" OR ").some((sub) => cond(rec, sub));
     if ((m = c.match(/^([\w.]+) LIKE '%(.*)%'$/))) return String(rec[m[1]] ?? "").toLowerCase().includes(m[2].toLowerCase());
-    if ((m = c.match(/^(\w+) (>=|<) (\S+)$/))) {
+    if ((m = c.match(/^(\w+) (>=|<=|<) (\S+)$/))) {
       const v = Date.parse(rec[m[1]] ?? "");
       const lit = Date.parse(m[3]);
-      return m[2] === ">=" ? v >= lit : v < lit;
+      return m[2] === ">=" ? v >= lit : m[2] === "<=" ? v <= lit : v < lit;
     }
     throw new Error(`fake SOQL cannot evaluate: ${c}`);
   }
@@ -152,8 +156,8 @@ function fakeWorld() {
     const obj = soql.match(/FROM (\w+)/)[1];
     let where = (soql.split(" WHERE ")[1] || "").replace(/\s+(ORDER BY|LIMIT).*$/, "").trim();
     let rows = store[obj].filter((r) => (where ? where.split(" AND ").every((c) => cond(r, c)) : true));
-    const order = soql.match(/ORDER BY (\w+)/);
-    if (order) rows = [...rows].sort((a, b) => String(a[order[1]] ?? "").localeCompare(String(b[order[1]] ?? "")));
+    const order = soql.match(/ORDER BY (\w+)( DESC)?/);
+    if (order) rows = [...rows].sort((a, b) => String(a[order[1]] ?? "").localeCompare(String(b[order[1]] ?? "")) * (order[2] ? -1 : 1));
     const lim = soql.match(/LIMIT (\d+)/);
     if (lim) rows = rows.slice(0, Number(lim[1]));
     return rows.map((r) => join(obj, r));
@@ -1134,7 +1138,7 @@ test("GET/POST /service/calls/{id}/clock: the office closes a forgotten clock, t
 test("tech SELECTs only name fields that exist in the object metadata", () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const root = join(here, "..", "..", "salesforce");
-  const dirs = ["service-objects", "service-delta-2026-09-15"].map((d) => join(root, d, "objects"));
+  const dirs = ["service-objects", "service-delta-2026-09-15", "tech-day-2026-09-28"].map((d) => join(root, d, "objects"));
   const fieldsOf = (obj) => {
     const found = new Set();
     for (const d of dirs) {
@@ -1148,6 +1152,7 @@ test("tech SELECTs only name fields that exist in the object metadata", () => {
   for (const [obj, select] of [
     ["Sundial_Service_Job__c", TECH_JOB_SELECT],
     ["Sundial_Estimate__c", TECH_ESTIMATE_SELECT],
+    ["Sundial_Tech_Day__c", DAY_SELECT], // D-076: the day clock's own package
   ]) {
     const have = fieldsOf(obj);
     assert.ok(have.size > 10, `${obj}: metadata not found under salesforce/`);
@@ -1215,4 +1220,174 @@ test("job photos: grouped by call (office at the top), the office adds at the to
   const rep = makeHandler(w, { user: { id: "USR000000000000003" }, access: { scope: "own", level: "Sales Rep", tenantId: TENANT, userId: "USR000000000000003", dealerId: "DLR000000000000001" } });
   assert.equal((await call(rep, "GET", `/service/tech/jobs/${jobId}/files`)).status, 403);
   assert.equal((await call(office, "GET", "/service/jobs/SVC000000000000099/photos")).status, 404);
+});
+
+// ---------------------------------------------------------------------------
+// The day clock, the techs' locations, the payroll report (D-076, day.js)
+// ---------------------------------------------------------------------------
+
+test("day helpers: weeks are Mon–Sun, spans union, the log derives the day, the report buckets hours by job and outside calls", () => {
+  assert.equal(weekMonday("2026-09-14"), "2026-09-14"); // a Monday
+  assert.equal(weekMonday("2026-09-20"), "2026-09-14"); // the Sunday after it
+  assert.equal(weekMonday("2026-09-21"), "2026-09-21");
+  assert.equal(weekMonday("2026-13-01"), null);
+  const wk = weekBounds("2026-09-14", "America/Phoenix");
+  assert.deepEqual([wk.monday, wk.sunday, wk.from, wk.to], ["2026-09-14", "2026-09-20", "2026-09-14T07:00:00.000Z", "2026-09-21T07:00:00.000Z"]);
+  assert.equal(unionMs([[0, 10], [5, 15], [20, 25]]), 20);
+
+  const log = parseDayLog(JSON.stringify([{ kind: "start", at: "2026-09-14T13:00:00.000Z", gps: { lat: 33.6, lng: -111.9 }, eventId: "d1" }, { kind: "note", at: "2026-09-14T23:00:00.000Z", note: "parts run" }, { kind: "end", at: "2026-09-14T23:30:00.000Z", eventId: "d2" }]));
+  const dd = dayFromLog(log);
+  assert.equal(dd.start.at, "2026-09-14T13:00:00.000Z");
+  assert.equal(dd.end.at, "2026-09-14T23:30:00.000Z");
+  const f = dayFields(log);
+  assert.equal(f.Status__c, "Closed");
+  assert.equal(f.House_Notes__c, "parts run");
+  assert.equal(f.Start_Latitude__c, 33.6);
+  assert.equal(f.End_Latitude__c, null);
+  // a start after the end reopens the day
+  assert.equal(dayFields([...log, { kind: "start", at: "2026-09-15T01:00:00.000Z" }]).Status__c, "Open");
+
+  // The report: Jake worked 8:00–16:30 Phoenix on Monday (13:00Z–23:30Z), two calls on two jobs
+  // (90 min on SVC-00003 with drive time, 60 min on SVC-00001), a call that crosses midnight
+  // Sunday→Monday, and Tuesday with call time but no day row.
+  const techs = [{ id: "T1", name: "Jake" }, { id: "T2", name: "Idle" }];
+  const days = [{ Tech__c: "T1", Work_Date__c: "2026-09-14", Day_Start__c: "2026-09-14T13:00:00.000Z", Day_End__c: "2026-09-14T23:30:00.000Z", Start_Kind__c: "Warehouse", House_Notes__c: "parts run" }];
+  const job = (Id, Name, cust) => ({ Id, Name, Customer_Name_at_Creation__c: cust });
+  const calls = [
+    { Id: "C1", Tech__c: "T1", Sundial_Service_Job__c: "J3", Sundial_Service_Job__r: job("J3", "SVC-00003", "Cy"), Clock_Intervals__c: JSON.stringify([{ in: "2026-09-14T14:59:00.000Z", out: "2026-09-14T16:29:00.000Z", kind: "en_route", arrived: "2026-09-14T15:20:00.000Z", ids: [] }]) },
+    { Id: "C2", Tech__c: "T1", Sundial_Service_Job__c: "J1", Sundial_Service_Job__r: job("J1", "SVC-00001", "Ann"), Clock_Intervals__c: JSON.stringify([{ in: "2026-09-14T17:00:00.000Z", out: "2026-09-14T18:00:00.000Z", kind: "on_site", ids: [] }, { in: "2026-09-14T20:00:00.000Z", out: "2026-09-14T20:30:00.000Z", kind: "on_site", ids: [], removed: { at: "x", by: "y", reason: "z" } }]) },
+    { Id: "C3", Tech__c: "T1", Sundial_Service_Job__c: "J1", Sundial_Service_Job__r: job("J1", "SVC-00001", "Ann"), Clock_Intervals__c: JSON.stringify([{ in: "2026-09-14T06:30:00.000Z", out: "2026-09-14T07:30:00.000Z", kind: "on_site", ids: [] }]) }, // Sunday 23:30 → Monday 00:30 Phoenix
+    { Id: "C4", Tech__c: "T1", Sundial_Service_Job__c: "J3", Sundial_Service_Job__r: job("J3", "SVC-00003", "Cy"), Clock_Intervals__c: JSON.stringify([{ in: "2026-09-15T15:00:00.000Z", out: "2026-09-15T17:00:00.000Z", kind: "on_site", ids: [] }]) }, // Tuesday, no day row
+  ];
+  const rep = buildPayroll({ techs, days, calls, week: wk, timeZone: "America/Phoenix", now: "2026-09-16T12:00:00.000Z" });
+  const jake = rep.techs[0];
+  assert.deepEqual(jake.jobs.map((j) => [j.jobNumber, j.minutes, j.calls]), [["SVC-00003", 210, 2], ["SVC-00001", 90, 2]]); // 90 + 120; 60 + the 30 min of C3 inside the week (removed interval ignored)
+  const mon = jake.days.find((x) => x.date === "2026-09-14");
+  assert.equal(mon.callMinutes, 180, "Monday: 30 (C3 after midnight) + 90 + 60");
+  assert.equal(mon.spanMinutes, 630);
+  assert.equal(mon.outsideMinutes, 480, "10.5 h span minus the 150 min of calls inside it");
+  assert.equal(mon.note, "parts run");
+  const tue = jake.days.find((x) => x.date === "2026-09-15");
+  assert.equal(tue.flag, "no_day_clock");
+  assert.equal(tue.outsideMinutes, 0);
+  assert.equal(jake.totals.callMinutes, 300);
+  assert.equal(jake.totals.outsideMinutes, 480);
+  assert.equal(jake.totals.totalHours, 13);
+  assert.equal(jake.totals.outsideHours, 8);
+  assert.deepEqual(rep.techs[1].jobs, []);
+  assert.deepEqual(rep.techs[1].days, []);
+  assert.equal(rep.totals.totalMinutes, 780);
+  // a forgotten clock-out on a past day ends at the last call clock-out of that day
+  const forgot = buildPayroll({ techs: [techs[0]], days: [{ ...days[0], Day_End__c: null }], calls, week: wk, timeZone: "America/Phoenix", now: "2026-09-16T12:00:00.000Z" }).techs[0].days[0];
+  assert.equal(forgot.flag, "no_clock_out");
+  assert.equal(forgot.end, "2026-09-14T18:00:00.000Z");
+  assert.equal(forgot.outsideMinutes, 150, "13:00→18:00 is 300 min, 150 of them on calls");
+
+  // last locations: the newest GPS-bearing event wins, day rows included
+  const spots = lastLocations({ techs, calls: [{ Id: "C9", Name: "SC-9", Tech__c: "T1", Sundial_Service_Job__c: "J3", Sundial_Service_Job__r: job("J3", "SVC-00003", "Cy"), Clock_Intervals__c: JSON.stringify([{ in: "2026-09-14T14:59:00.000Z", in_gps: { lat: 1, lng: 1 }, arrived: "2026-09-14T15:20:00.000Z", arrived_gps: { lat: 2, lng: 2 }, out: "2026-09-14T16:29:00.000Z", out_gps: { lat: 3, lng: 3 }, kind: "en_route", ids: [] }]) }], days: [{ Tech__c: "T1", Day_Start__c: "2026-09-14T13:00:00.000Z", Start_Latitude__c: 9, Start_Longitude__c: 9 }] });
+  assert.deepEqual(spots[0].gps, { lat: 3, lng: 3 });
+  assert.equal(spots[0].kind, "clock_out");
+  assert.equal(spots[0].jobNumber, "SVC-00003");
+  assert.equal(spots[1].gps, null);
+});
+
+test("the day clock on the phone: a call clock-in starts the day; clocking out for the day is refused while a call is open; the note lands on the report; Admin-only payroll", async () => {
+  const w = fakeWorld();
+  const h = makeHandler(w, JAKE);
+  const id = "SC0000000000000001";
+  const dayRow = () => w.store.Sundial_Tech_Day__c.find((r) => r.Day_Key__c === "USR000000000000001:2026-09-14");
+
+  // nothing yet
+  let r = await call(h, "GET", "/service/tech/day", null, { date: "2026-09-14" });
+  assert.equal(r.body.day.state, "none");
+  // ending a day that never started
+  r = await call(h, "POST", "/service/tech/day/end", { eventId: "de-0" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "DAY_NOT_STARTED");
+
+  // clocking in on the call starts the day (Start_Kind Call)
+  r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "In Progress", at: "2026-09-14T14:59:00Z", gps: { lat: 33.4486, lng: -112.0741 }, eventId: "ev-1" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.day.state, "open");
+  assert.equal(r.body.day.startKind, "Call");
+  assert.equal(dayRow().Start_Call__c, id);
+  assert.equal(dayRow().Day_Start__c, "2026-09-14T14:59:00.000Z");
+  assert.equal(dayRow().Start_Latitude__c, 33.4486);
+  // a second "start my day" tap is a no-op, not a second row
+  r = await call(h, "POST", "/service/tech/day/start", { at: "2026-09-14T15:00:00Z", eventId: "ds-1" });
+  assert.equal(r.body.alreadyStarted, true);
+  assert.equal(w.store.Sundial_Tech_Day__c.length, 1);
+
+  // clock out for the day while the call is on the clock → refused, naming the call
+  w.now = new Date("2026-09-14T16:30:00Z");
+  r = await call(h, "POST", "/service/tech/day/end", { at: "2026-09-14T16:30:00Z", eventId: "de-1" });
+  assert.equal(r.status, 409, JSON.stringify(r.body));
+  assert.equal(r.body.code, "DAY_CALL_OPEN");
+  assert.equal(r.body.jobNumber, "SVC-00003");
+  assert.ok(!dayRow().Day_End__c);
+
+  // finish the call (checklist done), then the day ends with the house note
+  const rec = w.store.Sundial_Service_Call__c.find((c) => c.Id === id);
+  Object.assign(rec, { Work_Notes__c: "done", Photos_Count__c: 1, Checklist_State__c: JSON.stringify({ walkthrough: { done: true, at: "x" }, tools: true }) });
+  r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "Complete", at: "2026-09-14T16:29:00Z", gps: { lat: 33.4486, lng: -112.0741 }, eventId: "ev-3" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.day, undefined, "a clock-out does not touch the day");
+  w.now = new Date("2026-09-14T23:30:00Z");
+  r = await call(h, "POST", "/service/tech/day/end", { at: "2026-09-14T23:30:00Z", gps: { lat: 33.6, lng: -111.9 }, eventId: "de-2", note: "Picked up breakers at the supply house, then shop time." });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.day.state, "closed");
+  assert.equal(r.body.day.minutes, 511, "14:59 → 23:30");
+  assert.equal(r.body.outsideMinutes, 421, "511 minus the 90 on the call");
+  assert.equal(dayRow().Status__c, "Closed");
+  assert.equal(dayRow().Outside_Minutes__c, 421);
+  assert.equal(dayRow().House_Notes__c, "Picked up breakers at the supply house, then shop time.");
+  assert.equal(dayRow().End_Longitude__c, -111.9);
+  // replayed from the offline queue → a no-op
+  r = await call(h, "POST", "/service/tech/day/end", { at: "2026-09-14T23:30:00Z", eventId: "de-2" });
+  assert.equal(r.body.duplicate, true);
+  // the note can be rewritten later (latest wins; the log keeps both)
+  r = await call(h, "POST", "/service/tech/day/note", { note: "Supply house run + shop time (inverter bench test).", date: "2026-09-14", eventId: "dn-1" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(dayRow().House_Notes__c, "Supply house run + shop time (inverter bench test).");
+  assert.equal(JSON.parse(dayRow().Day_Log__c).filter((e) => e.kind === "note").length, 2);
+  // GET /service/tech/day reports it
+  r = await call(h, "GET", "/service/tech/day", null, { date: "2026-09-14" });
+  assert.equal(r.body.day.state, "closed");
+  assert.equal(r.body.day.note, "Supply house run + shop time (inverter bench test).");
+
+  // the next morning: "Start my day" at the warehouse, no call yet
+  w.now = new Date("2026-09-15T14:00:00Z");
+  r = await call(h, "POST", "/service/tech/day/start", { at: "2026-09-15T13:58:00Z", gps: { lat: 33.6, lng: -111.9 }, eventId: "ds-2", kind: "Warehouse" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.day.state, "open");
+  assert.equal(r.body.day.startKind, "Warehouse");
+  assert.equal(w.store.Sundial_Tech_Day__c.length, 2);
+
+  // the office map: Jake's last clocked spot is the day-end at the warehouse… now superseded by this morning's start
+  const office = makeHandler(w);
+  r = await call(office, "GET", "/service/techs/locations");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const jake = r.body.techs.find((t) => t.id === "USR000000000000001");
+  assert.deepEqual([jake.location.lat, jake.location.lng, jake.location.kind], [33.6, -111.9, "day_start"]);
+  assert.equal(jake.dayOpen.date, "2026-09-15");
+  assert.equal(jake.onCall, null);
+  assert.equal(r.body.techs.find((t) => t.id === "USR000000000000002").location, null);
+  // a tech may not read it
+  assert.equal((await call(h, "GET", "/service/techs/locations")).status, 403);
+
+  // payroll: Admin sees the week; a Manager (tenant scope, not payroll) is refused; a tech is refused
+  r = await call(office, "GET", "/service/payroll", null, { week: "2026-09-16" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.week.monday, "2026-09-14");
+  const row = r.body.techs.find((t) => t.tech.id === "USR000000000000001");
+  assert.deepEqual(row.jobs.map((j) => [j.jobNumber, j.minutes, j.hours]), [["SVC-00003", 90, 1.5]]);
+  assert.equal(row.days[0].outsideMinutes, 421);
+  assert.equal(row.days[0].note, "Supply house run + shop time (inverter bench test).");
+  assert.equal(row.days[1].date, "2026-09-15");
+  assert.equal(row.days[1].open, true);
+  assert.equal(row.totals.callHours, 1.5);
+  const manager = makeHandler(w, { user: { id: "USR000000000000002", firstName: "Larry", lastName: "Ng" }, access: { scope: "tenant", level: "Manager", tenantId: TENANT, userId: "USR000000000000002" } });
+  assert.equal((await call(manager, "GET", "/service/payroll")).status, 403);
+  assert.equal((await call(h, "GET", "/service/payroll")).status, 403);
+  assert.equal((await call(office, "GET", "/service/payroll", null, { week: "soon" })).body.code, "WEEK_INVALID");
 });

@@ -70,7 +70,7 @@ function rawPo({ orderNbr, vendorId, description, project, amount, status = "Ope
 }
 
 mock.module("../../lib/acumatica.js", {
-  exports: {
+  namedExports: {
     getAcumaticaEntity: async (_entity, query) => {
       // The engine only ever filters by OrderNbr.
       const m = /OrderNbr eq '([^']*)'/.exec(query?.$filter ?? "");
@@ -135,7 +135,7 @@ mock.module("../../lib/acumatica.js", {
 // engine tries to persist — the ORDER of those calls is a tested property, not a detail.
 const sfWrites = [];
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     sfUpdateRecord: async (obj, id, fields) => {
       sfWrites.push({ obj, id, fields });
       return { ok: true };

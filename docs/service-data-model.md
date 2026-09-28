@@ -221,6 +221,10 @@ Card-on-file identity: **`Stripe_Customer_Id__c` belongs on `Sundial_Customer__c
 
 ---
 
+### 5.7 `Sundial_Tech_Day__c` (DAY-#) — the technician's day **[D-076, 2026-09-28]**
+
+One row per tech per calendar day (tenant timezone), `Day_Key__c = "{tech}:{YYYY-MM-DD}"` (external id, unique — the phone's taps upsert on it). `Day_Log__c` is the append-only JSON log (`start` / `end` / `note` events with the tap's own time, GPS and `eventId`); `Day_Start__c`, `Day_End__c`, `Status__c` (Open / Closed), the start / end lat-lng and `House_Notes__c` are derived from it. `Start_Kind__c` = Warehouse / Call / Other (+ `Start_Call__c` when a call clock-in opened the day). `Outside_Minutes__c` is stored at close for Salesforce reports only — the portal's payroll report recomputes it live from this row and the calls' `Clock_Intervals__c` (Time Outside Calls = the day's span minus the union of its call intervals). Written only by `sundial-service-board/day.js`; no cache table. Package `salesforce/tech-day-2026-09-28/`.
+
 ## 6. Where the math runs **[Recommended — amends D-065.3 for money]**
 
 Every line write goes through one Lambda route (`sundial-service-estimate`), so that Lambda recomputes the estimate's stored totals on each write (subtotal by kind → scoped discount → markup → tax on taxable lines → total → deposit amount) and writes them in the same call. Reasons over a Flow: the discount/markup/tax sequence has ordering and rounding rules that belong in tested code, offline PWA syncs replay through the same route, and the invoice freeze reuses the same function. A nightly reconcile recomputes from lines and reports drift. **Time** roll-ups (service call → job) stay on the Flow per D-065.3 — different shape, no rounding rules.

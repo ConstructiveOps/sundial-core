@@ -41,11 +41,11 @@ function resetCtx() {
 }
 
 mock.module("../../lib/identity.js", {
-  exports: { resolveIdentity: async () => ctx.identity },
+  namedExports: { resolveIdentity: async () => ctx.identity },
 });
 
 mock.module("../../lib/salesforce.js", {
-  exports: {
+  namedExports: {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     sfQuery: async (soql) => {
       ctx.soqlSeen.push(soql);
@@ -59,7 +59,7 @@ mock.module("../../lib/salesforce.js", {
 });
 
 mock.module("../../lib/supabase.js", {
-  exports: {
+  namedExports: {
     getSupabaseClient: async () => {
       if (ctx.supabaseThrows) throw new Error("supabase down");
       return {
@@ -81,7 +81,7 @@ mock.module("../../lib/supabase.js", {
 // Minimal S3 client stand-in: the commands carry their input, so the fake `send`
 // dispatches on constructor name.
 mock.module("@aws-sdk/client-s3", {
-  exports: {
+  namedExports: {
     S3Client: class {
       async send(cmd) {
         if (cmd.__type === "list") {

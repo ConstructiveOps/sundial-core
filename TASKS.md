@@ -4,6 +4,22 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## TCD lead webhook + daily report (D-077) — BUILT, NOT DEPLOYED (2026-09-29, branch `feature/tcd-lead-intake`)
+
+Runbook `docs/integrations/tcd-leads.md`. Tim's steps, in order:
+
+- [x] (1) Salesforce Setup → Object Manager → Customer → Fields: `TCD` on `Lead_Source__c` and the **`Contact_Disposition__c`** picklist (Contacted, No Answer, Left Voicemail, Wrong Number, Not Interested, Do Not Contact) — both confirmed visible to the integration user by describe, 2026-09-29. **No `Appointment_Disposition__c`**: the report uses the existing `Appointment_Outcome__c`.
+- [ ] (2) Secrets Manager → Store a new secret → Other type → **Plaintext** tab → paste `{"tcd":{"token":"<the slug you handed TCD>","tenant":"harmon"}}` → name **`sundial/lead-webhooks`**
+- [ ] (3) Lambda console → Create function **`sundial-lead-intake`** (Node 22.x, arm64, `index.handler`, role `sundial-lambda-execution-role`, 30 s, 256 MB) → Configuration → Environment variables → add `EMAIL_FROM`, `EMAIL_REPLY_TO`, `EMAIL_CONFIG_SET`, `SES_REGION` (copy the values from `sundial-service-estimate`), `TCD_REPORT_TO = ryan@thecooldown.com`, `TCD_REPORT_BCC = <a Harmon inbox>`, `TCD_REPORT_SINCE = 2026-09-29`
+- [ ] (4) PowerShell `.\deploy.ps1 sundial-lead-intake` then `.\scripts\wire-lead-intake.ps1`. Answer **y** to the prod deploy: that is also what ENABLES the 6 AM report (the rule is created disabled; a "no" prints the enable command)
+- [ ] (5) Test the intake from PowerShell: `Invoke-RestMethod -Method Post -ContentType "application/json" -Uri "<the URL>" -Body '{"first_name":"ZZ","last_name":"TCD TEST","address1":"1 Test St","city":"Phoenix","state":"AZ","zip_code":"85001","email":"tmurphy5213+tcd@gmail.com","phone":"6025550100"}'` → expect `{ ok: true, id: … }`, the record in Sales under Lead with source TCD; send the same body again → `duplicate: true`
+- [ ] (6) Lambda → Test → `{ "report": "tcd", "dryRun": true }` → read the CSV in the response; then `{ "report": "tcd" }` → the email arrives at the BCC address. The ZZ TCD TEST lead from step (5) is NOT in the CSV, by design (test records are excluded)
+- [ ] (7) Tell TCD they can send their test payload; delete the ZZ record after
+
+Follow-ups:
+- [ ] Switch `sundial-sf-query` and `sundial-cache-sync` to `lib/cache-row.js` (delete their copies) the next time each is deployed for its own reasons; `lib/cache-row.test.js` guards the copies until then
+- [ ] If duplicate TCD leads appear from same-second retries, replace the read-then-create with an upsert on an external id
+
 ## Commission burden: internal rep re-included (D-071) — BUILT, NOT DEPLOYED (2026-09-08)
 
 Branch `fix/sept-integration-tweaks`, part 3 of 3. budgetCalc 210 checks + suite 828 green.

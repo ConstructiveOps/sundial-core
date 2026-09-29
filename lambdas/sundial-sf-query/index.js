@@ -134,7 +134,7 @@ const SF_API_VERSION = "v60.0";
 // Solar prefers Contract_Date__c, falling back to CreatedDate; others use the
 // standard CreatedDate. Mirrors sundial-cache-sync. Only used when the cache table
 // has a `created_date` column.
-const CREATED_DATE_SOURCE = {
+export const CREATED_DATE_SOURCE = {
   solar: ["Sunbase_Created_Date__c", "Contract_Date__c", "CreatedDate"],
   // CUSTOMER list/board orders by MOST-RECENTLY-UPDATED (Harmon's daily working
   // set at the top). Sunbase_Last_Updated__c is the migrated Sunbase mod-date;
@@ -579,7 +579,7 @@ function extractRoute(event) {
 const DESCRIBE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const rawDescribeCache = new Map(); // sfObject -> { meta, at }
 const describeCache = new Map(); // sfObject -> { fields:[{name,type}] } (derived)
-const EXCLUDED_FIELD_TYPES = new Set(["address", "location", "base64"]);
+export const EXCLUDED_FIELD_TYPES = new Set(["address", "location", "base64"]);
 
 async function getRawDescribe(sfObject) {
   const cached = rawDescribeCache.get(sfObject);
@@ -655,7 +655,7 @@ async function getCacheColumns(table) {
 // Derive a cache column name from a Salesforce field. Reference (lookup) fields
 // map to "<name>_sf_id"; others lowercase the API name minus the __c suffix.
 // Only columns that actually exist in the cache table are written.
-function sfFieldToColumn(field) {
+export function sfFieldToColumn(field) {
   let base = field.name.replace(/__c$/i, "").toLowerCase();
   if (field.type === "reference") base += "_sf_id";
   return base;
@@ -673,7 +673,7 @@ function sfFieldToColumn(field) {
 //     and then dropped, and
 //   - the SELECT tracks the (narrow) cache schema, so an object's total field
 //     count no longer matters — nothing is truncated by an arbitrary cap.
-function buildCacheSelect(fields, columnSet, createdDateSources) {
+export function buildCacheSelect(fields, columnSet, createdDateSources) {
   const REQUIRED = new Set(["Id", "Client__c"]);
   const selectFields = fields.filter(
     (f) => REQUIRED.has(f.name) || columnSet.has(sfFieldToColumn(f))
@@ -706,7 +706,7 @@ function buildCacheSelect(fields, columnSet, createdDateSources) {
   };
 }
 
-function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
+export function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
   const row = {};
   for (const f of fields) {
     if (f.name === "Id") continue; // -> sf_id (control column below)

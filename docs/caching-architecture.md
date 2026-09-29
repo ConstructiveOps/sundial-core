@@ -66,6 +66,10 @@ The portal frontend never knows whether a response came from cache or Salesforce
 
 If the Salesforce write fails, the cache is not updated and the user sees the error. No partial writes.
 
+### A create that writes its own row — `lib/cache-row.js` (2026-09-29, D-077)
+
+The portal's `POST /sf/customer` writes no cache row (a known limitation in `sundial-sf-update`), so a new record normally reaches the cache through `sundial-cache-sync` or the list read's cold-cache fallback. `sundial-lead-intake` does better, because a TCD lead must be in Sales straight away. After the create it reads the record back (tenant-filtered) and upserts its row through `lib/cache-row.js`. That module is the SF-record → cache-row mapper moved out of `sundial-sf-query`. Only the intake uses it so far: sf-query and cache-sync keep their own copies until they are switched over (TASKS.md), and `lib/cache-row.test.js` fails if the lib and sf-query's copy ever map a record differently. The write is best-effort; a failure leaves the record to the sync.
+
 ### Salesforce Platform Events for Out-of-Band Changes
 
 The cache stays in sync with Salesforce when changes happen outside the portal (via Salesforce Flow, admin edits, Zapier integrations, the Acumatica integration writing back). The mechanism:

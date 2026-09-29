@@ -788,6 +788,21 @@ A failed holding-object delete is **not** a failed match — the bytes are attac
 - Updates Supabase cache
 - Broadcasts via Realtime to connected clients
 
+#### `POST /webhooks/leads/tcd/{token}` (public, 2026-09-29, D-077)
+
+**Lambda:** `sundial-lead-intake` · **Runbook:** `docs/integrations/tcd-leads.md`
+**Purpose:** The Cool Down's website POSTs a lead; Sundial creates a `Sundial_Customer__c` (Lead / `New` / Solar / Lead Source `TCD`, no sales rep) and writes its cache row so it is in Sales at once.
+
+**Authentication:** none by design. TCD cannot sign requests, so the only guard is `{token}`, a long random slug compared constant-time to `sundial/lead-webhooks` → `tcd.token`. The tenant comes from `tcd.tenant` in the same secret. A wrong or missing slug (and `POST /webhooks/leads/tcd` with no slug) is a **bare 404 with an empty body**, checked before anything else. Throttled at the stage to 5 rps / burst 10; body ≤ 16 KB and `application/json` only (Lambda-enforced).
+
+**Body:** `first_name`, `last_name`, `address1` (alias `address` / `street`), `city`, `state`, `zip_code` (alias `zip` / `postal_code`), `email`, `phone`, all strings; anything else is ignored. Required: `email` or `phone`, and `first_name` or `last_name`.
+
+**Responses:** `200 { ok, id }` created · `200 { ok, id, duplicate: true }` same email (else phone) in the tenant within 30 days (read-then-create; a same-second retry can double-create — accepted, see the runbook) · `400 missing_fields` names the requirement, never a value · `404` empty · `413` · `415` · `502 upstream_error` on a Salesforce failure (TCD retries; one masked log line).
+
+**Also on this Lambda (not an HTTP route):** EventBridge `sundial-tcd-daily-report`, `cron(0 13 * * ? *)` = 6:00 AM Arizona, input `{ "report": "tcd" }` — the cumulative cohort CSV emailed to `TCD_REPORT_TO`, with test records (`Last_Name__c` / `Name` starting `ZZ`) excluded. The rule is created disabled and enabled only by the wiring script's prod-deploy "y". `{ "report": "tcd", "dryRun": true }` returns the CSV without sending.
+
+**Tests:** `lambdas/sundial-lead-intake/test.js` (20), `lib/cache-row.test.js` (4).
+
 ---
 
 ## Path Variable Notes
@@ -825,6 +840,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
 | `sundial-comment-notify` | POST /webhooks/comment-mention (called by Postgres via pg_net) |
 | `sundial-acumatica-webhook` | POST /webhooks/acumatica |
+| `sundial-lead-intake` | POST /webhooks/leads/tcd/{token}, POST /webhooks/leads/tcd (bare 404) — public, URL-slug gated (D-077); **also** EventBridge `sundial-tcd-daily-report` |
 
 Lambda functions not exposed through API Gateway:
 

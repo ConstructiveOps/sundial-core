@@ -68,6 +68,7 @@ All third-party costs (Salesforce licenses, AWS, Supabase, Vercel, FullCalendar 
 | Salesforce-side File Access | XFiles Pro | Reads from the same S3 bucket so admin users see Sundial files inside Salesforce natively |
 | Document Mirror | Dropbox (Harmon's existing) | Automated copy-back from S3 for data ownership |
 | Lead Intake Routing | Zapier | Aurora and Roofr webhooks create Sundial records (handled by Tim, not in build scope) |
+| Direct Lead Webhooks | `sundial-lead-intake` (D-077) | A vendor POSTs leads straight to us: `POST /webhooks/leads/{source}/{token}`, **the URL slug is the only credential** (constant-time vs Secrets Manager `sundial/lead-webhooks`, which also pins the tenant; wrong slug = bare empty 404; never in code or logs). First vendor The Cool Down (TCD), plus its 6 AM Arizona cohort CSV. Runbook `docs/integrations/tcd-leads.md` |
 | Payments | Stripe | Service payments (D-072 amendment 8), Service Club subscriptions (D-073) |
 | SMS | Twilio (under the hood, not branded in client docs) | Customer texting from the job page (`sundial-sms`, built 2026-09-15); appointment reminders next |
 | Email | SendGrid or Salesforce email | Customer comms, automated notifications |
@@ -568,7 +569,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 - `docs/acumatica-integration.md` — API endpoints, payloads, queue config (create when Acumatica work starts)
 - `docs/service-workflows.md` — Service ticket lifecycle, intake patterns, dispatch logic
 - `docs/migration.md` — Sunbase, HCP, and Dropbox migration plans
-- `docs/integrations/` — One file per external system (acumatica, stripe, dropbox-sync, xfiles-pro, sitecapture). Written so far: `aurora-api-reference.md`, `aurora-inbound.md`, `acumatica-budget-push.md`, `budget-recalc-relay.md`, `auth-email-ses.md`, `retell-welcome-call.md`, `sms-twilio.md`, `stripe.md`, `service-club.md`, `push-notifications.md`
+- `docs/integrations/` — One file per external system (acumatica, stripe, dropbox-sync, xfiles-pro, sitecapture). Written so far: `aurora-api-reference.md`, `aurora-inbound.md`, `acumatica-budget-push.md`, `budget-recalc-relay.md`, `auth-email-ses.md`, `retell-welcome-call.md`, `sms-twilio.md`, `stripe.md`, `service-club.md`, `push-notifications.md`, `tcd-leads.md`
 
 **Standing instruction:** After completing any feature, Claude Code must:
 1. Update PROGRESS.md

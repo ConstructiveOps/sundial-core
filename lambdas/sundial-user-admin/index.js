@@ -295,16 +295,52 @@ async function requireSuperAdmin(headers, cors) {
   return { identity };
 }
 
+// --- The dispatch board membership (2026-09-30) ---------------------------------
+// Sundial_User__c.Dispatch_Board__c (checkbox) + Dispatch_Order__c (number), package
+// salesforce/dispatch-board-2026-09-30. `dispatchBoard` / `dispatchOrder` in the API. The
+// org may not have the fields yet: the list re-queries without them, and a write that
+// names them answers 400 DISPATCH_FIELDS_MISSING instead of a bare Salesforce error.
+const DISPATCH_FIELD_RE = /Dispatch_(Board|Order)__c|INVALID_FIELD/i;
+function parseDispatch(b, errors, fields) {
+  if (hasOwn(b, "dispatchBoard")) {
+    if (typeof b.dispatchBoard !== "boolean") errors.dispatchBoard = "dispatchBoard must be true or false";
+    else fields.Dispatch_Board__c = b.dispatchBoard;
+  }
+  if (hasOwn(b, "dispatchOrder")) {
+    const v = b.dispatchOrder;
+    if (v === null || v === "" || v === undefined) fields.Dispatch_Order__c = null;
+    else if (!Number.isInteger(Number(v)) || Number(v) < 0 || Number(v) > 999) errors.dispatchOrder = "dispatchOrder must be a whole number from 0 to 999, or blank";
+    else fields.Dispatch_Order__c = Number(v);
+  }
+}
+function dispatchFieldsMissing(sfErr, fields, cors) {
+  if (!(hasOwn(fields, "Dispatch_Board__c") || hasOwn(fields, "Dispatch_Order__c"))) return null;
+  if (!DISPATCH_FIELD_RE.test(String(sfErr?.sfBody ?? sfErr?.message ?? ""))) return null;
+  return jsonResponse(400, cors, {
+    error: "dispatch_fields_missing",
+    code: "DISPATCH_FIELDS_MISSING",
+    message: "The dispatch-board fields are not on Sundial_User__c yet — deploy salesforce/dispatch-board-2026-09-30 first.",
+  });
+}
+
 // === GET /admin/users ======================================================
 async function handleList(identity, cors) {
-  const soql =
+  const soqlFor = (withDispatch) =>
     `SELECT Id, First_Name__c, Last_Name__c, Email__c, Phone__c, Access_Level__c, ` +
     `Default_Department__c, Active__c, Super_Admin__c, Hierarchy_Level__c, Supabase_User_Id__c, ` +
-    `Dealer__c, Dealer__r.Name ` +
+    `Dealer__c, Dealer__r.Name${withDispatch ? ", Dispatch_Board__c, Dispatch_Order__c" : ""} ` +
     `FROM ${SF_OBJECT} ` +
     `WHERE Client__c = '${soqlEscapeString(identity.tenantId)}' ` +
     `ORDER BY Last_Name__c, First_Name__c`;
-  const rows = await sfQuery(soql);
+  let rows;
+  let dispatchFields = true;
+  try {
+    rows = await sfQuery(soqlFor(true));
+  } catch (e) {
+    if (!DISPATCH_FIELD_RE.test(String(e?.sfBody ?? e?.message ?? ""))) throw e;
+    dispatchFields = false;
+    rows = await sfQuery(soqlFor(false));
+  }
   const users = (rows || []).map((r) => ({
     id: r.Id,
     firstName: r.First_Name__c ?? null,
@@ -323,6 +359,9 @@ async function handleList(identity, cors) {
     dealerName: r.Dealer__r?.Name ?? null,
     // Boolean only — the actual Supabase_User_Id__c value is NEVER returned.
     hasLogin: trimStr(r.Supabase_User_Id__c) !== "",
+    // The dispatch board (2026-09-30): a column, and where. Null order = after the numbered.
+    dispatchBoard: r.Dispatch_Board__c === true,
+    dispatchOrder: r.Dispatch_Order__c == null ? null : Number(r.Dispatch_Order__c),
   }));
 
   // The dealer options, alongside the users.
@@ -334,7 +373,8 @@ async function handleList(identity, cors) {
   // extra SOQL on a low-frequency admin screen and removes a deployment dependency from
   // the critical path. Both sources are the same function; they cannot disagree.
   const dealers = await listActiveDealers(identity.tenantId);
-  return jsonResponse(200, cors, { users, dealers });
+  // `dispatchFields` tells the portal whether the board checkbox / order can be edited yet.
+  return jsonResponse(200, cors, { users, dealers, dispatchFields });
 }
 
 /** Active dealers in a tenant, as {id, name}, alphabetical. */
@@ -425,6 +465,8 @@ async function handleCreate(identity, event, cors) {
   if (defaultDepartment && !DEPARTMENTS.has(defaultDepartment)) {
     errors.defaultDepartment = `defaultDepartment must be one of: ${[...DEPARTMENTS].join(", ")}`;
   }
+  const dispatchFields = {};
+  parseDispatch(b, errors, dispatchFields);
   const credentialMode = b.credentialMode;
   if (credentialMode !== "invite" && credentialMode !== "password") {
     errors.credentialMode = 'credentialMode must be "invite" or "password"';
@@ -576,6 +618,7 @@ async function handleCreate(identity, event, cors) {
   };
   if (phone) fields.Phone__c = phone;
   if (defaultDepartment) fields.Default_Department__c = defaultDepartment;
+  Object.assign(fields, dispatchFields);
   // Validated by id against an ACTIVE dealer in this tenant above — never the raw
   // request value, and never present for a tenant-wide role.
   if (dealer) fields.Dealer__c = dealer.id;
@@ -595,6 +638,7 @@ async function handleCreate(identity, event, cors) {
     // Compensating action: delete the FRESH auth user so we don't orphan it. Never
     // delete a reused (pre-existing) user. If deletion also fails, surface loudly.
     console.error("sundial_user create failed:", sfErr?.message, sfErr?.sfBody || "");
+    const missing = dispatchFieldsMissing(sfErr, fields, cors);
     let orphanAuthUser = false;
     if (freshlyCreated) {
       try {
@@ -608,6 +652,7 @@ async function handleCreate(identity, event, cors) {
         console.error("compensating deleteUser THREW — orphaned auth user:", de?.message || String(de));
       }
     }
+    if (missing && !orphanAuthUser) return missing;
     const body = { error: "sf_create_failed", code: "SF_CREATE_FAILED" };
     if (orphanAuthUser) body.orphanAuthUser = true;
     return jsonResponse(502, cors, body);
@@ -685,6 +730,7 @@ async function handleUpdate(identity, event, cors) {
     if (v && !DEPARTMENTS.has(v)) errors.defaultDepartment = "invalid defaultDepartment";
     else fields.Default_Department__c = v || null;
   }
+  parseDispatch(b, errors, fields);
   // D-064: dealerId is accepted here, but WHETHER it is required depends on the
   // access level this PATCH leaves the user at — which may come from the body or may
   // already be on the record. Resolved after the record is read, below.
@@ -815,6 +861,8 @@ async function handleUpdate(identity, event, cors) {
     await sfUpdateRecord(SF_OBJECT, recordId, fields);
   } catch (sfErr) {
     console.error("sundial_user update failed:", sfErr?.message, sfErr?.sfBody || "");
+    const missing = dispatchFieldsMissing(sfErr, fields, cors);
+    if (missing) return missing;
     return jsonResponse(502, cors, { error: "sf_update_failed", code: "SF_UPDATE_FAILED" });
   }
 

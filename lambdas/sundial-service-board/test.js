@@ -249,6 +249,16 @@ test("pure helpers: routes, tech pick, tray order, SOQL datetimes, the customer'
   const none = pickTechs(users.map((u) => ({ ...u, Access_Level__c: "Admin", Default_Department__c: "Office" })));
   assert.equal(none.source, "all-users");
   assert.equal(none.techs.length, 3);
+  // The explicit list (2026-09-30): ticked users only, in Dispatch_Order__c, blank order last;
+  // the access level and department stop mattering (Beth the Admin is a column, Jake is not).
+  const explicit = pickTechs([
+    { ...users[0], Dispatch_Board__c: false },
+    { ...users[1], Dispatch_Board__c: true, Dispatch_Order__c: 2 },
+    { ...users[2], Dispatch_Board__c: true, Dispatch_Order__c: 1 },
+    { Id: "USR000000000000007", Client__c: TENANT, Active__c: true, First_Name__c: "Harmon", Last_Name__c: "Subcontractors", Access_Level__c: "Technician", Dispatch_Board__c: true, Dispatch_Order__c: null },
+  ]);
+  assert.equal(explicit.source, "dispatch-board");
+  assert.deepEqual(explicit.techs.map((t) => t.name), ["Beth Office", "Larry Ng", "Harmon Subcontractors"]);
 
   const tray = sortTray([{ priority: "Low", ageDays: 30 }, { priority: "Emergency", ageDays: 0 }, { priority: "Standard", ageDays: 9 }, { priority: "Standard", ageDays: 2 }]);
   assert.deepEqual(tray.map((t) => `${t.priority}/${t.ageDays}`), ["Emergency/0", "Standard/9", "Standard/2", "Low/30"]);
@@ -719,8 +729,28 @@ test("the day in the field: on my way (texts, closes the other clock) → clock 
   const h = makeHandler(w, JAKE);
   const id = "SC0000000000000001";
 
+  // 0. Still on the clock at SC-00005: neither "on my way" nor "clock in" here is allowed
+  //    (Harmon, 2026-09-30 — a block, not a warning). The call page says which call.
+  let r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "En Route", at: "2026-09-14T14:58:00Z", eventId: "ev-0" });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "CLOCKED_IN_ELSEWHERE");
+  assert.equal(r.body.other.id, "SC0000000000000005");
+  assert.equal(r.body.other.jobNumber, "SVC-00001");
+  assert.match(r.body.message, /still clocked in on SVC-00001/);
+  r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "In Progress", at: "2026-09-14T14:58:00Z", eventId: "ev-0b" });
+  assert.equal(r.body.code, "CLOCKED_IN_ELSEWHERE");
+  r = await call(h, "GET", `/service/tech/calls/${id}`);
+  assert.equal(r.body.onTheClock.id, "SC0000000000000005");
+  assert.equal(w.texts.length, 0, "no text went out for a refused tap");
+  // The office closes that clock from the board (or the tech completes it): now it is a
+  // call he was merely en route to, never arrived — leaving for the next job is fine and
+  // puts that one back to Scheduled.
+  Object.assign(w.store.Sundial_Service_Call__c.find((c) => c.Id === "SC0000000000000005"), { Status__c: "En Route", Clock_Intervals__c: JSON.stringify([{ in: "2026-09-14T13:05:00.000Z", out: null, kind: "en_route", ids: [] }]) });
+  r = await call(h, "GET", `/service/tech/calls/${id}`);
+  assert.equal(r.body.onTheClock, null);
+
   // 1. On my way (the phone's tap time is a minute ago; queued offline and replayed)
-  let r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "En Route", at: "2026-09-14T14:59:00Z", gps: { lat: 33.6, lng: -111.9, accuracy: 12 }, eventId: "ev-1" });
+  r = await call(h, "POST", `/service/tech/calls/${id}/status`, { status: "En Route", at: "2026-09-14T14:59:00Z", gps: { lat: 33.6, lng: -111.9, accuracy: 12 }, eventId: "ev-1" });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.call.status, "En Route");
   assert.equal(r.body.call.clock.state, "en_route");
@@ -731,8 +761,8 @@ test("the day in the field: on my way (texts, closes the other clock) → clock 
   assert.equal(w.texts[0].msg.body, "Hi Cy, Jake from harmon is on the way to you now. (Job SVC-00003) Reply to this text if anything changes.");
   assert.equal(w.smsRows[0].job_sf_id, "SVC000000000000003");
   assert.equal(w.smsRows[0].sent_by_name, "Jake Dorsey");
-  // the earlier job's clock was closed, its status left In Progress (paused, not finished)
-  assert.deepEqual(r.body.closedOthers, [{ id: "SC0000000000000005", status: "In Progress" }]);
+  // the earlier call's en-route clock was closed and it went back to Scheduled (never arrived)
+  assert.deepEqual(r.body.closedOthers, [{ id: "SC0000000000000005", status: "Scheduled" }]);
   const prev = w.store.Sundial_Service_Call__c.find((c) => c.Id === "SC0000000000000005");
   assert.equal(JSON.parse(prev.Clock_Intervals__c)[0].out, "2026-09-14T14:59:00.000Z");
   assert.equal(prev.Actual_End__c, undefined);

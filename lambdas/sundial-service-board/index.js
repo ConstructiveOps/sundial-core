@@ -246,6 +246,17 @@ export function sortTray(rows) {
  * broken, and the dispatcher can still schedule.
  */
 export function pickTechs(users) {
+  // The explicit list wins (2026-09-30, Harmon's "these seven, in this order"): once any
+  // active user has Dispatch_Board__c ticked, the board is exactly the ticked users in
+  // Dispatch_Order__c (blank after the numbered, then by last name — the query's order).
+  // Not tied to the access level: an Admin field manager stays a column, an office worker
+  // in the Service department comes off, a "Subcontractors" placeholder can be a column.
+  const ticked = users.filter((u) => u.Dispatch_Board__c === true);
+  if (ticked.length) {
+    const order = (u) => (u.Dispatch_Order__c == null || u.Dispatch_Order__c === "" ? Number.POSITIVE_INFINITY : Number(u.Dispatch_Order__c));
+    const sorted = ticked.map((u, i) => ({ u, i })).sort((a, b) => order(a.u) - order(b.u) || a.i - b.i).map((x) => x.u);
+    return { source: "dispatch-board", techs: sorted.map((u) => ({ id: u.Id, name: techName(u), level: u.Access_Level__c ?? null })) };
+  }
   const marked = users.filter((u) => u.Access_Level__c === "Technician" || u.Default_Department__c === "Service");
   const chosen = marked.length ? marked : users;
   return {
@@ -526,11 +537,24 @@ export function createHandler(deps = {}) {
     );
     return rows?.[0] ?? null;
   }
+  // Whether the org has the two dispatch-board fields (salesforce/dispatch-board-2026-09-30).
+  // Remembered per warm instance; a redeploy re-checks. Before the package lands the board
+  // keeps its old rule rather than failing on an unknown field.
+  let dispatchFields = null;
   async function loadTechs(tenantId) {
-    const rows = await d.sfQuery(
-      `SELECT Id, First_Name__c, Last_Name__c, Email__c, Access_Level__c, Default_Department__c FROM ${USER_SF_OBJECT} ` +
-        `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Active__c = true ORDER BY Last_Name__c, First_Name__c`
-    );
+    const base = `FROM ${USER_SF_OBJECT} WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Active__c = true ORDER BY Last_Name__c, First_Name__c`;
+    const cols = "Id, First_Name__c, Last_Name__c, Email__c, Access_Level__c, Default_Department__c";
+    let rows = null;
+    if (dispatchFields !== false) {
+      try {
+        rows = await d.sfQuery(`SELECT ${cols}, Dispatch_Board__c, Dispatch_Order__c ${base}`);
+        dispatchFields = true;
+      } catch (e) {
+        if (!/Dispatch_(Board|Order)__c|INVALID_FIELD/i.test(String(e?.sfBody ?? e?.message ?? ""))) throw e;
+        dispatchFields = false;
+      }
+    }
+    if (rows === null) rows = await d.sfQuery(`SELECT ${cols} ${base}`);
     return pickTechs(rows || []);
   }
   /** job id → the live (non-void) invoice's status, for the jobs given. Never throws. */

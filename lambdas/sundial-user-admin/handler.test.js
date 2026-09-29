@@ -65,6 +65,7 @@ function resetCtx() {
   ctx.updated = [];
   ctx.createError = null;
   ctx.updateError = null;
+  ctx.sfQueryOverride = null;
   ctx.authCalls = [];
   ctx.banCalls = [];
   ctx.emails = [];
@@ -94,6 +95,7 @@ mock.module("../../lib/salesforce.js", {
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
     sfQuery: async (soql) => {
       ctx.queries.push(soql);
+      if (ctx.sfQueryOverride) return ctx.sfQueryOverride(soql);
       return ctx.queryRows.shift() ?? [];
     },
     sfCreateRecord: async (sfObject, fields) => {
@@ -677,6 +679,63 @@ test("GET returns dealerId and dealerName, plus the dealer options", async () =>
   assert.equal(body.users[0].dealerId, DEALER_ID);
   assert.equal(body.users[0].dealerName, DEALER_NAME);
   assert.deepEqual(body.dealers, [{ id: DEALER_ID, name: DEALER_NAME }]);
+});
+
+// ===========================================================================
+// (e) The dispatch board membership (2026-09-30)
+// ===========================================================================
+
+test("PATCH dispatchBoard / dispatchOrder write the two fields; blank order clears; a bad order is a validation error", async () => {
+  ctx.queryRows = [ownedRow()];
+  let res = await handler(patchEvent(TARGET_ID, { dispatchBoard: true, dispatchOrder: 3 }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.updated[0].fields, { Dispatch_Board__c: true, Dispatch_Order__c: 3 });
+
+  ctx.queryRows = [ownedRow()];
+  res = await handler(patchEvent(TARGET_ID, { dispatchOrder: "" }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.updated[1].fields, { Dispatch_Order__c: null });
+
+  ctx.queryRows = [ownedRow()];
+  res = await handler(patchEvent(TARGET_ID, { dispatchOrder: 2.5 }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).fields.dispatchOrder.includes("whole number"), true);
+});
+
+test("PATCH naming the dispatch fields before the package is deployed is 400 DISPATCH_FIELDS_MISSING, not a bare 502", async () => {
+  ctx.queryRows = [ownedRow()];
+  ctx.updateError = "No such column 'Dispatch_Board__c' on entity 'Sundial_User__c' (INVALID_FIELD)";
+  const res = await handler(patchEvent(TARGET_ID, { dispatchBoard: true }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "DISPATCH_FIELDS_MISSING");
+  ctx.updateError = null;
+});
+
+test("GET carries dispatchBoard / dispatchOrder and dispatchFields:true; an org without the fields re-queries and says dispatchFields:false", async () => {
+  const row = { Id: TARGET_ID, First_Name__c: "Larry", Last_Name__c: "Ng", Email__c: "l@example.com", Access_Level__c: "Admin", Active__c: true, Super_Admin__c: false, Dispatch_Board__c: true, Dispatch_Order__c: 1 };
+  ctx.queryRows = [[row], []];
+  const get = () => handler({ requestContext: { http: { method: "GET" } }, headers: { authorization: "Bearer test", origin: "http://localhost:5173" }, rawPath: "/admin/users" });
+  let body = parse(await get());
+  assert.equal(body.dispatchFields, true);
+  assert.equal(body.users[0].dispatchBoard, true);
+  assert.equal(body.users[0].dispatchOrder, 1);
+  assert.ok(ctx.queries[0].includes("Dispatch_Board__c, Dispatch_Order__c"));
+
+  // The first query is refused by an org without the fields; the second goes without them.
+  resetCtx();
+  const rows = [[{ ...row, Dispatch_Board__c: undefined, Dispatch_Order__c: undefined }], []];
+  ctx.queryRows = rows;
+  const err = Object.assign(new Error("bad field"), { sfBody: "No such column 'Dispatch_Board__c' on entity 'Sundial_User__c'" });
+  let first = true;
+  ctx.sfQueryOverride = async () => {
+    if (first) { first = false; throw err; }
+    return rows.shift() ?? [];
+  };
+  body = parse(await get());
+  assert.equal(body.dispatchFields, false);
+  assert.equal(body.users[0].dispatchBoard, false);
+  assert.equal(body.users[0].dispatchOrder, null);
+  ctx.sfQueryOverride = null;
 });
 
 test("GET /admin/dealers returns ACTIVE dealers only, tenant-scoped", async () => {

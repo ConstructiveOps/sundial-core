@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dispatch-board-2026-09-30 - who is a column on the dispatch board, and in what order.
+  Two fields on Sundial_User__c (Dispatch_Board__c checkbox, Dispatch_Order__c number) plus
+  the integration-user permission set for them. CustomField members only - nothing here
+  touches object settings or any other field.
+
+  Until this deploys the board keeps its old rule (Technician level OR Service department);
+  the Lambda notices the fields are missing and falls back. Once ANY active user of a tenant
+  has Dispatch_Board__c ticked, the board is exactly the ticked users, in Dispatch_Order__c.
+  Tick + order them in Sundial: Settings -> Manage users -> edit.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; Linux/WSL zip or Explorer
+  Send-to, NEVER PowerShell 5.1 Compress-Archive) -> Workbench -> Migration -> Deploy ->
+  Single Package -> CHECK ONLY first, expect 3/3 components (2 fields + 1 permission set),
+  then deploy for real. Assign Sundial_Dispatch_Board to the integration user.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_User__c.Dispatch_Board__c</members>
+        <members>Sundial_User__c.Dispatch_Order__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Dispatch_Board</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

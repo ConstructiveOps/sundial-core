@@ -764,6 +764,33 @@ export function createTechHandlers(d, h) {
   // --- the event time (shared with the day clock in day.js) -------------------------
   const resolveAt = resolveEventAt;
 
+  /**
+   * The OTHER call this tech is clocked in on right now (an In Progress call with an open
+   * interval), or null. Harmon's rule (2026-09-30): a tech on the clock at one job cannot
+   * start another — not "on my way", not "clock in" — until that call is Complete. The
+   * office sees the same thing on the board. A call the tech is merely en route to (never
+   * arrived) does not count: leaving for a different job is a change of plan, and
+   * closeOtherClocks still puts that one back to Scheduled.
+   */
+  async function onTheClockElsewhere(ctx, tech, exceptCallId) {
+    const others = (await loadTechCalls(`Tech__c = '${soqlEscapeString(tech.Id)}' AND Status__c = 'In Progress'`, ctx.tenantId, "Scheduled_Start__c")).filter((c) => c.Id !== exceptCallId);
+    for (const c of others) {
+      if (openIntervalIndex(parseIntervals(c.Clock_Intervals__c)) >= 0) {
+        const job = c.Sundial_Service_Job__r || {};
+        return { id: c.Id, number: c.Name ?? null, jobId: c.Sundial_Service_Job__c ?? null, jobNumber: job.Name ?? null, customerName: job.Customer_Name_at_Creation__c ?? null };
+      }
+    }
+    return null;
+  }
+  function clockedElsewhere(cors, other, verb) {
+    return jsonResponse(409, cors, {
+      error: "clocked_in_elsewhere",
+      code: "CLOCKED_IN_ELSEWHERE",
+      other,
+      message: `You're still clocked in on ${other.jobNumber ?? other.number ?? "another call"}${other.customerName ? ` (${other.customerName})` : ""}. Complete that call before you ${verb}.`,
+    });
+  }
+
   /** Close whatever the tech has open on OTHER calls (leaving for the next job). */
   async function closeOtherClocks(ctx, tech, exceptCallId, at, gps) {
     const others = (await loadTechCalls(`Tech__c = '${soqlEscapeString(tech.Id)}' AND Status__c IN ('En Route', 'In Progress')`, ctx.tenantId, "Scheduled_Start__c")).filter((c) => c.Id !== exceptCallId);
@@ -894,11 +921,16 @@ export function createTechHandlers(d, h) {
             )
           : [],
       ]);
+      const techForBlock = call.Tech__c ? await h.loadTech(call.Tech__c, tenantId) : null;
+      const onTheClock = techForBlock ? await onTheClockElsewhere(ctx, techForBlock, call.Id) : null;
       const otherTechs = (siblings || [])
         .filter((c) => c.Id !== call.Id && c.Status__c !== "Cancelled")
         .map((c) => ({ id: c.Id, techId: c.Tech__c ?? null, techName: c.Tech__r ? techName(c.Tech__r) : null, status: c.Status__c ?? null, start: c.Scheduled_Start__c ?? null, end: c.Scheduled_End__c ?? null, isMe: !!ctx.userId && c.Tech__c === ctx.userId }));
       return jsonResponse(200, cors, {
         call: callView(call, now),
+        // The tech's OTHER call that is on the clock (2026-09-30): while set, On my way /
+        // Clock in on THIS call are refused (409 CLOCKED_IN_ELSEWHERE) — the app greys them.
+        onTheClock,
         otherTechs,
         photos: photos || [],
         estimate: estimate
@@ -946,6 +978,8 @@ export function createTechHandlers(d, h) {
 
       if (status === "En Route") {
         if (!["Scheduled", "En Route", "No-Show"].includes(call.Status__c)) return jsonResponse(409, cors, { error: "state", code: "CALL_STATE", status: call.Status__c, message: `You can't go en route from ${call.Status__c}.` });
+        const elsewhere = await onTheClockElsewhere(ctx, tech, call.Id);
+        if (elsewhere) return clockedElsewhere(cors, elsewhere, "head to the next one");
         closedOthers = await closeOtherClocks(ctx, tech, call.Id, at, gps);
         const ev = applyClockEvent(log, { kind: "en_route", at, gps, eventId });
         logAfter = ev.intervals;
@@ -960,6 +994,8 @@ export function createTechHandlers(d, h) {
         } else extra.text = { sent: false, reason: body?.textCustomer === false ? "SKIPPED" : "NO_JOB" };
       } else if (status === "In Progress") {
         if (!["Scheduled", "En Route", "In Progress", "Complete", "No-Show"].includes(call.Status__c)) return jsonResponse(409, cors, { error: "state", code: "CALL_STATE", status: call.Status__c });
+        const elsewhere = await onTheClockElsewhere(ctx, tech, call.Id);
+        if (elsewhere) return clockedElsewhere(cors, elsewhere, "clock in here");
         closedOthers = await closeOtherClocks(ctx, tech, call.Id, at, gps);
         const ev = applyClockEvent(log, { kind: "clock_in", at, gps, eventId });
         logAfter = ev.intervals;

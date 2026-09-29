@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_User__c - the two dispatch-board fields added on 2026-09-30 ONLY. package.xml lists
+  them as CustomField members, so this file adds them and touches nothing else on the object.
+  NEVER convert this to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Dispatch_Board__c</fullName>
+        <defaultValue>false</defaultValue>
+        <description>Ticked = this user is a column on the Service dispatch board (and on the phone's Schedule, the payroll report and the map). Once any active user of the tenant is ticked, the board is exactly the ticked users; while nobody is, the board falls back to Technician-level users and the Service department. Not tied to the access level: a field manager who is an Admin stays on the board, an office worker in the Service department comes off it, and a placeholder row for outside subcontractors can be a column without a login.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>Tick to make this user a column on the dispatch board. Order the columns with Dispatch Board Order.</inlineHelpText>
+        <label>On Dispatch Board</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Checkbox</type>
+    </fields>
+    <fields>
+        <fullName>Dispatch_Order__c</fullName>
+        <description>The column's position on the dispatch board, lowest first (1, 2, 3 ...). Blank sorts after every numbered column, then by last name.</description>
+        <externalId>false</externalId>
+        <inlineHelpText>1 is the leftmost column. Blank goes after the numbered ones.</inlineHelpText>
+        <label>Dispatch Board Order</label>
+        <precision>3</precision>
+        <required>false</required>
+        <scale>0</scale>
+        <trackTrending>false</trackTrending>
+        <type>Number</type>
+        <unique>false</unique>
+    </fields>
+</CustomObject>

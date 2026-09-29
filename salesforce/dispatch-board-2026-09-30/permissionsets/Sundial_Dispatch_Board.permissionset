@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Field permissions on the two dispatch-board fields of Sundial_User__c (2026-09-30) for the
+  Sundial INTEGRATION USER (assign to it after deploy). Object access on Sundial_User__c is
+  already granted elsewhere; this set adds only the two new fields.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Sundial Dispatch Board</label>
+    <description>2026-09-30: field access on Sundial_User__c.Dispatch_Board__c and Dispatch_Order__c (who is a column on the dispatch board, in what order) for the Sundial integration user.</description>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_User__c.Dispatch_Board__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_User__c.Dispatch_Order__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+</PermissionSet>

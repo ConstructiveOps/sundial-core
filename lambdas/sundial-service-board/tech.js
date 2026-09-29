@@ -12,6 +12,7 @@
 //   GET  /service/tech/price-book?q=              active items, for "add to estimate"
 //   READ-ONLY, TENANT-WIDE (action service.tech.read — 2026-09-16, Tim: "techs may need
 //   to see these even if they aren't assigned"):
+//   GET  /service/tech/schedule?date=YYYY-MM-DD   EVERY tech's calls that day — the phone's Schedule tab (2026-09-29)
 //   GET  /service/tech/jobs?q=&status=            jobs (open ones by default), search by number / name / address / phone
 //   GET  /service/tech/jobs/{id}                  one job: header, its calls, the estimate summary
 //   GET  /service/tech/estimates?q=&status=       estimates (not templates)
@@ -842,6 +843,33 @@ export function createTechHandlers(d, h) {
         next,
         activeCallId: activeCall?.id ?? null,
         day: h.days ? h.days.view(dayRow, now.toISOString()) : null,
+        serverTime: now.toISOString(),
+      });
+    },
+
+    /**
+     * The Schedule tab (2026-09-29): every tech's calls on one day, read-only, so a tech can see
+     * who is where — the office's board without the rows. `service.tech.read` (tenant-wide reads).
+     */
+    async techSchedule({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const now = d.now();
+      const date = strOrNull(query?.date) ?? localDate(now, DEFAULTS.timeZone);
+      const bounds = dayBounds(date, DEFAULTS.timeZone);
+      if (!bounds) return bad(cors, "DATE_INVALID", "date must be YYYY-MM-DD.");
+      const [{ techs }, calls] = await Promise.all([
+        h.loadTechs(tenantId),
+        loadTechCalls(`Scheduled_Start__c >= ${h.soqlDateTime(bounds.from)} AND Scheduled_Start__c < ${h.soqlDateTime(bounds.to)} AND Status__c != 'Cancelled'`, tenantId),
+      ]);
+      return jsonResponse(200, cors, {
+        date,
+        timeZone: DEFAULTS.timeZone,
+        window: bounds,
+        techs,
+        calls: calls.map((c) => {
+          const b = callToBoard(c);
+          return { id: b.id, number: b.number, jobId: b.jobId, jobNumber: b.jobNumber, customerName: b.customerName, address: b.address, techId: b.techId, techName: b.techName, start: b.start, end: b.end, status: b.status, priority: b.priority ?? null, serviceType: b.serviceType ?? null, isMine: !!ctx.userId && c.Tech__c === ctx.userId };
+        }),
         serverTime: now.toISOString(),
       });
     },

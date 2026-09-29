@@ -4,6 +4,7 @@
 //   POST /service/tech/day/start   { at?, gps?, eventId?, kind?: "Warehouse"|"Other" }   clock in for the day
 //   POST /service/tech/day/end     { at?, gps?, eventId?, note? }                         clock out for the day
 //   POST /service/tech/day/note    { note, date?, eventId? }                              the end-of-day note
+//   GET  /service/tech/timecard?week=YYYY-MM-DD                     (the tech) my own week: every clock in / out, by job
 //   GET  /service/techs/locations                                   (office) every tech's last clocked spot
 //   GET  /service/payroll?week=YYYY-MM-DD[&techId=]                 (Admin) hours by job + outside calls
 //
@@ -516,6 +517,47 @@ export function createDayHandlers(d, h) {
         return sfError(cors, e, "day note");
       }
       return jsonResponse(200, cors, { success: true, day: dayView(row, now.toISOString()) });
+    },
+
+    // --- the tech: my own timecard (2026-09-29) -----------------------------------------
+    /**
+     * The Timecard tab: the caller's week (Mon–Sun) as the payroll report computes it, plus every
+     * clock in / out as its own line so the tech can check what the office will pay against.
+     * Read-only by design: corrections are the office's, on the board (amendment 7).
+     */
+    async techTimecard({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const tech = await actingTech(ctx, query?.techId);
+      if (!tech) return jsonResponse(403, cors, { error: "no_user", code: "NO_TECH_USER", message: "Your login is not linked to an active Sundial user." });
+      const now = d.now();
+      const asked = strOrNull(query?.week) ?? localDate(now, tz());
+      const monday = weekMonday(asked);
+      if (!monday) return bad(cors, "WEEK_INVALID", "week must be YYYY-MM-DD.");
+      const week = weekBounds(monday, tz());
+      const me = `Tech__c = '${soqlEscapeString(tech.Id)}'`;
+      const [calls, days] = await Promise.all([
+        loadCalls(tenantId, `${me} AND Actual_Start__c >= ${h.soqlDateTime(new Date(Date.parse(week.from) - 86400000).toISOString())} AND Actual_Start__c < ${h.soqlDateTime(new Date(Date.parse(week.to) + 86400000).toISOString())}`),
+        loadDays(tenantId, `${me} AND Work_Date__c >= ${week.monday} AND Work_Date__c <= ${week.sunday}`),
+      ]);
+      const report = buildPayroll({ techs: [{ id: tech.Id, name: h.techName ? h.techName(tech) : tech.Id }], days, calls, week, timeZone: tz(), now: now.toISOString() });
+      const mine = report.techs[0];
+      const nowMs = now.getTime();
+      const weekFrom = Date.parse(week.from);
+      const weekTo = Date.parse(week.to);
+      // Every clock in / out in the week, one line each (an open one runs to now).
+      const entries = [];
+      for (const c of calls) {
+        const job = c.Sundial_Service_Job__r ?? {};
+        for (const i of liveIntervals(parseIntervals(c.Clock_Intervals__c))) {
+          const a = Date.parse(i.in);
+          const b = i.out ? Date.parse(i.out) : nowMs;
+          if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) continue;
+          if (b <= weekFrom || a >= weekTo) continue;
+          entries.push({ date: localDate(new Date(Math.max(a, weekFrom)), tz()), callId: c.Id, callNumber: c.Name ?? null, jobId: c.Sundial_Service_Job__c ?? null, jobNumber: job.Name ?? null, customer: job.Customer_Name_at_Creation__c ?? null, address: job.Address_at_Creation__c ?? null, in: i.in, out: i.out ?? null, open: !i.out, kind: i.kind ?? (i.arrived ? "on_site" : "en_route"), arrived: i.arrived ?? null, minutes: Math.round((Math.min(b, weekTo) - Math.max(a, weekFrom)) / 60000), corrected: Array.isArray(i.corrections) && i.corrections.length > 0 });
+        }
+      }
+      entries.sort((x, y) => x.in.localeCompare(y.in));
+      return jsonResponse(200, cors, { week: report.week, timeZone: tz(), tech: { id: tech.Id, name: mine.tech.name }, days: mine.days, jobs: mine.jobs, totals: mine.totals, entries, serverTime: now.toISOString() });
     },
 
     // --- the office: where everyone last was ------------------------------------------

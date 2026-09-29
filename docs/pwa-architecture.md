@@ -29,6 +29,14 @@ Five slots on the bottom bar — **Today · Jobs · Estimates · Customers · Mo
 
 `GET /service/tech/calls/{id}` adds `otherTechs` (the job's other calls), `photos` (S3 listing of `SUNDIAL/{jobId}/photos/{callId}/`), a read-only `estimate` (number, status, total, lines with `addedByThisCall`), and `geofenceMeters`.
 
+## The menu (2026-09-29 order, Tim's)
+
+Bottom bar: **Today · Inbox · Schedule · Jobs · More**. More: **Customers · Estimates · Timecard · Notification Settings · Refresh · Sign out**.
+
+- **Inbox** (`/tech/inbox`) — every notification the tech has had, from the same `NotificationsProvider` rows the office's bell reads (a push vanishes from the phone once tapped; here it stays). The tab carries the unread badge; a row opens what it points at and marks itself read; "Mark all read".
+- **Schedule** (`/tech/schedule`, `GET /service/tech/schedule`) — every tech's calls for one day on a time axis, read-only. Calls in the same window sit side by side (`scheduleLayout.ts`: overlapping calls form a cluster, columns are assigned greedily, a lone call is full width); each block shows the customer, job number, window and tech (initials when three or more share the width). Arrows or a horizontal swipe move a day; the week strip at the top picks a day and its arrows move a week. My own call opens my call page, anyone else's opens the job read-only.
+- **Timecard** (`/tech/timecard`, `GET /service/tech/timecard`) — my own week: on-calls / outside-calls / total, each day's day clock and every clock in → out with the job, "corrected by the office" where the board edited an interval, the time-outside-calls line with my note, a by-job summary. Read-only on purpose — corrections stay the office's.
+
 ## The day clock (D-076, 2026-09-28)
 
 The Today page's **My day** card. A day starts with "Start my day" (the warehouse tap) **or by the first clock-in on a call** — the phone never needs two taps — and ends with "Clock out for the day", which asks for the tech's note on the hours outside calls (parts runs, shop time, training) and is **refused while a call is still on the clock** (`409 DAY_CALL_OPEN`; the button is disabled with the reason). A closed day shows its span and note; the note can be edited (latest wins) and "Start again" reopens the day. Server side: `Sundial_Tech_Day__c`, one row per tech per day, an append-only `Day_Log__c` with the taps' own times and ids (`day.js`). The weekly payroll report (`/service/payroll`, Admins) is computed from these rows and the calls' clock logs: hours by job, and the day's span minus its call time as **Time Outside Calls**, with the note beside it.

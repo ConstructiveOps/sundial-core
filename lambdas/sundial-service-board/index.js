@@ -309,6 +309,8 @@ const ROUTES = [
   ["POST", /^\/service\/tech\/day\/end\/?$/, "techDayEnd"],
   ["POST", /^\/service\/tech\/day\/note\/?$/, "techDayNote"],
   ["GET", /^\/service\/tech\/day\/?$/, "techDay"],
+  ["GET", /^\/service\/tech\/schedule\/?$/, "techSchedule"], // every tech's day, read-only (2026-09-29)
+  ["GET", /^\/service\/tech\/timecard\/?$/, "techTimecard"], // my own week (day.js, 2026-09-29)
   ["GET", /^\/service\/tech\/price-book\/?$/, "techPriceBook"],
   ["GET", /^\/service\/tech\/jobs\/?$/, "techJobs"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/?$/, "techJob"],
@@ -350,6 +352,8 @@ const ACTION_FOR = Object.freeze({
   techDayStart: "service.tech.self",
   techDayEnd: "service.tech.self",
   techDayNote: "service.tech.self",
+  techTimecard: "service.tech.self",
+  techSchedule: "service.tech.read",
   techLocations: "service.board.read",
   payroll: "service.payroll.read", // Admin / Executive only (lib/access.js ACTION_LEVELS)
   techPriceBook: "service.tech.self",
@@ -884,13 +888,13 @@ export function createHandler(deps = {}) {
   };
   // The day clock + locations + payroll (day.js); the tech handlers get its `ops` so a call
   // clock-in can start the day and GET /service/tech/day can report it.
-  const days = createDayHandlers(d, { CALL_SF_OBJECT, CALL_SELECT, DEFAULTS, loadTech, loadTechs, soqlDateTime, jsonResponse, bad, sfError });
+  const days = createDayHandlers(d, { CALL_SF_OBJECT, CALL_SELECT, DEFAULTS, loadTech, loadTechs, techName, soqlDateTime, jsonResponse, bad, sfError });
   Object.assign(H, days.handlers);
   Object.assign(
     H,
     createTechHandlers(d, {
       CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
-      callToBoard, techName, soqlDateTime, loadTech, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier,
+      callToBoard, techName, soqlDateTime, loadTech, loadTechs, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier,
       jsonResponse, bad, notFound, sfError, notesDeps, days: days.ops,
     })
   );

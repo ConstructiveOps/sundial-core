@@ -5,6 +5,8 @@
       sundial-service-board:
         GET  /service/tech/day                         my calls for a day
         GET  /service/tech/price-book                  price-book search for "add what I found"
+        GET  /service/tech/schedule                    every tech's calls on a day (the Schedule tab, 2026-09-29)
+        GET  /service/tech/timecard                    my own week's clock lines (the Timecard tab, 2026-09-29)
         GET  /service/tech/jobs, /jobs/{id}            read-only lists + records (2026-09-16)
         GET  /service/tech/estimates, /estimates/{id}
         GET  /service/tech/customers, /customers/{id}
@@ -77,10 +79,12 @@ if (-not $root) { throw "Could not find root resource." }
 $service = Ensure-Resource $root "service"
 $tech    = Ensure-Resource $service "tech"
 
-Write-Host "==> /service/tech/day and /service/tech/price-book : GET, OPTIONS -> $Board" -ForegroundColor Cyan
+Write-Host "==> /service/tech/day, price-book, schedule, timecard : GET, OPTIONS -> $Board" -ForegroundColor Cyan
 $day = Ensure-Resource $tech "day"
 $pb  = Ensure-Resource $tech "price-book"
-foreach ($r in @($day, $pb)) { foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board } }
+$sch = Ensure-Resource $tech "schedule"
+$tc  = Ensure-Resource $tech "timecard"
+foreach ($r in @($day, $pb, $sch, $tc)) { foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board } }
 
 Write-Host "==> /service/tech/{jobs,estimates,customers} and /{id} : GET, OPTIONS -> $Board" -ForegroundColor Cyan
 foreach ($part in @("jobs", "estimates", "customers")) {

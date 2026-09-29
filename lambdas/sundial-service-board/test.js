@@ -1391,3 +1391,40 @@ test("the day clock on the phone: a call clock-in starts the day; clocking out f
   assert.equal((await call(h, "GET", "/service/payroll")).status, 403);
   assert.equal((await call(office, "GET", "/service/payroll", null, { week: "soon" })).body.code, "WEEK_INVALID");
 });
+
+test("the phone's Schedule and Timecard (2026-09-29): every tech's day read-only; my own week's clock lines, never editable", async () => {
+  const w = fakeWorld();
+  // Larry's Monday call, Jake's, and one cancelled one that must not show.
+  w.store.Sundial_Service_Call__c.push(
+    { Id: "SC0000000000000007", Client__c: TENANT, Name: "SC-00007", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000001", Tech__c: "USR000000000000002", Scheduled_Start__c: "2026-09-14T16:00:00.000Z", Scheduled_End__c: "2026-09-14T18:00:00.000Z", Status__c: "Scheduled", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" },
+    { Id: "SC0000000000000008", Client__c: TENANT, Name: "SC-00008", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000002", Tech__c: "USR000000000000001", Scheduled_Start__c: "2026-09-14T20:00:00.000Z", Scheduled_End__c: "2026-09-14T22:00:00.000Z", Status__c: "Cancelled", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" },
+    // Jake's finished call last week with two clock intervals, for the timecard.
+    { Id: "SC0000000000000009", Client__c: TENANT, Name: "SC-00009", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000003", Tech__c: "USR000000000000001", Scheduled_Start__c: "2026-09-08T15:00:00.000Z", Scheduled_End__c: "2026-09-08T17:00:00.000Z", Status__c: "Complete", Actual_Start__c: "2026-09-08T14:59:00.000Z", Actual_End__c: "2026-09-08T17:30:00.000Z", Clock_Intervals__c: JSON.stringify([{ in: "2026-09-08T14:59:00.000Z", arrived: "2026-09-08T15:20:00.000Z", out: "2026-09-08T16:29:00.000Z", kind: "en_route", ids: [] }, { in: "2026-09-08T17:00:00.000Z", out: "2026-09-08T17:30:00.000Z", kind: "on_site", ids: [], corrections: [{ at: "x", by: "Beth", reason: "forgot" }] }]), SystemModstamp: "2026-09-08T18:00:00Z", CreatedDate: "2026-09-01T10:00:00Z" },
+  );
+  w.store.Sundial_Tech_Day__c.push({ Id: "TD0000000000000001", Client__c: TENANT, Tech__c: "USR000000000000001", Work_Date__c: "2026-09-08", Day_Key__c: "USR000000000000001:2026-09-08", Day_Start__c: "2026-09-08T14:00:00.000Z", Day_End__c: "2026-09-08T23:00:00.000Z", Status__c: "Closed", House_Notes__c: "Parts run", Day_Log__c: "[]" });
+  const h = makeHandler(w, JAKE);
+  // Schedule: both techs' calls on the 14th, the cancelled one left out, mine flagged.
+  let r = await call(h, "GET", "/service/tech/schedule", null, { date: "2026-09-14" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body.calls.map((c) => [c.number, c.techName, c.isMine]).sort(), [["SC-00001", "Jake Dorsey", true], ["SC-00007", "Larry Ng", false]]);
+  assert.equal(r.body.calls.find((c) => c.number === "SC-00007").customerName, "Ann Lee");
+  assert.deepEqual(r.body.techs.map((t) => t.name).sort(), ["Jake Dorsey", "Larry Ng"]);
+  assert.equal((await call(h, "GET", "/service/tech/schedule", null, { date: "nope" })).body.code, "DATE_INVALID");
+  // Timecard: last week (Mon 9/7 – Sun 9/13), Jake's two clock lines and the day's outside time.
+  r = await call(h, "GET", "/service/tech/timecard", null, { week: "2026-09-10" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.week.monday, "2026-09-07");
+  assert.equal(r.body.tech.name, "Jake Dorsey");
+  assert.deepEqual(r.body.entries.map((e) => [e.date, e.jobNumber, e.minutes, e.kind, e.corrected]), [["2026-09-08", "SVC-00003", 90, "en_route", false], ["2026-09-08", "SVC-00003", 30, "on_site", true]]);
+  assert.deepEqual(r.body.jobs.map((j) => [j.jobNumber, j.minutes]), [["SVC-00003", 120]]);
+  const day = r.body.days.find((x) => x.date === "2026-09-08");
+  assert.equal(day.callMinutes, 120);
+  assert.equal(day.outsideMinutes, 420, "14:00 → 23:00 is 540 min, 120 on calls");
+  assert.equal(day.note, "Parts run");
+  assert.equal(r.body.totals.totalMinutes, 540);
+  // Only the caller's own: Larry's week has no lines from Jake's calls.
+  const larry = await call(makeHandler(w, LARRY), "GET", "/service/tech/timecard", null, { week: "2026-09-10" });
+  assert.deepEqual(larry.body.entries, []);
+  assert.equal((await call(h, "GET", "/service/tech/timecard", null, { week: "soon" })).body.code, "WEEK_INVALID");
+});
+

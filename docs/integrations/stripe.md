@@ -67,7 +67,14 @@ quiet moment — the switch is instant once the secret is saved.
    card → charge **$1.00** → see it in the live Stripe dashboard → refund it there → the job shows
    the refund row within seconds. Then delete the test endpoint in Stripe (or leave it — it only
    ever hears test events).
-6. **Cards on file do not carry over.** Every customer who had a card in test mode has none in
+6. **If the job page says "Invalid API Key provided: rk_live_…XXXX"**, Stripe does not recognise
+   the key string it was sent: compare the last four characters with the key's row in
+   Dashboard → Developers → API keys (live mode). A mismatch means a paste that lost a character
+   or picked up a stray one, or a key that was rolled / deleted since — create a fresh restricted
+   key and paste it again (the code trims spaces and line breaks; it cannot repair a missing
+   character). "…does not have the required permissions" is a different message: the key is
+   fine, a permission is missing from its restricted-key settings.
+7. **Cards on file do not carry over.** Every customer who had a card in test mode has none in
    live; the job page's "Enter card" / "Text link" is how the first live cards go on.
 
 ## Setup (Tim) — do it in TEST mode first, then repeat with live keys

@@ -125,8 +125,8 @@ A customer the import CREATED is refreshed from HCP on every run until cutover.
 
 | HCP | Sundial | Notes |
 |---|---|---|
-| customer | `Sundial_Customer__c` | `Status__c` = Customer when it has a job, else Lead (+ `Service_Stage__c = New`); `Lead_Source__c` only when HCP's value is a picklist value; `notes` → `Description__c` |
-| lead | the customer's hub record | `Service_Stage__c` New / Estimate Created (converted) / Closed (`lost_at`, resolution Not Interested); `Description__c` gets `HCP lead #… · pipeline status`, tags, job fields; `Assigned_To__c` by the tech map; a stage the office already set is never overwritten |
+| customer | `Sundial_Customer__c` | `Status__c` = Customer when it has a job, else Lead — **no `Service_Stage__c`** (2026-09-29: the first run stamped ~7,400 of them `New` and buried the office's pipeline; `scripts/clear-new-service-stage.mjs` cleared it, the office sets the stage by hand); `Lead_Source__c` only when HCP's value is a picklist value; `notes` → `Description__c` |
+| lead | the customer's hub record | `Service_Stage__c` Estimate Created (converted) / Closed (`lost_at`, resolution Not Interested) — an open lead gets **no stage** (2026-09-29); `Description__c` gets `HCP lead #… · pipeline status`, tags, job fields; `Assigned_To__c` by the tech map; a stage the office already set is never overwritten |
 | estimate (not claimed by a job) | `Sundial_Estimate__c` + `Sundial_Service_Line__c` per line of the approved option, else option 1 (other options in `Version_Log__c`) | Approved / Declined / Sent; `Tax_Amount__c` = option total − lines |
 | job | `Sundial_Service_Job__c` + its one estimate (the claimed HCP estimate via `original_estimate_id`, else `job:{id}:estimate`) + lines from the job's line items (else the invoice's items) | status: canceled → Closed/Cancelled; complete → Paid / Invoiced / Closed ($0) / Ready to Bill; scheduled → Scheduled; in progress → In Progress; unscheduled → Ready to Schedule. `Office_Notes__c` starts `Migrated from Housecall Pro — HCP job #1042` + tags + lead source + the job's notes field |
 | appointment | `Sundial_Service_Call__c`, one per tech (`{appointment}:{employee}` when several) | Arizona times (fixed −07:00); Complete calls get `Actual_*` from the job's clock (single appointment) else the window; a tech without a Sundial user is named in `Private_Notes__c` |
@@ -137,6 +137,8 @@ Not carried: HCP's notes feed and photos (the web-app route), `job_fields` beyon
 description, the service-plan memberships (D-073 rows are born from Sundial's own join).
 `settleMoney()` is not involved — the import writes the settled fields directly, once, from
 HCP's own paid / due numbers.
+
+**Clearing a stage the import should not have set** (2026-09-29): `node scripts/clear-new-service-stage.mjs --tenant harmon` lists every customer of the tenant at `Service_Stage__c = New` and writes `migration/service-stage-new-harmon.csv` (`Id, Service_Stage__c` blank — DataLoader *Update* with "Insert null values" ticked); `--apply` blanks them through the API instead, canary first, then batches of 200 by `Id`. Only the value `New`, only that tenant, idempotent. Then a full `customer` cache resync. (`POST /service/customers` — the office's own New Customer / Add to Service — still opens a customer at `New`: that one is deliberate.)
 
 **After an apply (Tim):** a FULL cache resync for `customer`, `estimate`, `service_line`,
 `service_job`, `service_call`, `service_invoice`, `service_payment` (the cache-sync Lambda,

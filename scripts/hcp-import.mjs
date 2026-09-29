@@ -335,7 +335,7 @@ if (PHASES.includes("leads")) {
     } else {
       leadRecords.push({ Id: sfId, [HCP_ID_FIELD]: cid, ...f });
     }
-    bump(`leads:${f.Service_Stage__c ? `stage-${f.Service_Stage__c}` : "stage-kept"}`);
+    bump(`leads:${f.Service_Stage__c ? `stage-${f.Service_Stage__c}` : "stage-left-blank"}`);
   }
   // one row per Sundial customer: the newest lead wins
   const byKey = new Map();

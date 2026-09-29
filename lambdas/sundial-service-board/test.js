@@ -487,6 +487,33 @@ test("POST /service/calls/{id}/cancel: needs a reason; last open call cancelled 
   assert.equal(again.body.alreadyCancelled, true);
 });
 
+test("POST /service/calls/{id}/unschedule (2026-09-29): the window is cleared, the call goes back to the tray, the job to Ready to Schedule, the tech is told; a started call stays put", async () => {
+  const w = fakeWorld();
+  w.store.Sundial_Service_Call__c[1].Status__c = "Complete";
+  const h = makeHandler(w);
+  const before = w.store.Sundial_Service_Call__c[0];
+  assert.equal(before.Status__c, "Scheduled");
+  const r = await call(h, "POST", "/service/calls/SC0000000000000001/unschedule", { baseModstamp: before.SystemModstamp });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.call.status, "Unscheduled");
+  assert.equal(r.body.call.start, null);
+  assert.equal(r.body.call.end, null);
+  assert.equal(r.body.jobStatusChanged, "Ready to Schedule");
+  const upd = w.calls.updates.find((u) => u.id === "SC0000000000000001");
+  assert.deepEqual(upd.fields, { Status__c: "Unscheduled", Scheduled_Start__c: null, Scheduled_End__c: null });
+  assert.equal(w.activity.find((a) => a.event === "service_call_updated" && a.details.unscheduled).details.fields.Status__c.to, "Unscheduled");
+  assert.equal(w.broadcasts.at(-1).payload.action, "updated");
+  assert.equal(w.notes.at(-1).kind, "reassigned_away");
+  // The tray now shows it as its own card.
+  const board = await call(h, "GET", "/service/board", null, { from: "2026-09-14T00:00:00Z", to: "2026-09-15T00:00:00Z" });
+  assert.ok(board.body.unscheduledCalls.some((c) => c.id === "SC0000000000000001"));
+  // Idempotent; a stale stamp is a 409; a started call is refused.
+  assert.equal((await call(h, "POST", "/service/calls/SC0000000000000001/unschedule", {})).body.alreadyUnscheduled, true);
+  assert.equal((await call(h, "POST", "/service/calls/SC0000000000000002/unschedule", {})).body.code, "CALL_ALREADY_STARTED");
+  w.store.Sundial_Service_Call__c[1].Status__c = "En Route";
+  assert.equal((await call(h, "POST", "/service/calls/SC0000000000000002/unschedule", { baseModstamp: "nope" })).body.code, "CALL_CONFLICT");
+});
+
 test("GET /service/jobs/{id}/calls returns the job's calls + techs; access gate denies a Technician / sales scope", async () => {
   const w = fakeWorld();
   const h = makeHandler(w);

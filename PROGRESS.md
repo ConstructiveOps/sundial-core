@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-09-29 (later) — Calls come off the schedule; search finds phones, emails and addresses; the "New" stage is cleared
+
+**Off the schedule.** `POST /service/calls/{id}/unschedule` on the board Lambda: a Scheduled / En Route call loses its window and goes back to `Unscheduled` — its own dashed tray card, tech kept, so a drop puts it back. Not a cancel (no reason, nothing closes); a started, Complete, Cancelled or No-Show call is refused (409). The job settles through `settleJobStatus` with the new trigger `unscheduled` (same rule as a cancel: last open call gone → Ready to Schedule); the tech hears "taken off your board". Route in `wire-service-board-routes.ps1`. Board suite 26 (+1). Portal: drag a board block onto the Unscheduled tray, or **Remove from schedule** on the call card; dragging between slots / days / techs already moved the time (PATCH) and is unchanged.
+
+**Search.** The Service module's boxes promised phone / email / address but `sundial-sf-query` searched name columns only. `SEARCH_FIELDS` now covers email, primary + alternate phone, street, city and ZIP on `customer`, and the address / phone / email snapshots on `estimate` and `job`; the sanitizer keeps `@ + _ # /`; a term of 7+ digits also matches the phone columns on `%602%555%0100%` (`phonePattern()`), so `6025550100` finds `(602) 555-0100`. Same on the live SOQL path. `search.test.js` (2). The global search, every tab's box and the New Estimate / New Job customer picker all go through the same route, so one deploy fixes them all.
+
+**Service Stage "New".** The HCP import stamped ~7,400 stage-less service customers `New`, which filled the Service board and list. `lib/hcp-import.js` no longer writes `New` — a customer without a job gets no stage, and an open HCP lead gets none either (Closed / Estimate Created still land); `scripts/clear-new-service-stage.mjs --tenant harmon` lists them, writes the DataLoader CSV (`Id, Service_Stage__c` blank; "Insert null values"), and with `--apply` blanks them through the API — canary first, then batches of 200 by `Id`. `POST /service/customers` (the office's own Add to Service) still opens at `New` on purpose. Also: the job page's "Coming next on this page" box is gone.
+
 ## 2026-09-29 — The phone's Inbox, Schedule and Timecard
 
 Two read-only routes on the board Lambda: `GET /service/tech/schedule?date=` (every tech's calls that day, `service.tech.read`) and `GET /service/tech/timecard?week=` (the caller's own week — `buildPayroll` for one tech plus one line per clock interval, `corrected` when the office edited it, `service.tech.self`). Wire script `scripts/wire-service-tech-routes.ps1` gained the two resources. Board suite 25 (+1).

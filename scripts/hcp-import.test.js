@@ -139,7 +139,7 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   assert.equal(solar.Street__c, "9 Elm St", "Sales's street stays");
   assert.equal(solar.Status__c, "Customer");
   assert.match(solar.Description__c ?? "", /HCP lead #L-77/, "the shared household's lead lands on the solar record by Salesforce id");
-  assert.equal(solar.Service_Stage__c, "New");
+  assert.equal(solar.Service_Stage__c ?? null, null, "an open lead sets no stage (2026-09-29) — the office does");
   // the new customer: created as a Customer (has a job); the lead-only one as a Lead in the pipeline
   const c2 = rec("Sundial_Customer__c", "cus_2");
   assert.equal(c2.Status__c, "Customer");
@@ -147,7 +147,7 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   assert.equal(c2.Lead_Source__c, undefined, "'Yard sign' is not a picklist value");
   const c3 = rec("Sundial_Customer__c", "cus_3");
   assert.equal(c3.Status__c, "Lead");
-  assert.equal(c3.Service_Stage__c, "New");
+  assert.equal(c3.Service_Stage__c ?? null, null, "a lead-only customer gets no stage either (2026-09-29)");
   assert.equal(c3.Lead_Source__c, "Phone");
   assert.equal(c3.Assigned_To__c, "a1USER00000001");
   assert.match(c3.Description__c, /HCP lead #L-9 · Contacted \(open\)/);

@@ -292,6 +292,7 @@ const ROUTES = [
   ["POST", /^\/service\/jobs\/([^/]+)\/calls\/?$/, "createCall"],
   ["PATCH", /^\/service\/calls\/([^/]+)\/?$/, "patchCall"],
   ["POST", /^\/service\/calls\/([^/]+)\/cancel\/?$/, "cancelCall"],
+  ["POST", /^\/service\/calls\/([^/]+)\/unschedule\/?$/, "unscheduleCall"],
   // The office's time corrections (tech.js — same clock engine as the phone).
   ["GET", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockGet"],
   ["POST", /^\/service\/calls\/([^/]+)\/clock\/?$/, "clockCorrect"],
@@ -341,6 +342,7 @@ const ACTION_FOR = Object.freeze({
   createCall: "service.call.write",
   patchCall: "service.call.write",
   cancelCall: "service.call.write",
+  unscheduleCall: "service.call.write",
   clockGet: "service.board.read",
   clockCorrect: "service.call.write",
   jobPhotos: "service.board.read",
@@ -568,7 +570,7 @@ export function createHandler(deps = {}) {
     if (trigger === "scheduled" && UNSCHEDULED_JOB_STATUSES.includes(job.Status__c)) next = "Scheduled";
     if (trigger === "in_progress" && job.Status__c === "Scheduled") next = "In Progress";
     if (trigger === "complete" && open.length === 0 && ["Scheduled", "In Progress"].includes(job.Status__c)) next = "Awaiting Office Review";
-    if (trigger === "cancelled" && open.length === 0 && job.Status__c === "Scheduled") next = "Ready to Schedule";
+    if ((trigger === "cancelled" || trigger === "unscheduled") && open.length === 0 && job.Status__c === "Scheduled") next = "Ready to Schedule";
     if (trigger === "reopened" && job.Status__c === "Awaiting Office Review") next = "In Progress";
     if (!next || next === job.Status__c) return null;
     try {
@@ -884,6 +886,60 @@ export function createHandler(deps = {}) {
       await announce(ctx, { kind: "call", action: "cancelled", call: shaped, jobStatus: job?.Status__c ?? null });
       if (call.Tech__c && call.Status__c !== "Unscheduled") await notifyTech(ctx, { kind: "cancelled", techId: call.Tech__c, call: { ...call, Cancel_Reason__c: reason }, job, stamp: d.now().toISOString() });
       return jsonResponse(200, cors, { success: true, call: shaped, jobStatusChanged, ...notify });
+    },
+
+    /**
+     * Take a call OFF the schedule (2026-09-29): the window is cleared and the call goes back
+     * to Unscheduled — its own dashed card in the tray, tech kept, so it can be dropped on
+     * the board again later. Not a cancel (no reason, nothing is closed) and not a move: a
+     * call that has started, is Complete or Cancelled stays where it is. The job follows
+     * through settleJobStatus, the tech hears "taken off your board".
+     */
+    async unscheduleCall({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const call = await loadCall(params[0], tenantId);
+      if (!call) return notFound(cors);
+      if (call.Status__c === "Unscheduled") return jsonResponse(200, cors, { success: true, alreadyUnscheduled: true, call: callToBoard(call) });
+      if (STARTED_CALL_STATUSES.includes(call.Status__c)) {
+        return jsonResponse(409, cors, { error: "started", code: "CALL_ALREADY_STARTED", status: call.Status__c, message: "This call has already started; it can't be taken off the schedule." });
+      }
+      if (call.Status__c === "Cancelled" || call.Status__c === "No-Show") {
+        return jsonResponse(409, cors, { error: "closed", code: "CALL_CLOSED", status: call.Status__c, message: `A ${call.Status__c.toLowerCase()} call can't be put back in the tray.` });
+      }
+      const base = strOrNull(body?.baseModstamp);
+      if (base && call.SystemModstamp && base !== call.SystemModstamp) {
+        return jsonResponse(409, cors, { error: "conflict", code: "CALL_CONFLICT", message: "This call changed since you loaded it — take another look.", call: callToBoard(call) });
+      }
+      const fields = { Status__c: "Unscheduled", Scheduled_Start__c: null, Scheduled_End__c: null };
+      try {
+        await d.sfUpdateRecord(CALL_SF_OBJECT, call.Id, fields);
+      } catch (e) {
+        return sfError(cors, e, "service call unschedule");
+      }
+      const changes = {
+        Status__c: { from: call.Status__c, to: "Unscheduled" },
+        Scheduled_Start__c: { from: call.Scheduled_Start__c ?? null, to: null },
+        Scheduled_End__c: { from: call.Scheduled_End__c ?? null, to: null },
+      };
+      await act(ctx, {
+        event: EVENTS.SERVICE_CALL_UPDATED,
+        recordType: "servicecall",
+        recordSfId: call.Id,
+        jobSfId: call.Sundial_Service_Job__c ?? null,
+        details: { fields: changes, via: "dispatch", unscheduled: true },
+      });
+      await markStale(CACHE.call, [call.Id], tenantId);
+      let jobStatusChanged = null;
+      let job = null;
+      if (call.Sundial_Service_Job__c) {
+        job = await loadJob(call.Sundial_Service_Job__c, tenantId);
+        if (job) jobStatusChanged = await settleJobStatus(ctx, job, "unscheduled", await loadJobCalls(job.Id, tenantId));
+      }
+      const shaped = callToBoard((await loadCall(call.Id, tenantId)) || { ...call, ...fields });
+      await announce(ctx, { kind: "call", action: "updated", call: shaped, jobStatus: job?.Status__c ?? null });
+      // The tech had this on their board; now they don't. Same words as a reassignment.
+      if (call.Tech__c) await notifyTech(ctx, { kind: "reassigned_away", techId: call.Tech__c, call, job, stamp: d.now().toISOString() });
+      return jsonResponse(200, cors, { success: true, call: shaped, changed: Object.keys(changes), jobStatusChanged });
     },
   };
   // The day clock + locations + payroll (day.js); the tech handlers get its `ops` so a call

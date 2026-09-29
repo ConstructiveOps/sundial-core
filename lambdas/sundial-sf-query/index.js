@@ -260,10 +260,14 @@ const PARENT_FILTER = {
 // Salesforce fields for the Sales-Rep live path. Only allowlisted here; anything
 // else (po/user) has no name search.
 const SEARCH_CAP = 200;
+// Phone / email / address columns joined the search on 2026-09-29 (Harmon: "we can only
+// find people by name"). Phone columns are matched on DIGITS when the term looks like a
+// number (see phonePattern) so "602-555-0100" finds "(602) 555-0100".
 const SEARCH_FIELDS = {
   customer: {
-    cache: ["first_name", "last_name", "name", "customer_name"],
-    sf: ["First_Name__c", "Last_Name__c", "Name"],
+    cache: ["first_name", "last_name", "name", "customer_name", "primary_email", "primary_phone", "alternate_contact_phone", "street", "city", "postal_code"],
+    phone: ["primary_phone", "alternate_contact_phone"],
+    sf: ["First_Name__c", "Last_Name__c", "Name", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Street__c"],
   },
   solar: {
     cache: ["project_name", "customer_name_at_creation"],
@@ -279,12 +283,14 @@ const SEARCH_FIELDS = {
   // template name so the template picker is a search; the price book searches
   // name + item code + description.
   estimate: {
-    cache: ["name", "customer_name_at_creation", "template_name"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c"],
+    cache: ["name", "customer_name_at_creation", "template_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
+    phone: ["primary_phone_at_creation"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
   },
   job: {
-    cache: ["name", "customer_name_at_creation", "billing_reference"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Billing_Reference__c"],
+    cache: ["name", "customer_name_at_creation", "billing_reference", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
+    phone: ["primary_phone_at_creation"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Billing_Reference__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
   },
   pricebookitem: {
     cache: ["name", "item_code", "description"],
@@ -315,11 +321,41 @@ const SEARCH_FIELDS = {
 // soqlEscapeString, and the cache path double-quotes the ILIKE value.
 function sanitizeSearchTerm(q) {
   if (q == null) return null;
+  // `@` `+` `_` `#` `/` stay (an email, a "+1" phone, a unit number); the PostgREST
+  // reserved characters (quotes, commas, parentheses, backslash) and everything else
+  // become spaces. Before 2026-09-29 `@` was stripped too, which is why an email
+  // address never matched anything.
   const cleaned = String(q)
-    .replace(/[^A-Za-z0-9 .&'-]/g, " ")
+    .replace(/[^A-Za-z0-9 .&'@+_#/-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   return cleaned.length >= 2 ? cleaned : null;
+}
+
+/**
+ * A phone typed any which way → an ILIKE pattern over the digits (2026-09-29):
+ * "(602) 555-0100", "602.555.0100", "6025550100", "+1 602 555 0100" all become
+ * "%602%555%0100%", which matches however the number was stored. Seven digits (no
+ * area code) → "%555%0100%". Fewer than seven digits, or mostly letters → null.
+ */
+export function phonePattern(term) {
+  const raw = String(term ?? "");
+  const digits = raw.replace(/\D/g, "");
+  const letters = raw.replace(/[^A-Za-z]/g, "");
+  if (digits.length < 7 || letters.length > 1) return null;
+  const d = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  if (d.length === 10) return `%${d.slice(0, 3)}%${d.slice(3, 6)}%${d.slice(6)}%`;
+  if (d.length === 7) return `%${d.slice(0, 3)}%${d.slice(3)}%`;
+  const chunks = [];
+  for (let i = 0; i < d.length; i += 3) chunks.push(d.slice(i, i + 3));
+  return `%${chunks.join("%")}%`;
+}
+/** The OR-group for a search: every column ILIKE the term, and the phone columns ILIKE the digit pattern too. */
+export function searchOrExpr(cols, term, phoneCols = []) {
+  const parts = cols.map((c) => `${c}.ilike."%${term}%"`);
+  const phone = phonePattern(term);
+  if (phone) for (const c of phoneCols) if (cols.includes(c)) parts.push(`${c}.ilike."${phone}"`);
+  return parts.join(",");
 }
 
 // First non-empty source value for a record (the COALESCE), or null.
@@ -1125,7 +1161,7 @@ async function handleSingleRead(ctx) {
 // count:"exact" returns the full match total even though only SEARCH_CAP rows come
 // back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
 // double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
-async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, term, cors, parentColumn, parentId, shadow, objectKey, enforce, access }) {
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, searchPhoneCols, term, cors, parentColumn, parentId, shadow, objectKey, enforce, access }) {
   const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
   if (cols.length === 0) {
     // No searchable columns: the served answer is an empty set for everyone, so the new
@@ -1142,7 +1178,7 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
       source: "cache", count: 0, total: 0, limit: SEARCH_CAP, offset: 0, hasMore: false, records: [],
     });
   }
-  const orExpr = cols.map((c) => `${c}.ilike."%${term}%"`).join(",");
+  const orExpr = searchOrExpr(cols, term, searchPhoneCols || []);
   // Explicit select (not "*") so long-text columns never enter a search response —
   // see buildListSelect / the 6 MB payload note.
   let cq = supabase
@@ -1360,7 +1396,7 @@ async function handleListRead(ctx) {
   if (searchTerm) {
     return await handleCacheSearch({
       supabase, cacheTable, columnSet, tenantId,
-      searchCacheCols: searchFields.cache, term: searchTerm, cors,
+      searchCacheCols: searchFields.cache, searchPhoneCols: searchFields.phone || [], term: searchTerm, cors,
       parentColumn: parentId ? parentFilter.cacheColumn : null,
       parentId,
       shadow, objectKey, enforce, access,
@@ -1599,8 +1635,10 @@ async function listColdCacheFallback(ctx) {
   // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.
   if (searchTerm && Array.isArray(searchSfFields) && searchSfFields.length) {
     const t = soqlEscapeString(searchTerm);
-    const likes = searchSfFields.map((f) => `${f} LIKE '%${t}%'`).join(" OR ");
-    where += ` AND (${likes})`;
+    const likes = searchSfFields.map((f) => `${f} LIKE '%${t}%'`);
+    const phone = phonePattern(searchTerm);
+    if (phone) for (const f of searchSfFields) if (/Phone/.test(f)) likes.push(`${f} LIKE '${phone}'`);
+    where += ` AND (${likes.join(" OR ")})`;
   }
 
   // Exact total for the pager (aggregate COUNT(Id) returns one row {c:N}).

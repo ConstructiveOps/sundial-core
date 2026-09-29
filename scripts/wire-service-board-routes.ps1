@@ -7,6 +7,7 @@
       POST  /service/jobs/{id}/calls           schedule a tech onto a job
       PATCH /service/calls/{id}                move / reassign / status / notes
       POST  /service/calls/{id}/cancel         cancel with a reason
+      POST  /service/calls/{id}/unschedule     take the call off the schedule, back to the tray (2026-09-29)
       GET   /service/calls/{id}/clock          the call's clock log, numbered, for the office (2026-09-17)
       POST  /service/calls/{id}/clock          the office's time correction (+ optional complete)
     plus OPTIONS everywhere for CORS. AWS_PROXY, authorization NONE at the gateway
@@ -74,6 +75,7 @@ $jobCalls = Ensure-Resource $jobId "calls"
 $calls   = Ensure-Resource $service "calls"
 $callId  = Ensure-Resource $calls "{id}"
 $cancel  = Ensure-Resource $callId "cancel"
+$unsched = Ensure-Resource $callId "unschedule"
 $clock   = Ensure-Resource $callId "clock"
 
 Write-Host "==> /service/board : GET, OPTIONS" -ForegroundColor Cyan
@@ -84,6 +86,8 @@ Write-Host "==> /service/calls/{id} : PATCH, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("PATCH", "OPTIONS")) { Wire-Method $callId $m }
 Write-Host "==> /service/calls/{id}/cancel : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $cancel $m }
+Write-Host "==> /service/calls/{id}/unschedule : POST, OPTIONS" -ForegroundColor Cyan
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $unsched $m }
 Write-Host "==> /service/calls/{id}/clock : GET, POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $clock $m }
 

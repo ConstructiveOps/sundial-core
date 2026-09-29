@@ -89,6 +89,7 @@ import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.j
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { sendEmail as realSendEmail, isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
+import { canAction } from "../../lib/access.js";
 import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
@@ -205,7 +206,7 @@ function s3() {
 const CUSTOMER_EMAIL_SELECT = "Id, Primary_Email__c, Name";
 
 /** Plain, deliverable email — the link is the point; the document lives on the page. */
-export function buildEstimateEmail({ est, total, url, brandName, validUntil }) {
+export function buildEstimateEmail({ est, total, url, brandName, validUntil, cardOnFile = false }) {
   const number = est.Name || "Estimate";
   const who = brandName ? ` from ${brandName}` : "";
   const money = Number.isFinite(Number(total)) ? Number(total).toLocaleString("en-US", { style: "currency", currency: "USD" }) : "";
@@ -218,14 +219,16 @@ export function buildEstimateEmail({ est, total, url, brandName, validUntil }) {
     `View and approve it here: ${url}`,
     "",
     validLine,
+    cardOnFile ? "" : "On the same page you can pay your deposit or keep a card on file for the work — your card goes straight to Stripe; we never see the number.",
     "Approving lets us get the work scheduled. Questions? Just reply to this email.",
-  ].filter((l) => l !== null).join("\n");
+  ].filter((l) => l !== null && l !== "").join("\n");
   const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const html = `<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;max-width:560px">
   <p>Hello${est.Customer_Name_at_Creation__c ? ` ${esc(est.Customer_Name_at_Creation__c)}` : ""},</p>
   <p>Your estimate <strong>${esc(number)}</strong>${esc(who)} is ready${money ? ` (<strong>${esc(money)}</strong>)` : ""}.</p>
   <p style="margin:24px 0"><a href="${esc(url)}" style="background:#1F3864;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">View and approve your estimate</a></p>
   ${validLine ? `<p style="color:#52525b">${esc(validLine)}</p>` : ""}
+  ${cardOnFile ? "" : `<p style="color:#52525b">On the same page you can pay your deposit or keep a card on file for the work — your card goes straight to Stripe; we never see the number.</p>`}
   <p style="color:#52525b">Approving lets us get the work scheduled. Questions? Just reply to this email.</p>
   <p style="color:#a1a1aa;font-size:12px">If the button doesn't work, copy this link: ${esc(url)}</p>
 </div>`;
@@ -374,6 +377,11 @@ const ROUTES = [
   // Stripe (D-072 amendment 8, stripe.js): the office's charge, and Stripe's own calls (no login).
   ["POST", /^\/service\/invoices\/([^/]+)\/charge\/?$/, "chargeInvoiceRoute"],
   ["POST", /^\/webhooks\/stripe\/([^/]+)\/?$/, "stripeWebhook"],
+  // The office's card on file (amendment 11, 2026-09-28): status, Stripe's card page, the customer link, a charge.
+  ["GET", /^\/service\/jobs\/([^/]+)\/card\/?$/, "jobCard"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/card-session\/?$/, "jobCardSession"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/card-link\/?$/, "jobCardLink"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/charge\/?$/, "jobCharge"],
   // Service Club (D-073, club.js). Public: the tenant slug is in the URL, no login.
   ["GET", /^\/public\/club\/([^/]+)\/plans\/?$/, "clubPlans"],
   ["POST", /^\/public\/club\/([^/]+)\/join\/?$/, "clubJoin"],
@@ -1188,7 +1196,13 @@ export function createHandler(deps = {}) {
           }
           if (!email) deliveryDetail = "The customer has no email address on file.";
           else {
-            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut });
+            // The card line is left out once a card is on file for the estimate's job (amendment 11).
+            let cardOnFile = false;
+            if (est.Service_Job__c) {
+              const jobRows = await d.sfQuery(`SELECT Id, Customer_Card_on_File__c FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Service_Job__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`).catch(() => []);
+              cardOnFile = jobRows?.[0]?.Customer_Card_on_File__c === true;
+            }
+            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut, cardOnFile });
             const attachments = pdfBytes
               ? [{ fileName: `${est.Name || "estimate"}-v${version}.pdf`, contentType: "application/pdf", content: pdfBytes }]
               : [];
@@ -1649,15 +1663,19 @@ export function createHandler(deps = {}) {
     return strOrNull(job?.Primary_Email_at_Creation__c);
   }
   // Money: one core (loaders + settleMoney) shared by the invoice routes and Stripe.
-  const money = createMoneyCore(d, { act, markStale, CACHE });
+  const money = createMoneyCore(d, { act, markStale, CACHE, publicEstimateUrl: (token) => publicEstimateUrl(token, d.publicBaseUrl), randomToken: d.randomToken });
   // The Service Club (D-073): public join / truck roll / request, the office's memberships,
   // and the webhook's subscription branch (consulted by stripe.js before the payments branch).
   const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
-  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier });
+  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token) => publicEstimateUrl(token, d.publicBaseUrl), randomToken: d.randomToken, portalBaseUrl: () => d.publicBaseUrl });
   Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
+  H.jobCard = stripeH.jobCard;
+  H.jobCardSession = stripeH.jobCardSession;
+  H.jobCardLink = stripeH.jobCardLink;
+  H.jobCharge = stripeH.jobCharge;
   Object.assign(H, createAddressHandlers(d, { jsonResponse, bad }));
   Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
@@ -1680,7 +1698,9 @@ export function createHandler(deps = {}) {
     suggestAddress: "service.estimate.write", resolveAddress: "service.estimate.write", // whoever can make an estimate can make its customer
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
-    chargeInvoiceRoute: "service.invoice.write",
+    chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is an Admin's action, everywhere
+    jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",
+    jobCharge: "service.card.charge", // Admin / Executive (lib/access.js ACTION_LEVELS)
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", sendReport: "service.estimate.send",
     techAddLines: "service.tech.self",
@@ -1757,6 +1777,9 @@ export function createHandler(deps = {}) {
         scope: identity?.access?.scope ?? null,
         actor: { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null },
         cors,
+        // A handler that does a second, narrower thing inside a broader route asks this
+        // (issue with "charge the card" is the office's route, the charge is an Admin's).
+        can: (key) => canAction(key, alwaysEnforcedAccess(identity) ?? identity?.access ?? null),
       };
       return await H[route.name]({ ctx, params: route.params, body, query: event?.queryStringParameters || {} });
     } catch (err) {

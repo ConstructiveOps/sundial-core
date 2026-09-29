@@ -1164,6 +1164,11 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   assert.ok(/283\.60 due/.test(fake.emails.at(-1).subject));
   assert.equal(inv.Status__c, "Partially Paid", "money status wins over Sent");
   assert.ok(inv.Sent_At__c);
+  // The pay link (amendment 11): the customer's page, in the email and on the preview, while money is owed.
+  assert.ok(fake.emails.at(-1).html.includes("Pay $283.60 online"), fake.emails.at(-1).html);
+  assert.ok(fake.emails.at(-1).text.includes("Pay online (card): https://portal.example.com/estimate/"));
+  const pv2 = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.ok(pv2.body.html.includes("Pay this invoice"), "the invoice document carries the link");
 
   // A check for the balance: invoice Paid, job Paid.
   const pay = await call(h, "POST", `/service/invoices/${inv.Id}/payments`, { method: "Check", amount: 283.6, reference: "1044" });
@@ -1645,6 +1650,141 @@ test("stripe: a deposit paid before the job exists is deferred, then lands when 
   assert.equal(inv.Status__c, "Paid");
   assert.equal(iss.body.paymentStatus, "Paid");
   assert.ok(!iss.body.warnings.some((w) => /not charged/.test(w)), JSON.stringify(iss.body.warnings));
+});
+
+test("stripe (amendment 11): the office's card on file — status from Stripe, the hosted card page, the customer link by text / email, an Admin charge of any amount (deposit before the invoice, the balance after), a Manager refused, the caps", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  const stripeCalls = [];
+  let hasCard = false;
+  let piSeq = 0;
+  fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, method: init?.method, params: init?.body ? new URLSearchParams(init.body) : null });
+    if (url.endsWith("/customers") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_office" }) };
+    if (/\/customers\/cus_office$/.test(url) && init.method === "GET") return { ok: true, status: 200, json: async () => ({ id: "cus_office", deleted: false, invoice_settings: { default_payment_method: hasCard ? "pm_visa" : null } }) };
+    if (url.endsWith("/payment_methods/pm_visa")) return { ok: true, status: 200, json: async () => ({ id: "pm_visa", card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2030 } }) };
+    if (url.endsWith("/checkout/sessions") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cs_office_1", url: "https://checkout.stripe.com/c/pay/cs_office_1" }) };
+    if (url.endsWith("/setup_intents/seti_1")) return { ok: true, status: 200, json: async () => ({ id: "seti_1", payment_method: "pm_visa" }) };
+    if (url.endsWith("/payment_intents") && init.method === "POST") {
+      piSeq += 1;
+      return { ok: true, status: 200, json: async () => ({ id: `pi_off_${piSeq}`, status: "requires_confirmation" }) };
+    }
+    if (/\/payment_intents\/pi_off_\d+\/confirm$/.test(url)) {
+      const id = url.split("/").slice(-2)[0];
+      return { ok: true, status: 200, json: async () => ({ id, status: "succeeded", created: 1_789_002_000, latest_charge: `ch_${id}` }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const texts = [];
+  fake.sms = { sendText: async (args) => { texts.push(args); return { ok: true, code: null, error: null, to: "+16025550101", message: { id: "m1" } }; } };
+  const h = makeHandler(fake);
+  const customer = fake.store.Sundial_Customer__c[0];
+  // A quick-created job (its estimate is a Draft — the office's go-ahead is the job itself).
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: customer.Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 300 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+
+  // 1. No card yet: the status says so, what is owed comes from the estimate, the customer link is minted.
+  let r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.configured, true);
+  assert.equal(r.body.cardOnFile, false);
+  assert.equal(r.body.owed, 300);
+  assert.equal(r.body.owedBasis, "estimate");
+  assert.equal(r.body.customerUrl, "https://portal.example.com/estimate/TOKEN123");
+  assert.equal(fake.store.Sundial_Estimate__c[0].Public_Token__c, "TOKEN123");
+  // A charge with no card is refused before Stripe is asked for money.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 100 });
+  assert.equal(r.status, 400, JSON.stringify(r.body));
+  assert.equal(r.body.code, "NO_CARD");
+
+  // 2. The office opens Stripe's card page: a setup-mode Checkout on the customer, back to the job page after.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-session`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.url, "https://checkout.stripe.com/c/pay/cs_office_1");
+  const sess = stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  assert.equal(sess.params.get("mode"), "setup");
+  assert.equal(sess.params.get("customer"), "cus_office");
+  assert.equal(sess.params.get("success_url"), `https://portal.example.com/service/jobs/${job.Id}?card=saved`);
+  assert.equal(sess.params.get("metadata[kind]"), "office_setup");
+  assert.equal(sess.params.get("metadata[jobId]"), job.Id);
+  assert.equal(customer.Stripe_Customer_Id__c, "cus_office");
+  // The customer can be sent the link instead — by text (the job's number) or email.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-link`, { via: "sms" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(texts.length, 1);
+  assert.ok(texts[0].body.includes("https://portal.example.com/estimate/TOKEN123"), texts[0].body);
+  assert.ok(texts[0].body.includes("Keep a card on file"));
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-link`, { via: "email" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.to, "ivy@example.com");
+  assert.ok(fake.emails[fake.emails.length - 1].subject.startsWith("Keep a card on file for SVC-"));
+
+  // 3. Stripe reports the card (the webhook), and the status reads brand / last 4 live from Stripe.
+  hasCard = true;
+  const meta = { tenant: "harmon", tenantId: TENANT, estimateId: job.Estimate__c, jobId: job.Id, customerId: customer.Id, invoiceId: "", kind: "office_setup" };
+  r = await send(h, stripeDelivery(evt("evt_office_cs", "checkout.session.completed", { id: "cs_office_1", object: "checkout.session", mode: "setup", customer: "cus_office", setup_intent: "seti_1", metadata: meta })));
+  assert.equal(r.body.status, "applied", JSON.stringify(r.body));
+  assert.equal(job.Customer_Card_on_File__c, true);
+  r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(r.body.cardOnFile, true);
+  assert.deepEqual(r.body.card, { brand: "visa", last4: "4242", expMonth: 12, expYear: 2030 });
+
+  // 4. An Admin charges a $100 deposit before any invoice: a Deposit row, the job reads Deposit Paid.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 100, note: "Deposit taken over the phone" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.type, "Deposit");
+  assert.equal(r.body.amount, 100);
+  const dep = fake.store.Sundial_Service_Payment__c[0];
+  assert.equal(dep.Type__c, "Deposit");
+  assert.equal(dep.Status__c, "Succeeded");
+  assert.equal(dep.Invoice__c, undefined);
+  assert.ok(dep.Notes__c.includes("Deposit taken over the phone"));
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  const piCall = stripeCalls.find((c) => c.url.endsWith("/payment_intents") && c.method === "POST");
+  assert.equal(piCall.params.get("amount"), "10000");
+  assert.equal(piCall.params.get("off_session"), "true");
+  assert.equal(piCall.params.get("metadata[kind]"), "deposit");
+  // More than what is left ($200) is refused; a Manager is refused outright (the level gate).
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 250 });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.code, "AMOUNT_TOO_HIGH");
+  assert.equal(r.body.owed, 200);
+  const manager = makeHandler(fake, { user: { id: "USR000000000000002" }, access: { level: "Manager", scope: "tenant", userId: "USR000000000000002", tenantId: TENANT } });
+  r = await call(manager, "POST", `/service/jobs/${job.Id}/charge`, { amount: 50 });
+  assert.equal(r.status, 403);
+  // The invoice-balance charge is the same Admin action; a Manager's issue with the tick still issues, uncharged.
+  r = await call(manager, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.charge.ok, false);
+  assert.equal(r.body.charge.code, "FORBIDDEN");
+  assert.ok(r.body.warnings.some((w) => /Admin action/.test(w)));
+  const invM = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal((await call(manager, "POST", `/service/invoices/${invM.Id}/charge`)).status, 403);
+  await call(h, "POST", `/service/invoices/${invM.Id}/void`, { reason: "test" });
+  // …but the Manager may still read the status and open the card page.
+  assert.equal((await call(manager, "GET", `/service/jobs/${job.Id}/card`)).status, 200);
+
+  // 5. The invoice is issued (the deposit rides on it); the office charges the $200 balance in part, then the rest.
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c.find((i) => i.Status__c !== "Void");
+  assert.equal(inv.Paid_Amount__c, 100);
+  r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(r.body.owedBasis, "invoice");
+  assert.equal(r.body.owed, 200);
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 75 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.type, "Payment");
+  assert.equal(inv.Paid_Amount__c, 175);
+  assert.equal(inv.Status__c, "Partially Paid");
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 125 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(inv.Status__c, "Paid");
+  assert.equal(job.Status__c, "Paid");
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 1 });
+  assert.equal(r.body.code, "NOTHING_DUE");
 });
 
 // ---------------------------------------------------------------------------

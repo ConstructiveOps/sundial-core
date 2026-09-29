@@ -146,7 +146,7 @@ export function estimateStatusAfterVoid(est) {
   return "Draft";
 }
 
-export function buildInvoiceEmail({ invoice, job, brandName, balance, pdfAttached }) {
+export function buildInvoiceEmail({ invoice, job, brandName, balance, pdfAttached, payUrl = null }) {
   const number = invoice.Name || "Invoice";
   const who = brandName ? ` from ${brandName}` : "";
   const money = (n) => Number(n).toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -165,10 +165,14 @@ export function buildInvoiceEmail({ invoice, job, brandName, balance, pdfAttache
     "Questions? Just reply to this email.",
   ].filter((l) => l !== "");
   const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  // The pay link (amendment 11): a button in the HTML, a plain line in the text — only while money is owed.
+  const showPay = !paidInFull && !!payUrl;
+  const payButton = showPay ? `<p style="margin:20px 0"><a href="${esc(payUrl)}" style="background:#1F3864;color:#fff;padding:12px 22px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Pay ${esc(money(balance))} online</a></p><p style="color:#a1a1aa;font-size:12px">Your card goes straight to Stripe — we never see the number. If the button doesn't work, copy this link: ${esc(payUrl)}</p>` : "";
   const html = `<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;max-width:560px">${lines
     .map((l, i) => (i === 0 ? `<p>${esc(l)}</p>` : `<p style="color:${i > 2 ? "#52525b" : "#18181b"}">${esc(l)}</p>`))
-    .join("")}</div>`;
-  return { subject, text: lines.join("\n"), html };
+    .join("")}${payButton}</div>`;
+  const text = showPay ? [...lines.slice(0, -1), `Pay online (card): ${payUrl}`, "", lines[lines.length - 1]].join("\n") : lines.join("\n");
+  return { subject, text, html };
 }
 
 // --- handler factory ---------------------------------------------------------------
@@ -270,7 +274,27 @@ export function createMoneyCore(d, h) {
     return { payments, summary };
   }
 
-  return { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice };
+  /**
+   * The customer's page for the job's estimate — where a card is added or a bill paid
+   * (amendment 11): `{base}/estimate/{token}`, the token minted on first use so an invoice
+   * or a card link can be sent before the estimate ever was. Null when there is no
+   * estimate or no SERVICE_PUBLIC_BASE_URL.
+   */
+  async function customerLinkFor(job, tenantId) {
+    if (!job?.Estimate__c || !h.publicEstimateUrl) return { url: null, token: null };
+    const rows = await d.sfQuery(`SELECT Id, Public_Token__c FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+    const est = rows?.[0];
+    if (!est) return { url: null, token: null };
+    let token = est.Public_Token__c || null;
+    if (!token && h.randomToken) {
+      token = h.randomToken();
+      await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Public_Token__c: token });
+      await h.markStale(CACHE.estimate, [est.Id], tenantId);
+    }
+    return { url: token ? h.publicEstimateUrl(token) : null, token };
+  }
+
+  return { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice, customerLinkFor };
 }
 
 export function createInvoiceHandlers(d, h) {
@@ -279,9 +303,21 @@ export function createInvoiceHandlers(d, h) {
   const { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney } = money;
 
   /** Render + store the PDF for an invoice (best-effort; returns { key, bytes } or nulls). */
+  /** The "Pay this invoice" link: the customer's page, only while the customer owes money (amendment 11). */
+  async function payUrlFor({ invoice, job, tenantId }) {
+    if (invoice.Status__c === "Void" || balanceOf(invoice) <= 0) return null;
+    if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return null; // a partner gets the document, not a card page
+    try {
+      return (await money.customerLinkFor(job, tenantId)).url;
+    } catch (e) {
+      console.error("invoice pay link:", e?.sfBody || e?.message || e, e?.stack);
+      return null;
+    }
+  }
   async function renderAndStorePdf({ invoice, job, est, lines, payments, ctx, tenantId }) {
     try {
-      const model = buildInvoiceModel({ invoice, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf" } });
+      const payUrl = await payUrlFor({ invoice, job, tenantId });
+      const model = buildInvoiceModel({ invoice, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
       const bytes = await d.renderPdf(model);
       const key = invoicePdfKey(job.Id, invoice.Name);
       await d.putObject({ key, body: bytes, contentType: "application/pdf" });
@@ -425,8 +461,13 @@ export function createInvoiceHandlers(d, h) {
       // The charge's own outcome rides along; a decline never un-issues the invoice.
       let charge = null;
       if (body?.chargeCard === true && h.chargeInvoice) {
-        charge = await h.chargeInvoice({ ctx, invoice, job });
-        if (charge?.settled) money = charge.settled;
+        // Charging the stored card is an Admin / Executive action (amendment 11) — the invoice
+        // still issues; the tick just does nothing for anyone else, and says so.
+        if (ctx.can && !ctx.can("service.card.charge")) charge = { ok: false, code: "FORBIDDEN", message: "Charging the card on file is an Admin action — the invoice was issued, not charged." };
+        else {
+          charge = await h.chargeInvoice({ ctx, invoice, job });
+          if (charge?.settled) money = charge.settled;
+        }
       }
       return jsonResponse(201, cors, {
         success: true,
@@ -460,7 +501,7 @@ export function createInvoiceHandlers(d, h) {
       const est = job?.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
       const lines = est ? await h.loadLines(est.Id, tenantId) : [];
       const payments = (await loadJobPayments(inv.Service_Job__c, tenantId)).filter((p) => p.Invoice__c === inv.Id);
-      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "preview" } });
+      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "preview", payUrl: await payUrlFor({ invoice: inv, job, tenantId }) } });
       const { html, title } = renderEstimateDocument({ model });
       return jsonResponse(200, cors, { html, title, number: inv.Name, status: inv.Status__c, total: inv.Total__c, balance: balanceOf(inv) });
     },
@@ -515,7 +556,7 @@ export function createInvoiceHandlers(d, h) {
         if (!email && !deliveryDetail) deliveryDetail = "The customer has no email address on file.";
         if (email) {
           const balance = balanceOf(inv);
-          const msg = buildInvoiceEmail({ invoice: inv, job, brandName: h.brandFor(ctx).companyName, balance, pdfAttached: Boolean(pdf.bytes) });
+          const msg = buildInvoiceEmail({ invoice: inv, job, brandName: h.brandFor(ctx).companyName, balance, pdfAttached: Boolean(pdf.bytes), payUrl: await payUrlFor({ invoice: inv, job, tenantId }) });
           const attachments = pdf.bytes ? [{ fileName: `${inv.Name}.pdf`, contentType: "application/pdf", content: pdf.bytes }] : [];
           const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
           if (sent.ok) {

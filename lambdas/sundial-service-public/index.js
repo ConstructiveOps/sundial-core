@@ -83,6 +83,10 @@ const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
  */
 export function paymentSummary({ est, job, invoice, configured }) {
   const approved = ["Approved", "Invoiced"].includes(est?.Status__c);
+  // A job's existence is the office's go-ahead (a quick-created job's estimate may still be a
+  // Draft): the card-on-file step is offered as soon as there is a job, while the deposit still
+  // waits for the customer's approval (amendment 11, 2026-09-28).
+  const cardStep = approved || !!job;
   const partner = job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer";
   const live = invoice && invoice.Status__c !== "Void" && invoice.Status__c !== "Draft" ? invoice : null;
   const balance = live ? cents((Number(live.Total__c) || 0) - (Number(live.Paid_Amount__c) || 0)) : 0;
@@ -94,7 +98,7 @@ export function paymentSummary({ est, job, invoice, configured }) {
   if (!partner) {
     if (live && balance > 0) next = "balance";
     else if (approved && depositRequired && !depositPaidAt && !live) next = "deposit";
-    else if (approved && !cardOnFile && !live) next = "setup";
+    else if (cardStep && !cardOnFile && !live) next = "setup";
   }
   return {
     configured: configured === true,
@@ -352,7 +356,7 @@ export function createHandler(deps = {}) {
       const job = await loadJob(est);
       const invoice = await loadLiveInvoice(job);
       const summary = paymentSummary({ est, job, invoice, configured: true });
-      const allowed = summary.next === kind || (kind === "setup" && ["Approved", "Invoiced"].includes(est.Status__c) && !summary.cardOnFile && !(job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer"));
+      const allowed = summary.next === kind || (kind === "setup" && (["Approved", "Invoiced"].includes(est.Status__c) || !!job) && !summary.cardOnFile && !(job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer"));
       if (!allowed) return jsonResponse(409, cors, { error: "not_applicable", code: "CHECKOUT_NOT_APPLICABLE", next: summary.next, message: summary.next ? "That step isn't the one that's due — reload the page." : "There's nothing to pay right now." });
       const base = String(d.publicBaseUrl || "").replace(/\/+$/, "");
       if (!base) return jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "Online payment isn't set up yet — please give us a call." });

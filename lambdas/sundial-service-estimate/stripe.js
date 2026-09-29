@@ -4,6 +4,15 @@
 //                                           gated only by the Stripe-Signature check, fail closed)
 //   POST /service/invoices/{id}/charge      the office charges the card on file for the balance
 //                                           (off-session; also `chargeCard: true` on issue)
+//   THE OFFICE'S CARD ON FILE (amendment 11, 2026-09-28 — a card over the phone):
+//   GET  /service/jobs/{id}/card            is there a card? (brand / last 4, live from Stripe), what is owed
+//   POST /service/jobs/{id}/card-session    a Stripe-hosted card page for the OFFICE to type the card the
+//                                           customer reads out (Checkout in setup mode; the card never
+//                                           touches Sundial's own page — Stripe's, in a new tab)
+//   POST /service/jobs/{id}/card-link       text / email the customer the estimate link so THEY add the card
+//   POST /service/jobs/{id}/charge          charge the card on file for ANY amount up to what is owed — a
+//                                           deposit before the invoice, part or all of the balance after.
+//                                           Admin / Executive only (service.card.charge, ACTION_LEVELS).
 //
 // The customer's side (Checkout Sessions for card-on-file / deposit / balance) lives in
 // sundial-service-public. Everything that turns a Stripe event into MONEY lives here, and
@@ -30,7 +39,7 @@
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
-import { defaultPaymentMethod, fromCents, stripeForTenant, toCents, verifyWebhookSignature, StripeError } from "../../lib/stripe.js";
+import { defaultPaymentMethod, ensureStripeCustomer, fromCents, stripeForTenant, toCents, verifyWebhookSignature, StripeError } from "../../lib/stripe.js";
 import { PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "./invoice.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 
@@ -119,12 +128,12 @@ export function createStripeHandlers(d, h) {
   }
   async function loadCustomer(id, tenantId) {
     if (!SF_ID_RE.test(id || "")) return null;
-    const rows = await d.sfQuery(`SELECT Id, Name, Client__c, Primary_Email__c, Stripe_Customer_Id__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+    const rows = await d.sfQuery(`SELECT Id, Name, Client__c, Primary_Email__c, Primary_Phone__c, Stripe_Customer_Id__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0] ?? null;
   }
   async function loadEstimateLite(id, tenantId) {
     if (!SF_ID_RE.test(id || "")) return null;
-    const rows = await d.sfQuery(`SELECT Id, Name, Client__c, Service_Job__c, Deposit_Paid_At__c FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+    const rows = await d.sfQuery(`SELECT Id, Name, Client__c, Service_Job__c, Deposit_Paid_At__c, Total__c, Deposit_Amount__c, Public_Token__c, Status__c FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0] ?? null;
   }
   const systemCtx = (tenantId, slug, cors) => ({ tenantId, tenantSlug: slug, userId: null, scope: "system", actor: { id: null, name: "Stripe" }, cors });
@@ -333,45 +342,108 @@ export function createStripeHandlers(d, h) {
     return { status: created.length ? "applied" : "ignored", refunds: created.length, jobId: job.Id, duplicate: !created.length };
   }
 
-  /** The office's charge on the card on file. Returns a plain result; never throws for a decline. */
-  async function chargeInvoice({ ctx, invoice, job }) {
-    const { tenantId } = ctx;
-    if (invoice.Status__c === "Void") return { ok: false, code: "INVOICE_VOID", message: "This invoice is void." };
-    const balance = money.balanceOf(invoice);
-    if (balance <= 0) return { ok: false, code: "NOTHING_DUE", message: "There is no balance on this invoice." };
-    if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return { ok: false, code: "NOT_CUSTOMER_PAY", message: `This invoice bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}, not the customer's card.` };
+  // --- the office's card on file ----------------------------------------------------------
+  const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  /** Money already taken on the job that is not a refund: Succeeded and Pending rows both count (a Pending charge is money in flight). */
+  function takenOn(payments) {
+    let taken = 0;
+    for (const p of payments) {
+      if (!["Succeeded", "Pending"].includes(p.Status__c)) continue;
+      const a = Number(p.Amount__c) || 0;
+      taken += p.Type__c === "Refund" ? -Math.abs(a) : a;
+    }
+    return round2(taken);
+  }
+  /**
+   * What the customer still owes on the job: the live invoice's balance when there is one,
+   * else the estimate's total less what has been taken (a deposit before the bill). With no
+   * estimate total there is nothing to charge against.
+   */
+  async function owedOn({ job, invoice, tenantId }) {
+    if (invoice && invoice.Status__c !== "Void") return { owed: money.balanceOf(invoice), basis: "invoice", invoice };
+    const est = job.Estimate__c ? await loadEstimateLite(job.Estimate__c, tenantId) : null;
+    const total = round2(est?.Total__c);
+    const payments = (await money.loadJobPayments(job.Id, tenantId)).filter((p) => !p.Invoice__c);
+    return { owed: round2(Math.max(0, total - takenOn(payments))), basis: "estimate", estimate: est, total, taken: takenOn(payments) };
+  }
+  /** The default card's brand / last four, straight from Stripe — the flag on the job is a hint, this is the fact. */
+  async function cardOnFileFor({ ctx, job }) {
     const stripe = await stripeFor(ctx.tenantSlug);
-    if (!stripe) return { ok: false, code: "STRIPE_NOT_CONFIGURED", message: "Stripe isn't set up for this tenant yet (Secrets Manager sundial/stripe)." };
-    const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
-    if (!customer?.Stripe_Customer_Id__c) return { ok: false, code: "NO_CARD", message: "There is no card on file for this customer — send the estimate link so they can add one." };
+    if (!stripe) return { configured: false, mode: null, cardOnFile: false, card: null, customer: null, stripe: null };
+    const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, ctx.tenantId) : null;
+    if (!customer?.Stripe_Customer_Id__c) return { configured: true, mode: stripe.config.mode, cardOnFile: false, card: null, customer, stripe };
     let pm = null;
+    let card = null;
     try {
       pm = await defaultPaymentMethod(stripe.client, customer.Stripe_Customer_Id__c);
+      if (pm) {
+        const full = await stripe.client.get(`payment_methods/${encodeURIComponent(pm)}`);
+        const c = full?.card || null;
+        card = { id: pm, brand: c?.brand ?? null, last4: c?.last4 ?? null, expMonth: c?.exp_month ?? null, expYear: c?.exp_year ?? null };
+      }
     } catch (e) {
-      return { ok: false, code: "STRIPE_ERROR", message: e?.message || "Stripe could not be reached." };
+      console.error("stripe: card lookup failed:", e?.message || e);
+      return { configured: true, mode: stripe.config.mode, cardOnFile: false, card: null, customer, stripe, error: e?.message || "Stripe could not be reached." };
     }
-    if (!pm) return { ok: false, code: "NO_CARD", message: "There is no card on file for this customer — send the estimate link so they can add one." };
-    // Pending in Sundial first — refuse to double-charge a balance a Pending row already covers.
-    const pending = (await money.loadJobPayments(job.Id, tenantId)).find((p) => p.Invoice__c === invoice.Id && p.Status__c === "Pending" && p.Stripe_Payment_Intent_Id__c);
-    if (pending) return { ok: false, code: "CHARGE_PENDING", message: `A card charge (${pending.Stripe_Payment_Intent_Id__c}) is still processing on this invoice.` };
-    const metadata = { tenant: ctx.tenantSlug || "", tenantId, jobId: job.Id, invoiceId: invoice.Id, estimateId: job.Estimate__c || "", customerId: customer.Id, kind: "charge" };
-    const description = `${invoice.Name} — ${h.brandFor ? h.brandFor(ctx).companyName || "Sundial" : "Sundial"}`.slice(0, 200);
+    const cardOnFile = !!pm;
+    // The job's flag catches up with Stripe (the webhook may not have run, or the card was added from another job).
+    if (cardOnFile !== (job.Customer_Card_on_File__c === true)) {
+      try {
+        await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Customer_Card_on_File__c: cardOnFile });
+        job.Customer_Card_on_File__c = cardOnFile;
+        await h.markStale(CACHE.job, [job.Id], ctx.tenantId);
+      } catch (e) {
+        console.error("stripe: card flag write failed:", e?.sfBody || e?.message || e);
+      }
+    }
+    return { configured: true, mode: stripe.config.mode, cardOnFile, card, paymentMethodId: pm, customer, stripe };
+  }
+
+  /**
+   * Charge the card on file. `amount` is the office's (a deposit, a partial, the balance) and is
+   * capped at what is owed; `invoice` is the live invoice when there is one (the row hangs off it
+   * and settleMoney moves the bill), else the row is a Deposit on the job. Never throws for a
+   * decline — a Failed row with Stripe's words is the answer.
+   */
+  async function chargeCard({ ctx, job, invoice = null, amount, note = null, kind = "charge" }) {
+    const { tenantId } = ctx;
+    if (invoice && invoice.Status__c === "Void") return { ok: false, code: "INVOICE_VOID", message: "This invoice is void." };
+    if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return { ok: false, code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}, not the customer's card.` };
+    const wanted = round2(amount);
+    if (!(wanted > 0)) return { ok: false, code: "AMOUNT_INVALID", message: "Enter an amount greater than zero." };
+    const due = await owedOn({ job, invoice, tenantId });
+    if (due.owed <= 0) return { ok: false, code: "NOTHING_DUE", message: due.basis === "invoice" ? "There is no balance on this invoice." : "There is nothing to charge yet — the estimate has no total, or it is already covered." };
+    if (wanted > due.owed + 0.005) return { ok: false, code: "AMOUNT_TOO_HIGH", message: `That is more than what is owed ($${due.owed.toFixed(2)}).`, owed: due.owed };
+    const cof = await cardOnFileFor({ ctx, job });
+    if (!cof.configured) return { ok: false, code: "STRIPE_NOT_CONFIGURED", message: "Stripe isn't set up for this tenant yet (Secrets Manager sundial/stripe)." };
+    if (cof.error) return { ok: false, code: "STRIPE_ERROR", message: cof.error };
+    if (!cof.cardOnFile) return { ok: false, code: "NO_CARD", message: "There is no card on file for this customer — enter one, or send them the card link." };
+    const { stripe, customer, paymentMethodId: pm } = cof;
+    // Pending in Sundial first — refuse to double-charge while an earlier charge is still in flight.
+    const pending = (await money.loadJobPayments(job.Id, tenantId)).find((p) => (invoice ? p.Invoice__c === invoice.Id : !p.Invoice__c) && p.Status__c === "Pending" && p.Stripe_Payment_Intent_Id__c);
+    if (pending) return { ok: false, code: "CHARGE_PENDING", message: `A card charge (${pending.Stripe_Payment_Intent_Id__c}) is still processing on this ${invoice ? "invoice" : "job"}.` };
+    const metadata = { tenant: ctx.tenantSlug || "", tenantId, jobId: job.Id, invoiceId: invoice?.Id || "", estimateId: job.Estimate__c || "", customerId: customer.Id, kind };
+    const brandName = h.brandFor ? h.brandFor(ctx).companyName || "Sundial" : "Sundial";
+    const description = `${invoice ? invoice.Name : `${job.Name} deposit`} — ${brandName}`.slice(0, 200);
     const email = customer.Primary_Email__c || job.Primary_Email_at_Creation__c || null;
+    const type = invoice ? "Payment" : "Deposit";
     let pi;
     try {
       pi = await stripe.client.post(
         "payment_intents",
-        { amount: toCents(balance), currency: "usd", customer: customer.Stripe_Customer_Id__c, payment_method: pm, off_session: true, confirm: false, description, metadata, ...(email ? { receipt_email: email } : {}) },
-        { idempotencyKey: `charge:${invoice.Id}:${toCents(balance)}:${d.now().toISOString().slice(0, 13)}` }
+        { amount: toCents(wanted), currency: "usd", customer: customer.Stripe_Customer_Id__c, payment_method: pm, off_session: true, confirm: false, description, metadata, ...(email ? { receipt_email: email } : {}) },
+        { idempotencyKey: `charge:${invoice?.Id || job.Id}:${toCents(wanted)}:${d.now().toISOString().slice(0, 16)}` }
       );
     } catch (e) {
       return { ok: false, code: e instanceof StripeError ? e.code || "STRIPE_ERROR" : "STRIPE_ERROR", message: e?.message || "Stripe could not create the charge." };
     }
     const now = d.now().toISOString();
-    const rowFields = { Service_Job__c: job.Id, Invoice__c: invoice.Id, Client__c: tenantId, Type__c: "Payment", Method__c: "Card", Amount__c: balance, Status__c: "Pending", Received_At__c: now, Reference__c: pi.id, Stripe_Payment_Intent_Id__c: pi.id, Recorded_By__c: ctx.userId || undefined, Notes__c: `Stripe (${stripe.config.mode}) — charged by the office` };
+    const who = ctx.actor?.name ? ` by ${ctx.actor.name}` : " by the office";
+    const rowFields = { Service_Job__c: job.Id, Invoice__c: invoice?.Id || undefined, Client__c: tenantId, Type__c: type, Method__c: "Card", Amount__c: wanted, Status__c: "Pending", Received_At__c: now, Reference__c: pi.id, Stripe_Payment_Intent_Id__c: pi.id, Recorded_By__c: ctx.userId || undefined, Notes__c: [`Stripe (${stripe.config.mode}) — charged${who}`, note ? String(note).slice(0, 200) : null].filter(Boolean).join(" · ").slice(0, 255) };
     for (const k of Object.keys(rowFields)) if (rowFields[k] === undefined) delete rowFields[k];
     const row = await d.sfCreateRecord(PAYMENT_SF_OBJECT, rowFields);
     await h.markStale(CACHE.payment, [row.id], tenantId);
+    const actBase = { event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: row.id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null };
     let confirmed;
     try {
       confirmed = await stripe.client.post(`payment_intents/${encodeURIComponent(pi.id)}/confirm`, { off_session: true }, { idempotencyKey: `confirm:${pi.id}` });
@@ -380,7 +452,7 @@ export function createStripeHandlers(d, h) {
       const code = e instanceof StripeError ? e.declineCode || e.code || "STRIPE_ERROR" : "STRIPE_ERROR";
       await d.sfUpdateRecord(PAYMENT_SF_OBJECT, row.id, { Status__c: "Failed", Failure_Reason__c: String(reason).slice(0, 255) });
       await h.markStale(CACHE.payment, [row.id], tenantId);
-      await h.act(ctx, { event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: row.id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { invoice: invoice.Name, type: "Payment", method: "Card", amount: balance, failed: true, reason, reference: pi.id, via: "office-charge" } });
+      await h.act(ctx, { ...actBase, details: { invoice: invoice?.Name ?? null, type, method: "Card", amount: wanted, failed: true, reason, reference: pi.id, note, via: "office-charge" } });
       return { ok: false, code, message: reason, paymentId: row.id, paymentIntentId: pi.id };
     }
     if (confirmed.status === "succeeded") {
@@ -389,12 +461,20 @@ export function createStripeHandlers(d, h) {
       if (charge) upd.Stripe_Charge_Id__c = charge;
       await d.sfUpdateRecord(PAYMENT_SF_OBJECT, row.id, upd);
       await h.markStale(CACHE.payment, [row.id], tenantId);
-      const settled = await money.settleMoney({ invoice, job, tenantId, ctx });
-      await h.act(ctx, { event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: row.id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { invoice: invoice.Name, type: "Payment", method: "Card", amount: balance, reference: pi.id, paid: settled.summary.paid, balance: settled.balance, invoiceStatus: invoice.Status__c, via: "office-charge", mode: stripe.config.mode } });
-      return { ok: true, status: "succeeded", paymentId: row.id, paymentIntentId: pi.id, amount: balance, settled };
+      const settled = invoice ? await money.settleMoney({ invoice, job, tenantId, ctx }) : await money.settleJobWithoutInvoice({ job, tenantId });
+      await h.act(ctx, { ...actBase, details: { invoice: invoice?.Name ?? null, type, method: "Card", amount: wanted, reference: pi.id, note, paid: settled.summary?.paid ?? null, balance: settled.balance ?? null, invoiceStatus: invoice?.Status__c ?? null, via: "office-charge", mode: stripe.config.mode } });
+      return { ok: true, status: "succeeded", paymentId: row.id, paymentIntentId: pi.id, amount: wanted, type, settled };
     }
     // processing / requires_action: the webhook finishes it.
-    return { ok: true, status: confirmed.status, pending: true, paymentId: row.id, paymentIntentId: pi.id, amount: balance };
+    return { ok: true, status: confirmed.status, pending: true, paymentId: row.id, paymentIntentId: pi.id, amount: wanted, type };
+  }
+
+  /** The office's charge of an invoice's whole balance (issue-time tick, the invoice card's button). */
+  async function chargeInvoice({ ctx, invoice, job }) {
+    if (invoice.Status__c === "Void") return { ok: false, code: "INVOICE_VOID", message: "This invoice is void." };
+    const balance = money.balanceOf(invoice);
+    if (balance <= 0) return { ok: false, code: "NOTHING_DUE", message: "There is no balance on this invoice." };
+    return chargeCard({ ctx, job, invoice, amount: balance, kind: "charge" });
   }
 
   /** Create Job hook: money and cards that arrived before the job existed. */
@@ -429,9 +509,132 @@ export function createStripeHandlers(d, h) {
     return { applied };
   }
 
+  const chargeStatusFor = (code) => (["NOTHING_DUE", "INVOICE_VOID", "NOT_CUSTOMER_PAY", "CHARGE_PENDING", "AMOUNT_TOO_HIGH"].includes(code) ? 409 : ["NO_CARD", "STRIPE_NOT_CONFIGURED", "AMOUNT_INVALID"].includes(code) ? 400 : 402);
+  /** The customer's page for this job's estimate — where a card is added or a bill paid (money.customerLinkFor mints the token). */
+  const customerLinkFor = async (job, tenantId) => ({ ...(await money.customerLinkFor(job, tenantId)), estimate: job.Estimate__c ? { Id: job.Estimate__c } : null });
+  const cardView = (cof) => ({ configured: cof.configured, mode: cof.mode, cardOnFile: cof.cardOnFile, card: cof.card ? { brand: cof.card.brand, last4: cof.card.last4, expMonth: cof.card.expMonth, expYear: cof.card.expYear } : null, stripeError: cof.error ?? null });
+
   return {
     chargeInvoice,
+    chargeCard,
+    cardOnFileFor,
     applyDeferred,
+
+    /** GET /service/jobs/{id}/card — the card on file (from Stripe) and what is owed. */
+    async jobCard({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const job = await money.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const cof = await cardOnFileFor({ ctx, job });
+      const invoice = (await money.loadJobInvoices(job.Id, tenantId)).find((i) => i.Status__c !== "Void") ?? null;
+      const due = await owedOn({ job, invoice, tenantId });
+      const link = await customerLinkFor(job, tenantId).catch(() => ({ url: null }));
+      return jsonResponse(200, cors, {
+        jobId: job.Id,
+        ...cardView(cof),
+        billToType: job.Bill_To_Type__c || "Customer",
+        customerPays: !job.Bill_To_Type__c || job.Bill_To_Type__c === "Customer",
+        owed: due.owed,
+        owedBasis: due.basis,
+        invoice: invoice ? { id: invoice.Id, number: invoice.Name, status: invoice.Status__c, balance: money.balanceOf(invoice) } : null,
+        estimateTotal: due.total ?? null,
+        customerUrl: link.url,
+        customerEmail: cof.customer?.Primary_Email__c ?? job.Primary_Email_at_Creation__c ?? null,
+        customerPhone: cof.customer?.Primary_Phone__c ?? job.Primary_Phone_at_Creation__c ?? null,
+      });
+    },
+
+    /** POST /service/jobs/{id}/card-session — Stripe's hosted card page for the office (Checkout, setup mode). */
+    async jobCardSession({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const job = await money.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c} — there is no customer card to keep.` });
+      const stripe = await stripeFor(ctx.tenantSlug);
+      if (!stripe) return jsonResponse(503, cors, { error: "not_configured", code: "STRIPE_NOT_CONFIGURED", message: "Stripe isn't set up for this tenant yet (Secrets Manager sundial/stripe)." });
+      const base = String(h.portalBaseUrl?.() || "").replace(/\/+$/, "");
+      if (!base) return jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "SERVICE_PUBLIC_BASE_URL is not set on this Lambda." });
+      const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
+      if (!customer) return jsonResponse(409, cors, { error: "no_customer", code: "NO_CUSTOMER", message: "This job has no customer record to keep a card for." });
+      let stripeCustomerId = customer.Stripe_Customer_Id__c || null;
+      try {
+        const ensured = await ensureStripeCustomer(stripe.client, {
+          existingId: stripeCustomerId,
+          name: customer.Name || job.Customer_Name_at_Creation__c || undefined,
+          email: customer.Primary_Email__c || job.Primary_Email_at_Creation__c || undefined,
+          phone: customer.Primary_Phone__c || undefined,
+          metadata: { tenant: ctx.tenantSlug || "", sundialCustomerId: customer.Id, source: "sundial" },
+        });
+        if (ensured !== stripeCustomerId) {
+          await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, { Stripe_Customer_Id__c: ensured });
+          await h.markStale(CACHE.customer, [customer.Id], tenantId);
+        }
+        stripeCustomerId = ensured;
+      } catch (e) {
+        return jsonResponse(502, cors, { error: "stripe_error", code: "STRIPE_ERROR", message: e?.message || "Stripe could not be reached." });
+      }
+      const page = `${base}/service/jobs/${encodeURIComponent(job.Id)}`;
+      const metadata = { tenant: ctx.tenantSlug || "", tenantId, estimateId: job.Estimate__c || "", jobId: job.Id, customerId: customer.Id, invoiceId: "", kind: "office_setup", by: ctx.userId || "" };
+      let session;
+      try {
+        session = await stripe.client.post(
+          "checkout/sessions",
+          { mode: "setup", customer: stripeCustomerId, payment_method_types: ["card"], success_url: `${page}?card=saved`, cancel_url: `${page}?card=cancel`, client_reference_id: job.Id, metadata, setup_intent_data: { metadata } },
+          { idempotencyKey: `office-setup:${job.Id}:${d.now().toISOString().slice(0, 16)}` }
+        );
+      } catch (e) {
+        return jsonResponse(502, cors, { error: "stripe_error", code: "STRIPE_ERROR", message: e instanceof StripeError ? e.message : e?.message || "Stripe could not start the card page." });
+      }
+      await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { cardSession: session.id ?? null, via: "office", mode: stripe.config.mode } });
+      return jsonResponse(200, cors, { url: session.url, mode: stripe.config.mode });
+    },
+
+    /** POST /service/jobs/{id}/card-link { via: "sms"|"email", to? } — the customer adds the card themselves. */
+    async jobCardLink({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await money.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}.` });
+      const via = body?.via === "email" ? "email" : "sms";
+      const link = await customerLinkFor(job, tenantId);
+      if (!link.url) return jsonResponse(409, cors, { error: "no_link", code: "NO_ESTIMATE_LINK", message: job.Estimate__c ? "SERVICE_PUBLIC_BASE_URL is not set on this Lambda." : "This job has no estimate to link to." });
+      const brand = h.brandFor ? h.brandFor(ctx).companyName || "" : "";
+      const first = (job.Customer_Name_at_Creation__c || "").split(" ")[0] || "there";
+      const text = `Hi ${first}, ${brand ? `${brand} here. ` : ""}To keep a card on file for ${job.Name}, open this secure link and choose "Keep a card on file": ${link.url}`;
+      if (via === "sms") {
+        if (!d.sms) return jsonResponse(503, cors, { error: "not_configured", code: "SMS_NOT_WIRED", message: "Texting is not wired on this Lambda." });
+        const r = await d.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job, to: body?.to ? String(body.to) : null, body: text, sentBy: { id: ctx.userId ?? null, name: ctx.actor?.name ?? null } });
+        if (!r.ok) return jsonResponse(r.code === "NO_PHONE" ? 409 : 502, cors, { error: "send_failed", code: r.code || "SMS_FAILED", message: r.code === "NO_PHONE" ? "No mobile number on this job — enter one." : r.error || "The text could not be sent." });
+        await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { cardLink: "sms", to: r.to ?? null, via: "office" } });
+        return jsonResponse(200, cors, { success: true, via, to: r.to ?? null, url: link.url });
+      }
+      if (!d.isEmailConfigured || !d.isEmailConfigured()) return jsonResponse(503, cors, { error: "not_configured", code: "EMAIL_NOT_WIRED", message: "Email is not wired on this Lambda." });
+      const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
+      const to = (body?.to ? String(body.to).trim() : "") || customer?.Primary_Email__c || job.Primary_Email_at_Creation__c || null;
+      if (!to) return jsonResponse(409, cors, { error: "no_email", code: "NO_EMAIL", message: "The customer has no email address on file — enter one." });
+      const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+      const subject = `Keep a card on file for ${job.Name}${brand ? ` — ${brand}` : ""}`;
+      const html = `<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;max-width:560px"><p>Hi ${esc(first)},</p><p>${esc(brand ? `${brand} keeps a card on file so we can bill your service work when it is done.` : "We keep a card on file so we can bill your service work when it is done.")} Open the secure link below and choose <strong>Keep a card on file</strong>. Your card details go straight to Stripe — we never see the number.</p><p><a href="${esc(link.url)}" style="display:inline-block;background:#0f172a;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none">Keep a card on file</a></p><p style="color:#52525b">Or copy this link: ${esc(link.url)}</p><p style="color:#52525b">Questions? Just reply to this email.</p></div>`;
+      const sent = await d.sendEmail({ to, subject, html, text });
+      if (!sent.ok) return jsonResponse(502, cors, { error: "send_failed", code: "EMAIL_FAILED", message: `Email failed: ${sent.error}` });
+      await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { cardLink: "email", to, via: "office" } });
+      return jsonResponse(200, cors, { success: true, via, to, url: link.url });
+    },
+
+    /** POST /service/jobs/{id}/charge { amount, note? } — Admin / Executive: charge the card on file for any amount owed. */
+    async jobCharge({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await money.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const amount = Number(body?.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return bad(cors, "AMOUNT_INVALID", "Enter an amount greater than zero.");
+      const invoice = (await money.loadJobInvoices(job.Id, tenantId)).find((i) => i.Status__c !== "Void") ?? null;
+      const note = body?.note ? String(body.note).trim().slice(0, 200) : null;
+      const r = await chargeCard({ ctx, job, invoice, amount, note, kind: invoice ? "charge" : "deposit" });
+      if (!r.ok) return jsonResponse(chargeStatusFor(r.code), cors, { error: "charge_failed", ...r });
+      const payments = await money.loadJobPayments(job.Id, tenantId);
+      return jsonResponse(200, cors, { success: true, ...r, settled: undefined, invoice: invoice ? { id: invoice.Id, number: invoice.Name, status: invoice.Status__c, balance: money.balanceOf(invoice) } : null, payments, jobStatus: job.Status__c, paymentStatus: job.Payment_Status__c });
+    },
 
     /** POST /service/invoices/{id}/charge — the office charges the card on file. */
     async chargeInvoiceRoute({ ctx, params }) {
@@ -441,10 +644,7 @@ export function createStripeHandlers(d, h) {
       const job = await money.loadJob(invoice.Service_Job__c, tenantId);
       if (!job) return notFound(cors);
       const r = await chargeInvoice({ ctx, invoice, job });
-      if (!r.ok) {
-        const status = ["NOTHING_DUE", "INVOICE_VOID", "NOT_CUSTOMER_PAY", "CHARGE_PENDING"].includes(r.code) ? 409 : ["NO_CARD", "STRIPE_NOT_CONFIGURED"].includes(r.code) ? 400 : 402;
-        return jsonResponse(status, cors, { error: "charge_failed", ...r });
-      }
+      if (!r.ok) return jsonResponse(chargeStatusFor(r.code), cors, { error: "charge_failed", ...r });
       const payments = (await money.loadJobPayments(job.Id, tenantId)).filter((p) => p.Invoice__c === invoice.Id);
       return jsonResponse(200, cors, { success: true, ...r, settled: undefined, invoice, payments, balance: money.balanceOf(invoice), jobStatus: job.Status__c, paymentStatus: job.Payment_Status__c });
     },

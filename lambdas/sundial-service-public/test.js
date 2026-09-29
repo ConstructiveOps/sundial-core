@@ -152,7 +152,9 @@ test("paymentSummary: what the page offers, from the records alone", () => {
   assert.equal(paymentSummary({ est: { ...est, Deposit_Paid_At__c: "x" }, job: { ...job, Customer_Card_on_File__c: true }, invoice: null, configured: true }).next, null);
   // No deposit on the estimate, approved, no card → setup; not yet approved → nothing.
   assert.equal(paymentSummary({ est: { ...est, Deposit_Required__c: false }, job, invoice: null, configured: true }).next, "setup");
-  assert.equal(paymentSummary({ est: { ...est, Status__c: "Sent" }, job, invoice: null, configured: true }).next, null);
+  // Not yet approved: no deposit — but with a JOB the card step is offered (amendment 11); with no job, nothing.
+  assert.equal(paymentSummary({ est: { ...est, Status__c: "Sent" }, job, invoice: null, configured: true }).next, "setup");
+  assert.equal(paymentSummary({ est: { ...est, Status__c: "Sent" }, job: null, invoice: null, configured: true }).next, null);
   // A live invoice with a balance wins over everything; a paid one offers nothing.
   const inv = { Name: "SVC-00003", Status__c: "Issued", Total__c: 405.32, Paid_Amount__c: 101.33 };
   const s = paymentSummary({ est: { ...est, Status__c: "Invoiced" }, job, invoice: inv, configured: true });

@@ -14,7 +14,8 @@ a check and a refund all move the invoice and the job the same way.
 | Client + signature check | `lib/stripe.js` | A page of REST over `fetch` (no SDK); `verifyWebhookSignature` (HMAC-SHA256, 5-min tolerance, constant-time) |
 | Customer side | `lambdas/sundial-service-public` → `POST /public/estimates/{token}/checkout` | A Checkout Session: `setup` (card on file, nothing charged), `deposit` (charges the deposit AND keeps the card), `balance` (pays the live invoice). The step is **re-derived from the records** — the page's word for it is never trusted |
 | Stripe → Sundial | `lambdas/sundial-service-estimate/stripe.js` → `POST /webhooks/stripe/{tenant}` | Signature-gated. `checkout.session.completed` (card on file), `payment_intent.succeeded` (a Payment row), `payment_intent.payment_failed` (a Failed row), `charge.refunded` (a Refund row) |
-| Office side | same file → `POST /service/invoices/{id}/charge`, and `chargeCard: true` on issue | Off-session charge of the balance on the card on file. PaymentIntent → **Pending row first** → confirm, so the webhook only ever updates an existing row |
+| Office side | same file → `POST /service/invoices/{id}/charge`, and `chargeCard: true` on issue | Off-session charge of the balance on the card on file. PaymentIntent → **Pending row first** → confirm, so the webhook only ever updates an existing row. **Admin / Executive only** since amendment 11 (`service.card.charge`) |
+| **The card over the phone** (amendment 11, 2026-09-28) | same file → `GET /service/jobs/{id}/card`, `POST …/card-session`, `POST …/card-link`, `POST …/charge` | The job page's **Card on file** card: brand / last 4 read live from Stripe; **Enter card** opens a Stripe-hosted card page (Checkout, setup mode) in a new tab for the office to type what the customer reads out — the number never touches Sundial's page; **Text / Email link** sends the customer the estimate page to add it themselves; **Charge card** (Admin) takes any amount up to what is owed — a Deposit row before the invoice, a Payment on the invoice after |
 | Ledger | Supabase `sundial_stripe_events` (`sql/sundial_stripe_events.sql`) | One row per Stripe event id: applied / deferred / ignored / error. A redelivered event is a no-op |
 | Portal | `PublicEstimatePage` (the customer), `JobInvoiceCard` (the office) | The money step after Approve; "Charge card on file $X" and the issue-time tick |
 
@@ -33,6 +34,41 @@ the estimate requires one and it is unpaid), else "Keep a card on file" (if none
 invoice is issued — "Pay SVC-00042 — $440.07". A partner-billed job never asks the customer for
 a card. If Stripe is not configured for the tenant the page says "Online payment isn't set up
 yet — we'll take care of it over the phone." instead of a dead button.
+
+## Going LIVE — switching the keys from Test to Live (Tim)
+
+The code is the same in both modes; only three values change, and Stripe keeps test and live
+completely separate (a test card on file does not exist in live). Do it in this order, at a
+quiet moment — the switch is instant once the secret is saved.
+
+1. **Live restricted key.** Stripe Dashboard → turn the **Test mode** toggle OFF (top right) →
+   Developers → API keys → **Create restricted key** with the same permissions as the test one
+   (Write: Customers, Checkout Sessions, PaymentIntents, SetupIntents, Payment Methods; Read:
+   Charges, Refunds — and, for the Service Club, Write on Subscriptions, Products, Prices, Billing
+   Portal). Name it `Sundial live`. Copy it once — it starts `rk_live_`.
+2. **Live webhook.** Still in live mode: Developers → Webhooks → **Add endpoint** →
+   `https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/webhooks/stripe/harmon` → the same
+   events as the test endpoint (`checkout.session.completed`, `payment_intent.succeeded`,
+   `payment_intent.payment_failed`, `charge.refunded`, plus the club's `customer.subscription.updated`,
+   `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`) → copy the **signing
+   secret** (`whsec_…`). Live and test webhooks are separate endpoints with separate secrets.
+3. **Secrets Manager** → `sundial/stripe` → **Retrieve secret value → Edit** → replace the two
+   values under `tenants.harmon`:
+   ```json
+   { "tenants": { "harmon": { "secretKey": "rk_live_…", "webhookSecret": "whsec_…(the LIVE one)" } } }
+   ```
+   Save. No deploy is needed: the Lambdas read the secret on their next cold start; to force
+   it now, `.\deploy.ps1 sundial-service-estimate` and `.\deploy.ps1 sundial-service-public`
+   (a redeploy restarts them). The code reads the mode off the key prefix, so from this moment a
+   *test* event arriving on the old test webhook is logged `ignored` — that is expected.
+4. **Service Club products** exist per mode: run `node scripts/seed-service-club.mjs` again in live
+   (it creates the live Products / Prices and writes their ids to `Sundial_Service_Plan__c`).
+5. **Prove it with one real dollar.** On the ZZ test customer: Enter card on a job with your own
+   card → charge **$1.00** → see it in the live Stripe dashboard → refund it there → the job shows
+   the refund row within seconds. Then delete the test endpoint in Stripe (or leave it — it only
+   ever hears test events).
+6. **Cards on file do not carry over.** Every customer who had a card in test mode has none in
+   live; the job page's "Enter card" / "Text link" is how the first live cards go on.
 
 ## Setup (Tim) — do it in TEST mode first, then repeat with live keys
 
@@ -86,8 +122,13 @@ response; `sundial_stripe_events` shows what Sundial did with each one.
 - **No Sundial receipt email yet.** Stripe's own receipt (`receipt_email` on the charge, and
   Checkout's receipts if enabled in the dashboard) is what the customer gets today. The
   "receipt + photo job report" email is the next increment.
-- **Nothing is auth-and-captured** (D-065 decision 6): a card on file is a SetupIntent, the
-  final charge is off-session at issue. If the bank asks for authentication on an off-session
+- **Nothing is auth-and-captured** (D-065 decision 6; reconfirmed 2026-09-28): a card on file is
+  a SetupIntent with the customer's consent to be charged later, the charge is off-session — a
+  deposit or the balance, for the amount the office types. Card-network holds expire in 7 days,
+  which most service jobs would outlive.
+- **Taking a card over the phone is done on Stripe's page, never Sundial's.** "Enter card"
+  opens a Stripe-hosted Checkout (setup mode) in a new tab; the office types the number there.
+  Sundial's own pages never carry Stripe.js or a card field, so PCI stays Stripe's problem. If the bank asks for authentication on an off-session
   charge, the row stays *Pending* and Stripe's webhook finishes it either way.
 - **Deposits without a job are deferred, never lost.** If Create Job is skipped and the office
   quick-creates a job by hand instead, the deferred row stays in the ledger — open it there.

@@ -14,6 +14,8 @@
       POST   /service/jobs
       GET    /service/jobs/{id}/activity | street-view | invoice | labor
       POST   /service/jobs/{id}/invoice | labor
+      GET    /service/jobs/{id}/card                                   (the card on file, 2026-09-28)
+      POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
       POST   /service/labor/default-rate
       GET    /service/invoices/{id} | /service/invoices/{id}/preview
       POST   /service/invoices/{id}/payments | send | void | charge   (charge: the card on file, 2026-09-17)
@@ -125,6 +127,15 @@ foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepSend $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }
+# The office's card on file (D-072 amendment 11, 2026-09-28).
+Write-Host "==> /service/jobs/{id}/card : GET, OPTIONS" -ForegroundColor Cyan
+$jobCard = Ensure-Resource $jobId "card"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobCard $m }
+foreach ($part in @("card-session", "card-link", "charge")) {
+    Write-Host "==> /service/jobs/{id}/$part : POST, OPTIONS" -ForegroundColor Cyan
+    $r = Ensure-Resource $jobId $part
+    foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
+}
 Write-Host "==> /service/labor/default-rate : POST, OPTIONS" -ForegroundColor Cyan
 $labor = Ensure-Resource $service "labor"
 $laborRate = Ensure-Resource $labor "default-rate"

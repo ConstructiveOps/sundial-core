@@ -208,6 +208,9 @@ function baseCustomer(overrides = {}) {
     Welcome_Call_Attempts__c: 0,
     Welcome_Call_Log__c: "",
     Client__c: "a1W7y000007AszBEAS",
+    // The tenant slug rides on the same read (D-078). A real record always has one;
+    // the default here is the PRIMARY tenant, which is every record in production today.
+    Client__r: { Name: "harmon" },
     ...overrides,
   };
 }
@@ -961,6 +964,70 @@ test("a 2xx with no call_id is treated as a failure", async () => {
   ctx.retellResponse = { status: 201, body: {} };
   await assert.rejects(() => place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW }));
   assert.equal(ctx.sfUpdates.length, 0);
+});
+
+// --- PRIMARY-TENANT RULE (D-078): one Retell account, agent and number — the primary tenant's ---
+
+test("D-078: a record in a NON-primary tenant is skipped — no Retell call, nothing written to the record", async () => {
+  fresh();
+  delete process.env.SUNDIAL_WELCOME_CALL_TENANTS;
+  // Otherwise fully eligible: in the calling window, a good phone, a mappable partner.
+  ctx.queryRows = [baseCustomer({ Client__c: "a1W000000000DEMO01", Client__r: { Name: "conops-demo" } })];
+  const res = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.deepEqual(res, { recordId: baseCustomer().Id, status: "skipped", reason: "integration_not_enabled" });
+  assert.equal(ctx.retellCalls.length, 0, "no call is placed");
+  assert.equal(ctx.sfUpdates.length, 0, "no status, attempt or log line is written");
+  assert.equal(ctx.cacheUpdates.length, 0);
+  assert.equal(ctx.broadcasts.length, 0);
+  assert.equal(ctx.soqlSeen.length, 1, "the tenant came from the ONE existing read, not a second query");
+});
+
+test("D-078: the skip wins over every other verdict — an unmappable partner in another tenant writes no log line", async () => {
+  fresh();
+  ctx.queryRows = [baseCustomer({ Financing_Partner__c: "GoodLeap", Client__r: { Name: "conops-demo" } })];
+  const res = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.equal(res.reason, "integration_not_enabled");
+  assert.equal(ctx.sfUpdates.length, 0);
+});
+
+test("D-078: a record with NO tenant is skipped too (fail closed)", async () => {
+  for (const over of [{ Client__r: null }, { Client__r: { Name: "" } }, { Client__c: null, Client__r: undefined }]) {
+    fresh();
+    ctx.queryRows = [baseCustomer(over)];
+    const res = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+    assert.equal(res.status, "skipped");
+    assert.equal(res.reason, "integration_not_enabled");
+    assert.equal(ctx.retellCalls.length, 0);
+    assert.equal(ctx.sfUpdates.length, 0);
+  }
+});
+
+test("D-078: the tenant slug is asked for on the existing SELECT, and only when the org has Client__c", async () => {
+  fresh();
+  await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.equal(ctx.soqlSeen.length, 1);
+  assert.match(ctx.soqlSeen[0], /Client__c/);
+  assert.match(ctx.soqlSeen[0], /, Client__r\.Name FROM Sundial_Customer__c/);
+  // An org without the lookup: the relationship is not selected (the query would fail),
+  // and with no tenant to read the record is skipped rather than dialled.
+  fresh();
+  ctx.describeFields = describeWithLogLength().filter((f) => f.name !== "Client__c");
+  const res = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.doesNotMatch(ctx.soqlSeen[0], /Client__r/);
+  assert.equal(res.status, "placed", "the fixture row still carries Client__r, so this only pins the SELECT");
+});
+
+test("D-078: SUNDIAL_WELCOME_CALL_TENANTS enables another tenant; the primary tenant needs nothing", async () => {
+  fresh();
+  process.env.SUNDIAL_WELCOME_CALL_TENANTS = "conops-demo";
+  ctx.queryRows = [baseCustomer({ Client__r: { Name: "conops-demo" } })];
+  const demo = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.equal(demo.status, "placed");
+  delete process.env.SUNDIAL_WELCOME_CALL_TENANTS;
+  fresh();
+  const primary = await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
+  assert.equal(primary.status, "placed");
+  assert.equal(ctx.retellCalls.length, 1);
 });
 
 test("a missing customer is a no-op, not an error", async () => {

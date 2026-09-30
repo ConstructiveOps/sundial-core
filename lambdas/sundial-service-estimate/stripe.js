@@ -40,6 +40,8 @@ import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { defaultPaymentMethod, ensureStripeCustomer, fromCents, stripeForTenant, toCents, verifyWebhookSignature, StripeError } from "../../lib/stripe.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { portalUrlNotConfiguredBody } from "../../lib/tenant-settings.js";
 import { PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "./invoice.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 
@@ -137,6 +139,13 @@ export function createStripeHandlers(d, h) {
     return rows?.[0] ?? null;
   }
   const systemCtx = (tenantId, slug, cors) => ({ tenantId, tenantSlug: slug, userId: null, scope: "system", actor: { id: null, name: "Stripe" }, cors });
+  // "No address to build the customer's link from" (D-078). The primary tenant's answer is
+  // unchanged (its address is the Lambda's SERVICE_PUBLIC_BASE_URL); any other tenant is
+  // told its own brand block has no publicUrl / portalUrl — and is never lent the primary's.
+  const noPublicUrl = (ctx) =>
+    isPrimaryTenant(ctx?.tenantSlug)
+      ? { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "SERVICE_PUBLIC_BASE_URL is not set on this Lambda." }
+      : portalUrlNotConfiguredBody("This account has no public page address configured yet, so the customer's link can't be built.");
 
   // --- the ledger -----------------------------------------------------------------
   async function ledgerGet(id) {
@@ -511,7 +520,7 @@ export function createStripeHandlers(d, h) {
 
   const chargeStatusFor = (code) => (["NOTHING_DUE", "INVOICE_VOID", "NOT_CUSTOMER_PAY", "CHARGE_PENDING", "AMOUNT_TOO_HIGH"].includes(code) ? 409 : ["NO_CARD", "STRIPE_NOT_CONFIGURED", "AMOUNT_INVALID"].includes(code) ? 400 : 402);
   /** The customer's page for this job's estimate — where a card is added or a bill paid (money.customerLinkFor mints the token). */
-  const customerLinkFor = async (job, tenantId) => ({ ...(await money.customerLinkFor(job, tenantId)), estimate: job.Estimate__c ? { Id: job.Estimate__c } : null });
+  const customerLinkFor = async (job, tenantId, ctx) => ({ ...(await money.customerLinkFor(job, tenantId, ctx)), estimate: job.Estimate__c ? { Id: job.Estimate__c } : null });
   const cardView = (cof) => ({ configured: cof.configured, mode: cof.mode, cardOnFile: cof.cardOnFile, card: cof.card ? { brand: cof.card.brand, last4: cof.card.last4, expMonth: cof.card.expMonth, expYear: cof.card.expYear } : null, stripeError: cof.error ?? null });
 
   return {
@@ -528,7 +537,7 @@ export function createStripeHandlers(d, h) {
       const cof = await cardOnFileFor({ ctx, job });
       const invoice = (await money.loadJobInvoices(job.Id, tenantId)).find((i) => i.Status__c !== "Void") ?? null;
       const due = await owedOn({ job, invoice, tenantId });
-      const link = await customerLinkFor(job, tenantId).catch(() => ({ url: null }));
+      const link = await customerLinkFor(job, tenantId, ctx).catch(() => ({ url: null }));
       return jsonResponse(200, cors, {
         jobId: job.Id,
         ...cardView(cof),
@@ -552,8 +561,9 @@ export function createStripeHandlers(d, h) {
       if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c} — there is no customer card to keep.` });
       const stripe = await stripeFor(ctx.tenantSlug);
       if (!stripe) return jsonResponse(503, cors, { error: "not_configured", code: "STRIPE_NOT_CONFIGURED", message: "Stripe isn't set up for this tenant yet (Secrets Manager sundial/stripe)." });
-      const base = String(h.portalBaseUrl?.() || "").replace(/\/+$/, "");
-      if (!base) return jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "SERVICE_PUBLIC_BASE_URL is not set on this Lambda." });
+      // The tenant's own customer-page address (D-078) — Stripe sends the office back there.
+      const base = String(h.portalBaseUrl?.(ctx) || "").replace(/\/+$/, "");
+      if (!base) return jsonResponse(503, cors, noPublicUrl(ctx));
       const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
       if (!customer) return jsonResponse(409, cors, { error: "no_customer", code: "NO_CUSTOMER", message: "This job has no customer record to keep a card for." });
       let stripeCustomerId = customer.Stripe_Customer_Id__c || null;
@@ -596,8 +606,12 @@ export function createStripeHandlers(d, h) {
       if (!job) return notFound(cors);
       if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}.` });
       const via = body?.via === "email" ? "email" : "sms";
-      const link = await customerLinkFor(job, tenantId);
-      if (!link.url) return jsonResponse(409, cors, { error: "no_link", code: "NO_ESTIMATE_LINK", message: job.Estimate__c ? "SERVICE_PUBLIC_BASE_URL is not set on this Lambda." : "This job has no estimate to link to." });
+      const link = await customerLinkFor(job, tenantId, ctx);
+      if (!link.url) {
+        if (!job.Estimate__c) return jsonResponse(409, cors, { error: "no_link", code: "NO_ESTIMATE_LINK", message: "This job has no estimate to link to." });
+        const why = noPublicUrl(ctx); // the primary tenant keeps its old code; another tenant is told its address is missing
+        return jsonResponse(409, cors, { error: "no_link", code: isPrimaryTenant(ctx.tenantSlug) ? "NO_ESTIMATE_LINK" : why.code, message: why.message });
+      }
       const brand = h.brandFor ? h.brandFor(ctx).companyName || "" : "";
       const first = (job.Customer_Name_at_Creation__c || "").split(" ")[0] || "there";
       const text = `Hi ${first}, ${brand ? `${brand} here. ` : ""}To keep a card on file for ${job.Name}, open this secure link and choose "Keep a card on file": ${link.url}`;

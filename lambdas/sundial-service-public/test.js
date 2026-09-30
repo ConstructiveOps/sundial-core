@@ -31,8 +31,13 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
     sfQuery: async (soql) => {
       if (soql.includes("FROM Sundial_Estimate__c")) return soql.includes(`Public_Token__c = '${TOKEN}'`) ? [{ ...est }] : [];
       if (soql.includes("FROM Sundial_Service_Line__c")) return lines.map((l) => ({ ...l }));
+      // The estimate's tenant exists and is the PRIMARY tenant (D-078): SERVICE_BRAND_NAME
+      // (`brandName` below) is the primary tenant's name and only names the primary tenant.
+      if (soql.includes("FROM Sundial_Tenant__c")) return [{ Id: TENANT, Name: "harmon" }];
       return [];
     },
+    // No secrets configured unless a test says so (and never a real Secrets Manager call).
+    getSecret: async () => ({}),
     sfUpdateRecord: async (obj, id, fields) => {
       updates.push({ obj, id, fields });
       const target = obj === "Sundial_Estimate__c" ? est : lines.find((l) => l.Id === id);
@@ -326,4 +331,110 @@ test("report: the token resolves the job; the document carries the sections, the
   const p = await call(h, "GET", `/public/reports/${RTOKEN}`);
   assert.equal(p.body.receipt, false);
   assert.ok(!p.body.html.includes("Receipt ·"));
+});
+
+// ---------------------------------------------------------------------------
+// D-078 — another tenant's customer is sent back to THAT tenant's site, under its name
+// ---------------------------------------------------------------------------
+test("D-078: a NON-primary tenant's checkout returns to its own public address and carries its own name; with no address it is a clean 503 — never the primary tenant's site or name", async () => {
+  const DEMO = "a1W000000000DEMO01";
+  const world = (brandBlock) => {
+    const f = fake({ status: "Approved", approvedAt: "2026-09-12T00:00:00Z" });
+    f.est.Client__c = DEMO;
+    f.est.Sundial_Customer__c = "CUS000000000000001";
+    f.est.Deposit_Amount__c = 101.33;
+    f.lines.forEach((l) => (l.Client__c = DEMO));
+    const job = { Id: "SVC000000000000001", Name: "SVC-00003", Client__c: DEMO, Status__c: "Scheduled", Bill_To_Type__c: "Customer", Sundial_Customer__c: "CUS000000000000001", Customer_Card_on_File__c: false, Customer_Name_at_Creation__c: "Ann Lee" };
+    const customer = { Id: "CUS000000000000001", Name: "Ann Lee", Client__c: DEMO, Primary_Email__c: "ann@example.com", Stripe_Customer_Id__c: "cus_demo" };
+    const stripeCalls = [];
+    const secretReads = [];
+    const h = createHandler({
+      ...f.deps,
+      sfQuery: async (soql) => {
+        if (soql.includes("FROM Sundial_Service_Job__c")) return [{ ...job }];
+        if (soql.includes("FROM Sundial_Customer__c")) return [{ ...customer }];
+        if (soql.includes("FROM Sundial_Service_Invoice__c")) return [];
+        if (soql.includes("FROM Sundial_Tenant__c")) return [{ Id: DEMO, Name: "conops-demo" }];
+        return f.deps.sfQuery(soql);
+      },
+      getSecret: async (name) => {
+        secretReads.push(name);
+        if (name === "sundial/stripe") return { tenants: { harmon: { secretKey: "sk_live_h" }, "conops-demo": { secretKey: "sk_test_demo" } } };
+        if (name === "sundial/brand") return { harmon: { companyName: "Harmon Service" }, ...(brandBlock ? { "conops-demo": brandBlock } : {}) };
+        return {};
+      },
+      fetchUrl: async (url, init) => {
+        stripeCalls.push({ url, init });
+        if (url.includes("/customers/cus_")) return { ok: true, status: 200, json: async () => ({ id: url.split("/").pop() }) };
+        if (url.endsWith("/checkout/sessions")) return { ok: true, status: 200, json: async () => ({ id: "cs_1", url: "https://checkout.stripe.com/c/pay/cs_1" }) };
+        return { ok: false, status: 500, json: async () => ({}) };
+      },
+      // The Lambda's own values — the PRIMARY tenant's site and name.
+      publicBaseUrl: "https://sundial.harmonelectric.net",
+      brandName: "Harmon Electric",
+    });
+    return { h, stripeCalls, secretReads };
+  };
+
+  // Configured: its own publicUrl (here defaulting from portalUrl) and companyName.
+  const ok = world({ companyName: "Constructive Operations", portalUrl: "https://demo.constructiveops.example/" });
+  let r = await call(ok.h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "deposit" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const session = ok.stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  const p = new URLSearchParams(session.init.body);
+  assert.equal(session.init.headers.Authorization, "Bearer sk_test_demo", "its own Stripe keys");
+  assert.equal(p.get("success_url"), `https://demo.constructiveops.example/estimate/${TOKEN}?checkout=success&kind=deposit`);
+  assert.equal(p.get("cancel_url"), `https://demo.constructiveops.example/estimate/${TOKEN}?checkout=cancel`);
+  assert.equal(p.get("line_items[0][price_data][product_data][name]"), "Deposit — EST-00042 (Constructive Operations)");
+  assert.ok(!session.init.body.includes("harmon"), "nothing of the primary tenant's reaches Stripe");
+  // The hosted page itself prints the tenant's own name, not the Lambda's SERVICE_BRAND_NAME.
+  r = await call(ok.h, "GET", `/public/estimates/${TOKEN}`);
+  assert.ok(r.body.html.includes("Constructive Operations"));
+  assert.ok(!r.body.html.includes("Harmon"));
+
+  // No address in its brand block (or no block at all): refused before a session is created.
+  for (const block of [{ companyName: "Constructive Operations" }, null]) {
+    const off = world(block);
+    r = await call(off.h, "POST", `/public/estimates/${TOKEN}/checkout`, { kind: "deposit" });
+    assert.equal(r.status, 503);
+    assert.equal(r.body.code, "PUBLIC_URL_NOT_SET");
+    assert.ok(!off.stripeCalls.some((c) => c.url.endsWith("/checkout/sessions")), "no Stripe session with somebody else's return address");
+    // …and with no companyName the page prints NO company name rather than the primary tenant's.
+    r = await call(off.h, "GET", `/public/estimates/${TOKEN}`);
+    assert.ok(!r.body.html.includes("Harmon"));
+  }
+});
+
+test("D-078: when the brand cannot be loaded, the fallback prints SERVICE_BRAND_NAME only for a tenant KNOWN to be the primary one — otherwise no name", async () => {
+  const brokenBrands = { brandFor: async () => { throw new Error("brand loader blew up"); } };
+  const view = async (over) => {
+    const f = fake();
+    const h = createHandler({ ...f.deps, brandName: "Harmon Electric", ...over(f) });
+    const r = await call(h, "GET", `/public/estimates/${TOKEN}`);
+    assert.equal(r.status, 200, "the page still renders");
+    assert.ok(r.body.html.includes("Standard service call"));
+    return r.body.html;
+  };
+  const tenantIs = (f, name) => async (soql) => (soql.includes("FROM Sundial_Tenant__c") ? [{ Id: TENANT, Name: name }] : f.deps.sfQuery(soql));
+
+  // The tenant is known and it IS the primary tenant: its name, as before.
+  let html = await view((f) => ({ brands: brokenBrands, sfQuery: tenantIs(f, "harmon") }));
+  assert.ok(html.includes("Harmon Electric"));
+
+  // The tenant is known and it is NOT the primary tenant: no name — never the primary tenant's.
+  html = await view((f) => ({ brands: brokenBrands, sfQuery: tenantIs(f, "conops-demo") }));
+  assert.ok(!html.includes("Harmon"));
+
+  // The tenant lookup itself failed, so nobody knows whose page this is: no name.
+  html = await view((f) => ({
+    sfQuery: async (soql) => {
+      if (soql.includes("FROM Sundial_Tenant__c")) throw new Error("Salesforce is down");
+      return f.deps.sfQuery(soql);
+    },
+  }));
+  assert.ok(!html.includes("Harmon"));
+
+  // …and a tenant record that is missing (no slug) is not the primary tenant either.
+  html = await view((f) => ({ brands: brokenBrands, sfQuery: async (soql) => (soql.includes("FROM Sundial_Tenant__c") ? [] : f.deps.sfQuery(soql)) }));
+  assert.ok(!html.includes("Harmon"));
 });

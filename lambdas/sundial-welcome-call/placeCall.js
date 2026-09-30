@@ -37,6 +37,7 @@ import {
 import { createPhoneCall } from "./retell.js";
 import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
 import { getConfig } from "./config.js";
+import { integrationEnabled } from "../../lib/tenant-guard.js";
 
 /** Salesforce id shape (15 or 18 char, alphanumeric). */
 const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
@@ -89,8 +90,14 @@ export function extractCustomerIds(event) {
  * what scopes every write that follows (same model as sundial-aurora-inbound).
  */
 async function readCustomerFresh(recordId, schema) {
+  // Client__r.Name (the tenant SLUG) rides on this same read for the primary-tenant
+  // guard in placeWelcomeCall (D-078) — one query, not two. Describe-guarded like every
+  // other field here: it is only asked for when the org has the Client__c lookup.
+  const selectFields = schema.apiName("client")
+    ? [...schema.selectFields, "Client__r.Name"]
+    : schema.selectFields;
   const soql =
-    `SELECT ${schema.selectFields.join(", ")} FROM ${CUSTOMER_SF_OBJECT} ` +
+    `SELECT ${selectFields.join(", ")} FROM ${CUSTOMER_SF_OBJECT} ` +
     `WHERE Id = '${soqlEscapeString(recordId)}' LIMIT 1`;
   const rows = await sfQuery(soql);
   return rows?.[0] ?? null;
@@ -214,6 +221,19 @@ export async function placeWelcomeCall(recordId, { now = new Date() } = {}) {
 
   const get = schema.reader(record);
   const tenantId = get("client") ?? null;
+
+  // PRIMARY-TENANT RULE (D-078). There is ONE Retell account, agent, caller-id number and
+  // billing ledger, and they are the primary tenant's. Nobody presses a button here — a
+  // Salesforce Flow fires on a stage change in ANY tenant — so the record's own tenant is
+  // the only thing that can decide. Any tenant not enabled for `welcome_call`
+  // (SUNDIAL_WELCOME_CALL_TENANTS), and any record with no tenant at all, is skipped
+  // BEFORE the eligibility guard: no Retell call, and nothing written to the record
+  // (not even a log line — the record is not ours to annotate, and a skip that never
+  // changes is just churn). A skip is a success, like every other skip in this file.
+  if (!integrationEnabled("welcome_call", record.Client__r?.Name)) {
+    console.log(`welcome-call SKIP ${recordId}: integration_not_enabled (welcome calls are not enabled for this record's tenant)`);
+    return { recordId, status: "skipped", reason: "integration_not_enabled" };
+  }
 
   const verdict = evaluateEligibility(get, now);
   if (!verdict.eligible) {

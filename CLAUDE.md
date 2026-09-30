@@ -129,11 +129,21 @@ Sundial is designed from the start for multiple clients, even though Harmon is t
 - **Shared:** Salesforce org, Sundial_* custom objects, Connected App, Lambda code, all third-party integrations
 - **Forked per client:** React/Vite repo, Vercel deployment, Supabase project, branding, custom field configurations, module enablement
 
+**As built (2026-09-29, D-078):** the deployed Lambdas and the Supabase project are shared by every tenant as well — a Supabase project per client was the plan, not what the code does (the project ref is a constant in `lib/supabase-auth.js`). A tenant is a `Sundial_Tenant__c` record plus per-slug blocks in Secrets Manager.
+
 The Harmon repo (`harmon-crm`) evolves into the canonical `sundial-template` as the platform matures. New clients fork from the template, customize via `client-config.ts`, and only fork code when configuration cannot express what's needed.
 
 Target scale: under 10 clients in the first two years. If the count grows past that, we revisit toward a true multi-tenant single-frontend architecture.
 
 Every Salesforce record carries a `Client__c` lookup. Every Lambda query enforces tenant filtering. This is a hard architectural rule. The tenant anchor is the dedicated `Sundial_Tenant__c` object (its `Name` holds the tenant slug, e.g. `harmon`); `Client__c` targets `Sundial_Tenant__c`.
+
+**The primary-tenant rule (D-078, 2026-09-29, `lib/tenant-guard.js`).** Harmon predates per-tenant configuration, so everything that exists as ONE value is Harmon's. The primary tenant is `SUNDIAL_PRIMARY_TENANT` (default `harmon`); a missing slug is never the primary tenant. **The slug (`Sundial_Tenant__c.Name`) is load-bearing for integrations and fallbacks** (not for record isolation — that stays `Client__c`): never rename a tenant without setting `SUNDIAL_PRIMARY_TENANT` / re-keying its per-slug secret blocks.
+
+- **A single-credential integration serves the primary tenant only** — Acumatica, Aurora, the Retell welcome call. Any other tenant is refused (`403 INTEGRATION_NOT_ENABLED`) before any read, write or external call, unless its slug is in that Lambda's `SUNDIAL_<NAME>_TENANTS`. A new single-credential integration gets the same first line: `integrationEnabled(name, identity.tenantSlug)` right after identity.
+- **An un-keyed fallback serves the primary tenant only** — the shared texting line (the primary tenant and `defaultTenant` may send from it, nobody else), a flat `sundial/stripe` or `sundial/service-club` secret, `SERVICE_BRAND_NAME`. Never write `tenants[slug] ?? theOneValue`: a tenant with no entry is "not configured".
+- **An address or a company name in an outbound message is the tenant's own** — `portalUrl` / `publicUrl` / `companyName` in its `sundial/brand` block, through `lib/tenant-settings.js`. `PORTAL_BASE_URL`, `SERVICE_PUBLIC_BASE_URL` and `SERVICE_BRAND_NAME` are the primary tenant's. No address → refuse (`PORTAL_URL_NOT_CONFIGURED`) or send without the link; never the primary tenant's.
+- **One email = one login = one tenant** — the Supabase project is shared, so a login is never linked to user records in two tenants (`409 EMAIL_IN_USE_OTHER_TENANT`).
+- **The primary tenant pays nothing for any of this** — no new secret read, Salesforce query or failure on its path. A lookup another tenant needs is skipped for the primary one.
 
 Full pattern documented in `docs/multi-client-deployment.md`.
 

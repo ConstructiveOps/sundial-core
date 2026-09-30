@@ -2,6 +2,14 @@
 
 > How Sundial scales from one client (Harmon) to multiple clients without rebuilding the platform each time.
 
+> **Status 2026-09-29 — what the code actually does.** The text below is the DESIGN. As built, a second tenant (`conops-demo`, a demo) is added on the **same deployed Lambdas and the same Supabase project** as Harmon — there is no per-client Supabase project, no `sundial-template` repo, no per-tenant S3 prefix and no `supabase/migrations/` (the Supabase project ref is a constant in `lib/supabase-auth.js`; the bucket is `sfsolproj`, keys `SUNDIAL/{recordId}/…`).
+>
+> - **A tenant is a `Sundial_Tenant__c` record** (its `Name` is the slug). Every record carries `Client__c`, every Lambda read and write filters on it (D-034, D-035, D-064), and the per-tenant settings are blocks keyed by slug in Secrets Manager: `sundial/brand` (`companyName`, logo, `portalUrl`, `publicUrl`), `sundial/twilio.tenantNumbers`, `sundial/stripe.tenants`, `sundial/service-club.tenants`.
+> - **The primary-tenant rule (D-078).** Harmon predates per-tenant configuration, so every single-credential integration (Acumatica, Aurora, the Retell welcome call) and every un-keyed fallback (the shared texting line, a flat Stripe / club secret, `PORTAL_BASE_URL`, `SERVICE_PUBLIC_BASE_URL`, `SERVICE_BRAND_NAME`) serves the primary tenant (`SUNDIAL_PRIMARY_TENANT`, default `harmon`) and nobody else. Any other tenant gets an integration only through its own per-slug entry or that integration's `SUNDIAL_<NAME>_TENANTS` allowlist, and otherwise a clean `INTEGRATION_NOT_ENABLED` / `PORTAL_URL_NOT_CONFIGURED` / "not set up" — never Harmon's credentials, phone line, company name or portal address.
+> - **Not solved yet:** the CORS allowlist is hardcoded in six files (a `*.vercel.app` origin works, a custom domain does not); one shared `auth.users` (one email = one login = one tenant) and Realtime channels that are not private; org-wide picklists and field manifest; shared auto-number sequences; Salesforce Flows and alerts are not tenant-filtered.
+>
+> See **DECISIONS.md D-078** for the full list of guarded surfaces and what a new tenant needs.
+
 ---
 
 ## Architecture Pattern

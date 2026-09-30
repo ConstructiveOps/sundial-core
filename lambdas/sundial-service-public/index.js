@@ -46,7 +46,8 @@ import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate
 import { createNotifier } from "../../lib/notify.js";
 import { publicUrlForKey } from "../../lib/file-access.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
-import { createBrandLoader } from "../../lib/brand.js";
+import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { ensureStripeCustomer, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
 import { INVOICE_SELECT, INVOICE_SF_OBJECT, PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "../sundial-service-estimate/invoice.js";
 import { JOB_SF_OBJECT } from "../sundial-service-estimate/fields.js";
@@ -182,12 +183,19 @@ export function createHandler(deps = {}) {
   // identity lines, the terms + Service Club footer. No logo bytes here — the pages are HTML.
   const brands = d.brands ?? createBrandLoader({ getSecret: d.getSecret, env: { ...process.env, ...(deps.brandName ? { SERVICE_BRAND_NAME: deps.brandName } : {}) } });
   async function brandFor(tenantId) {
+    // Known only once the tenant lookup has answered; stays null if that lookup throws.
+    let slug = null;
     try {
-      const slug = await tenantSlug(tenantId);
+      slug = await tenantSlug(tenantId);
       return await brands.brandFor({ tenantSlug: slug });
     } catch (e) {
       console.error("public brand:", e?.message || e);
-      return { ...DEFAULT_BRAND, companyName: deps.brandName || "" };
+      // The page still renders, with a plain brand. SERVICE_BRAND_NAME (`brandName`) is
+      // the PRIMARY tenant's name (D-078), so it is printed only when the slug is KNOWN
+      // to be the primary tenant's. If the tenant lookup itself failed we do not know
+      // whose page this is, and a page with no company name is better than another
+      // tenant's customer reading the primary tenant's name.
+      return { ...DEFAULT_BRAND, companyName: isPrimaryTenant(slug) ? deps.brandName || "" : "" };
     }
   }
 
@@ -358,7 +366,15 @@ export function createHandler(deps = {}) {
       const summary = paymentSummary({ est, job, invoice, configured: true });
       const allowed = summary.next === kind || (kind === "setup" && (["Approved", "Invoiced"].includes(est.Status__c) || !!job) && !summary.cardOnFile && !(job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer"));
       if (!allowed) return jsonResponse(409, cors, { error: "not_applicable", code: "CHECKOUT_NOT_APPLICABLE", next: summary.next, message: summary.next ? "That step isn't the one that's due — reload the page." : "There's nothing to pay right now." });
-      const base = String(d.publicBaseUrl || "").replace(/\/+$/, "");
+      // Where Stripe sends the customer back to, and the name on Stripe's page (D-078).
+      // SERVICE_PUBLIC_BASE_URL and SERVICE_BRAND_NAME are one value per Lambda and they
+      // are the PRIMARY tenant's: the primary tenant gets exactly those, as before, and
+      // nothing new is read for it. Any other tenant gets the publicUrl (else portalUrl)
+      // and companyName of its own `sundial/brand` block — or the same "not set up" 503
+      // when it has no address. Never the primary tenant's site or name.
+      const primary = isPrimaryTenant(slug);
+      const tenantBrand = primary ? null : await brands.brandFor({ tenantSlug: slug });
+      const base = String(primary ? d.publicBaseUrl || "" : brandPublicUrl(tenantBrand)).replace(/\/+$/, "");
       if (!base) return jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "Online payment isn't set up yet — please give us a call." });
 
       // The Stripe customer: reuse the id on the customer hub, else create and remember it.
@@ -390,7 +406,7 @@ export function createHandler(deps = {}) {
         client_reference_id: est.Id,
         metadata,
       };
-      const brand = deps.brandName || "";
+      const brand = primary ? deps.brandName || "" : tenantBrand?.companyName || "";
       if (kind === "setup") {
         Object.assign(params, { mode: "setup", payment_method_types: ["card"], setup_intent_data: { metadata } });
       } else {

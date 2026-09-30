@@ -278,9 +278,10 @@ export function createMoneyCore(d, h) {
    * The customer's page for the job's estimate — where a card is added or a bill paid
    * (amendment 11): `{base}/estimate/{token}`, the token minted on first use so an invoice
    * or a card link can be sent before the estimate ever was. Null when there is no
-   * estimate or no SERVICE_PUBLIC_BASE_URL.
+   * estimate or no SERVICE_PUBLIC_BASE_URL. `ctx` says WHOSE page it is (D-078): the
+   * address is the tenant's own, so every caller passes the request's ctx.
    */
-  async function customerLinkFor(job, tenantId) {
+  async function customerLinkFor(job, tenantId, ctx) {
     if (!job?.Estimate__c || !h.publicEstimateUrl) return { url: null, token: null };
     const rows = await d.sfQuery(`SELECT Id, Public_Token__c FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     const est = rows?.[0];
@@ -291,7 +292,7 @@ export function createMoneyCore(d, h) {
       await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Public_Token__c: token });
       await h.markStale(CACHE.estimate, [est.Id], tenantId);
     }
-    return { url: token ? h.publicEstimateUrl(token) : null, token };
+    return { url: token ? h.publicEstimateUrl(token, ctx) : null, token };
   }
 
   return { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice, customerLinkFor };
@@ -304,11 +305,11 @@ export function createInvoiceHandlers(d, h) {
 
   /** Render + store the PDF for an invoice (best-effort; returns { key, bytes } or nulls). */
   /** The "Pay this invoice" link: the customer's page, only while the customer owes money (amendment 11). */
-  async function payUrlFor({ invoice, job, tenantId }) {
+  async function payUrlFor({ invoice, job, tenantId, ctx }) {
     if (invoice.Status__c === "Void" || balanceOf(invoice) <= 0) return null;
     if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return null; // a partner gets the document, not a card page
     try {
-      return (await money.customerLinkFor(job, tenantId)).url;
+      return (await money.customerLinkFor(job, tenantId, ctx)).url;
     } catch (e) {
       console.error("invoice pay link:", e?.sfBody || e?.message || e, e?.stack);
       return null;
@@ -316,7 +317,7 @@ export function createInvoiceHandlers(d, h) {
   }
   async function renderAndStorePdf({ invoice, job, est, lines, payments, ctx, tenantId }) {
     try {
-      const payUrl = await payUrlFor({ invoice, job, tenantId });
+      const payUrl = await payUrlFor({ invoice, job, tenantId, ctx });
       const model = buildInvoiceModel({ invoice, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
       const bytes = await d.renderPdf(model);
       const key = invoicePdfKey(job.Id, invoice.Name);
@@ -501,7 +502,7 @@ export function createInvoiceHandlers(d, h) {
       const est = job?.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
       const lines = est ? await h.loadLines(est.Id, tenantId) : [];
       const payments = (await loadJobPayments(inv.Service_Job__c, tenantId)).filter((p) => p.Invoice__c === inv.Id);
-      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "preview", payUrl: await payUrlFor({ invoice: inv, job, tenantId }) } });
+      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "preview", payUrl: await payUrlFor({ invoice: inv, job, tenantId, ctx }) } });
       const { html, title } = renderEstimateDocument({ model });
       return jsonResponse(200, cors, { html, title, number: inv.Name, status: inv.Status__c, total: inv.Total__c, balance: balanceOf(inv) });
     },
@@ -556,7 +557,7 @@ export function createInvoiceHandlers(d, h) {
         if (!email && !deliveryDetail) deliveryDetail = "The customer has no email address on file.";
         if (email) {
           const balance = balanceOf(inv);
-          const msg = buildInvoiceEmail({ invoice: inv, job, brandName: h.brandFor(ctx).companyName, balance, pdfAttached: Boolean(pdf.bytes), payUrl: await payUrlFor({ invoice: inv, job, tenantId }) });
+          const msg = buildInvoiceEmail({ invoice: inv, job, brandName: h.brandFor(ctx).companyName, balance, pdfAttached: Boolean(pdf.bytes), payUrl: await payUrlFor({ invoice: inv, job, tenantId, ctx }) });
           const attachments = pdf.bytes ? [{ fileName: `${inv.Name}.pdf`, contentType: "application/pdf", content: pdf.bytes }] : [];
           const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
           if (sent.ok) {

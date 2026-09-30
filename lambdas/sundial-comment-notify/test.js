@@ -41,6 +41,9 @@ const ctx = {
   rpcError: null,
   rpcCalls: [], // { fn, args }
   bells: [], // in-app notifications handed to lib/notify.js (D-074)
+  selects: [], // every table a SELECT ran against, in order (D-078: what a mention costs)
+  brandSecret: null, // what Secrets Manager `sundial/brand` holds
+  brandReads: 0, // how many times it was read
 };
 
 function baseMention(over = {}) {
@@ -73,10 +76,15 @@ function resetCtx() {
     comments: [baseComment()],
     user_preferences: [], // NO ROW — the default-on case is the default in these tests
     profiles: [{ id: RECIPIENT, tenant_id: "harmon" }],
-    sundial_customer_cache: [{ sf_id: RECORD_ID, customer_name: "HOLLAND, DANA", name: "C-0042" }],
+    // Every cache row carries its tenant twice: `client_sf_id` (the tenant RECORD id —
+    // what comments.tenant_id holds; these fixtures use the string "harmon" for it) and
+    // `tenant_id` (the tenant SLUG). D-078 reads the slug off the row the label needs.
+    sundial_customer_cache: [{ sf_id: RECORD_ID, customer_name: "HOLLAND, DANA", name: "C-0042", client_sf_id: "harmon", tenant_id: "harmon" }],
     sundial_solar_cache: [],
     sundial_roofing_cache: [],
     sundial_service_job_cache: [],
+    // The fallback when the record row cannot say: any user row of that tenant.
+    sundial_user_cache: [{ sf_id: "a1O7y00000CallerAA", client_sf_id: "harmon", tenant_id: "harmon" }],
   };
   ctx.authUsers = { [RECIPIENT]: { email: "dana@example.com" } };
   ctx.authError = null;
@@ -90,6 +98,15 @@ function resetCtx() {
   ctx.rpcError = null;
   ctx.rpcCalls = [];
   ctx.bells = [];
+  ctx.selects = [];
+  ctx.missingColumns = {}; // table -> columns it does not have
+  ctx.brandSecret = {
+    default: { accentColor: "#111111" },
+    harmon: { companyName: "Harmon Service" },
+    "conops-demo": { companyName: "Constructive Operations", portalUrl: "https://demo.constructiveops.example/" },
+    "no-portal": { companyName: "No Portal Co" },
+  };
+  ctx.brandReads = 0;
   delete process.env.COMMENT_NOTIFY_SECRET;
   delete process.env.PORTAL_BASE_URL;
 }
@@ -99,7 +116,11 @@ resetCtx();
 // Module mocks
 // ---------------------------------------------------------------------------
 mock.module("../../lib/secrets.js", {
-  namedExports: { getSecret: async () => ctx.secret, clearSecretCache: () => {} },
+  namedExports: {
+    // `sundial/brand` is only ever read for a NON-primary tenant's portal address (D-078).
+    getSecret: async (name) => (name === "sundial/brand" ? ((ctx.brandReads += 1), ctx.brandSecret) : ctx.secret),
+    clearSecretCache: () => {},
+  },
 });
 
 mock.module("../../lib/email.js", {
@@ -119,6 +140,12 @@ function supabaseStub() {
     from(table) {
       const rec = { table, op: "select", patch: null, filters: {} };
       const run = () => {
+        if (rec.op === "select") ctx.selects.push(table);
+        // A table that lacks a column: PostgREST refuses the whole select that names it.
+        const missing = ctx.missingColumns?.[table];
+        if (missing && rec.op === "select" && String(rec.cols ?? "").split(",").some((c) => missing.includes(c))) {
+          return Promise.resolve({ data: null, error: { message: `column ${table}.${missing[0]} does not exist` } });
+        }
         if (ctx.selectErrors[table] && rec.op === "select") {
           return Promise.resolve({ data: null, error: { message: ctx.selectErrors[table] } });
         }
@@ -140,7 +167,8 @@ function supabaseStub() {
         return Promise.resolve({ data: match[0] ?? null, error: null });
       };
       const chain = {
-        select() {
+        select(cols) {
+          rec.cols = cols;
           return chain;
         },
         update(patch) {
@@ -191,7 +219,7 @@ mock.module("../../lib/supabase.js", {
 const content = await import("./content.js");
 const { handler } = await import("./index.js");
 const { clearConfigCache, DEFAULT_PORTAL_BASE_URL } = await import("./config.js");
-const { setDefaultNotifier } = await import("./notify.js");
+const { setDefaultNotifier, clearTenantCache, lookupRecord, lookupRecordName } = await import("./notify.js");
 // The bell + push side (D-074) is recorded, never delivered.
 setDefaultNotifier({
   toProfile: async (n) => {
@@ -203,6 +231,7 @@ setDefaultNotifier({
 function fresh() {
   resetCtx();
   clearConfigCache();
+  clearTenantCache(); // what a warm container has learned about tenants (D-078)
 }
 
 const parse = (res) => JSON.parse(res.body);
@@ -662,4 +691,139 @@ test("A11: the SAME mention on a CUSTOMER comment still sends", async () => {
   assert.equal(ctx.sent.length, 1);
   const call = ctx.rpcCalls.find((c) => c.fn === "record_visible_for");
   assert.equal(call.args.p_object, "customer");
+});
+
+// ===========================================================================
+// D-078 — the link opens the COMMENT'S tenant's portal, never the primary's by default
+// ===========================================================================
+// In these tests comments.tenant_id / profiles.tenant_id / client_sf_id hold a tenant
+// RECORD id and `tenant_id` on a cache row holds the SLUG, as in production.
+
+const DEMO_ID = "a1W000000000DEMO01";
+const DEMO_PORTAL = "https://demo.constructiveops.example";
+/** Put the mention in another tenant: the comment, the recipient, the record, a user. */
+function inTenant(tenantId, slug, { recordRow = true, userRow = true } = {}) {
+  ctx.rows.comments = [baseComment({ tenant_id: tenantId })];
+  ctx.rows.profiles = [{ id: RECIPIENT, tenant_id: tenantId }];
+  ctx.rows.sundial_customer_cache = recordRow ? [{ sf_id: RECORD_ID, customer_name: "DEMO, CUSTOMER", client_sf_id: tenantId, tenant_id: slug }] : [];
+  ctx.rows.sundial_user_cache = userRow ? [{ sf_id: "a1O000000000DEMOU1", client_sf_id: tenantId, tenant_id: slug }] : [];
+}
+
+test("D-078: the PRIMARY tenant's mention is unchanged — and costs nothing new: the slug comes off the label row, no extra query, no secret read", async () => {
+  fresh();
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  assert.ok(ctx.sent[0].text.includes(`Open the record: ${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`));
+  assert.ok(ctx.sent[0].html.includes(`<a href="${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}">Open the record</a>`));
+  assert.equal(ctx.brandReads, 0, "the brand secret is never read for the primary tenant");
+  assert.ok(!ctx.selects.includes("sundial_user_cache"), "no fallback lookup when the record row names its tenant");
+  assert.equal(ctx.selects.filter((t) => t === "sundial_customer_cache").length, 1, "the label row is still read exactly once");
+});
+
+test("D-078: when the record row cannot name the tenant, ONE user-cache read learns it — once per warm container", async () => {
+  fresh();
+  ctx.rows.sundial_customer_cache = []; // a cache miss: no row, so no slug from it
+  await handler(hookEvent());
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`), "still the primary tenant's link");
+  assert.equal(ctx.selects.filter((t) => t === "sundial_user_cache").length, 1);
+  assert.equal(ctx.brandReads, 0);
+  // A second mention in the same container (NOT clearTenantCache): nothing is looked up again.
+  resetCtx();
+  ctx.rows.sundial_customer_cache = [];
+  await handler(hookEvent());
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`));
+  assert.equal(ctx.selects.filter((t) => t === "sundial_user_cache").length, 0, "remembered");
+});
+
+test("D-078: another tenant's mention links to ITS portal (sundial/brand portalUrl) — the primary domain appears nowhere", async () => {
+  fresh();
+  inTenant(DEMO_ID, "conops-demo");
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  const mail = ctx.sent[0];
+  assert.equal(mail.subject, "Tim Murphy mentioned you on DEMO, CUSTOMER");
+  assert.ok(mail.text.includes(`Open the record: ${DEMO_PORTAL}/customers/${RECORD_ID}`), mail.text);
+  assert.ok(!(mail.text + mail.html).includes("harmonelectric"));
+  assert.equal(ctx.bells[0].tenantId, DEMO_ID);
+  assert.equal(ctx.bells[0].url, `/customers/${RECORD_ID}`, "the bell's portal path is relative, as before");
+});
+
+test("D-078: a tenant with NO portal address still gets the alert — without a link, never with the primary's", async () => {
+  for (const slug of ["no-portal", "not-in-the-secret"]) {
+    fresh();
+    inTenant(DEMO_ID, slug);
+    const res = await handler(hookEvent());
+    assert.equal(res.statusCode, 200);
+    assert.equal(parse(res).sent, true, "the words still arrive");
+    const mail = ctx.sent[0];
+    assert.ok(mail.text.includes("Can you check the roof pitch"));
+    assert.ok(!mail.text.includes("Open the record"));
+    assert.ok(!mail.html.includes("<a href"));
+    assert.ok(!(mail.text + mail.html).includes("harmonelectric"));
+    assert.ok(!(mail.text + mail.html).includes("http"), "no link of any kind");
+    assert.equal(ctx.bells.length, 1, "the bell still rings");
+    assert.ok(ctx.rows.comment_mentions[0].notified_at, "and it is stamped: the alert was delivered");
+  }
+});
+
+test("D-078: a tenant whose slug cannot be learned at all is NOT treated as the primary tenant", async () => {
+  fresh();
+  inTenant(DEMO_ID, "conops-demo", { recordRow: false, userRow: false });
+  await handler(hookEvent());
+  assert.equal(ctx.sent.length, 1);
+  assert.ok(!(ctx.sent[0].text + ctx.sent[0].html).includes("harmonelectric"));
+  assert.ok(!ctx.sent[0].text.includes("Open the record"));
+  assert.equal(ctx.brandReads, 0);
+  // …and the miss is not remembered: once the tenant's users are cached, the link appears.
+  resetCtx();
+  inTenant(DEMO_ID, "conops-demo", { recordRow: false, userRow: true });
+  await handler(hookEvent());
+  assert.ok(ctx.sent[0].text.includes(`${DEMO_PORTAL}/customers/${RECORD_ID}`));
+});
+
+test("D-078: a comment written against ANOTHER tenant's record id gets neither that record's name nor that tenant's portal", async () => {
+  fresh();
+  // A demo-tenant comment whose record_id is a PRIMARY-tenant customer's id.
+  inTenant(DEMO_ID, "conops-demo");
+  ctx.rows.sundial_customer_cache = [{ sf_id: RECORD_ID, customer_name: "HOLLAND, DANA", client_sf_id: "harmon", tenant_id: "harmon" }];
+  await handler(hookEvent());
+  const mail = ctx.sent[0];
+  assert.equal(mail.subject, `Tim Murphy mentioned you on customer ${RECORD_ID}`, "the other tenant's customer name is not used");
+  assert.ok(!(mail.subject + mail.text + mail.html).includes("HOLLAND"));
+  assert.ok(mail.text.includes(`${DEMO_PORTAL}/customers/${RECORD_ID}`), "the link is the COMMENT'S tenant's portal");
+  assert.ok(!(mail.text + mail.html).includes("harmonelectric"));
+});
+
+test("D-078: lookupRecord — the slug only from a row of the SAME tenant; the label as before when the row has no tenant recorded", async () => {
+  fresh();
+  const sb = supabaseStub();
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "HOLLAND, DANA", tenantSlug: "harmon" });
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "someone-else"), { name: null, tenantSlug: null });
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID), { name: "HOLLAND, DANA", tenantSlug: null }, "no expected tenant → label only");
+  ctx.rows.sundial_customer_cache = [{ sf_id: RECORD_ID, customer_name: "LEGACY, ROW" }];
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "LEGACY, ROW", tenantSlug: null });
+  assert.equal(await lookupRecordName(sb, "customer", RECORD_ID), "LEGACY, ROW", "the old helper still answers");
+  assert.deepEqual(await lookupRecord(sb, "service", RECORD_ID, "harmon"), { name: null, tenantSlug: null });
+});
+
+test("D-078: the email without a link — who, where and the full text, nothing dangling", () => {
+  const mail = content.buildMentionEmail({ authorName: "Tim", commentBody: "See this.", label: "HOLLAND, DANA", url: null });
+  assert.equal(mail.subject, "Tim mentioned you on HOLLAND, DANA");
+  assert.equal(mail.text, ["Tim mentioned you in a comment on HOLLAND, DANA.", "", "See this.", "", "— Sundial", "You can turn these alerts off in Settings."].join("\n"));
+  assert.ok(!mail.html.includes("Open the record"));
+  // With a link, the email is what it always was.
+  const linked = content.buildMentionEmail({ authorName: "Tim", commentBody: "See this.", label: "HOLLAND, DANA", url: "https://p/customers/a1P" });
+  assert.equal(linked.text, ["Tim mentioned you in a comment on HOLLAND, DANA.", "", "See this.", "", "Open the record: https://p/customers/a1P", "", "— Sundial", "You can turn these alerts off in Settings."].join("\n"));
+  assert.ok(linked.html.includes('<p><a href="https://p/customers/a1P">Open the record</a></p>'));
+});
+
+test("D-078: a cache table WITHOUT the tenant columns costs nothing — the label read is retried as it was, and the primary tenant's link stands", async () => {
+  fresh();
+  ctx.missingColumns = { sundial_customer_cache: ["client_sf_id", "tenant_id"] };
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  assert.equal(ctx.sent[0].subject, "Tim Murphy mentioned you on HOLLAND, DANA", "the label survived");
+  assert.deepEqual(ctx.selects.filter((t) => t === "sundial_customer_cache"), ["sundial_customer_cache", "sundial_customer_cache"], "the wide read, then the old narrow one");
+  // The slug then comes from the user cache, and the link is still the primary tenant's.
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`));
 });

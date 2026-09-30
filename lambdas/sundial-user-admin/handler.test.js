@@ -56,6 +56,9 @@ const ctx = {
 function resetCtx() {
   ctx.identity = {
     tenantId: TENANT,
+    // The PRIMARY tenant (D-078) — every real caller today. Its invite links are the
+    // Lambda's own PORTAL_BASE_URL and no secret is read for them.
+    tenantSlug: "harmon",
     user: { id: CALLER_ID, superAdmin: true },
   };
   ctx.identityError = null;
@@ -73,6 +76,9 @@ function resetCtx() {
   ctx.emailResult = { ok: true, messageId: "ses-1" };
   ctx.generateLink = null; // (args) => result, to script a specific outcome
   ctx.resets = [];
+  ctx.createUser = null; // (args) => result, to script createUser
+  ctx.authUsers = []; // what auth.admin.listUsers returns (the "reuse by email" lookup)
+  ctx.secretReads = []; // every Secrets Manager read (the primary tenant must cause none)
 }
 resetCtx();
 
@@ -117,6 +123,7 @@ function supabaseStub() {
       admin: {
         createUser: async (args) => {
           ctx.authCalls.push({ op: "createUser", args });
+          if (ctx.createUser) return ctx.createUser(args);
           return { data: { user: { id: TARGET_UID } }, error: null };
         },
         inviteUserByEmail: async (email, opts) => {
@@ -129,7 +136,7 @@ function supabaseStub() {
           if (ctx.generateLink) return ctx.generateLink(args);
           return { data: { user: { id: TARGET_UID }, properties: { hashed_token: "HASH123", verification_type: args.type } }, error: null };
         },
-        listUsers: async () => ({ data: { users: [] }, error: null }),
+        listUsers: async () => ({ data: { users: ctx.authUsers }, error: null }),
         deleteUser: async (id) => {
           ctx.authCalls.push({ op: "deleteUser", id });
           return { error: null };
@@ -151,6 +158,24 @@ mock.module("../../lib/email.js", {
       ctx.emails.push(msg);
       return ctx.emailResult;
     },
+  },
+});
+
+// Secrets Manager: only `sundial/brand` is ever asked for here (lib/tenant-settings.js),
+// and only for a NON-primary tenant's portal address (D-078). Reads are recorded.
+const BRAND_SECRET = {
+  default: { accentColor: "#111111" },
+  harmon: { companyName: "Harmon Service" },
+  "conops-demo": { companyName: "Constructive Operations", portalUrl: "https://demo.constructiveops.example/" },
+  "no-portal": { companyName: "No Portal Co" },
+};
+mock.module("../../lib/secrets.js", {
+  namedExports: {
+    getSecret: async (name) => {
+      ctx.secretReads.push(name);
+      return name === "sundial/brand" ? BRAND_SECRET : {};
+    },
+    clearSecretCache: () => {},
   },
 });
 
@@ -870,4 +895,313 @@ test("RESEND refuses an inactive user, 404s a cross-tenant id, and falls back to
   assert.equal(parse(res).inviteVia, "supabase");
   assert.deepEqual(ctx.authCalls.map((c) => c.op), ["inviteUserByEmail"]);
   assert.equal(ctx.emails.length, 0);
+});
+
+// ===========================================================================
+// D-078 — the primary-tenant rule on this Lambda
+//   (a) an invite / resend link opens the TENANT'S OWN portal, or is refused
+//   (b) one email = one login = one tenant: no cross-tenant login reuse
+// ===========================================================================
+
+const PRIMARY_PORTAL = "https://sundial.harmonelectric.net";
+const DEMO_PORTAL = "https://demo.constructiveops.example";
+const asTenant = (tenantId, tenantSlug) => {
+  ctx.identity = { tenantId, tenantSlug, user: { id: CALLER_ID, superAdmin: true, firstName: "Dana", lastName: "Admin" } };
+};
+const DEMO_TENANT = "a1W000000000DEMO01";
+const inviteBody = (over = {}) => createBody({ credentialMode: "invite", tempPassword: undefined, ...over });
+
+test("D-078: the PRIMARY tenant's invite links to the Lambda's portal address, exactly as before — and reads no secret", async () => {
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = true;
+  const res = await handler(postEvent(inviteBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.deepEqual(ctx.authCalls[0].args, { type: "invite", email: "zz.newuser@example.com", options: { redirectTo: `${PRIMARY_PORTAL}/reset-password` } });
+  assert.ok(ctx.emails[0].text.includes(`${PRIMARY_PORTAL}/reset-password?token_hash=HASH123&type=invite`));
+  assert.ok(ctx.emails[0].text.includes(`Sundial · ${PRIMARY_PORTAL}`));
+  assert.deepEqual(ctx.secretReads, [], "no Secrets Manager read on the primary tenant's path");
+  assert.equal(ctx.queries.length, 1, "and no extra Salesforce query: only the same-tenant duplicate guard");
+});
+
+test("D-078: another tenant's invite links to ITS portal (sundial/brand portalUrl) — the primary domain appears nowhere", async () => {
+  asTenant(DEMO_TENANT, "conops-demo");
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = true;
+  const res = await handler(postEvent(inviteBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(parse(res).inviteSent, true);
+  assert.deepEqual(ctx.authCalls[0].args.options, { redirectTo: `${DEMO_PORTAL}/reset-password` });
+  const mail = ctx.emails[0];
+  assert.ok(mail.text.includes(`${DEMO_PORTAL}/reset-password?token_hash=HASH123&type=invite`), mail.text);
+  assert.ok(mail.text.includes(`Sundial · ${DEMO_PORTAL}`));
+  assert.ok(!(mail.text + mail.html).includes("harmonelectric"), "never the primary tenant's portal");
+  assert.equal(ctx.created[0].fields.Client__c, DEMO_TENANT);
+  // The Supabase-email fallback (no SES) carries the tenant's address too.
+  resetCtx();
+  asTenant(DEMO_TENANT, "conops-demo");
+  ctx.queryRows = [[]];
+  ctx.emailConfigured = false;
+  await handler(postEvent(inviteBody()));
+  assert.deepEqual(ctx.authCalls[0], { op: "inviteUserByEmail", email: "zz.newuser@example.com", opts: { redirectTo: `${DEMO_PORTAL}/reset-password` } });
+});
+
+test("D-078: a tenant with NO portal address cannot send an invite — 503 PORTAL_URL_NOT_CONFIGURED before anything is created", async () => {
+  for (const slug of ["no-portal", "not-in-the-secret", null]) {
+    resetCtx();
+    asTenant(DEMO_TENANT, slug);
+    ctx.queryRows = [[]];
+    ctx.emailConfigured = true;
+    const res = await handler(postEvent(inviteBody()));
+    assert.equal(res.statusCode, 503, res.body);
+    const body = parse(res);
+    assert.equal(body.error, "not_configured");
+    assert.equal(body.code, "PORTAL_URL_NOT_CONFIGURED");
+    assert.match(body.message, /temporary password/);
+    assert.deepEqual(ctx.authCalls, [], "no auth user is created or invited");
+    assert.equal(ctx.emails.length, 0, "nothing is emailed");
+    assert.equal(ctx.created.length, 0, "no Sundial_User__c");
+  }
+});
+
+test("D-078: PASSWORD-mode creation needs no portal address — it works for a tenant with none, and reads no secret", async () => {
+  asTenant(DEMO_TENANT, "no-portal");
+  ctx.queryRows = [[]];
+  const res = await handler(postEvent(createBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.deepEqual(ctx.authCalls.map((c) => c.op), ["createUser"]);
+  assert.equal(ctx.created[0].fields.Client__c, DEMO_TENANT);
+  assert.deepEqual(ctx.secretReads, []);
+});
+
+test("D-078: RESEND uses the tenant's own portal, and is refused for a tenant with none", async () => {
+  // the primary tenant: the Lambda's address, no secret read
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow()];
+  let res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.authCalls[0].args.options, { redirectTo: `${PRIMARY_PORTAL}/reset-password` });
+  assert.ok(ctx.emails[0].text.includes(`${PRIMARY_PORTAL}/reset-password?token_hash=HASH123&type=invite`));
+  assert.deepEqual(ctx.secretReads, []);
+
+  // another tenant with a portal address — the invite AND the recovery link
+  resetCtx();
+  asTenant(DEMO_TENANT, "conops-demo");
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow()];
+  ctx.generateLink = (args) =>
+    args.type === "invite"
+      ? { data: null, error: { message: "A user with this email address has already been registered", status: 422 } }
+      : { data: { user: { id: TARGET_UID }, properties: { hashed_token: "RHASH" } }, error: null };
+  res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.authCalls.map((c) => c.args.options.redirectTo), [`${DEMO_PORTAL}/reset-password`, `${DEMO_PORTAL}/reset-password`]);
+  assert.ok(ctx.emails[0].text.includes(`${DEMO_PORTAL}/reset-password?token_hash=RHASH&type=recovery`));
+  assert.ok(!(ctx.emails[0].text + ctx.emails[0].html).includes("harmonelectric"));
+
+  // another tenant with none: refused before Supabase is touched
+  resetCtx();
+  asTenant(DEMO_TENANT, "no-portal");
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow()];
+  res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 503);
+  assert.equal(parse(res).code, "PORTAL_URL_NOT_CONFIGURED");
+  assert.deepEqual(ctx.authCalls, []);
+  assert.equal(ctx.emails.length, 0);
+});
+
+// --- (b) no cross-tenant login reuse -----------------------------------------------
+
+const EXISTING_UID = "9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f";
+const ALREADY = { data: null, error: { message: "A user with this email address has already been registered", status: 422 } };
+const existingLogin = () => {
+  ctx.authUsers = [{ id: EXISTING_UID, email: "ZZ.NewUser@example.com" }];
+};
+
+test("D-078: an email whose login belongs to a user in ANOTHER tenant is refused — 409 EMAIL_IN_USE_OTHER_TENANT, nothing created", async () => {
+  for (const mode of ["invite", "password"]) {
+    resetCtx();
+    ctx.emailConfigured = true;
+    existingLogin();
+    ctx.generateLink = () => ALREADY;
+    ctx.createUser = () => ALREADY;
+    // 1st query: the same-tenant duplicate guard (nothing). 2nd: the cross-tenant check (a hit).
+    ctx.queryRows = [[], [{ Id: "a1O7y00000OtherTenAA" }]];
+    const res = await handler(postEvent(mode === "invite" ? inviteBody() : createBody()));
+    assert.equal(res.statusCode, 409, res.body);
+    assert.deepEqual(parse(res), {
+      error: "email_in_use",
+      code: "EMAIL_IN_USE_OTHER_TENANT",
+      message: "That email already has a Sundial login on another account. Use a different email address.",
+    });
+    assert.equal(ctx.created.length, 0, "no second Sundial_User__c for the same login");
+    assert.equal(ctx.emails.length, 0);
+    assert.ok(!ctx.authCalls.some((c) => c.op === "deleteUser"), "the other tenant's login is never touched");
+    // The check asks about THAT login, outside THIS tenant — and never counts a user
+    // record that has no tenant at all (an orphan row must not produce a false refusal).
+    assert.equal(ctx.queries.length, 2);
+    assert.match(ctx.queries[1], new RegExp(`Supabase_User_Id__c = '${EXISTING_UID}'`));
+    assert.match(ctx.queries[1], new RegExp(`Client__c != '${TENANT}' AND Client__c != null LIMIT 1$`));
+  }
+});
+
+test("D-078: the refusal works in both directions — a NON-primary tenant cannot take a primary-tenant user's login either", async () => {
+  asTenant(DEMO_TENANT, "conops-demo");
+  existingLogin();
+  ctx.createUser = () => ALREADY;
+  // 1st: the same-tenant duplicate guard. 2nd: the non-primary email check (no record
+  // with that email elsewhere — the login is linked under a different address).
+  // 3rd: the login check on the reuse path (a hit).
+  ctx.queryRows = [[], [], [{ Id: "a1O7y00000HarmonUsAA" }]];
+  const res = await handler(postEvent(createBody()));
+  assert.equal(res.statusCode, 409);
+  assert.equal(parse(res).code, "EMAIL_IN_USE_OTHER_TENANT");
+  assert.equal(ctx.queries.length, 3);
+  assert.match(ctx.queries[2], new RegExp(`Supabase_User_Id__c = '${EXISTING_UID}' AND Client__c != '${DEMO_TENANT}' AND Client__c != null`));
+  assert.equal(ctx.created.length, 0);
+});
+
+// --- (c) the pending-invite gap, closed for a NON-primary tenant ------------------------
+
+test("D-078: a NON-primary tenant cannot create a user whose email already belongs to a user in another tenant — refused before any login is minted", async () => {
+  for (const mode of ["invite", "password"]) {
+    resetCtx();
+    asTenant(DEMO_TENANT, "conops-demo");
+    ctx.emailConfigured = true;
+    // 1st: the same-tenant duplicate guard (nothing). 2nd: the same email in another tenant (a hit).
+    ctx.queryRows = [[], [{ Id: "a1O7y00000HarmonUsAA" }]];
+    const res = await handler(postEvent(mode === "invite" ? inviteBody() : createBody()));
+    assert.equal(res.statusCode, 409, res.body);
+    assert.deepEqual(parse(res), {
+      error: "email_in_use",
+      code: "EMAIL_IN_USE_OTHER_TENANT",
+      message: "That email already has a Sundial login on another account. Use a different email address.",
+    });
+    assert.equal(ctx.queries.length, 2);
+    assert.equal(
+      ctx.queries[1],
+      `SELECT Id FROM Sundial_User__c WHERE Email__c = 'zz.newuser@example.com' AND Client__c != '${DEMO_TENANT}' AND Client__c != null LIMIT 1`
+    );
+    assert.deepEqual(ctx.authCalls, [], "no login is created, invited or re-issued");
+    assert.equal(ctx.emails.length, 0, "nothing is emailed");
+    assert.equal(ctx.created.length, 0);
+    assert.deepEqual(ctx.secretReads, [], "refused before the portal address is even looked up");
+  }
+});
+
+test("D-078: that email check is ONE-SIDED — the primary tenant's create makes exactly the queries it always made", async () => {
+  // Invite and password mode alike: the same-tenant duplicate guard, and nothing else.
+  for (const mode of ["invite", "password"]) {
+    resetCtx();
+    ctx.emailConfigured = true;
+    // If the primary tenant ever asked the cross-tenant email question, this second
+    // queued row would answer "yes" and the create would be refused.
+    ctx.queryRows = [[], [{ Id: "a1O000000000DEMOUS" }]];
+    const res = await handler(postEvent(mode === "invite" ? inviteBody() : createBody()));
+    assert.equal(res.statusCode, 201, res.body);
+    assert.equal(ctx.queries.length, 1, "only the same-tenant duplicate guard");
+    assert.match(ctx.queries[0], new RegExp(`Email__c = 'zz.newuser@example.com' AND Client__c = '${TENANT}' LIMIT 1$`));
+    assert.equal(ctx.created.length, 1);
+  }
+  // A non-primary tenant whose email is free elsewhere is created as before, one query more.
+  resetCtx();
+  asTenant(DEMO_TENANT, "conops-demo");
+  ctx.queryRows = [[], []];
+  const res = await handler(postEvent(createBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(ctx.queries.length, 2);
+  assert.equal(ctx.created[0].fields.Client__c, DEMO_TENANT);
+});
+
+// --- (d) resend: the re-link obeys the same rule ---------------------------------------
+
+test("D-078: RESEND never re-points a record at a login that belongs to a user in ANOTHER tenant — 409, the record is left alone", async () => {
+  ctx.emailConfigured = true;
+  // The record's login id is stale; Supabase answers with an existing login (EXISTING_UID).
+  ctx.generateLink = (args) =>
+    args.type === "invite" ? ALREADY : { data: { user: { id: EXISTING_UID }, properties: { hashed_token: "RHASH" } }, error: null };
+  // 1st: the record itself. 2nd: is that login linked in another tenant? (yes)
+  ctx.queryRows = [userRow({ Supabase_User_Id__c: "old-uuid-gone" }), [{ Id: "a1O000000000DEMOUS" }]];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 409, res.body);
+  assert.deepEqual(parse(res), {
+    error: "email_in_use",
+    code: "EMAIL_IN_USE_OTHER_TENANT",
+    message: "That email already has a Sundial login on another account. Use a different email address.",
+  });
+  assert.deepEqual(ctx.updated, [], "Supabase_User_Id__c is not re-pointed");
+  assert.equal(ctx.queries.length, 2);
+  assert.equal(
+    ctx.queries[1],
+    `SELECT Id FROM Sundial_User__c WHERE Supabase_User_Id__c = '${EXISTING_UID}' AND Client__c != '${TENANT}' AND Client__c != null LIMIT 1`
+  );
+
+  // The login is linked nowhere else (the deleted-and-re-created case): re-linked as before.
+  resetCtx();
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow({ Supabase_User_Id__c: "old-uuid-gone" }), []];
+  const ok = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(parse(ok).relinked, true);
+  assert.deepEqual(ctx.updated, [{ sfObject: "Sundial_User__c", id: TARGET_ID, fields: { Supabase_User_Id__c: TARGET_UID } }]);
+
+  // The check itself failing is the same "try again" answer as a failed re-link — never a blind re-link.
+  resetCtx();
+  ctx.emailConfigured = true;
+  let n = 0;
+  ctx.sfQueryOverride = () => {
+    n += 1;
+    if (n === 1) return userRow({ Supabase_User_Id__c: "old-uuid-gone" });
+    throw new Error("Salesforce is down");
+  };
+  const bad = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(bad.statusCode, 502);
+  assert.equal(parse(bad).code, "SF_UPDATE_FAILED");
+  assert.deepEqual(ctx.updated, []);
+});
+
+test("D-078: an ordinary RESEND for the primary tenant still makes ONE Salesforce query — the record already points at its login", async () => {
+  ctx.emailConfigured = true;
+  ctx.queryRows = [userRow(), [{ Id: "would-refuse-if-asked" }]];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(ctx.queries.length, 1);
+  assert.equal(ctx.emails.length, 1);
+  assert.deepEqual(ctx.updated, []);
+});
+
+test("D-078: a NON-primary tenant's RESEND is refused before anything is sent when the email belongs to a user in another tenant", async () => {
+  asTenant(DEMO_TENANT, "conops-demo");
+  ctx.emailConfigured = true;
+  // 1st: the record. 2nd: the same email in another tenant (a hit).
+  ctx.queryRows = [userRow(), [{ Id: "a1O7y00000HarmonUsAA" }]];
+  const res = await handler(patchEvent(TARGET_ID, { resendInvite: true }));
+  assert.equal(res.statusCode, 409, res.body);
+  assert.equal(parse(res).code, "EMAIL_IN_USE_OTHER_TENANT");
+  assert.equal(
+    ctx.queries[1],
+    `SELECT Id FROM Sundial_User__c WHERE Email__c = 'zz.newuser@example.com' AND Client__c != '${DEMO_TENANT}' AND Client__c != null LIMIT 1`
+  );
+  assert.deepEqual(ctx.authCalls, [], "no link is minted");
+  assert.equal(ctx.emails.length, 0, "and nobody is emailed a link to this tenant's portal");
+  assert.deepEqual(ctx.updated, []);
+});
+
+test("D-078: SAME-tenant reuse is unchanged — a login linked to nobody elsewhere is re-linked, as the retry path always did", async () => {
+  existingLogin();
+  ctx.createUser = () => ALREADY;
+  ctx.queryRows = [[], []]; // duplicate guard: none. cross-tenant check: none.
+  const res = await handler(postEvent(createBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(ctx.created.length, 1);
+  assert.equal(ctx.created[0].fields.Supabase_User_Id__c, EXISTING_UID, "the existing login is reused");
+  assert.equal(ctx.created[0].fields.Client__c, TENANT);
+});
+
+test("D-078: a FRESH login never pays for the cross-tenant check — one Salesforce query, as before", async () => {
+  ctx.queryRows = [[]];
+  const res = await handler(postEvent(createBody()));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(ctx.queries.length, 1, "only the same-tenant duplicate guard");
+  assert.ok(!ctx.queries.some((q) => q.includes("Supabase_User_Id__c")));
 });

@@ -78,6 +78,10 @@ export function escapeHtml(s) {
  * save the reader a trip to the portal; a truncated body sends them there anyway, which
  * is the same as not sending it. (The link is right there for context and replies.)
  *
+ * `url` may be null: a tenant whose portal address is not configured (D-078) still gets
+ * the alert — who said what, in full — just without the "Open the record" line. No link
+ * is always better than a link to somebody else's portal.
+ *
  * @returns {{ subject: string, text: string, html: string }}
  */
 export function buildMentionEmail({ authorName, commentBody, label, url }) {
@@ -91,8 +95,7 @@ export function buildMentionEmail({ authorName, commentBody, label, url }) {
     "",
     body || "(no comment text)",
     "",
-    `Open the record: ${url}`,
-    "",
+    ...(url ? [`Open the record: ${url}`, ""] : []),
     "— Sundial",
     "You can turn these alerts off in Settings.",
   ].join("\n");
@@ -103,7 +106,7 @@ export function buildMentionEmail({ authorName, commentBody, label, url }) {
   const html = [
     `<p><strong>${escapeHtml(who)}</strong> mentioned you in a comment on <strong>${escapeHtml(label)}</strong>.</p>`,
     `<blockquote style="margin:16px 0;padding:8px 16px;border-left:3px solid #d0d7de;color:#24292f;white-space:pre-wrap;">${escapeHtml(body) || "<em>(no comment text)</em>"}</blockquote>`,
-    `<p><a href="${escapeHtml(url)}">Open the record</a></p>`,
+    ...(url ? [`<p><a href="${escapeHtml(url)}">Open the record</a></p>`] : []),
     `<hr style="border:none;border-top:1px solid #eaeef2;margin:24px 0;">`,
     `<p style="color:#57606a;font-size:12px;">Sundial — you can turn these alerts off in Settings.</p>`,
   ].join("\n");

@@ -96,6 +96,17 @@ recorded call is a customer-trust problem, not a rendering glitch.
 The read is **not tenant-filtered by a caller** — there is no caller. The record's own
 `Client__c` scopes every write that follows, exactly as `sundial-aurora-inbound` does.
 
+**Primary tenant only (D-078, 2026-09-29).** There is one Retell account, agent, caller-id
+number and billing ledger, and they are the primary tenant's (`harmon`). The same read
+also selects `Client__r.Name` (the tenant slug), and a record whose tenant is not the
+primary one — or has no tenant at all — is **skipped before the eligibility guard below**:
+no Retell call, nothing written to the record, one log line
+(`welcome-call SKIP <id>: integration_not_enabled`). Another tenant gets welcome calls
+only if its slug is listed in the Lambda's `SUNDIAL_WELCOME_CALL_TENANTS`. The trigger
+Flow itself is not tenant-filtered; this guard is what stops a second tenant's stage
+change from placing a real call. The webhook and orphan-match paths are unchanged — they
+act on calls that were already placed.
+
 ### The eligibility guard
 
 Checked in this order. The first hit skips the call. **A skip is a success** — it

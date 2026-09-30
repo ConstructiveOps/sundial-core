@@ -858,12 +858,16 @@ test("the tenant's brand on the documents (2026-09-24): sundial/brand → logo o
   assert.ok(/\/Subtype\s*\/Image/.test(raw), "the sent PDF embeds the logo");
   assert.ok(fake.fetches.filter((u) => u === "https://cdn.example.com/logo.jpg").length === 1, "fetched once, then cached");
 
-  // The same handler, a tenant with no block: the name from the env fallback, no logo, only the default links.
+  // The same handler, a tenant with no block: no logo, only the default links — and (D-078)
+  // NOT the Lambda's SERVICE_BRAND_NAME, which is the primary tenant's name: it prints its own slug.
   const other = makeHandler(fake, { tenantSlug: "other" });
   await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Oth" });
   const c2 = await call(other, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[1].Id } });
   const p2 = await call(other, "GET", `/service/estimates/${c2.body.id}/preview`);
   assert.ok(!p2.body.html.includes('class="logo"'));
+  assert.ok(!p2.body.html.includes("Test Electric"), "never the primary tenant's env name");
+  assert.ok(!p2.body.html.includes("Test Service"), "nor the primary tenant's block");
+  assert.ok(p2.body.html.includes("Other"), "its own slug, capitalised, as before");
   assert.ok(p2.body.html.includes('href="https://club.example.com/terms"'));
   assert.ok(!p2.body.html.includes("club.example.com/\""));
 });
@@ -1835,6 +1839,15 @@ function clubStripe(fake, stripeCalls, { subStatus = () => "active" } = {}) {
 test("club pure helpers: config per tenant, the public catalog, Stripe status mapping, MRR, the join form, the plan discount", () => {
   assert.deepEqual(clubConfigFor(CLUB_SECRET, "harmon"), { solarFacts: null, solarFactsHookUrl: "https://hooks.zapier.com/catch/1/on", solarFactsCancelHookUrl: "https://hooks.zapier.com/catch/1/off", teamEmail: "service-team@example.com" });
   assert.equal(clubConfigFor(CLUB_SECRET, "nobody"), null);
+  // D-078: a FLAT secret (no `tenants` key) is the primary tenant's and nobody else's —
+  // another tenant must never reach its SolarFax credentials or its team inbox.
+  const FLAT_CLUB = { solarFacts: { apiKey: "k", accessToken: "t" }, solarFactsHookUrl: "https://hooks.zapier.com/catch/1/on", teamEmail: "service-team@example.com" };
+  assert.equal(clubConfigFor(FLAT_CLUB, "harmon", {}).teamEmail, "service-team@example.com");
+  assert.equal(clubConfigFor(FLAT_CLUB, "harmon", {}).solarFacts.apiKey, "k");
+  assert.equal(clubConfigFor(FLAT_CLUB, "conops-demo", {}), null);
+  assert.equal(clubConfigFor(FLAT_CLUB, null, {}), null);
+  assert.equal(clubConfigFor(FLAT_CLUB, "acme", { SUNDIAL_PRIMARY_TENANT: "acme" }).teamEmail, "service-team@example.com");
+  assert.equal(clubConfigFor(FLAT_CLUB, "harmon", { SUNDIAL_PRIMARY_TENANT: "acme" }), null);
   assert.equal(clubConfigFor({ tenants: { harmon: { solarFactsHookUrl: "https://h" } } }, "harmon").solarFactsCancelHookUrl, "https://h", "cancel hook falls back to the main hook");
   const plans = publicPlans(PLAN_ROWS(TENANT).map((r, i) => ({ Id: `P${i}`, ...r })));
   assert.deepEqual(plans.map((p) => [p.code, p.purchasable]), [["monitor", true], ["maintain", true], ["protect", false], ["truck-roll", true]], "Retired is hidden, Coming Soon is shown but not purchasable");
@@ -2409,4 +2422,125 @@ test("job report: photos to pick from, save (a stranger's photo refused), previe
   assert.equal((await call(h, "GET", "/service/jobs/a1Xnope0000000000A/report")).status, 404);
   const tech = makeHandler(fake, { access: { level: "Technician", scope: "tech", userId: USER, tenantId: TENANT } });
   assert.equal((await call(tech, "GET", `/service/jobs/${job.Id}/report`)).status, 403);
+});
+
+// ---------------------------------------------------------------------------
+// D-078 — a customer link opens the TENANT'S OWN site, under the tenant's own name
+// ---------------------------------------------------------------------------
+test("D-078: SERVICE_PUBLIC_BASE_URL and SERVICE_BRAND_NAME are the PRIMARY tenant's — another tenant's estimate, card, report and club links use its own brand block, or are not built at all", async () => {
+  const DEMO_URL = "https://demo.constructiveops.example";
+  const world = async (brandBlock) => {
+    const fake = fakeSalesforce();
+    fake.brandSecret = { default: { accentColor: "#111111" }, harmon: { companyName: "Test Service" }, ...(brandBlock ? { "conops-demo": brandBlock } : {}) };
+    fake.stripeSecret = { tenants: { harmon: { secretKey: "sk_test_h" }, "conops-demo": { secretKey: "sk_test_demo" } } };
+    const stripeCalls = [];
+    fake.stripe = async (url, init) => {
+      stripeCalls.push({ url, params: init?.body ? new URLSearchParams(init.body) : null });
+      if (url.endsWith("/customers") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_demo" }) };
+      if (url.endsWith("/checkout/sessions")) return { ok: true, status: 200, json: async () => ({ id: "cs_1", url: "https://checkout.stripe.com/c/pay/cs_1" }) };
+      return { ok: true, status: 200, json: async () => ({ id: "cus_demo", deleted: false, invoice_settings: {} }) };
+    };
+    const texts = [];
+    fake.sms = { sendText: async (args) => (texts.push(args), { ok: true, code: null, error: null, to: "+16025550101", message: { id: "m1" } }) };
+    await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy Lane", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101" });
+    // The Lambda's own values (makeHandler): publicBaseUrl https://portal.example.com, brandName "Test Electric".
+    const h = makeHandler(fake, { tenantSlug: "conops-demo" });
+    const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 300 }] });
+    assert.equal(j.status, 201, JSON.stringify(j.body));
+    const job = fake.store.Sundial_Service_Job__c[0];
+    return { fake, h, job, estId: job.Estimate__c, stripeCalls, texts };
+  };
+  const everything = (w) => JSON.stringify([w.fake.emails.map((e) => [e.subject, e.text, e.html]), w.texts.map((t) => t.body), w.stripeCalls.map((c) => String(c.params ?? ""))]);
+
+  // --- configured: publicUrl (here from portalUrl) + companyName ---------------------
+  const ok = await world({ companyName: "Constructive Operations", portalUrl: `${DEMO_URL}/` });
+  let r = await call(ok.h, "POST", `/service/estimates/${ok.estId}/send`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.delivery, "email");
+  assert.equal(r.body.publicUrl, `${DEMO_URL}/estimate/TOKEN123`);
+  assert.ok(ok.fake.emails[0].html.includes(`${DEMO_URL}/estimate/TOKEN123`));
+  assert.ok(ok.fake.emails[0].subject.includes("Constructive Operations"));
+  r = await call(ok.h, "GET", `/service/jobs/${ok.job.Id}/card`);
+  assert.equal(r.body.customerUrl, `${DEMO_URL}/estimate/TOKEN123`);
+  r = await call(ok.h, "POST", `/service/jobs/${ok.job.Id}/card-session`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const session = ok.stripeCalls.find((c) => c.url.endsWith("/checkout/sessions"));
+  assert.ok(session.params.get("success_url").startsWith(`${DEMO_URL}/`), session.params.get("success_url"));
+  assert.ok(session.params.get("cancel_url").startsWith(`${DEMO_URL}/`));
+  r = await call(ok.h, "POST", `/service/jobs/${ok.job.Id}/card-link`, { via: "sms" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.url, `${DEMO_URL}/estimate/TOKEN123`);
+  assert.ok(ok.texts[0].body.includes("Constructive Operations here."));
+  ok.job.Report_Public_Token__c = "REPORTTOKEN";
+  r = await call(ok.h, "GET", `/service/jobs/${ok.job.Id}/report`);
+  assert.equal(r.body.publicUrl, `${DEMO_URL}/report/REPORTTOKEN`);
+  assert.ok(!everything(ok).includes("portal.example.com"), "the primary tenant's address reaches nothing");
+  assert.ok(!everything(ok).includes("Test Electric"), "nor does its name");
+
+  // --- not configured: no block at all, or a block with no address ----------------------
+  for (const block of [null, { companyName: "Constructive Operations" }]) {
+    const off = await world(block);
+    r = await call(off.h, "POST", `/service/estimates/${off.estId}/send`, {});
+    assert.equal(r.status, 200, "the version is still recorded");
+    assert.equal(r.body.delivery, "recorded");
+    assert.equal(r.body.publicUrl, null);
+    assert.match(r.body.deliveryDetail, /PORTAL_URL_NOT_CONFIGURED/);
+    assert.equal(off.fake.emails.length, 0, "no email with somebody else's link");
+    r = await call(off.h, "GET", `/service/jobs/${off.job.Id}/card`);
+    assert.equal(r.body.customerUrl, null);
+    r = await call(off.h, "POST", `/service/jobs/${off.job.Id}/card-session`, {});
+    assert.equal(r.status, 503);
+    assert.equal(r.body.code, "PORTAL_URL_NOT_CONFIGURED");
+    assert.ok(!off.stripeCalls.some((c) => c.url.endsWith("/checkout/sessions")));
+    r = await call(off.h, "POST", `/service/jobs/${off.job.Id}/card-link`, { via: "sms" });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.code, "PORTAL_URL_NOT_CONFIGURED");
+    assert.equal(off.texts.length, 0);
+    off.job.Report_Public_Token__c = "REPORTTOKEN";
+    r = await call(off.h, "GET", `/service/jobs/${off.job.Id}/report`);
+    assert.equal(r.body.publicUrl, null);
+    assert.ok(!everything(off).includes("portal.example.com"));
+  }
+
+  // --- the public Service Club pages take the tenant from the URL's slug ------------------
+  const joiner = { firstName: "Ann", lastName: "Lee", email: "ann@example.com", phone: "602-555-0101", street: "9 Oak St", city: "Mesa", state: "AZ", postalCode: "85201" };
+  const clubWorld = async (block) => {
+    const w = await world(block);
+    w.fake.store.Sundial_Tenant__c = [{ Id: TENANT, Name: "conops-demo" }];
+    for (const row of PLAN_ROWS(TENANT)) await w.fake.deps.sfCreateRecord("Sundial_Service_Plan__c", row);
+    w.fake.stripe = clubStripe(w.fake, w.stripeCalls);
+    return w;
+  };
+  const club = await clubWorld({ companyName: "Constructive Operations", publicUrl: DEMO_URL });
+  r = await pub(club.h, "GET", "/public/club/conops-demo/plans");
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.brand, "Constructive Operations");
+  r = await pub(club.h, "POST", "/public/club/conops-demo/join", { planCode: "monitor", interval: "monthly", customer: joiner });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const joinSession = club.stripeCalls.filter((c) => c.url.endsWith("/checkout/sessions")).at(-1);
+  assert.equal(joinSession.params.get("success_url"), `${DEMO_URL}/club/joined?session={CHECKOUT_SESSION_ID}`);
+  assert.ok(joinSession.params.get("cancel_url").startsWith(`${DEMO_URL}/club/join?`));
+  assert.equal(joinSession.init.headers.Authorization, "Bearer sk_test_demo");
+
+  const bareClub = await clubWorld(null);
+  r = await pub(bareClub.h, "GET", "/public/club/conops-demo/plans");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.brand, "Conops-Demo", "its own slug — never the Lambda's SERVICE_BRAND_NAME");
+  r = await pub(bareClub.h, "POST", "/public/club/conops-demo/join", { planCode: "monitor", interval: "monthly", customer: joiner });
+  assert.equal(r.status, 503, "no address to return to → the join is not offered");
+  assert.equal(r.body.code, "PUBLIC_URL_NOT_SET");
+  assert.ok(!bareClub.stripeCalls.some((c) => c.url.endsWith("/checkout/sessions")));
+});
+
+test("D-078: the PRIMARY tenant's links are built from the Lambda's own address whatever its brand block says — nothing changed for it", async () => {
+  const fake = fakeSalesforce();
+  // Even if somebody puts addresses in the primary tenant's block, they are not used for it.
+  fake.brandSecret = { harmon: { companyName: "Test Service", portalUrl: "https://ignored.example.com", publicUrl: "https://ignored.example.com" } };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Em", Primary_Email__c: "em@example.com" });
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  const s = await call(h, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s.body.publicUrl, "https://portal.example.com/estimate/TOKEN123");
+  assert.ok(fake.emails[0].html.includes("https://portal.example.com/estimate/TOKEN123"));
+  assert.ok(!fake.emails[0].html.includes("ignored.example.com"));
 });

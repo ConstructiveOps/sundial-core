@@ -41,6 +41,7 @@
 import { getSalesforceToken, sfQuery, soqlEscapeString } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
+import { integrationEnabled, integrationNotEnabledBody } from "../../lib/tenant-guard.js";
 import {
   putAcumaticaEntity,
   getAcumaticaEntity,
@@ -276,6 +277,8 @@ const CUSTOMER_FIELDS = [
 const STATIC_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://sundial.harmonelectric.net",
+  // The Constructive Operations demo portal (tenant conops-demo, D-078).
+  "https://sundial.constructiveoperations.com",
 ]);
 
 function isAllowedOrigin(origin) {
@@ -563,6 +566,15 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId;
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // PRIMARY-TENANT RULE (D-078). There is ONE Acumatica login (lib/acumatica.js) and it
+    // is the primary tenant's ERP. Any other tenant is refused HERE — before a single
+    // Salesforce read or Acumatica call — unless its slug is listed in
+    // SUNDIAL_ACUMATICA_TENANTS. Without this, a second tenant's "Sync to Acumatica"
+    // button would create a real customer and project in the primary tenant's books.
+    if (!integrationEnabled("acumatica", identity.tenantSlug)) {
+      return jsonResponse(403, cors, integrationNotEnabledBody("acumatica"));
     }
 
     // ACCESS MODEL (D-064 §3.6): pushing a customer into Acumatica is an accounting

@@ -124,6 +124,16 @@ only ever born from our own join. The join refuses a customer who already has a 
      fallback when `solarFacts` is absent; with both present the API wins.
    - The team email needs `EMAIL_FROM` on `sundial-service-estimate` (already set for estimate
      sends).
+   - **One entry per tenant, no fallback (D-078, 2026-09-29).** A tenant with no
+     `tenants["<slug>"]` entry has no SolarFax hand-off and no team email: memberships are
+     stamped `Not Applicable`, nothing is sent. The older FLAT shape (no `tenants` key at all —
+     `solarFacts` / `teamEmail` at the top level) is still read, but for the **primary tenant
+     only** (`harmon`); it never serves another tenant, so a second tenant can never reach
+     Harmon's SolarFax credentials or its team inbox.
+   - **The club's links are the tenant's own (D-078).** The join / booking / manage links and
+     Stripe's return URLs use `SERVICE_PUBLIC_BASE_URL` for the primary tenant and, for any other
+     tenant, `publicUrl` (else `portalUrl`) from its `sundial/brand` block; with neither, the
+     public join and booking answer their existing "isn't set up yet" 503.
 7. **Lambdas + routes.** `npm test`, then `.\deploy.ps1 sundial-service-estimate`,
    `.\deploy.ps1 sundial-auth-proxy` (two new actions in `lib/access.js`),
    `.\deploy.ps1 sundial-sf-query` and `.\deploy.ps1 sundial-cache-sync` (the two new objects in

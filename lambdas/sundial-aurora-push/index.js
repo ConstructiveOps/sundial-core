@@ -60,6 +60,7 @@ import {
   soqlEscapeString,
 } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
+import { integrationEnabled, integrationNotEnabledBody } from "../../lib/tenant-guard.js";
 import {
   alwaysEnforcedAccess,
   assertActionOnRecord,
@@ -132,6 +133,8 @@ const CUSTOMER_SELECT_FIELDS = [
 const STATIC_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://sundial.harmonelectric.net",
+  // The Constructive Operations demo portal (tenant conops-demo, D-078).
+  "https://sundial.constructiveoperations.com",
 ]);
 
 function isAllowedOrigin(origin) {
@@ -613,6 +616,16 @@ export const handler = async (event) => {
     const tenantId = identity.tenantId; // SALESFORCE Client record id
     if (!tenantId) {
       return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    }
+
+    // PRIMARY-TENANT RULE (D-078). There is ONE Aurora account (lib/aurora.js) and ONE
+    // design-request mailbox (DESIGN_REQUEST_NOTIFY_TO), and both are the primary
+    // tenant's. Any other tenant is refused HERE — before a Salesforce read, an Aurora
+    // call or an email — unless its slug is listed in SUNDIAL_AURORA_TENANTS. Without
+    // this, a second tenant's "Send to Aurora" would create a real project in the
+    // primary tenant's Aurora and email its design manager.
+    if (!integrationEnabled("aurora", identity.tenantSlug)) {
+      return jsonResponse(403, cors, integrationNotEnabledBody("aurora"));
     }
 
     // ACCESS MODEL (D-064 §3.6). THE ONE ACTION OPEN TO SALES ROLES, and Tim's call

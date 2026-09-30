@@ -10,7 +10,7 @@ a check and a refund all move the invoice and the job the same way.
 
 | Piece | Where | What it does |
 |---|---|---|
-| Keys | Secrets Manager **`sundial/stripe`** | Per tenant: `{ "tenants": { "harmon": { "secretKey": "sk_…", "webhookSecret": "whsec_…" } } }` |
+| Keys | Secrets Manager **`sundial/stripe`** | Per tenant: `{ "tenants": { "harmon": { "secretKey": "sk_…", "webhookSecret": "whsec_…" } } }`. **No entry = not set up (D-078, 2026-09-29):** a tenant with no `tenants["<slug>"]` gets `STRIPE_NOT_CONFIGURED` / "Online payment isn't set up yet" everywhere. The older flat shape (a top-level `{ secretKey, webhookSecret }`, a single-tenant install) is still read, but for the **primary tenant only** (`harmon`) — it is never a fallback for another tenant. Production uses the `tenants` shape. A second tenant gets its own entry (test keys for a demo) and its own webhook endpoint `…/webhooks/stripe/<slug>` |
 | Client + signature check | `lib/stripe.js` | A page of REST over `fetch` (no SDK); `verifyWebhookSignature` (HMAC-SHA256, 5-min tolerance, constant-time) |
 | Customer side | `lambdas/sundial-service-public` → `POST /public/estimates/{token}/checkout` | A Checkout Session: `setup` (card on file, nothing charged), `deposit` (charges the deposit AND keeps the card), `balance` (pays the live invoice). The step is **re-derived from the records** — the page's word for it is never trusted |
 | Stripe → Sundial | `lambdas/sundial-service-estimate/stripe.js` → `POST /webhooks/stripe/{tenant}` | Signature-gated. `checkout.session.completed` (card on file), `payment_intent.succeeded` (a Payment row), `payment_intent.payment_failed` (a Failed row), `charge.refunded` (a Refund row) |

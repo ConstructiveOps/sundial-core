@@ -645,6 +645,7 @@ export async function realListPhotos(prefix) {
  * @param h  shared pieces from index.js: CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT,
  *           CALL_SELECT, DEFAULTS, callToBoard, techName, loadTech, loadJob, loadJobCalls,
  *           settleJobStatus, act, markStale, announce, sms (createSmsSender), CACHE,
+ *           brandNameFor(ctx) — the TENANT'S company name for the "on my way" text (D-078),
  *           jsonResponse, bad, notFound, sfError
  */
 /**
@@ -1055,7 +1056,7 @@ export function createTechHandlers(d, h) {
         // The text. Skipped silently when the customer has no mobile; the app shows the outcome.
         if (body?.textCustomer !== false && job) {
           const custom = strOrNull(body?.message);
-          const text = custom ? custom.slice(0, MAX_TEXT_CHARS) : onMyWayText({ customerName: job.Customer_Name_at_Creation__c, techFirstName: tech.First_Name__c, brandName: DEFAULTS.brandName || ctx.tenantSlug || "", jobNumber: job.Name });
+          const text = custom ? custom.slice(0, MAX_TEXT_CHARS) : onMyWayText({ customerName: job.Customer_Name_at_Creation__c, techFirstName: tech.First_Name__c, brandName: (await h.brandNameFor(ctx)) || ctx.tenantSlug || "", jobNumber: job.Name });
           const sent = await h.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job, body: text, sentBy: { id: ctx.userId, name: ctx.actor?.name ?? techName(tech) } });
           extra.text = sent.ok ? { sent: true, to: sent.message?.toPretty ?? null } : { sent: false, reason: sent.code, detail: sent.code === "NO_PHONE" ? "No mobile number on this job." : sent.error };
         } else extra.text = { sent: false, reason: body?.textCustomer === false ? "SKIPPED" : "NO_JOB" };

@@ -15,7 +15,11 @@ import { profileScopeColumns } from "../../lib/access.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { parseJsonBody } from "../../lib/http.js";
 import { isEmailConfigured as realIsEmailConfigured } from "../../lib/email.js";
-import { mintAndSend as realMintAndSend, portalBaseUrl } from "../../lib/auth-email.js";
+import { mintAndSend as realMintAndSend, portalBaseUrl, DEFAULT_PORTAL_BASE_URL } from "../../lib/auth-email.js";
+import { sfQuery as realSfQuery, soqlEscapeString } from "../../lib/salesforce.js";
+import { getSecret as realGetSecret } from "../../lib/secrets.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { createTenantSettings } from "../../lib/tenant-settings.js";
 
 // --- CORS ------------------------------------------------------------------
 
@@ -24,6 +28,8 @@ import { mintAndSend as realMintAndSend, portalBaseUrl } from "../../lib/auth-em
 const STATIC_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://sundial.harmonelectric.net",
+  // The Constructive Operations demo portal (tenant conops-demo, D-078).
+  "https://sundial.constructiveoperations.com",
 ]);
 
 function isAllowedOrigin(origin) {
@@ -206,6 +212,101 @@ function forgotAllowed(key, now = Date.now()) {
 }
 const maskEmail = (e) => String(e).replace(/^(.).*(@.*)$/, "$1…$2");
 
+// --- Which portal the reset link opens (D-078) -----------------------------------
+//
+// This route is public and knows nothing about the person until Supabase has found
+// their login, and the portal address used to be one value for everybody: the PRIMARY
+// tenant's (PORTAL_BASE_URL / its in-code default). On shared Lambdas that would email
+// every other tenant's users a link to the primary tenant's portal.
+//
+//   - A request that comes FROM the primary tenant's own portal (its Origin header is
+//     that portal's address — see isPrimaryPortalOrigin) is handled exactly as before:
+//     same link, no lookup, no secret read. That is the primary tenant's login page
+//     asking, and it costs it nothing new.
+//   - ANY other request (another portal, a preview deploy, no Origin at all) looks up
+//     the person's tenant first — one Salesforce read of their Sundial_User__c by the
+//     login's id — and a person POSITIVELY identified as another tenant's user is
+//     linked to THAT tenant's portal (`portalUrl` in Secrets Manager `sundial/brand`),
+//     or gets nothing when that tenant has no address configured.
+//   - EVERYTHING ELSE falls back to the primary tenant's link, which is exactly what
+//     this route sent before D-078: a primary-tenant user, a lookup that failed twice,
+//     a login with no user record, a user record with no tenant. The primary tenant is
+//     the paying, live one; a Salesforce hiccup or an Origin this code did not expect
+//     must never be the reason its people cannot reset a password. The cost of that
+//     choice is small and known: in those same failure cases another tenant's user
+//     would get the primary portal's link, as they did before this rule existed.
+//
+// Either way the answer to the caller is the same 200: nothing here can be used to
+// learn whether an address has an account, or which tenant it belongs to.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An Origin header, comparable: trimmed, no trailing slash, lower-case. */
+const normOrigin = (v) => String(v ?? "").trim().replace(/\/+$/, "").toLowerCase();
+
+/**
+ * Is this request from the primary tenant's own portal? True when the Origin is
+ * PORTAL_BASE_URL on this Lambda OR the in-code default portal address — both are the
+ * primary tenant's. Accepting the in-code default as well means a PORTAL_BASE_URL that
+ * is mistyped, or set to something else for a test, cannot push the primary tenant's
+ * real login page onto the lookup path.
+ */
+function isPrimaryPortalOrigin(originHeader, primaryBase) {
+  const origin = normOrigin(originHeader);
+  return origin !== "" && (origin === normOrigin(primaryBase) || origin === normOrigin(DEFAULT_PORTAL_BASE_URL));
+}
+
+/**
+ * The login's user record, read at most twice: one retry on an error, because a single
+ * transient Salesforce failure should not decide which portal a person is sent to.
+ * When several records point at one login (which D-078 refuses to create, but older
+ * data may hold), an ACTIVE one wins, then the oldest — so the answer is the same on
+ * every request instead of whichever row Salesforce happens to return first.
+ * @returns {Promise<{ ok: true, row: object|null } | { ok: false, error: string }>}
+ */
+async function lookupLoginUser(d, authUserId) {
+  const soql =
+    `SELECT Id, Client__r.Name FROM Sundial_User__c WHERE Supabase_User_Id__c = '${soqlEscapeString(authUserId)}' ` +
+    `ORDER BY Active__c DESC, CreatedDate ASC LIMIT 1`;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const rows = await d.sfQuery(soql);
+      return { ok: true, row: rows?.[0] ?? null };
+    } catch (e) {
+      // Value-safety: a Salesforce error can quote the query back, and the query holds the login's id.
+      lastError = String(e?.message || e).split(authUserId).join("<login id>");
+      console.warn(`auth/forgot: tenant lookup attempt ${attempt} of 2 failed: ${lastError}`);
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+async function resetTargetForUser(d, user, primaryBase) {
+  // What this route sent to everybody before D-078 — the fallback for every case below
+  // in which the person is NOT positively known to belong to another tenant.
+  const primaryTarget = { redirectTo: `${primaryBase}/reset-password` };
+  const authUserId = String(user?.id ?? "");
+  if (!UUID_RE.test(authUserId)) {
+    console.warn("auth/forgot: the login has no usable id, so its tenant could not be looked up — sending the primary portal's link.");
+    return primaryTarget;
+  }
+  const found = await lookupLoginUser(d, authUserId);
+  if (!found.ok) {
+    console.error("auth/forgot: tenant lookup failed twice — sending the primary portal's link.");
+    return primaryTarget;
+  }
+  const slug = typeof found.row?.Client__r?.Name === "string" ? found.row.Client__r.Name.trim() : "";
+  if (!slug) {
+    console.warn(`auth/forgot: ${found.row ? "the user record has no tenant" : "the login has no user record"} — sending the primary portal's link.`);
+    return primaryTarget;
+  }
+  if (isPrimaryTenant(slug)) return primaryTarget;
+  // A known non-primary tenant: its own portal, or nothing. Never the primary tenant's.
+  const base = await d.tenantSettings.portalUrlFor(slug, primaryBase);
+  if (!base) return { reason: "no portal address is configured for this person's tenant (sundial/brand portalUrl); nothing was emailed." };
+  return { redirectTo: `${base}/reset-password`, portalBase: base };
+}
+
 async function handleForgot(d, event, headers, cors) {
   const done = () => jsonResponse(200, cors, { ok: true, message: "If that address has a Sundial account, a reset link is on its way." });
   const parsed = parseJsonBody(event);
@@ -216,16 +317,33 @@ async function handleForgot(d, event, headers, cors) {
     console.warn(`auth/forgot: rate limit hit for ${maskEmail(email)}`);
     return done();
   }
-  const redirectTo = `${portalBaseUrl()}/reset-password`;
+  const primaryBase = portalBaseUrl();
+  const redirectTo = `${primaryBase}/reset-password`;
+  // D-078 (see resetTargetForUser above): a request from the primary tenant's own portal
+  // keeps the one-address behaviour with no lookup; everything else looks the tenant up.
+  const fromPrimaryPortal = isPrimaryPortalOrigin(headers["origin"], primaryBase);
   try {
     const supabase = await d.getSupabaseClient();
     if (!d.isEmailConfigured()) {
+      // DEGRADED MODE, the same for every Origin, exactly as before D-078: without
+      // EMAIL_FROM this Lambda cannot send its own email, so Supabase sends its reset
+      // email with the primary portal's redirect. That email CANNOT carry a per-tenant
+      // link — Supabase sends it before we learn whose login it is — so in this mode
+      // another tenant's user is pointed at the primary portal too. Sending nothing
+      // instead would also leave the primary tenant's people without a reset whenever
+      // their Origin was not the one expected. SES (`EMAIL_FROM` on this Lambda) is
+      // what gives other tenants their own link.
       console.warn("auth/forgot: EMAIL_FROM not set — using Supabase's own reset email (its Reset Password template MUST be the token_hash shape).");
       const r = await supabase.auth.resetPasswordForEmail(email, { redirectTo });
       if (r.error) console.warn(`auth/forgot: Supabase reset for ${maskEmail(email)}: ${r.error.message}`);
       return done();
     }
-    const r = await d.mintAndSend(supabase, { type: "recovery", email, redirectTo });
+    const r = await d.mintAndSend(supabase, {
+      type: "recovery",
+      email,
+      redirectTo,
+      ...(fromPrimaryPortal ? {} : { resolveTarget: (user) => resetTargetForUser(d, user, primaryBase) }),
+    });
     if (!r.ok) console.log(`auth/forgot: no link for ${maskEmail(email)} (${r.error?.message || "refused"})`); // unknown address, most likely
     else if (!r.sent) console.error(`auth/forgot: ${maskEmail(email)}: ${r.reason}`);
     else console.log(`auth/forgot: reset link sent to ${maskEmail(email)}`);
@@ -244,8 +362,13 @@ export function createHandler(deps = {}) {
     getSupabaseClient: realGetSupabaseClient,
     isEmailConfigured: realIsEmailConfigured,
     mintAndSend: realMintAndSend,
+    sfQuery: realSfQuery,
+    getSecret: realGetSecret,
     ...deps,
   };
+  // Per-tenant portal addresses (D-078). Built once per warm container; it reads the
+  // brand secret only when a NON-primary tenant's address is actually asked for.
+  if (!d.tenantSettings) d.tenantSettings = createTenantSettings({ getSecret: d.getSecret });
   return async (event) => {
   // Support both REST (v1, httpMethod) and HTTP API (v2, requestContext.http).
   const method =
@@ -290,9 +413,14 @@ export function createHandler(deps = {}) {
     // directions: a client that ignores it renders what it always did and the server
     // has not started refusing anything yet; a client that honours it renders a subset
     // of what the server already agreed to send.
+    //
+    // `tenant.slug` (D-078) is new and additive in the same way: the tenant's slug
+    // (Sundial_Tenant__c.Name, already on the resolved identity — no extra read), so a
+    // portal build can tell that the person who just signed in belongs to ITS tenant
+    // and sign them out if not. A label, never an isolation key.
     return jsonResponse(200, cors, {
       user: { ...identity.user, access: identity.access },
-      tenant: { clientId: identity.tenantId },
+      tenant: { clientId: identity.tenantId, slug: identity.tenantSlug ?? null },
     });
   } catch (err) {
     // Real error to CloudWatch only; generic body to the caller.

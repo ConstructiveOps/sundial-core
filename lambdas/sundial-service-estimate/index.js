@@ -95,7 +95,8 @@ import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-p
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
-import { createBrandLoader } from "../../lib/brand.js";
+import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import {
   buildKey,
   listRecordFiles,
@@ -471,11 +472,31 @@ export function createHandler(deps = {}) {
   // `brandFor(ctx)` stays synchronous for the many callers that hand it to a builder.
   // Unconfigured: SERVICE_BRAND_NAME, else the tenant slug, so the layout can be reviewed.
   if (!d.brands) d.brands = createBrandLoader({ getSecret: d.getSecret, fetchUrl: d.fetchUrl, env: { ...process.env, ...(d.brandName ? { SERVICE_BRAND_NAME: d.brandName } : {}) } });
+  // SERVICE_BRAND_NAME (d.brandName) is the PRIMARY tenant's name (D-078): the un-warmed
+  // fallback below hands it to the primary tenant only. Any other tenant falls through
+  // to its own slug, never to somebody else's company name.
   const brandFor = (ctx) => {
-    const b = ctx?.brand ?? d.brands.cached(ctx?.tenantSlug ?? null) ?? { ...DEFAULT_BRAND, companyName: d.brandName || "" };
+    const b = ctx?.brand ?? d.brands.cached(ctx?.tenantSlug ?? null) ?? { ...DEFAULT_BRAND, companyName: isPrimaryTenant(ctx?.tenantSlug) ? d.brandName || "" : "" };
     if (!b.companyName) b.companyName = ctx?.tenantSlug ? ctx.tenantSlug.replace(/\b\w/g, (c) => c.toUpperCase()) : "";
     return b;
   };
+  // WHERE THIS TENANT'S CUSTOMER PAGES LIVE (D-078). SERVICE_PUBLIC_BASE_URL
+  // (d.publicBaseUrl) is one address per Lambda and it is the PRIMARY tenant's: the
+  // primary tenant gets exactly that, as before. Any other tenant gets the `publicUrl`
+  // (else `portalUrl`) of its own brand block — already warmed by the dispatcher for
+  // this request, so this stays synchronous and reads nothing new — or "" when it has
+  // none, which every caller already treats as "no link can be built". Never the
+  // primary tenant's address: an estimate, report, pay or club link must open the
+  // tenant's own site.
+  const publicBaseFor = (ctx) => {
+    if (isPrimaryTenant(ctx?.tenantSlug)) return d.publicBaseUrl;
+    return brandPublicUrl(ctx?.brand ?? d.brands.cached(ctx?.tenantSlug ?? null)).replace(/\/+$/, "");
+  };
+  /** Why no customer link could be built — names the right knob for the tenant it is about. */
+  const noPublicUrlDetail = (ctx) =>
+    isPrimaryTenant(ctx?.tenantSlug)
+      ? "SERVICE_PUBLIC_BASE_URL is not set on this Lambda, so no link could be built."
+      : "This account has no public page address configured (PORTAL_URL_NOT_CONFIGURED: add publicUrl or portalUrl to its sundial/brand block), so no link could be built.";
   const warmBrand = async (tenantSlug) => {
     try {
       await d.brands.brandFor({ tenantSlug }, { withLogo: true });
@@ -1083,7 +1104,7 @@ export function createHandler(deps = {}) {
       const validUntil = new Date(now.getTime() + validDays * 86400000);
       const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
       const token = est.Public_Token__c || d.randomToken();
-      const url = publicEstimateUrl(token, d.publicBaseUrl);
+      const url = publicEstimateUrl(token, publicBaseFor(ctx));
       const fields = {
         Version__c: version,
         Status__c: "Sent",
@@ -1183,7 +1204,7 @@ export function createHandler(deps = {}) {
       let deliveryDetail = null;
       let recipient = null;
       if (via === "Email" || via === "Both") {
-        if (!url) deliveryDetail = "SERVICE_PUBLIC_BASE_URL is not set on this Lambda, so no link could be built.";
+        if (!url) deliveryDetail = noPublicUrlDetail(ctx);
         else if (!d.isEmailConfigured()) deliveryDetail = "EMAIL_FROM is not set on this Lambda (SES not wired).";
         else {
           let email = strOrNull(body?.to);
@@ -1663,12 +1684,12 @@ export function createHandler(deps = {}) {
     return strOrNull(job?.Primary_Email_at_Creation__c);
   }
   // Money: one core (loaders + settleMoney) shared by the invoice routes and Stripe.
-  const money = createMoneyCore(d, { act, markStale, CACHE, publicEstimateUrl: (token) => publicEstimateUrl(token, d.publicBaseUrl), randomToken: d.randomToken });
+  const money = createMoneyCore(d, { act, markStale, CACHE, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken });
   // The Service Club (D-073): public join / truck roll / request, the office's memberships,
   // and the webhook's subscription branch (consulted by stripe.js before the payments branch).
-  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, notifier: d.notifier });
+  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
-  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token) => publicEstimateUrl(token, d.publicBaseUrl), randomToken: d.randomToken, portalBaseUrl: () => d.publicBaseUrl });
+  const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken, portalBaseUrl: (ctx) => publicBaseFor(ctx) });
   Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
@@ -1681,7 +1702,7 @@ export function createHandler(deps = {}) {
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
   // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
   if (!d.sms) d.sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, now: d.now, ...(d.sendSms ? { sendSms: d.sendSms } : {}), ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
-  Object.assign(H, createReportHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, loadJobCalls: (jobId, tenantId) => d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 200`) }));
+  Object.assign(H, createReportHandlers(d, { publicBaseFor, noPublicUrlDetail, loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, loadJobCalls: (jobId, tenantId) => d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 200`) }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
   const ACTION_FOR = {

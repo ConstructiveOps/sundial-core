@@ -192,6 +192,8 @@ const WRITE_BLOCKLIST = new Set(["id", "client__c", "ownerid", "recordtypeid"]);
 const STATIC_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://sundial.harmonelectric.net",
+  // The Constructive Operations demo portal (tenant conops-demo, D-078).
+  "https://sundial.constructiveoperations.com",
 ]);
 
 function isAllowedOrigin(origin) {

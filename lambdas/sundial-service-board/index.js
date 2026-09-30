@@ -59,6 +59,7 @@ import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseI
 import { createDayHandlers } from "./day.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
+import { createTenantSettings } from "../../lib/tenant-settings.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -436,6 +437,13 @@ export function createHandler(deps = {}) {
   // Notifications (D-074): the tech's bell / phone when the office changes their board.
   // Best-effort like every other side effect here; never a reason to fail the write.
   const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, broadcast: d.broadcast, now: d.now, env: d.env });
+  // THE COMPANY NAME IN CUSTOMER TEXTS AND APPOINTMENT EMAILS (D-078). SERVICE_BRAND_NAME
+  // (DEFAULTS.brandName) is one value per Lambda and it is the PRIMARY tenant's name: the
+  // primary tenant gets exactly that, with nothing new read. Any other tenant gets the
+  // companyName of its own block in Secrets Manager `sundial/brand` (lib/tenant-settings.js),
+  // or none — never "… from <the primary tenant>" on a text to somebody else's customer.
+  const tenantSettings = d.tenantSettings ?? createTenantSettings({ getSecret: d.getSecret, env: d.env });
+  const brandNameFor = async (ctx) => (await tenantSettings.companyNameFor(ctx?.tenantSlug, DEFAULTS.brandName)) || "";
   /**
    * Tell a tech about their call. kind: scheduled | moved | reassigned_away | cancelled.
    * The dedupe key carries the call's modstamp-ish `stamp` so a genuine second move rings
@@ -514,7 +522,7 @@ export function createHandler(deps = {}) {
       customerName: job?.Customer_Name_at_Creation__c,
       window: formatWindow(call.Scheduled_Start__c, call.Scheduled_End__c),
       techFirstName: tech?.First_Name__c ?? null,
-      brandName: DEFAULTS.brandName,
+      brandName: await brandNameFor(ctx),
       reason,
     });
     const sent = await d.sendEmail({ to: email, subject: msg.subject, text: msg.text, html: msg.html });
@@ -981,7 +989,7 @@ export function createHandler(deps = {}) {
     H,
     createTechHandlers(d, {
       CALL_SF_OBJECT, JOB_SF_OBJECT, USER_SF_OBJECT, CALL_SELECT, DEFAULTS, CACHE,
-      callToBoard, techName, soqlDateTime, loadTech, loadTechs, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier,
+      callToBoard, techName, soqlDateTime, loadTech, loadTechs, loadJob, loadJobCalls, settleJobStatus, act, markStale, announce, sms, notifier, brandNameFor,
       jsonResponse, bad, notFound, sfError, notesDeps, days: days.ops,
     })
   );

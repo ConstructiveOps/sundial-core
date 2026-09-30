@@ -40,6 +40,10 @@ const ctx = {
   readBackOk: true,
   sfPatches: [],     // every Salesforce PATCH: { url, body }
   sfRecords: {},     // object name -> rows returned by sfQuery
+  soql: [],          // every sfQuery text (the primary-tenant guard must run before any)
+  // Who is calling. The default is a PRIMARY-tenant caller (slug "harmon"), which is
+  // every real caller today; the D-078 tests swap the slug.
+  identity: { tenantId: "a0X000000000001", tenantSlug: "harmon", accessLevel: "admin" },
 };
 
 function resetCtx() {
@@ -52,6 +56,10 @@ function resetCtx() {
   ctx.readBackOk = true;
   ctx.sfPatches = [];
   ctx.sfRecords = {};
+  ctx.soql = [];
+  ctx.identity = { tenantId: "a0X000000000001", tenantSlug: "harmon", accessLevel: "admin" };
+  delete process.env.SUNDIAL_ACUMATICA_TENANTS;
+  delete process.env.SUNDIAL_PRIMARY_TENANT;
 }
 
 mock.module("../../lib/acumatica.js", {
@@ -107,6 +115,7 @@ mock.module("../../lib/salesforce.js", {
   namedExports: {
     getSalesforceToken: async () => ({ access_token: "t", instance_url: "https://sf.test" }),
     sfQuery: async (soql) => {
+      ctx.soql.push(soql);
       const object = /FROM\s+(\w+)/.exec(soql)?.[1];
       return ctx.sfRecords[object] ?? [];
     },
@@ -116,7 +125,7 @@ mock.module("../../lib/salesforce.js", {
 
 mock.module("../../lib/identity.js", {
   namedExports: {
-    resolveIdentity: async () => ({ tenantId: "a0X000000000001", accessLevel: "admin" }),
+    resolveIdentity: async () => ctx.identity,
   },
 });
 
@@ -629,4 +638,78 @@ test("normalizePicklist folds every dash it might meet", () => {
       `dash U+${dash.charCodeAt(0).toString(16)} not folded`
     );
   }
+});
+
+// ===========================================================================
+// PRIMARY-TENANT RULE (D-078) — the one Acumatica login is the primary tenant's
+// ===========================================================================
+// What is pinned: a tenant that is not the primary one is refused BEFORE anything
+// happens — no Salesforce read, no Acumatica call, no Salesforce write — and the
+// primary tenant (every other test in this file) is served exactly as before.
+
+const pushAs = async (identity) => {
+  resetCtx();
+  ctx.identity = identity;
+  ctx.sfRecords.Sundial_Customer__c = [customerRow()];
+  ctx.sfRecords.Sundial_Solar__c = [solarRow()];
+  const res = await handler({
+    requestContext: { http: { method: "POST" } },
+    headers: { authorization: "Bearer x", origin: "http://localhost:5173" },
+    body: JSON.stringify({ recordId: "a1P000000000001" }),
+  });
+  return { res, body: JSON.parse(res.body) };
+};
+const nothingHappened = () => {
+  assert.equal(ctx.soql.length, 0, "no Salesforce read");
+  assert.equal(ctx.puts.length, 0, "no Acumatica write");
+  assert.equal(ctx.gets.length, 0, "no Acumatica read");
+  assert.equal(ctx.sfPatches.length, 0, "no Salesforce write");
+};
+
+test("D-078: a NON-primary tenant is refused 403 INTEGRATION_NOT_ENABLED before any Salesforce or Acumatica call", async () => {
+  const { res, body } = await pushAs({ tenantId: "a0XdemoTENANT0001", tenantSlug: "conops-demo", accessLevel: "admin" });
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(body, { error: "integration_not_enabled", code: "INTEGRATION_NOT_ENABLED", message: "Acumatica isn't enabled for this account." });
+  assert.equal(res.headers["Access-Control-Allow-Origin"], "http://localhost:5173", "answered with the Lambda's own CORS headers");
+  nothingHappened();
+});
+
+test("D-078: a caller with NO tenant slug is refused too — the guard fails closed", async () => {
+  for (const tenantSlug of [null, undefined, "", "   "]) {
+    const { res, body } = await pushAs({ tenantId: "a0X000000000001", tenantSlug, accessLevel: "admin" });
+    assert.equal(res.statusCode, 403);
+    assert.equal(body.code, "INTEGRATION_NOT_ENABLED");
+    nothingHappened();
+  }
+});
+
+test("D-078: the PRIMARY tenant is still served — and its slug is matched case-insensitively", async () => {
+  for (const tenantSlug of ["harmon", "Harmon"]) {
+    const { res, body } = await pushAs({ tenantId: "a0X000000000001", tenantSlug, accessLevel: "admin" });
+    assert.equal(res.statusCode, 200, JSON.stringify(body));
+    assert.equal(body.ok, true);
+    assert.ok(customerPut(), "the customer was created in Acumatica");
+  }
+});
+
+test("D-078: another tenant is served only once SUNDIAL_ACUMATICA_TENANTS names it", async () => {
+  const demo = { tenantId: "a0X000000000001", tenantSlug: "conops-demo", accessLevel: "admin" };
+  resetCtx();
+  // pushAs() resets the env, so set it through a wrapper that runs after the reset.
+  const run = async (list) => {
+    resetCtx();
+    process.env.SUNDIAL_ACUMATICA_TENANTS = list;
+    ctx.identity = demo;
+    ctx.sfRecords.Sundial_Customer__c = [customerRow()];
+    ctx.sfRecords.Sundial_Solar__c = [solarRow()];
+    const res = await handler({
+      requestContext: { http: { method: "POST" } },
+      headers: { authorization: "Bearer x" },
+      body: JSON.stringify({ recordId: "a1P000000000001" }),
+    });
+    return res.statusCode;
+  };
+  assert.equal(await run("some-other-tenant"), 403);
+  assert.equal(await run("other, Conops-Demo "), 200);
+  resetCtx();
 });

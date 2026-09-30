@@ -419,6 +419,8 @@ const REFETCH_ID_CHUNK_SIZE = 200;
 const STATIC_ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://sundial.harmonelectric.net",
+  // The Constructive Operations demo portal (tenant conops-demo, D-078).
+  "https://sundial.constructiveoperations.com",
 ]);
 
 function isAllowedOrigin(origin) {

@@ -36,6 +36,8 @@ import {
 } from "../../lib/http.js";
 import { isEmailConfigured } from "../../lib/email.js";
 import { authLink, mintAndSend } from "../../lib/auth-email.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { createTenantSettings, portalUrlNotConfiguredBody } from "../../lib/tenant-settings.js";
 
 const SF_OBJECT = "Sundial_User__c";
 export const ACCESS_LEVELS = new Set([
@@ -206,6 +208,56 @@ const DEALER_REQUIRED = {
 const PORTAL_BASE_URL = (process.env.PORTAL_BASE_URL || "https://sundial.harmonelectric.net").replace(/\/+$/, "");
 const RESET_PASSWORD_URL = `${PORTAL_BASE_URL}/reset-password`;
 
+// WHICH PORTAL AN INVITE OPENS (D-078, lib/tenant-settings.js). PORTAL_BASE_URL above is
+// one value per Lambda and it is the PRIMARY tenant's portal. Every other tenant's
+// invite / set-password link must open ITS OWN portal — `portalUrl` in its block of
+// Secrets Manager `sundial/brand` — and a tenant with none gets a clean refusal
+// (PORTAL_URL_NOT_CONFIGURED) instead of an email that lands its new user on somebody
+// else's login page. The primary tenant's answer is the constant above: no secret is
+// read for it and its link is the same string it has always been.
+const tenantSettings = createTenantSettings();
+/** @returns {Promise<{ redirectTo: string, portalBase?: string } | null>} null = no portal address configured for this tenant */
+async function resetTargetFor(identity) {
+  const slug = identity?.tenantSlug;
+  const base = await tenantSettings.portalUrlFor(slug, PORTAL_BASE_URL);
+  if (!base) return null;
+  // `portalBase` is only passed for a non-primary tenant: without it lib/auth-email.js
+  // builds the primary tenant's email exactly as before.
+  return isPrimaryTenant(slug) ? { redirectTo: RESET_PASSWORD_URL } : { redirectTo: `${base}/reset-password`, portalBase: base };
+}
+const NO_PORTAL_URL_FOR_INVITE =
+  "This account has no portal address configured yet, so a set-password link can't be emailed. " +
+  "Create the user with a temporary password instead, or have the portal address added to the account's settings.";
+
+// ONE EMAIL = ONE LOGIN = ONE TENANT (D-078). Every tenant shares one Supabase project, so
+// an email address has exactly one login, and lib/identity.js resolves a login to a user
+// record with `LIMIT 1`. A second Sundial_User__c in ANOTHER tenant pointing at the same
+// login would make that person land in either tenant, request by request.
+const EMAIL_IN_USE_OTHER_TENANT = {
+  error: "email_in_use",
+  code: "EMAIL_IN_USE_OTHER_TENANT",
+  message: "That email already has a Sundial login on another account. Use a different email address.",
+};
+// The two questions behind that refusal. Both skip a user record with NO tenant
+// (`Client__c != null`): an orphan row belongs to nobody, so it must never be the reason
+// a tenant — the primary one above all — is told "that email is on another account".
+/** Is this LOGIN already linked to a user record in a different tenant? */
+async function loginLinkedInAnotherTenant(authUserId, tenantId) {
+  const rows = await sfQuery(
+    `SELECT Id FROM ${SF_OBJECT} WHERE Supabase_User_Id__c = '${soqlEscapeString(authUserId)}' ` +
+      `AND Client__c != '${soqlEscapeString(tenantId)}' AND Client__c != null LIMIT 1`
+  );
+  return !!(rows && rows.length > 0);
+}
+/** Does a user record with this EMAIL exist in a different tenant (whether or not it has a login yet)? */
+async function emailHeldByAnotherTenant(email, tenantId) {
+  const rows = await sfQuery(
+    `SELECT Id FROM ${SF_OBJECT} WHERE Email__c = '${soqlEscapeString(email)}' ` +
+      `AND Client__c != '${soqlEscapeString(tenantId)}' AND Client__c != null LIMIT 1`
+  );
+  return !!(rows && rows.length > 0);
+}
+
 // --- The invite link, and why WE send it (2026-09-22) -----------------------------
 //
 // An invite link is a ONE-TIME token, and Supabase's own invite email points at a URL
@@ -222,13 +274,13 @@ export const inviteLink = (tokenHash, base = RESET_PASSWORD_URL) => authLink(tok
  * Create the invited auth user and get the invite to them.
  * @returns {Promise<{ error?: object, data?: object, via?: "ses"|"supabase", warning?: string }>}
  */
-async function inviteAuthUser(supabase, email, { firstName, invitedBy }) {
+async function inviteAuthUser(supabase, email, { firstName, invitedBy, target = { redirectTo: RESET_PASSWORD_URL } }) {
   if (!isEmailConfigured() || typeof supabase.auth.admin.generateLink !== "function") {
     console.warn("user-admin: EMAIL_FROM not set — falling back to Supabase's invite email; its Invite template MUST use the token_hash link shape (auth-email-ses.md Part B2).");
-    const res = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    const res = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: target.redirectTo });
     return res.error ? { error: res.error } : { data: res.data, via: "supabase" };
   }
-  const r = await mintAndSend(supabase, { type: "invite", email, firstName, invitedBy, redirectTo: RESET_PASSWORD_URL });
+  const r = await mintAndSend(supabase, { type: "invite", email, firstName, invitedBy, ...target });
   if (!r.ok) return { error: r.error };
   return { data: { user: r.user }, via: "ses", ...(r.sent ? {} : { warning: r.reason }) };
 }
@@ -544,6 +596,32 @@ async function handleCreate(identity, event, cors) {
     return jsonResponse(409, cors, { error: "user_exists", code: "USER_ALREADY_EXISTS" });
   }
 
+  // a2. THE PENDING-INVITE GAP (D-078), closed from ONE side on purpose. Step b2 below
+  //     only runs when Supabase answers "already registered" — and for a login whose
+  //     invite was never accepted it does not: it re-issues the invite, so the email
+  //     would end up linked to user records in two tenants. So a NON-primary tenant is
+  //     refused up front when another tenant already has a user record with this email,
+  //     before any login is minted or any email sent.
+  //     Why not the primary tenant too: its create path is deliberately left exactly as
+  //     it was — the same single query, no new way to fail or to be refused. The
+  //     reverse case (the primary tenant creating a user whose email another tenant
+  //     already uses) is caught by b2 whenever Supabase reports the login as existing.
+  //     What stays open is the primary tenant INVITING an address whose invite in
+  //     another tenant was never accepted; keeping the primary tenant's path untouched
+  //     is worth more than closing that (DECISIONS.md D-078, known gaps).
+  if (!isPrimaryTenant(identity.tenantSlug) && (await emailHeldByAnotherTenant(email, identity.tenantId))) {
+    console.warn("user-admin: refused — that email already belongs to a user in another tenant.");
+    return jsonResponse(409, cors, EMAIL_IN_USE_OTHER_TENANT);
+  }
+
+  // An INVITE emails a link, so it needs this tenant's portal address — settled before
+  // anything is created. A password-mode user needs no link and no address (D-078).
+  let inviteTarget = null;
+  if (credentialMode === "invite") {
+    inviteTarget = await resetTargetFor(identity);
+    if (!inviteTarget) return jsonResponse(503, cors, portalUrlNotConfiguredBody(NO_PORTAL_URL_FOR_INVITE));
+  }
+
   const supabase = await getSupabaseClient();
 
   // b. Supabase auth user — create fresh, or REUSE an existing one by email (so a
@@ -557,7 +635,7 @@ async function handleCreate(identity, event, cors) {
     const invitedBy = [identity?.user?.firstName, identity?.user?.lastName].filter(Boolean).join(" ") || null;
     const res =
       credentialMode === "invite"
-        ? await inviteAuthUser(supabase, email, { firstName, invitedBy })
+        ? await inviteAuthUser(supabase, email, { firstName, invitedBy, target: inviteTarget })
         : await supabase.auth.admin.createUser({
             email,
             password: tempPassword,
@@ -601,6 +679,18 @@ async function handleCreate(identity, event, cors) {
       code: "SUPABASE_CREATE_FAILED",
       message: "Supabase returned no auth user id.",
     });
+  }
+
+  // b2. NO CROSS-TENANT LOGIN REUSE (D-078 — see EMAIL_IN_USE_OTHER_TENANT above). Only
+  //     on the REUSE path: the email was "already registered", so nothing was created
+  //     and nothing was emailed. If that login already belongs to a user record in a
+  //     DIFFERENT tenant, refuse. A login linked only within THIS tenant (the retry
+  //     after a partial failure that reuse exists for), or to nothing, carries on as
+  //     before. The fresh-create path never reaches this query. A user record with no
+  //     tenant at all is ignored (see loginLinkedInAnotherTenant).
+  if (!freshlyCreated && (await loginLinkedInAnotherTenant(authUserId, identity.tenantId))) {
+    console.warn("user-admin: refused — that email's login is already linked to a user in another tenant.");
+    return jsonResponse(409, cors, EMAIL_IN_USE_OTHER_TENANT);
   }
 
   // c. Create Sundial_User__c. Client__c is force-stamped from the token; the auth
@@ -904,6 +994,21 @@ async function handleResendInvite(identity, id, cors) {
   if (!email) return jsonResponse(400, cors, { error: "no_email", code: "NO_EMAIL", message: "This user has no email address on their record." });
   if (u.Active__c === false) return jsonResponse(409, cors, { error: "inactive", code: "USER_INACTIVE", message: "Reactivate this user before re-sending their invite." });
 
+  // The link opens THIS tenant's portal (D-078); a tenant with no portal address is
+  // refused before anything is sent. The primary tenant's target is the old constant.
+  const target = await resetTargetFor(identity);
+  if (!target) return jsonResponse(503, cors, portalUrlNotConfiguredBody(NO_PORTAL_URL_FOR_INVITE));
+
+  // One email = one login = one tenant (D-078), before anything is minted or emailed —
+  // for a NON-primary tenant only, the same one-sided check as step a2 of create: if
+  // another tenant has a user record with this email, a link sent from here would hand
+  // that person a link to THIS tenant's portal. The primary tenant's resend makes no
+  // new query; the re-link further down is guarded for every tenant.
+  if (!isPrimaryTenant(identity.tenantSlug) && (await emailHeldByAnotherTenant(email, identity.tenantId))) {
+    console.warn("user-admin: resend refused — that email already belongs to a user in another tenant.");
+    return jsonResponse(409, cors, EMAIL_IN_USE_OTHER_TENANT);
+  }
+
   const supabase = await getSupabaseClient();
   const invitedBy = [identity?.user?.firstName, identity?.user?.lastName].filter(Boolean).join(" ") || null;
   const masked = email.replace(/^(.).*(@.*)$/, "$1…$2");
@@ -912,20 +1017,20 @@ async function handleResendInvite(identity, id, cors) {
     // No SES on this Lambda: Supabase's own emails (dashboard templates MUST be the
     // token_hash shape). An unfinished invite is re-invited; a finished one gets a reset.
     console.warn("user-admin: EMAIL_FROM not set — resend goes through Supabase's own email.");
-    const inv = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    const inv = await supabase.auth.admin.inviteUserByEmail(email, { redirectTo: target.redirectTo });
     if (!inv.error) return jsonResponse(200, cors, { success: true, id: u.Id, linkType: "invite", inviteVia: "supabase" });
     if (!isAlreadyRegistered(inv.error)) return jsonResponse(502, cors, { error: "resend_failed", code: "RESEND_FAILED", message: inv.error.message });
-    const rec = await supabase.auth.resetPasswordForEmail(email, { redirectTo: RESET_PASSWORD_URL });
+    const rec = await supabase.auth.resetPasswordForEmail(email, { redirectTo: target.redirectTo });
     if (rec.error) return jsonResponse(502, cors, { error: "resend_failed", code: "RESEND_FAILED", message: rec.error.message });
     return jsonResponse(200, cors, { success: true, id: u.Id, linkType: "recovery", inviteVia: "supabase" });
   }
 
   // Try the invite first (new or unfinished user); an already-confirmed user gets a
   // recovery link — the same page, a different word on the button.
-  let r = await mintAndSend(supabase, { type: "invite", email, firstName: trimStr(u.First_Name__c), invitedBy, redirectTo: RESET_PASSWORD_URL });
+  let r = await mintAndSend(supabase, { type: "invite", email, firstName: trimStr(u.First_Name__c), invitedBy, ...target });
   let linkType = "invite";
   if (!r.ok && isAlreadyRegistered(r.error)) {
-    r = await mintAndSend(supabase, { type: "recovery", email, firstName: trimStr(u.First_Name__c), redirectTo: RESET_PASSWORD_URL });
+    r = await mintAndSend(supabase, { type: "recovery", email, firstName: trimStr(u.First_Name__c), ...target });
     linkType = "recovery";
   }
   if (!r.ok) {
@@ -938,6 +1043,27 @@ async function handleResendInvite(identity, id, cors) {
   let relinked = false;
   const authId = trimStr(r.user?.id);
   if (authId && authId !== trimStr(u.Supabase_User_Id__c)) {
+    // NO CROSS-TENANT RE-LINK (D-078, the same rule as step b2 of create). The login
+    // Supabase answered with is not the one on this record. When it is brand new (the
+    // old one was deleted) nothing else points at it and the re-link goes ahead as
+    // before. When it already belongs to a user record in ANOTHER tenant, pointing this
+    // record at it too would put one login in two tenants — refuse, and leave the
+    // record as it is. Only this rare re-link pays for the query; an ordinary resend,
+    // where the record already points at the login, never reaches it. The link has
+    // already been emailed by now; it opens a reset page and changes nothing about
+    // which tenant that login belongs to.
+    let linkedElsewhere = false;
+    try {
+      linkedElsewhere = await loginLinkedInAnotherTenant(authId, identity.tenantId);
+    } catch (e) {
+      // Could not check → do not re-link blind. The same "try again" answer as a failed re-link.
+      console.error(`user-admin: resend for ${masked}: could not check the login before re-linking: ${String(e?.message || e).split(authId).join("<login id>")}`);
+      return jsonResponse(502, cors, { error: "sf_update_failed", code: "SF_UPDATE_FAILED", message: "The link was sent, but the user record could not be re-linked to the login. Try again." });
+    }
+    if (linkedElsewhere) {
+      console.warn(`user-admin: resend for ${masked}: refused to re-link — that email's login is already linked to a user in another tenant.`);
+      return jsonResponse(409, cors, EMAIL_IN_USE_OTHER_TENANT);
+    }
     try {
       await sfUpdateRecord(SF_OBJECT, u.Id, { Supabase_User_Id__c: authId });
       relinked = true;

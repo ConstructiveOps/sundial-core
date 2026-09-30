@@ -21,6 +21,8 @@ The job page subscribes to `tenant:{tenantId}:sundial_service_job:{jobId}` (even
      "tenantNumbers": {}, "defaultTenant": "harmon" }
    ```
    `fromNumber` is the shared Constructive Ops line. When Harmon's number is approved, add `"tenantNumbers": { "harmon": "+1602…" }` — sends switch within five minutes (the secret is cached that long) and inbound texts to the new number route to Harmon by the number itself.
+
+   **Who may send from the shared line (D-078, 2026-09-29; revised 2026-09-30).** Only the primary tenant (`harmon`) and `defaultTenant` — the tenant replies on that line are routed to — may send from `fromNumber`; today those are the same tenant. The primary tenant is allowed whatever `defaultTenant` / `SMS_DEFAULT_TENANT` says, so a typo there can never switch off Harmon's texting (it would only misroute replies on the shared line — keep `defaultTenant` = `harmon`). Any other tenant texts **only** from its own `tenantNumbers["<slug>"]`; without one it gets "No sending number is configured for this tenant." (`canSend: false`, `503 SMS_NOT_CONFIGURED`, the tech's "on my way" goes through with `text: { sent: false, reason: "NOT_CONFIGURED" }`) and Twilio is never called. Before D-078 it would have sent from the shared line and every reply would have landed in the owner's office. **To give a second tenant texting:** buy / register a number in the same Twilio account, add `"tenantNumbers": { "<slug>": "+1…" }` (the key is `Sundial_Tenant__c.Name`, lower-case), and point that number's "A message comes in" webhook at the same `/sms/inbound` URL. No deploy. Inbound routing is unchanged.
 2. **Create the Lambda** `sundial-sms` in the console with the same runtime / role / architecture / timeout as `sundial-service-board`, then `.\deploy.ps1 sundial-sms`.
 3. **Env var** `SMS_WEBHOOK_BASE = https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`. Twilio signs the *exact* URL it calls, so this must match what you paste into Twilio character for character (no trailing slash).
 4. `.\scripts\wire-sms-routes.ps1` — adds the four routes and the invoke permissions, deploys the API.
@@ -62,7 +64,7 @@ Other symptoms:
 | Symptom | Look at |
 |---|---|
 | "Texting isn't set up yet" in the portal | The secret is missing `accountSid` / `authToken`, or the role cannot read it. |
-| "No sending number is configured" | Neither `tenantNumbers[slug]` nor `fromNumber` is set. |
+| "No sending number is configured" | Neither `tenantNumbers[slug]` nor `fromNumber` is set — **or** (D-078) the tenant has no `tenantNumbers[slug]` and may not use the shared line (only the primary tenant and `defaultTenant` may). |
 | Sent but status stays "Sending…" | The status callback is not reaching `/sms/status` — same URL checks; or Twilio rejected the callback URL (must be https). |
 | A reply landed on the wrong job | The matching order above; the office can see the row on the job it matched and the true job's page will show the next outbound. Re-keying a row is manual for now. |
 | Text to a customer fails with code 30003 / 30005 | Twilio's side: unreachable / unknown destination. The row is kept as `failed` with the code so the office sees it. |

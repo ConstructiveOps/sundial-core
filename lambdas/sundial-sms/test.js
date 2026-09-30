@@ -161,12 +161,77 @@ test("phone helpers: E.164, last10, pretty", () => {
 test("config: per-tenant number wins over the shared one; the To number picks the tenant", () => {
   const cfg = twilioConfigFrom({ accountSid: "AC", authToken: "t", fromNumber: "480-555-0100", tenantNumbers: { harmon: "(602) 555-0199" }, defaultTenant: "harmon" }, {});
   assert.equal(fromNumberFor(cfg, "harmon"), "+16025550199");
-  assert.equal(fromNumberFor(cfg, "other"), "+14805550100");
+  // D-078: the shared line is its OWNER's — another tenant without its own number gets none.
+  assert.equal(fromNumberFor(cfg, "other"), null);
   assert.equal(tenantSlugForNumber(cfg, "+16025550199"), "harmon");
   assert.equal(tenantSlugForNumber(cfg, "+14805550100"), "harmon"); // default tenant catches the shared line
   const noDefault = twilioConfigFrom({ authToken: "t" }, {});
   assert.equal(tenantSlugForNumber(noDefault, "+14805550100"), null);
   assert.equal(twilioConfigFrom({}, { SMS_DEFAULT_TENANT: "Harmon" }).defaultTenant, "harmon");
+});
+
+test("D-078: who may send from the shared line — the primary tenant, and defaultTenant when one is named; nobody else", () => {
+  const SHARED = "+14805550100";
+  const base = { accountSid: "AC", authToken: "t", fromNumber: SHARED };
+  // The live shape: shared line, defaultTenant "harmon", no tenantNumbers at all.
+  const live = twilioConfigFrom({ ...base, defaultTenant: "harmon" }, {});
+  assert.equal(fromNumberFor(live, "harmon", {}), SHARED, "the primary tenant keeps the shared line");
+  assert.equal(fromNumberFor(live, "Harmon", {}), SHARED, "case-insensitive, as before");
+  assert.equal(fromNumberFor(live, "conops-demo", {}), null);
+  assert.equal(fromNumberFor(live, null, {}), null, "no slug → no number (fail closed)");
+  assert.equal(fromNumberFor(live, "", {}), null);
+  // No defaultTenant in the secret: the line belongs to the primary tenant (default "harmon", or SUNDIAL_PRIMARY_TENANT).
+  const noOwner = twilioConfigFrom(base, {});
+  assert.equal(fromNumberFor(noOwner, "harmon", {}), SHARED);
+  assert.equal(fromNumberFor(noOwner, "conops-demo", {}), null);
+  assert.equal(fromNumberFor(noOwner, "acme", { SUNDIAL_PRIMARY_TENANT: "acme" }), SHARED);
+  assert.equal(fromNumberFor(noOwner, "harmon", { SUNDIAL_PRIMARY_TENANT: "acme" }), null);
+  // defaultTenant names ANOTHER tenant (on purpose or by a typo): that tenant is added,
+  // and the primary tenant is NOT removed — a wrong defaultTenant / SMS_DEFAULT_TENANT
+  // can never switch off the primary tenant's texting.
+  const otherOwner = twilioConfigFrom({ ...base, defaultTenant: "acme" }, {});
+  assert.equal(fromNumberFor(otherOwner, "acme", {}), SHARED);
+  assert.equal(fromNumberFor(otherOwner, "harmon", {}), SHARED, "the primary tenant keeps the shared line");
+  assert.equal(fromNumberFor(otherOwner, "conops-demo", {}), null, "everyone else still gets none");
+  for (const bad of ["harmn", "Harmon Electric", "conops-demo"]) {
+    const viaEnv = twilioConfigFrom({ ...base, defaultTenant: "harmon" }, { SMS_DEFAULT_TENANT: bad });
+    assert.equal(fromNumberFor(viaEnv, "harmon", {}), SHARED, `SMS_DEFAULT_TENANT=${bad} does not stop the primary tenant`);
+    const viaSecret = twilioConfigFrom({ ...base, defaultTenant: bad }, {});
+    assert.equal(fromNumberFor(viaSecret, "harmon", {}), SHARED, `defaultTenant=${bad} does not stop the primary tenant`);
+    assert.equal(fromNumberFor(viaSecret, "some-third-tenant", {}), null);
+  }
+  // A missing slug never matches a missing defaultTenant (null is not an owner).
+  assert.equal(fromNumberFor(noOwner, undefined, {}), null);
+  // A tenant's OWN number always wins, owner or not.
+  const own = twilioConfigFrom({ ...base, defaultTenant: "harmon", tenantNumbers: { "conops-demo": "602-555-0142", harmon: "602-555-0199" } }, {});
+  assert.equal(fromNumberFor(own, "conops-demo", {}), "+16025550142");
+  assert.equal(fromNumberFor(own, "harmon", {}), "+16025550199");
+  // Inbound routing is unchanged: the shared line still belongs to defaultTenant.
+  assert.equal(tenantSlugForNumber(own, SHARED), "harmon");
+  assert.equal(tenantSlugForNumber(own, "+16025550142"), "conops-demo");
+  // No shared line at all.
+  assert.equal(fromNumberFor(twilioConfigFrom({ accountSid: "AC", authToken: "t", defaultTenant: "harmon" }, {}), "harmon", {}), null);
+});
+
+test("D-078: a NON-primary tenant with no number of its own cannot text — the thread says so and a send is a clean 503, never a Twilio call", async () => {
+  const fake = makeFake({ identity: { tenantSlug: "conops-demo" } });
+  seedJob(fake);
+  const thread = json(await jwt(fake.handler, "GET", "/service/jobs/J1/sms"));
+  assert.equal(thread.canSend, false);
+  assert.equal(thread.fromNumber, null);
+  assert.equal(thread.notConfiguredReason, "No sending number is configured for this tenant.");
+  const r = await jwt(fake.handler, "POST", "/service/jobs/J1/sms", { body: "On our way!" });
+  assert.equal(r.statusCode, 503);
+  assert.equal(json(r).code, "SMS_NOT_CONFIGURED");
+  assert.equal(fake.sends.length, 0, "Twilio is never called without a From");
+  assert.equal(fake.store.sms.length, 0, "and nothing lands on the thread");
+  // Its own number in the secret is the whole fix — no deploy.
+  const own = makeFake({ identity: { tenantSlug: "conops-demo" } });
+  own.secret.tenantNumbers = { "conops-demo": "+16025550142" };
+  seedJob(own);
+  const ok = await jwt(own.handler, "POST", "/service/jobs/J1/sms", { body: "On our way!" });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(own.sends[0].msg.from, "+16025550142");
 });
 
 test("routes + request URL + form parsing", () => {

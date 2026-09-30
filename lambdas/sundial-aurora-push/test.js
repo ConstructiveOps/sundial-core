@@ -39,6 +39,7 @@ function resetCtx() {
   ctx.auroraCreateStatus = 200;
   ctx.omitTrackingField = false;
   delete process.env.DESIGN_REQUEST_NOTIFY_CC;
+  delete process.env.SUNDIAL_AURORA_TENANTS;
   process.env.DESIGN_REQUEST_NOTIFY_TO = "design.manager@harmonelectric.net";
   process.env.EMAIL_FROM = "Sundial <no-reply@sundialcrm.com>";
 }
@@ -463,6 +464,9 @@ test("missing customer -> 404 RECORD_NOT_FOUND, nothing sent anywhere", async ()
 test("cross-tenant id -> 404, and the SELECT was scoped to the CALLER's tenant", async () => {
   resetCtx();
   // The record exists in another tenant, so the tenant-scoped SELECT returns nothing.
+  // The caller's tenant is one that HAS been enabled for Aurora (D-078) — a tenant that
+  // has not is refused earlier still, which the primary-tenant tests below pin.
+  process.env.SUNDIAL_AURORA_TENANTS = "other";
   ctx.identity = { tenantId: "a0XotherTENANT", tenantSlug: "other" };
   ctx.customerRows = [];
 
@@ -476,6 +480,48 @@ test("cross-tenant id -> 404, and the SELECT was scoped to the CALLER's tenant",
   assert.match(ctx.soqlSeen.at(-1), /Client__c = 'a0XotherTENANT'/);
   assert.equal(auroraCreateCall(), undefined);
   assert.equal(ctx.emailsSent.length, 0);
+});
+
+test("D-078: a NON-primary tenant is refused 403 INTEGRATION_NOT_ENABLED before any Salesforce read, Aurora call or email", async () => {
+  resetCtx();
+  ctx.identity = { tenantId: "a0XdemoTENANT", tenantSlug: "conops-demo" };
+  // Even a record that WOULD be found: the refusal comes first.
+  ctx.customerRows = [fullCustomer()];
+
+  const res = await handler(designRequestEvent());
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(parse(res), {
+    error: "integration_not_enabled",
+    code: "INTEGRATION_NOT_ENABLED",
+    message: "Aurora isn't enabled for this account.",
+  });
+  assert.equal(res.headers["Access-Control-Allow-Origin"], "http://localhost:5173");
+  assert.equal(ctx.soqlSeen.length, 0, "no Salesforce read");
+  assert.equal(ctx.fetchCalls.length, 0, "no Aurora call and no Salesforce write");
+  assert.equal(ctx.emailsSent.length, 0, "no email to the design manager");
+});
+
+test("D-078: a tenant with a tenant id but NO slug is refused too (fail closed)", async () => {
+  resetCtx();
+  ctx.identity = { tenantId: "a0XharmonTENANT", tenantSlug: null };
+  ctx.customerRows = [fullCustomer()];
+  const res = await handler(designRequestEvent());
+  assert.equal(res.statusCode, 403);
+  assert.equal(parse(res).code, "INTEGRATION_NOT_ENABLED");
+  assert.equal(ctx.soqlSeen.length, 0);
+  assert.equal(ctx.fetchCalls.length, 0);
+});
+
+test("D-078: a tenant named in SUNDIAL_AURORA_TENANTS is served like the primary one", async () => {
+  resetCtx();
+  process.env.SUNDIAL_AURORA_TENANTS = "someone-else, conops-demo";
+  ctx.identity = { tenantId: "a0XdemoTENANT", tenantSlug: "conops-demo" };
+  ctx.customerRows = [fullCustomer()];
+  const res = await handler(designRequestEvent());
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).status, "pushed");
+  assert.ok(auroraCreateCall(), "the Aurora project was created");
+  delete process.env.SUNDIAL_AURORA_TENANTS;
 });
 
 test("no tenant on the identity -> 403 NO_TENANT before any Salesforce read", async () => {

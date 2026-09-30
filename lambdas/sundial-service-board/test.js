@@ -1547,3 +1547,58 @@ test("the phone's Schedule and Timecard (2026-09-29): every tech's day read-only
   assert.equal((await call(h, "GET", "/service/tech/timecard", null, { week: "soon" })).body.code, "WEEK_INVALID");
 });
 
+
+// ---------------------------------------------------------------------------
+// D-078 — the company name in customer texts and appointment emails is the TENANT'S
+// ---------------------------------------------------------------------------
+test("D-078: SERVICE_BRAND_NAME names the PRIMARY tenant only — another tenant's texts and emails carry its own name (or none), and its texts need its own number", async () => {
+  // A Lambda whose env names the primary tenant, as production's does.
+  process.env.SERVICE_BRAND_NAME = "Harmon Electric";
+  const { createHandler: createNamed } = await import("./index.js?d078=brand-name-set");
+  delete process.env.SERVICE_BRAND_NAME;
+
+  const run = async ({ tenantSlug, brand, twilio }) => {
+    const w = fakeWorld();
+    const reads = [];
+    w.deps.getSecret = async (name) => {
+      reads.push(name);
+      if (name === "sundial/twilio") return { accountSid: "AC1", authToken: "tok", fromNumber: "+16025550000", defaultTenant: "harmon", ...(twilio || {}) };
+      if (name === "sundial/brand") return { default: { accentColor: "#111111" }, harmon: { companyName: "Harmon Service (secret)" }, ...(brand ? { [tenantSlug]: brand } : {}) };
+      return {};
+    };
+    const as = (identity) => createNamed({ ...w.deps, resolveIdentity: async () => ({ ...identity, tenantSlug }) });
+    const office = { tenantId: TENANT, user: { id: "USR000000000000003", firstName: "Beth", lastName: "Office" }, access: { scope: "tenant", level: "Admin", tenantId: TENANT, userId: "USR000000000000003" } };
+    const sched = await call(as(office), "POST", "/service/jobs/SVC000000000000001/calls", { techId: "USR000000000000001", start: "2026-09-15T16:00:00Z", notifyCustomer: true });
+    assert.equal(sched.status, 201, JSON.stringify(sched.body));
+    const omw = await call(as(JAKE), "POST", "/service/tech/calls/SC0000000000000001/status", { status: "En Route", at: "2026-09-14T14:59:00Z", eventId: "ev-d078" });
+    assert.equal(omw.status, 200, JSON.stringify(omw.body));
+    return { w, reads, omw, email: w.emails[0] };
+  };
+
+  // The primary tenant: the Lambda's own name, exactly as before — and the brand secret is never read.
+  const primary = await run({ tenantSlug: "harmon" });
+  assert.equal(primary.w.texts[0].msg.body, "Hi Cy, Jake from Harmon Electric is on the way to you now. (Job SVC-00003) Reply to this text if anything changes.");
+  assert.equal(primary.w.texts[0].msg.from, "+16025550000", "and the shared line is still its line");
+  assert.ok(primary.email.subject.startsWith("Your service appointment from Harmon Electric — "), primary.email.subject);
+  assert.ok(!primary.reads.includes("sundial/brand"), "no new Secrets Manager read on the primary tenant's path");
+
+  // Another tenant with a name and a number of its own.
+  const demo = await run({ tenantSlug: "conops-demo", brand: { companyName: "Constructive Operations" }, twilio: { tenantNumbers: { "conops-demo": "+16025550142" } } });
+  assert.equal(demo.w.texts[0].msg.body, "Hi Cy, Jake from Constructive Operations is on the way to you now. (Job SVC-00003) Reply to this text if anything changes.");
+  assert.equal(demo.w.texts[0].msg.from, "+16025550142");
+  assert.ok(demo.email.subject.startsWith("Your service appointment from Constructive Operations — "), demo.email.subject);
+  assert.ok(!(demo.w.texts[0].msg.body + demo.email.subject + demo.email.text).includes("Harmon"));
+
+  // …with no companyName configured: its own slug in the text (the old fallback), no name in the email — never the primary tenant's.
+  const bare = await run({ tenantSlug: "conops-demo", twilio: { tenantNumbers: { "conops-demo": "+16025550142" } } });
+  assert.equal(bare.w.texts[0].msg.body, "Hi Cy, Jake from conops-demo is on the way to you now. (Job SVC-00003) Reply to this text if anything changes.");
+  assert.ok(bare.email.subject.startsWith("Your service appointment — "), bare.email.subject);
+  assert.ok(!(bare.w.texts[0].msg.body + bare.email.subject + bare.email.text).includes("Harmon"));
+
+  // …and with no number of its own: the tap still works, the text is simply not sent — never from the shared line.
+  const noNumber = await run({ tenantSlug: "conops-demo", brand: { companyName: "Constructive Operations" } });
+  assert.equal(noNumber.omw.body.call.status, "En Route");
+  assert.equal(noNumber.omw.body.text.sent, false);
+  assert.equal(noNumber.omw.body.text.reason, "NOT_CONFIGURED");
+  assert.equal(noNumber.w.texts.length, 0, "Twilio is never called");
+});

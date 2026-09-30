@@ -35,6 +35,7 @@
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { sfQuery, soqlEscapeString, sfUpdateRecord } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
+import { integrationEnabled, integrationNotEnabledBody } from "../../lib/tenant-guard.js";
 import {
   corsHeaders,
   normalizeHeaders,
@@ -1056,6 +1057,14 @@ async function handleHttp(event) {
   const tenantId = identity.tenantId;
   if (!tenantId) return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
 
+  // PRIMARY-TENANT RULE (D-078). The one Acumatica login is the primary tenant's ERP, and
+  // this route ends in real budget lines and real commission purchase orders. Any other
+  // tenant is refused HERE — before the record is read, before the status is flipped to
+  // "Pushing", before the worker is started — unless listed in SUNDIAL_ACUMATICA_TENANTS.
+  if (!integrationEnabled("acumatica", identity.tenantSlug)) {
+    return jsonResponse(403, cors, integrationNotEnabledBody("acumatica"));
+  }
+
   // Load the project TENANT-SCOPED with the two gate inputs + the linked customer's
   // Acumatica-sync flag. Not owned / missing is indistinguishable -> 404.
   const soql =
@@ -1130,7 +1139,7 @@ async function handleHttp(event) {
         FunctionName: SELF_FUNCTION_NAME,
         InvocationType: "Event", // async, fire-and-forget
         Payload: Buffer.from(
-          JSON.stringify({ __worker: true, recordId, acumaticaProjectId, tenantId })
+          JSON.stringify({ __worker: true, recordId, acumaticaProjectId, tenantId, tenantSlug: identity.tenantSlug })
         ),
       })
     );
@@ -1161,6 +1170,16 @@ async function handleHttp(event) {
 // true). On any failure/abort it records the reason and leaves Finalized untouched.
 async function handleWorker(event) {
   const { recordId, acumaticaProjectId, tenantId } = event;
+  // PRIMARY-TENANT RULE (D-078), second lock. The HTTP leg above already refused any
+  // tenant that is not enabled, and it now hands its slug to the worker; this re-check
+  // stands in front of the budget lines AND the commission-PO / attribute stages, which
+  // only ever run from here. A payload with NO slug is an operator's direct invoke (or a
+  // push started by the previous version of this code, mid-deploy) — the same trust level
+  // as the dry-run and reconcile payloads — and runs as it always has.
+  if (event.tenantSlug != null && !integrationEnabled("acumatica", event.tenantSlug)) {
+    console.warn("budget-push worker: refused — Acumatica is not enabled for this tenant.");
+    return { ok: false, error: "integration_not_enabled", code: "INTEGRATION_NOT_ENABLED" };
+  }
   try {
     // Pull the fields the mapping references PLUS what the downstream stages read
     // (tenant-scoped defense-in-depth).
@@ -1466,6 +1485,14 @@ async function handleAttributesSyncHttp(event) {
   }
   const tenantId = identity.tenantId;
   if (!tenantId) return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+
+  // PRIMARY-TENANT RULE (D-078), same as the push route. This one matters most: the
+  // portal fires it automatically on a date edit, and its only other gate is "the record
+  // carries an Acumatica project id" — so another tenant's record holding a realistic id
+  // would overwrite the attributes of the primary tenant's real project of that id.
+  if (!integrationEnabled("acumatica", identity.tenantSlug)) {
+    return jsonResponse(403, cors, integrationNotEnabledBody("acumatica"));
+  }
 
   try {
     const result = await runAttributeOnlySync(recordId, tenantId);

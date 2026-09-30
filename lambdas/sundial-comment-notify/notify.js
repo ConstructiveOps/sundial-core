@@ -22,6 +22,8 @@ import { getSupabaseClient } from "../../lib/supabase.js";
 import { isEmailConfigured, sendEmail } from "../../lib/email.js";
 import { buildMentionEmail, recordLabel, recordLink } from "./content.js";
 import { CATEGORIES, createNotifier } from "../../lib/notify.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { createTenantSettings } from "../../lib/tenant-settings.js";
 
 // The bell + push side of a mention (D-074), built once per warm container. Injectable
 // for tests through handleMention's third argument.
@@ -66,28 +68,104 @@ const LABEL_SOURCES = {
 /** Skip/So-far results are shaped identically so the handler can just return them. */
 const skip = (reason, extra = {}) => ({ status: 200, body: { sent: false, reason, ...extra } });
 
+// Every cache table carries the record's tenant twice: `client_sf_id` (the tenant RECORD
+// id, the isolation key) and `tenant_id` (the tenant SLUG). Reading them on the row the
+// label already needs is how this Lambda learns a comment's tenant slug for free (D-078).
+const TENANT_COLUMNS = ["client_sf_id", "tenant_id"];
+
+/**
+ * Look up the record's display name — and, from the same row, which tenant it belongs to.
+ * Never throws — a label is a nicety.
+ *
+ * `expectedTenantId` is the comment's tenant (record id). When the cached row says it
+ * belongs to a DIFFERENT tenant, nothing is returned: a comment can be written against
+ * any record id string, and another tenant's customer name must never reach a subject
+ * line. A row with no tenant recorded is used as before.
+ *
+ * @returns {Promise<{ name: string|null, tenantSlug: string|null }>}
+ *   tenantSlug is set only when the row's `client_sf_id` EQUALS expectedTenantId.
+ */
+export async function lookupRecord(supabase, objectKey, recordId, expectedTenantId = null) {
+  const none = { name: null, tenantSlug: null };
+  const source = LABEL_SOURCES[String(objectKey ?? "").trim().toLowerCase()];
+  if (!source || !recordId) return none;
+  try {
+    let { data, error } = await supabase
+      .from(source.table)
+      .select([...source.columns, ...TENANT_COLUMNS].join(","))
+      .eq("sf_id", recordId)
+      .maybeSingle();
+    if (error) {
+      // The wider select must never cost the label: retry exactly the read this function
+      // made before the tenant columns were added.
+      ({ data, error } = await supabase.from(source.table).select(source.columns.join(",")).eq("sf_id", recordId).maybeSingle());
+    }
+    if (error || !data) return none;
+    const rowTenantId = typeof data.client_sf_id === "string" && data.client_sf_id.trim() !== "" ? data.client_sf_id.trim() : null;
+    if (rowTenantId && expectedTenantId && rowTenantId !== expectedTenantId) return none;
+    const sameTenant = rowTenantId != null && rowTenantId === expectedTenantId;
+    const tenantSlug = sameTenant && typeof data.tenant_id === "string" && data.tenant_id.trim() !== "" ? data.tenant_id.trim() : null;
+    for (const col of source.columns) {
+      const v = data[col];
+      if (typeof v === "string" && v.trim() !== "") return { name: v.trim(), tenantSlug };
+    }
+    return { name: null, tenantSlug };
+  } catch {
+    return none; // a label is never worth failing a notification over
+  }
+}
+
 /**
  * Look up a display name for the record. Never throws — a label is a nicety.
  * @returns {Promise<string|null>}
  */
 export async function lookupRecordName(supabase, objectKey, recordId) {
-  const source = LABEL_SOURCES[String(objectKey ?? "").trim().toLowerCase()];
-  if (!source || !recordId) return null;
+  return (await lookupRecord(supabase, objectKey, recordId)).name;
+}
+
+// --- Which portal the email's link opens (D-078) -----------------------------------
+//
+// `cfg.portalBaseUrl` is one address per Lambda and it is the PRIMARY tenant's portal.
+// A mention in any other tenant must link to THAT tenant's portal (`portalUrl` in its
+// block of Secrets Manager `sundial/brand`, lib/tenant-settings.js) or carry no link.
+//
+// The comment only knows its tenant's RECORD ID; the rule is keyed by SLUG. The slug is
+// learned, in this order, and remembered for the life of the warm container (a tenant's
+// id and slug never change):
+//   1. from the cached record row the label lookup already reads — no extra query;
+//   2. else ONE small read of `sundial_user_cache` (any row of that tenant carries both).
+// A tenant whose slug cannot be learned is treated as "not the primary tenant, no
+// address": the email goes out without a link. It never borrows the primary's address.
+const USER_CACHE_TABLE = "sundial_user_cache";
+const tenantSlugById = new Map();
+let tenantSettings = null;
+/** Test hook: forget what this container has learned about tenants. */
+export function clearTenantCache() {
+  tenantSlugById.clear();
+  tenantSettings = null;
+}
+
+async function tenantSlugFor(supabase, tenantId, hintSlug) {
+  if (!tenantId) return null;
+  if (hintSlug) tenantSlugById.set(tenantId, hintSlug);
+  if (tenantSlugById.has(tenantId)) return tenantSlugById.get(tenantId);
   try {
-    const { data, error } = await supabase
-      .from(source.table)
-      .select(source.columns.join(","))
-      .eq("sf_id", recordId)
-      .maybeSingle();
-    if (error || !data) return null;
-    for (const col of source.columns) {
-      const v = data[col];
-      if (typeof v === "string" && v.trim() !== "") return v.trim();
-    }
-    return null;
+    const { data, error } = await supabase.from(USER_CACHE_TABLE).select("tenant_id").eq("client_sf_id", tenantId).limit(1).maybeSingle();
+    const slug = !error && typeof data?.tenant_id === "string" && data.tenant_id.trim() !== "" ? data.tenant_id.trim() : null;
+    if (slug) tenantSlugById.set(tenantId, slug); // a miss is NOT remembered: the next mention tries again
+    return slug;
   } catch {
-    return null; // a label is never worth failing a notification over
+    return null;
   }
+}
+
+/** The portal origin for this comment's tenant, or null when it has none configured. */
+async function portalBaseFor(supabase, tenantId, hintSlug, cfg) {
+  const slug = await tenantSlugFor(supabase, tenantId, hintSlug);
+  if (isPrimaryTenant(slug)) return cfg.portalBaseUrl; // the primary tenant: the same address as always, no secret read
+  if (!slug) return null;
+  tenantSettings ??= createTenantSettings();
+  return tenantSettings.portalUrlFor(slug, cfg.portalBaseUrl);
 }
 
 /**
@@ -281,7 +359,20 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   }
 
   // --- 8) Compose ----------------------------------------------------------
-  const { url, known } = recordLink(cfg.portalBaseUrl, comment.record_object, comment.record_id);
+  // The link opens the COMMENT'S tenant's portal (D-078, portalBaseFor above). The
+  // record row is read first because it is also where the tenant's slug comes from.
+  const commentTenantId = comment.tenant_id ?? profile?.tenant_id ?? null;
+  const record = await lookupRecord(supabase, comment.record_object, comment.record_id, commentTenantId);
+  const portalBase = await portalBaseFor(supabase, commentTenantId, record.tenantSlug, cfg);
+  const link = recordLink(portalBase ?? "", comment.record_object, comment.record_id);
+  const known = link.known;
+  const url = portalBase ? link.url : null;
+  if (!portalBase) {
+    console.warn(
+      `comment-notify: no portal address for the tenant of comment ${comment.id} ` +
+        `(sundial/brand portalUrl) — the alert goes out without a link.`
+    );
+  }
   if (!known) {
     // Loud, because it means a module shipped without an entry in RECORD_PATHS and
     // every alert for it is now pointing at the dashboard.
@@ -290,8 +381,7 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
         `${comment.id} — linking to the dashboard. Add it to RECORD_PATHS in content.js.`
     );
   }
-  const recordName = await lookupRecordName(supabase, comment.record_object, comment.record_id);
-  const label = recordLabel(comment.record_object, comment.record_id, recordName);
+  const label = recordLabel(comment.record_object, comment.record_id, record.name);
   const mail = buildMentionEmail({
     authorName: comment.author_name,
     commentBody: comment.body,

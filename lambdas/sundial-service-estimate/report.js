@@ -80,7 +80,8 @@ export function buildReportText({ job, brandName, url, paid }) {
 /**
  * @param d  the estimate handler's deps (sfQuery, sfUpdateRecord, listFiles, getObject, putObject,
  *           sendEmail, isEmailConfigured, publicBaseUrl, now, randomToken, getSupabaseClient, sms?)
- * @param h  { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError,
+ * @param h  { publicBaseFor(ctx), noPublicUrlDetail(ctx)  ← the TENANT'S customer-page address (D-078), never d.publicBaseUrl directly
+ *             loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError,
  *             CACHE, customerEmailFor, money, loadJobCalls }
  */
 export function createReportHandlers(d, h) {
@@ -108,7 +109,7 @@ export function createReportHandlers(d, h) {
     return { photos, invoice: live, lines, payments: (payments || []).filter((p) => !live || !p.Invoice__c || p.Invoice__c === live.Id), estimate };
   }
 
-  function reportState(job, report) {
+  function reportState(job, report, ctx) {
     const updated = job.Report_Updated_At__c ?? null;
     const sent = job.Report_Sent_At__c ?? null;
     return {
@@ -120,7 +121,7 @@ export function createReportHandlers(d, h) {
       sentAt: sent,
       sentCount: Number(job.Report_Sent_Count__c) || 0,
       editedSinceSent: !!(sent && updated && updated > sent),
-      publicUrl: job.Report_Public_Token__c ? publicReportUrl(job.Report_Public_Token__c, d.publicBaseUrl) : null,
+      publicUrl: job.Report_Public_Token__c ? publicReportUrl(job.Report_Public_Token__c, h.publicBaseFor(ctx)) : null, // the tenant's own address (D-078)
       pdfUrl: job.Report_PDF_S3_Key__c ? publicUrlForKey(job.Report_PDF_S3_Key__c) : null,
       partnerBilled: !!(job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer"),
     };
@@ -143,7 +144,7 @@ export function createReportHandlers(d, h) {
       return jsonResponse(200, cors, {
         jobId: job.Id,
         jobNumber: job.Name ?? null,
-        ...reportState(job, report),
+        ...reportState(job, report, ctx),
         summary: job.Customer_Summary__c ?? null,
         photos: g.photos,
         invoice: g.invoice ? { number: g.invoice.Name ?? null, status: g.invoice.Status__c ?? null, total: Number(g.invoice.Total__c) || 0, paid: Number(g.invoice.Paid_Amount__c) || 0 } : null,
@@ -172,7 +173,7 @@ export function createReportHandlers(d, h) {
       Object.assign(job, fields);
       await h.markStale(CACHE.job, [job.Id], tenantId);
       await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { report: "saved", sections: norm.value.sections.length, receipt: norm.value.receipt } });
-      return jsonResponse(200, cors, { success: true, jobId: job.Id, ...reportState(job, norm.value) });
+      return jsonResponse(200, cors, { success: true, jobId: job.Id, ...reportState(job, norm.value, ctx) });
     },
 
     async previewReport({ ctx, params }) {
@@ -197,7 +198,7 @@ export function createReportHandlers(d, h) {
       const via = ["Email", "SMS", "Both"].includes(body?.via) ? body.via : "Email";
       const now = d.now();
       const token = job.Report_Public_Token__c || d.randomToken();
-      const url = publicReportUrl(token, d.publicBaseUrl);
+      const url = publicReportUrl(token, h.publicBaseFor(ctx));
       const sentCount = (Number(job.Report_Sent_Count__c) || 0) + 1;
       const pdfKey = reportPdfKey(job.Id, sentCount);
       const pdfUrl = publicUrlForKey(pdfKey);
@@ -242,7 +243,7 @@ export function createReportHandlers(d, h) {
       const detail = [];
       let recipient = null;
       let textedTo = null;
-      if (!url) detail.push("SERVICE_PUBLIC_BASE_URL is not set on this Lambda, so no link could be built.");
+      if (!url) detail.push(h.noPublicUrlDetail(ctx));
       if (via === "Email" || via === "Both") {
         if (!url) {
           /* said above */
@@ -290,7 +291,7 @@ export function createReportHandlers(d, h) {
       Object.assign(job, fields);
       await h.markStale(CACHE.job, [job.Id], tenantId);
       await h.act(ctx, { event: EVENTS.JOB_REPORT_SENT, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { via, delivery, recipient, textedTo, deliveryDetail: detail.join(" ") || null, sections: report.sections.length, receipt: !!model.receipt, sentCount, pdfKey: pdfBytes ? pdfKey : null } });
-      return jsonResponse(200, cors, { success: true, jobId: job.Id, delivery, recipient, textedTo, deliveryDetail: detail.join(" ") || null, ...reportState(job, report) });
+      return jsonResponse(200, cors, { success: true, jobId: job.Id, delivery, recipient, textedTo, deliveryDetail: detail.join(" ") || null, ...reportState(job, report, ctx) });
     },
   };
 }

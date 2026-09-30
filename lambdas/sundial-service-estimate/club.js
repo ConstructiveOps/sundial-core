@@ -40,6 +40,7 @@ import { EVENTS } from "../../lib/service-activity.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { ensureStripeCustomer, fromCents, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
 import { createSolarFactsClient, solarFactsConfigFor, splitName } from "../../lib/solarfacts.js";
+import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { candidateSoql, matchCandidates, normalizeNewCustomer, CANDIDATE_SELECT, CUSTOMER_SF_OBJECT } from "./customer.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 import { ITEM_SELECT, ITEM_SF_OBJECT } from "./pricebook.js";
@@ -83,11 +84,13 @@ const idOf = (v) => (typeof v === "string" ? v : v?.id ?? null);
  *   { solarFacts: { apiKey, accessToken, inviteTemplate, baseUrl?, test? } | null,   ← SolarFax's API (lib/solarfacts.js)
  *     solarFactsHookUrl, solarFactsCancelHookUrl,                                    ← the older Zapier catch hook, if any
  *     teamEmail }
- * or null when the tenant has no entry.
+ * or null when the tenant has no entry. A FLAT secret (no `tenants` key — a single-tenant
+ * install) is the primary tenant's and nobody else's (lib/tenant-guard.js, D-078): any
+ * other tenant must never reach the primary tenant's SolarFax credentials or team inbox.
  */
-export function clubConfigFor(secret, tenantSlug) {
+export function clubConfigFor(secret, tenantSlug, env = process.env) {
   if (!secret || typeof secret !== "object") return null;
-  const t = secret.tenants?.[tenantSlug] || (secret.tenants ? null : secret);
+  const t = secret.tenants?.[tenantSlug] || (secret.tenants || !isPrimaryTenant(tenantSlug, env) ? null : secret);
   if (!t || typeof t !== "object") return null;
   return {
     solarFacts: solarFactsConfigFor(t),
@@ -301,7 +304,7 @@ export async function syncPlanPrices(stripe, plan, { tenant, log = () => {} } = 
  *           getSecret, fetchUrl, sendEmail, isEmailConfigured, now, publicBaseUrl, brandName)
  * @param h  { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate,
  *             loadLines, recomputeAndStore, act, markStale, flushEvents, linkEstimateActivityToJob,
- *             CACHE, jsonResponse, bad, notFound, sfError, brandFor }
+ *             CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor }
  */
 export function createClubHandlers(d, h) {
   const { jsonResponse, bad, notFound, sfError, CACHE } = h;
@@ -492,14 +495,16 @@ export function createClubHandlers(d, h) {
     }
   }
   const brandName = (ctx) => (h.brandFor ? h.brandFor(ctx).companyName : "") || "";
-  const publicBase = () => String(d.publicBaseUrl || "").replace(/\/+$/, "");
+  // The tenant's OWN customer-page address (D-078, index.js publicBaseFor): the join,
+  // booking and manage links and Stripe's return URLs must open that tenant's site.
+  const publicBase = (ctx) => String(h.publicBaseFor(ctx) || "").replace(/\/+$/, "");
 
   // --- the join: Pending row + Checkout session (shared by the public page and the office) --
   async function startJoin({ ctx, customer, plan, interval, source, notes, cors, ownerNote }) {
     const { tenantId, tenantSlug: slug } = ctx;
     const stripe = await stripeFor(slug);
     if (!stripe) return { ok: false, response: jsonResponse(503, cors, { error: "not_configured", code: "STRIPE_NOT_CONFIGURED", message: "Online membership isn't set up yet — please give us a call." }) };
-    const base = publicBase();
+    const base = publicBase(ctx);
     if (!base) return { ok: false, response: jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "Online membership isn't set up yet — please give us a call." }) };
     const priceId = interval === "Yearly" ? plan.Stripe_Yearly_Price_Id__c : plan.Stripe_Monthly_Price_Id__c;
     const price = interval === "Yearly" ? plan.Yearly_Price__c : plan.Monthly_Price__c;
@@ -809,7 +814,7 @@ export function createClubHandlers(d, h) {
       if (!cust.ok) return bad(cors, "CUSTOMER_INVALID", "Please check the form.", { missing: cust.missing });
       const issue = strOrNull(body?.issue)?.slice(0, 2000) ?? null;
       const stripe = await stripeFor(t.slug);
-      const base = publicBase();
+      const base = publicBase(t.ctx);
       if (!stripe || !base) return jsonResponse(503, cors, { error: "not_configured", code: "STRIPE_NOT_CONFIGURED", message: "Online booking isn't set up yet — please give us a call." });
       const r = await resolvePublicCustomer(t.ctx, cust.value, cors);
       if (!r.ok) return r.response;
@@ -926,7 +931,7 @@ export function createClubHandlers(d, h) {
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return generic;
       try {
         const stripe = await stripeFor(t.slug);
-        const base = publicBase();
+        const base = publicBase(t.ctx);
         if (!stripe || !base) return generic;
         const customers = await d.sfQuery(`SELECT Id, Name, Primary_Email__c, Stripe_Customer_Id__c, Active_Membership__c FROM ${CUSTOMER_SF_OBJECT} WHERE Primary_Email__c = '${soqlEscapeString(email)}' AND Client__c = '${soqlEscapeString(t.tenantId)}' AND Active_Membership__c != null LIMIT 3`);
         for (const c of customers || []) {

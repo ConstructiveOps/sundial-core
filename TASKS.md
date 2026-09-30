@@ -4,6 +4,58 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Demo tenant `conops-demo` (Constructive Operations marketing demo) — TOOLING BUILT, NOTHING SEEDED (2026-09-30)
+
+Portal: the `conops-demo` repo (scrubbed copy of harmon-crm; its own README / CLIENT_DIVERGENCE.md). Backend: the shared Lambdas, after the D-078 guards below are deployed. Runbook: `docs/demo-tenant-seed.md`.
+
+- [x] `scripts/probe-demo-prereqs.mjs` — read-only org probe → `migration/demo/probe.json` (run 2026-09-30).
+- [x] `scripts/seed-demo-tenant.mjs` + `scripts/demo-seed/` — built and tested offline (59 tests); never run against the org.
+- [ ] Deploy the D-078 guards (section below) BEFORE seeding — the welcome-call and Acumatica / Aurora refusals are what make demo records harmless.
+- [ ] Confirm in Salesforce that record-triggered Flows / email alerts on `Sundial_Customer__c` and `Sundial_Solar__c` are limited to the Harmon tenant (the seed's canary sees field changes, not emails). Only then consider `--with-sold-pending-review`.
+- [ ] Demo portal address: `https://sundial.constructiveoperations.com` (Vercel custom domain + a DNS record; already in the CORS allowlist, six files). Check the `sfsolproj` bucket's own CORS rules allow it, or uploads and downloads fail in the browser.
+- [ ] `sundial/brand` block for `conops-demo` (`companyName`, `portalUrl`, `logoUrl`); optional Twilio number (`tenantNumbers`) and Stripe TEST keys (`sundial/stripe.tenants`).
+- [ ] Dry run (`node scripts/seed-demo-tenant.mjs`), read the summary, then `--apply`; back up `migration/demo/id-map.json` afterwards.
+- [ ] Incremental cache sync once after seeding (the command the script prints).
+- [ ] Before each demo: `node scripts/seed-demo-tenant.mjs --freshen --apply`.
+- [ ] Known limits: roofing jobs all sit in `Stage 1` until the roofing-revamp stages are deployed; the budget calculator treats every demo deal as a dealer deal (`INTERNAL_SALES_COMPANY` is `Harmon Solar` in `budgetCalc.js`) and `Commission_Redline_PPW__c` is an org-wide formula with Harmon's table (hidden in the demo portal); demo records consume numbers from the shared `SOL-` / `EST-` / `SVC-` / `SC-` sequences.
+
+## Primary-tenant rule: guards for a second tenant on the shared Lambdas (D-078) — BUILT, NOT DEPLOYED (2026-09-29, branch `feature/primary-tenant-guards`)
+
+Nothing here is needed for Harmon to keep working; all of it must be live BEFORE the demo tenant's first user signs in. Tim's steps, in order:
+
+- [x] Built: `lib/tenant-guard.js`, `lib/tenant-settings.js`, the guards, the narrowed fallbacks, per-tenant addresses + name, the cross-tenant login refusal, `tenant.slug` on `/auth/me`. Suite 1181 green; all 23 functions bundle. Review fixes 2026-09-30 (PROGRESS.md): suite 1190.
+- [ ] (1) Confirm in Salesforce that Harmon's `Sundial_Tenant__c.Name` is exactly `harmon` (it is the key of `sundial/stripe.tenants` and `sundial/brand`, so it should be) — the whole rule keys on that slug. If it is anything else, set `SUNDIAL_PRIMARY_TENANT` on every Lambda below BEFORE deploying. **Never rename it afterwards** without doing the same and re-keying the per-slug secret blocks: a renamed tenant silently loses its integrations.
+- [ ] (2) Confirm `PORTAL_BASE_URL` on `sundial-auth-proxy` is unset or exactly `https://sundial.harmonelectric.net` — forgot-password treats a request from that origin as Harmon's and leaves it untouched.
+- [ ] (3) PowerShell, from the repo root, one command at a time (each waits for the update to settle). Every function whose bundle includes a changed file — no others need it (nineteen since 2026-09-30: the demo portal's domain was added to the CORS allowlist, which pulls in every Lambda a browser calls; `sundial-lead-intake` also bundles `lib/http.js` but is a webhook no browser calls, so it is left out):
+  - [ ] `.\deploy.ps1 sundial-acumatica-budget-push`
+  - [ ] `.\deploy.ps1 sundial-acumatica-push`
+  - [ ] `.\deploy.ps1 sundial-aurora-push`
+  - [ ] `.\deploy.ps1 sundial-auth-proxy`
+  - [ ] `.\deploy.ps1 sundial-budget`
+  - [ ] `.\deploy.ps1 sundial-comment-notify`
+  - [ ] `.\deploy.ps1 sundial-delete-file`
+  - [ ] `.\deploy.ps1 sundial-list-files`
+  - [ ] `.\deploy.ps1 sundial-list-related-files`
+  - [ ] `.\deploy.ps1 sundial-notify`
+  - [ ] `.\deploy.ps1 sundial-service-board`
+  - [ ] `.\deploy.ps1 sundial-service-estimate`
+  - [ ] `.\deploy.ps1 sundial-service-public`
+  - [ ] `.\deploy.ps1 sundial-sf-query`
+  - [ ] `.\deploy.ps1 sundial-sf-update`
+  - [ ] `.\deploy.ps1 sundial-sms`
+  - [ ] `.\deploy.ps1 sundial-upload-file`
+  - [ ] `.\deploy.ps1 sundial-user-admin`
+  - [ ] `.\deploy.ps1 sundial-welcome-call`
+- [ ] (4) Harmon smoke test after the deploys (ZZ test users / records only): sign in (`/auth/me` now shows `tenant.slug: "harmon"`); Forgot password from the portal → the email links to `sundial.harmonelectric.net`; Manage Users → resend an invite to a ZZ user; send a text from a ZZ job; an @-mention on the ZZ test customer → the email link opens the record.
+- [ ] (5) For the demo tenant, Secrets Manager `sundial/brand` → add a block `"conops-demo": { "companyName": "Constructive Operations", "portalUrl": "https://sundial.constructiveoperations.com" }` (add `"publicUrl"` only if customer pages live on a different origin). No deploy; re-read within 5 minutes.
+- [ ] (6) Only if the demo should text: a dedicated Twilio number → `sundial/twilio` `"tenantNumbers": { "conops-demo": "+1…" }` + that number's inbound webhook (`docs/integrations/sms-twilio.md`). Only if it should take payments: `sundial/stripe` `tenants["conops-demo"]` with TEST keys. Do **not** set any `SUNDIAL_<NAME>_TENANTS`.
+
+Follow-ups:
+- [~] **Pending invites slip past the cross-tenant refusal.** Supabase re-issues an invite for an unconfirmed login instead of answering "already registered", so inviting an email that has a PENDING invite in another tenant still links one login to two tenants. **Closed 2026-09-30 for a non-primary caller** (the demo tenant is refused with `409 EMAIL_IN_USE_OTHER_TENANT` when another tenant has a user record with that email — create and resend). **Still open from Harmon's side, on purpose** (its create path keeps its single query): Harmon inviting an address that has an UNACCEPTED invite in the demo tenant. Keep using addresses for demo users that are not Harmon users (plus-addresses).
+- [ ] **Frontend:** compare `/auth/me` `tenant.slug` with `clientConfig.tenantId` and sign out on a mismatch (a login works at either portal until then).
+- [ ] **Check the org:** the welcome-call trigger Flow, stage-based email alerts, the D-019 mirror Flow and the budget-recalc Flow are not tenant-filtered by this change.
+- [ ] A reset asked for from Harmon's own login page links to Harmon's portal whoever asks; close it only if a non-Harmon user could plausibly be sent there.
+
 ## TCD lead webhook + daily report (D-077) — BUILT, NOT DEPLOYED (2026-09-29, branch `feature/tcd-lead-intake`)
 
 Runbook `docs/integrations/tcd-leads.md`. Tim's steps, in order:
@@ -1398,7 +1450,9 @@ copy-for-new-tenant base stays tenant-agnostic:
 - [ ] **Acumatica mapping** — `sundial-acumatica-budget-push` `MAPPING_ROWS`/`UNCONFIRMED` + `sundial-acumatica-push` `CUSTOMER_CLASS="RESIDENT"` / template `"RS"` → per-tenant config.
 - [ ] **budgetCalc** — accepted as a per-tenant *forked* calc module (a materially different tenant budget sheet = different math, per D-038); optionally lift the adder catalog / hours-per-unit to config if tenants share the calc shape.
 - [ ] **Portal origin + invite base URL** — `sundial.harmonelectric.net` is now hardcoded in the CORS allowlist (six files) and as the `PORTAL_BASE_URL` in-code default (D-053). A second tenant needs both per-tenant; `PORTAL_BASE_URL` is already env-overridable, the CORS allowlist is not.
-- Already cleanly externalized (no work): secrets/tenant IDs (Secrets Manager), rate/catalog defaults (SF field-default metadata), per-project values (records), tenant isolation (`Client__c → Sundial_Tenant__c`, D-034).
+  - **D-078 (2026-09-29) covers the link half:** invite / resend / forgot-password / @-mention links and the customer-page links are per tenant (`portalUrl` / `publicUrl` in `sundial/brand`); the env vars and the in-code default are the primary tenant's. **Not covered: the CORS allowlist** — still six files; a `*.vercel.app` origin works, a custom domain needs the edit and a redeploy (done 2026-09-30 for the demo portal, `https://sundial.constructiveoperations.com`; `lib/http.test.js` pins the six copies).
+- **D-078 (2026-09-29) — what it does and does not cover in this list.** It does NOT externalize the three items above: the tax zones, the Acumatica mapping and budgetCalc are still Harmon's, in code. It makes them unreachable instead — Acumatica, Aurora and the welcome call refuse any tenant but the primary one (`INTEGRATION_NOT_ENABLED`) — so they only have to become per-tenant config when a second tenant gets its own ERP. Also covered: the shared texting line, flat Stripe / Service Club secrets, `SERVICE_BRAND_NAME`, cross-tenant login reuse. Also NOT covered: the shared Supabase project (project ref is a constant in `lib/supabase-auth.js`), org-wide picklists and field manifest, shared auto-number sequences, Salesforce Flows / alerts, the S3 prefix, one timezone / shop location / reminder hour per Lambda, `sundial-lead-intake`'s Harmon-worded report.
+- Already cleanly externalized (no work): secrets/tenant IDs (Secrets Manager), rate/catalog defaults (SF field-default metadata), per-project values (records), tenant isolation (`Client__c → Sundial_Tenant__c`, D-034). *(2026-09-29: true for the tenant ID and for the per-slug secrets — brand, Stripe, club, the texting number; NOT true for the Supabase project, Acumatica, Aurora or Retell, which are one account each. D-078 fences those; it does not make them per-tenant.)*
 
 ---
 

@@ -94,3 +94,7 @@ Supabase issues an access token that lives **one hour** by default; a healthy cl
 7. Portal deploys with `main`. On a phone: open `https://sundial.harmonelectric.net/tech`, sign in as a Technician, "Add to Home Screen".
 
 Test with the ZZ tech users (`zz-tech-2`, `zz-tech-3`) on the ZZ test job, never a live tech.
+
+## Photos off, the summary on (2026-09-30)
+
+A wrong photo is deleted from the phone — the tech's own call's photos on the call page and on the job page's Photos section (`DELETE /service/tech/calls/{id}/photos?key=`; a two-tap confirm in place, never a browser dialog; online only, not queued) — and from the desktop job page (`DELETE /service/jobs/{id}/photos?key=`, any photo on the job). The job's **Summary of work** is editable on the phone's job page by a tech with a call on that job (`POST /service/tech/jobs/{id}/summary`): the same customer-facing field the office writes, saved on tap, online only.

@@ -43,11 +43,11 @@
 //
 // TENANT ISOLATION: every read is Client__c-bound; ids from another tenant are 404.
 
-import { S3Client, PutObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
-import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
+import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, FILE_METADATA_TABLE, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, fmtTime, jobLabel } from "../../lib/notify.js";
 
@@ -618,6 +618,10 @@ const s3 = () => (s3Client ??= new S3Client({ region: S3_REGION }));
 export async function realPresignPut({ key, contentType }) {
   return getSignedUrl(s3(), new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, ContentType: contentType }), { expiresIn: PHOTO_URL_EXPIRY_SECONDS });
 }
+/** Remove one object. S3 answers 204 for a key that is already gone, so a retry is harmless. */
+export async function realDeleteObject(key) {
+  await s3().send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+}
 export async function realListPhotos(prefix) {
   const out = [];
   let ContinuationToken;
@@ -823,8 +827,71 @@ export function createTechHandlers(d, h) {
     return closed;
   }
 
+  /** The shared delete: S3 → metadata row → the call's count → the log. `call` may be null (an office photo). */
+  async function removePhoto(ctx, { key, jobId, call, via }) {
+    const { tenantId, cors } = ctx;
+    try {
+      await d.deleteObject(key);
+    } catch (e) {
+      console.error("photo delete:", e?.message || e);
+      return { error: jsonResponse(502, cors, { error: "delete_failed", code: "PHOTO_DELETE_FAILED", message: "The photo could not be removed from storage. Try again." }) };
+    }
+    try {
+      const supabase = await d.getSupabaseClient();
+      await supabase.from(FILE_METADATA_TABLE).delete().eq("s3_key", key);
+    } catch (e) {
+      console.error("photo metadata delete:", e?.message || e);
+    }
+    let count = null;
+    let photos = [];
+    if (call) {
+      try {
+        photos = await d.listPhotos(photoPrefix(call.Sundial_Service_Job__c, call.Id));
+      } catch (e) {
+        console.error("photos list:", e?.message || e);
+        photos = [];
+      }
+      count = photos.length;
+      try {
+        await d.sfUpdateRecord(CALL_SF_OBJECT, call.Id, { Photos_Count__c: count });
+      } catch (e) {
+        return { error: sfError(cors, e, "photo count") };
+      }
+      await h.markStale(CACHE.call, [call.Id], tenantId);
+    }
+    await h.act(ctx, { event: EVENTS.SERVICE_PHOTO_DELETED, recordType: call ? "servicecall" : "job", recordSfId: call ? call.Id : jobId, jobSfId: jobId ?? null, details: { key, callId: call?.Id ?? null, count, via } });
+    return { count, photos };
+  }
+
   // --- handlers ---------------------------------------------------------------------
   return {
+    /**
+     * The job's Summary of work, written from the phone (2026-09-30). The same field the
+     * office edits on the job page (Customer_Summary__c — printed on the invoice and the
+     * customer's report). A tech may write it on a job they have a call on; the office
+     * anywhere. Plain replace, no stamp: it is the customer-facing narrative, not a log.
+     */
+    async techJobSummary({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      if (ctx.scope !== "tenant") {
+        const calls = await h.loadJobCalls(job.Id, tenantId);
+        if (!calls.some((c) => !!ctx.userId && c.Tech__c === ctx.userId && c.Status__c !== "Cancelled")) return notFound(cors);
+      }
+      if (!body || !Object.prototype.hasOwnProperty.call(body, "summary")) return bad(cors, "SUMMARY_REQUIRED", "Send `summary` (text, or empty to clear).");
+      const summary = strOrNull(body.summary)?.slice(0, 32000) ?? null;
+      if ((job.Customer_Summary__c ?? null) === summary) return jsonResponse(200, cors, { success: true, unchanged: true, summary });
+      try {
+        await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Customer_Summary__c: summary });
+      } catch (e) {
+        return sfError(cors, e, "job summary");
+      }
+      await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { fields: { Customer_Summary__c: { from: job.Customer_Summary__c ?? null, to: summary } }, via: "tech" } });
+      await h.markStale(CACHE.job, [job.Id], tenantId);
+      return jsonResponse(200, cors, { success: true, summary });
+    },
+
     async techDay({ ctx, query }) {
       const { tenantId, cors } = ctx;
       const tech = await actingTech(ctx, query?.techId);
@@ -1317,6 +1384,43 @@ export function createTechHandlers(d, h) {
       await h.markStale(CACHE.call, [call.Id], tenantId);
       const after = { ...call, Photos_Count__c: count };
       return jsonResponse(200, cors, { success: true, photosCount: count, photos, checklist: checklistFor(after) });
+    },
+
+    /**
+     * Delete one photo (2026-09-30, "the wrong photo was uploaded"): the S3 object goes, its
+     * sundial_file_metadata row goes, a call's Photos_Count__c is recounted, and the log
+     * says who removed what. The tech route takes only a key inside THEIR call's folder;
+     * the office route (files.job.delete, tenant scope) takes any key under the job's
+     * photos/ — a visit's or its own. Never a key with ".." and never outside the prefix.
+     */
+    async techPhotoDelete({ ctx, params, query, body }) {
+      const { tenantId, cors } = ctx;
+      const call = await loadTechCall(params[0], tenantId);
+      if (!call || !ownsCall(ctx, call)) return notFound(cors);
+      const prefix = photoPrefix(call.Sundial_Service_Job__c, call.Id);
+      const key = strOrNull(query?.key) ?? strOrNull(body?.key);
+      if (!key || !key.startsWith(prefix) || key.includes("..")) return bad(cors, "KEY_INVALID", "That key does not belong to this call.");
+      const r = await removePhoto(ctx, { key, jobId: call.Sundial_Service_Job__c, call, via: "tech" });
+      if (r.error) return r.error;
+      return jsonResponse(200, cors, { success: true, key, photosCount: r.count, photos: r.photos, checklist: checklistFor({ ...call, Photos_Count__c: r.count }) });
+    },
+    async jobPhotoDelete({ ctx, params, query, body }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const prefix = jobPhotoPrefix(job.Id);
+      const key = strOrNull(query?.key) ?? strOrNull(body?.key);
+      if (!key || !key.startsWith(prefix) || key.includes("..")) return bad(cors, "KEY_INVALID", "That key does not belong to this job's photo folder.");
+      // A key inside photos/{callId}/ recounts that call.
+      const rest = key.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      const callId = slash > 0 ? rest.slice(0, slash) : null;
+      const call = callId ? await loadTechCall(callId, tenantId) : null;
+      if (callId && (!call || call.Sundial_Service_Job__c !== job.Id)) return bad(cors, "KEY_INVALID", "That key names a call that is not on this job.");
+      const r = await removePhoto(ctx, { key, jobId: job.Id, call, via: "office" });
+      if (r.error) return r.error;
+      const photos = await d.listPhotos(prefix).catch(() => []);
+      return jsonResponse(200, cors, { success: true, key, total: photos.length, groups: groupJobPhotos(photos, prefix, await h.loadJobCalls(job.Id, tenantId)) });
     },
 
     async techPhotos({ ctx, params }) {

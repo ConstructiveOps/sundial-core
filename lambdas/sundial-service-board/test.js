@@ -119,6 +119,8 @@ function fakeWorld() {
   const smsRows = [];
   const fileRows = [];
   const photos = []; // { key, fileName, publicUrl, size, lastModified }
+  const deleted = []; // metadata rows removed
+  const s3Deleted = []; // keys removed from S3
   const fetches = [];
 
   function cond(rec, c) {
@@ -189,6 +191,7 @@ function fakeWorld() {
       },
       select: () => ({ eq: (col, v) => ({ limit: () => ({ maybeSingle: async () => ({ data: fileRows.find((r) => r[col] === v) ?? null, error: null }) }) }) }),
       update: (patch) => ({ in: (col, ids) => ({ eq: async () => { stale.push({ table, ids, patch }); return { error: null }; } }) }),
+      delete: () => ({ eq: async (col, v) => { if (table === "sundial_file_metadata") { const i = fileRows.findIndex((r) => r[col] === v); if (i >= 0) fileRows.splice(i, 1); deleted.push({ table, col, v }); } return { error: null }; } }),
     }),
   });
   // Notifications (D-074): recorded, never delivered.
@@ -199,7 +202,7 @@ function fakeWorld() {
     toProfile: async (n) => (notes.push({ to: "profile", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
   };
   const world = {
-    store, calls, activity, stale, emails, broadcasts, texts, smsRows, fileRows, photos, fetches, notes,
+    store, calls, activity, stale, emails, broadcasts, texts, smsRows, fileRows, photos, deleted, s3Deleted, fetches, notes,
     now: NOW,
     geocode: { status: "OK", results: [{ geometry: { location: { lat: 33.4484, lng: -112.074 } } }] },
     deps: {
@@ -214,6 +217,7 @@ function fakeWorld() {
       sendSms: async (creds, msg) => { texts.push({ creds, msg }); return { ok: true, sid: `SM${texts.length}`, status: "queued" }; },
       presignPut: async ({ key, contentType }) => `https://s3.example/${key}?ct=${encodeURIComponent(contentType)}`,
       listPhotos: async (prefix) => photos.filter((p) => p.key.startsWith(prefix)),
+      deleteObject: async (key) => { s3Deleted.push(key); const i = photos.findIndex((p) => p.key === key); if (i >= 0) photos.splice(i, 1); },
     },
   };
   return world;
@@ -1277,6 +1281,64 @@ test("job photos: grouped by call (office at the top), the office adds at the to
   const rep = makeHandler(w, { user: { id: "USR000000000000003" }, access: { scope: "own", level: "Sales Rep", tenantId: TENANT, userId: "USR000000000000003", dealerId: "DLR000000000000001" } });
   assert.equal((await call(rep, "GET", `/service/tech/jobs/${jobId}/files`)).status, 403);
   assert.equal((await call(office, "GET", "/service/jobs/SVC000000000000099/photos")).status, 404);
+});
+
+test("deleting a photo (2026-09-30): a tech removes one from their own call only, the office any under the job; S3 + metadata + the call's count + the log; the phone writes the Summary of work on a job it has a call on", async () => {
+  const w = fakeWorld();
+  const office = makeHandler(w);
+  const jake = makeHandler(w, { user: { id: "USR000000000000001", firstName: "Jake", lastName: "Dorsey" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001", actions: ["service.tech.self", "service.tech.read"] } });
+  const jobId = "SVC000000000000003";
+  const mine = `SUNDIAL/${jobId}/photos/SC0000000000000001/a.jpg`;
+  const larrys = `SUNDIAL/${jobId}/photos/SC0000000000000002/b.jpg`;
+  const offices = `SUNDIAL/${jobId}/photos/c.jpg`;
+  w.photos.push(
+    { key: mine, fileName: "a.jpg", publicUrl: "u1", size: 1, lastModified: "2026-09-14T10:00:00.000Z" },
+    { key: `SUNDIAL/${jobId}/photos/SC0000000000000001/a2.jpg`, fileName: "a2.jpg", publicUrl: "u1b", size: 1, lastModified: "2026-09-14T10:01:00.000Z" },
+    { key: larrys, fileName: "b.jpg", publicUrl: "u2", size: 1, lastModified: "2026-09-15T10:00:00.000Z" },
+    { key: offices, fileName: "c.jpg", publicUrl: "u3", size: 1, lastModified: "2026-09-16T10:00:00.000Z" },
+  );
+  w.fileRows.push({ id: "file-x", s3_key: mine }, { id: "file-y", s3_key: offices });
+  w.store.Sundial_Service_Call__c[0].Photos_Count__c = 2;
+
+  // Jake may not delete Larry's photo (the key is outside his call's folder), nor a traversal.
+  assert.equal((await call(jake, "DELETE", `/service/tech/calls/SC0000000000000001/photos`, null, { key: larrys })).body.code, "KEY_INVALID");
+  assert.equal((await call(jake, "DELETE", `/service/tech/calls/SC0000000000000001/photos`, null, { key: `SUNDIAL/${jobId}/photos/SC0000000000000001/../c.jpg` })).body.code, "KEY_INVALID");
+  assert.equal((await call(jake, "DELETE", `/service/tech/calls/SC0000000000000002/photos`, null, { key: larrys })).status, 404, "not his call");
+  // His own: gone from S3, the metadata row gone, the count recounted, logged.
+  let r = await call(jake, "DELETE", `/service/tech/calls/SC0000000000000001/photos`, null, { key: mine });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.photosCount, 1);
+  assert.deepEqual(r.body.photos.map((p) => p.fileName), ["a2.jpg"]);
+  assert.deepEqual(w.s3Deleted, [mine]);
+  assert.ok(!w.fileRows.some((f) => f.s3_key === mine));
+  assert.equal(w.store.Sundial_Service_Call__c[0].Photos_Count__c, 1);
+  const ev = w.activity.find((a) => a.event === "service_photo_deleted");
+  assert.equal(ev.details.via, "tech");
+  assert.equal(ev.details.callId, "SC0000000000000001");
+
+  // The office: any key under the job — Larry's, and its own (no call to recount).
+  r = await call(office, "DELETE", `/service/jobs/${jobId}/photos`, null, { key: larrys });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.total, 2);
+  assert.equal(w.store.Sundial_Service_Call__c[1].Photos_Count__c, 0);
+  r = await call(office, "DELETE", `/service/jobs/${jobId}/photos`, null, { key: offices });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.total, 1);
+  assert.ok(!w.fileRows.some((f) => f.s3_key === offices));
+  assert.equal((await call(office, "DELETE", `/service/jobs/${jobId}/photos`, null, { key: `SUNDIAL/SVC000000000000001/photos/x.jpg` })).body.code, "KEY_INVALID");
+  // A tech cannot use the office's delete.
+  assert.equal((await call(jake, "DELETE", `/service/jobs/${jobId}/photos`, null, { key: offices })).status, 403);
+
+  // The Summary of work from the phone: Jake has a call on SVC-00003, none on SVC-00001.
+  r = await call(jake, "POST", `/service/tech/jobs/${jobId}/summary`, { summary: "Replaced the failed breaker; array producing again." });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(w.store.Sundial_Service_Job__c.find((j) => j.Id === jobId).Customer_Summary__c, "Replaced the failed breaker; array producing again.");
+  const upd = w.activity.find((a) => a.event === "job_updated" && a.details.via === "tech");
+  assert.equal(upd.details.fields.Customer_Summary__c.to, "Replaced the failed breaker; array producing again.");
+  assert.equal((await call(jake, "POST", `/service/tech/jobs/${jobId}/summary`, { summary: "Replaced the failed breaker; array producing again." })).body.unchanged, true);
+  assert.equal((await call(jake, "POST", `/service/tech/jobs/SVC000000000000001/summary`, { summary: "x" })).status, 404, "no call of his on that job");
+  assert.equal((await call(jake, "POST", `/service/tech/jobs/${jobId}/summary`, {})).body.code, "SUMMARY_REQUIRED");
+  assert.equal((await call(office, "POST", `/service/tech/jobs/SVC000000000000001/summary`, { summary: "office can" })).status, 200);
 });
 
 // ---------------------------------------------------------------------------

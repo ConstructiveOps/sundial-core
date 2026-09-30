@@ -105,7 +105,7 @@ foreach ($part in @("status", "notes", "checklist")) {
 }
 Write-Host "==> /service/tech/calls/{id}/photos : GET, POST, OPTIONS ; /confirm : POST, OPTIONS -> $Board" -ForegroundColor Cyan
 $photos  = Ensure-Resource $callId "photos"
-foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $photos $m $Board }
+foreach ($m in @("GET", "POST", "DELETE", "OPTIONS")) { Wire-Method $photos $m $Board }  # DELETE = remove one photo (2026-09-30)
 $confirm = Ensure-Resource $photos "confirm"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $confirm $m $Board }
 
@@ -120,7 +120,7 @@ Write-Host "==> /service/jobs/{id}/photos [+ /confirm] : GET, POST, OPTIONS (boa
 $jobs    = Ensure-Resource $service "jobs"
 $jobId   = Ensure-Resource $jobs "{id}"
 $jPhotos = Ensure-Resource $jobId "photos"
-foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jPhotos $m $Board }
+foreach ($m in @("GET", "POST", "DELETE", "OPTIONS")) { Wire-Method $jPhotos $m $Board }  # DELETE = the office removes one photo (2026-09-30)
 $jConfirm = Ensure-Resource $jPhotos "confirm"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jConfirm $m $Board }
 Write-Host "==> /service/tech/jobs/{id}/photos, /files : GET, OPTIONS (board)" -ForegroundColor Cyan
@@ -130,6 +130,10 @@ foreach ($part in @("photos", "files")) {
     $r = Ensure-Resource $tJobId $part
     foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m $Board }
 }
+# The Summary of work from the phone (2026-09-30).
+Write-Host "==> /service/tech/jobs/{id}/summary : POST, OPTIONS (board)" -ForegroundColor Cyan
+$tSummary = Ensure-Resource $tJobId "summary"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $tSummary $m $Board }
 # The house on the phone (2026-09-19): the same Street View still the office's job page
 # fetches, served read-only to the tech app by the ESTIMATE Lambda (the Google key lives there).
 Write-Host "==> /service/tech/jobs/{id}/street-view : GET, OPTIONS -> $Est" -ForegroundColor Cyan

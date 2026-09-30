@@ -55,7 +55,7 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
-import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realListPhotos, realPresignPut } from "./tech.js";
+import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realDeleteObject, realListPhotos, realPresignPut } from "./tech.js";
 import { createDayHandlers } from "./day.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
@@ -121,7 +121,7 @@ export function invoiceStateFor({ jobStatus, paymentStatus, invoiceStatus }) {
 export const JOB_SELECT =
   "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
   "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Sundial_Customer__c, Estimate__c, " +
-  "Estimate_Total__c, Bill_To_Type__c, Geocode_Lat__c, Geocode_Lon__c, Geocode_Status__c, CreatedDate, SystemModstamp";
+  "Estimate_Total__c, Bill_To_Type__c, Customer_Summary__c, Geocode_Lat__c, Geocode_Lon__c, Geocode_Status__c, CreatedDate, SystemModstamp";
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
@@ -311,6 +311,7 @@ const ROUTES = [
   ["GET", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotos"],
   ["POST", /^\/service\/jobs\/([^/]+)\/photos\/confirm\/?$/, "jobPhotoConfirm"],
   ["POST", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoPresign"],
+  ["DELETE", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoDelete"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/photos\/?$/, "techJobPhotos"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/files\/?$/, "techJobFiles"],
   // The techs' last clocked spots for the dispatch map, and the Admin payroll report (day.js, D-076).
@@ -337,6 +338,8 @@ const ROUTES = [
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/photos\/confirm\/?$/, "techPhotoConfirm"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/photos\/?$/, "techPhotoPresign"],
   ["GET", /^\/service\/tech\/calls\/([^/]+)\/photos\/?$/, "techPhotos"],
+  ["DELETE", /^\/service\/tech\/calls\/([^/]+)\/photos\/?$/, "techPhotoDelete"],
+  ["POST", /^\/service\/tech\/jobs\/([^/]+)\/summary\/?$/, "techJobSummary"],
 ];
 export function matchRoute(method, path) {
   const p = (path || "").replace(/^\/[^/]+(?=\/service\/)/, "");
@@ -359,6 +362,7 @@ const ACTION_FOR = Object.freeze({
   jobPhotos: "service.board.read",
   jobPhotoPresign: "files.job.upload",
   jobPhotoConfirm: "files.job.upload",
+  jobPhotoDelete: "files.job.delete",
   techJobPhotos: "service.tech.read",
   techJobFiles: "service.tech.read",
   techDay: "service.tech.self",
@@ -377,6 +381,8 @@ const ACTION_FOR = Object.freeze({
   techPhotoConfirm: "service.tech.self",
   techPhotoPresign: "service.tech.self",
   techPhotos: "service.tech.self",
+  techPhotoDelete: "service.tech.self",
+  techJobSummary: "service.tech.self",
   // Read-only, tenant-wide (2026-09-16).
   techJobs: "service.tech.read",
   techJob: "service.tech.read",
@@ -420,6 +426,7 @@ export function createHandler(deps = {}) {
     sendSms: undefined, // lib/twilio.js's real send unless a test injects one
     presignPut: realPresignPut,
     listPhotos: realListPhotos,
+    deleteObject: realDeleteObject,
     now: () => new Date(),
     env: process.env,
     ...deps,

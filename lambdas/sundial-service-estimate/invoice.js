@@ -392,6 +392,74 @@ export function createInvoiceHandlers(d, h) {
       });
     },
 
+    /**
+     * Reopen an invoiced estimate for editing (2026-09-30, Harmon). The lock was the rule
+     * since amendment 5 ("the invoice's frozen source"); Harmon wants to keep working the
+     * estimate after the bill went out. So: a copy of the live invoice AS IT STANDS NOW is
+     * rendered and kept in the job's Files (`{INV}-before-edit-{stamp}.pdf`, category
+     * Invoice) — the office's proof of what the customer was sent — then the estimate goes
+     * back to Approved / Sent / Draft (the same rule a void uses) and every edit route works
+     * again. The invoice itself is untouched: its amounts stay what they were, the job stays
+     * Invoiced; if the total changes the office voids and re-issues (`-2`) as before.
+     */
+    async unlockEstimate({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const est = await h.loadEstimate(params[0], tenantId);
+      if (!est) return notFound(cors);
+      if (est.Status__c !== "Invoiced") return jsonResponse(200, cors, { success: true, unchanged: true, status: est.Status__c ?? null, invoice: null, snapshot: null });
+      const job = est.Service_Job__c ? await loadJob(est.Service_Job__c, tenantId) : null;
+      const invoices = job ? await loadJobInvoices(job.Id, tenantId) : [];
+      const inv = invoices.find((i) => i.Status__c !== "Void") ?? null;
+      let snapshot = null;
+      if (inv && job) {
+        try {
+          const lines = (await h.loadLines(est.Id, tenantId)).filter((l) => l.Stage__c !== "Removed");
+          const payments = (await loadJobPayments(job.Id, tenantId)).filter((p) => p.Invoice__c === inv.Id);
+          const payUrl = await payUrlFor({ invoice: inv, job, tenantId, ctx });
+          const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
+          const bytes = await d.renderPdf(model);
+          const stamp = d.now().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+          const key = buildKey(job.Id, `${String(inv.Name).replace(/[^A-Za-z0-9._-]+/g, "-")}-before-edit-${stamp}.pdf`);
+          await d.putObject({ key, body: bytes, contentType: "application/pdf" });
+          try {
+            const supabase = await d.getSupabaseClient();
+            await registerFileMetadata(supabase, {
+              s3Key: key,
+              fileName: key.split("/").pop(),
+              tenantId,
+              sfRecordId: job.Id,
+              sfObjectType: JOB_SF_OBJECT,
+              uploadedByUserId: ctx.userId ?? null,
+              uploadedByUserName: "Sundial (invoice)",
+              fileSizeBytes: bytes?.byteLength ?? null,
+              mimeType: "application/pdf",
+              category: "Invoice",
+              description: `${inv.Name} as it stood when the estimate was reopened for editing`,
+              subfolder: null,
+            });
+          } catch (e) {
+            console.error(`invoice snapshot: file metadata register failed for ${key}: ${e?.message || e}`);
+          }
+          snapshot = { key, url: publicUrlForKey(key), fileName: key.split("/").pop() };
+        } catch (e) {
+          console.error("invoice snapshot failed:", e?.message || e);
+          return jsonResponse(502, cors, { error: "snapshot_failed", code: "INVOICE_SNAPSHOT_FAILED", message: "The copy of the invoice could not be saved to the job's Files, so the estimate stays locked. Try again." });
+        }
+      }
+      const status = estimateStatusAfterVoid(est);
+      try {
+        await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Status__c: status });
+      } catch (e) {
+        return sfError(cors, e, "estimate unlock");
+      }
+      await h.markStale(CACHE.estimate, [est.Id], tenantId);
+      await h.act(ctx, {
+        event: EVENTS.ESTIMATE_UPDATED, recordType: "estimate", recordSfId: est.Id, jobSfId: job?.Id ?? null, estimateSfId: est.Id,
+        details: { fields: { Status__c: { from: "Invoiced", to: status } }, unlocked: true, invoice: inv?.Name ?? null, snapshotKey: snapshot?.key ?? null, via: "office" },
+      });
+      return jsonResponse(200, cors, { success: true, status, invoice: inv ? { id: inv.Id, number: inv.Name ?? null, status: inv.Status__c ?? null, total: inv.Total__c ?? null } : null, snapshot });
+    },
+
     async issueInvoice({ ctx, params, body }) {
       const { tenantId, userId, cors } = ctx;
       const job = await loadJob(params[0], tenantId);

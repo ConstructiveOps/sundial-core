@@ -1151,6 +1151,27 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   assert.equal(again.status, 409);
   assert.equal(again.body.code, "INVOICE_EXISTS");
 
+  // Harmon (2026-09-30): the office may reopen the estimate anyway. A copy of the invoice as it
+  // stands is kept in the job's Files first; the invoice itself is untouched; the estimate goes
+  // back to Approved / Sent / Draft (the void rule) and edits work again. A second unlock is a no-op.
+  const putsBefore = fake.puts.length;
+  const un = await call(h, "POST", `/service/estimates/${est.Id}/unlock`, {});
+  assert.equal(un.status, 200, JSON.stringify(un.body));
+  assert.equal(un.body.status, "Draft", "never sent or approved in this test → Draft (the void rule)");
+  assert.equal(un.body.invoice.number, inv.Name);
+  assert.match(un.body.snapshot.key, new RegExp(`^SUNDIAL/${job.Id}/${job.Name}-before-edit-\\d{8}T\\d{6}Z\\.pdf$`));
+  assert.equal(fake.puts.length, putsBefore + 1);
+  assert.equal(fake.puts.at(-1).contentType, "application/pdf");
+  assert.equal(est.Status__c, "Draft");
+  assert.equal(inv.Status__c, "Partially Paid", "the invoice is not touched");
+  assert.equal(job.Status__c, "Invoiced", "the job is not touched");
+  assert.ok(fake.activity.some((a) => a.event === "estimate_updated" && a.details.unlocked && a.details.invoice === inv.Name));
+  const edit = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 9 });
+  assert.equal(edit.status, 200, JSON.stringify(edit.body));
+  assert.equal((await call(h, "POST", `/service/estimates/${est.Id}/unlock`, {})).body.unchanged, true);
+  // put it back the way the rest of this test expects
+  await fake.deps.sfUpdateRecord("Sundial_Estimate__c", est.Id, { Status__c: "Invoiced", Tax_Rate__c: 8.6 });
+
   // Preview reads as an invoice, not an estimate.
   const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
   assert.equal(pv.status, 200);

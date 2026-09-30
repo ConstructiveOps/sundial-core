@@ -859,7 +859,9 @@ export function createHandler(deps = {}) {
         if (job && changes.Status__c) {
           const calls = await loadJobCalls(job.Id, tenantId);
           if (changes.Status__c.to === "Scheduled" && wasUnscheduled) jobStatusChanged = await settleJobStatus(ctx, job, "scheduled", calls);
-          else if (changes.Status__c.to === "In Progress") jobStatusChanged = await settleJobStatus(ctx, job, "in_progress", calls);
+          // Back to In Progress from Complete / No-Show is a reopen (2026-09-30: the office
+          // re-opens a call from the board card) — the job follows the way the phone's reopen does.
+          else if (changes.Status__c.to === "In Progress") jobStatusChanged = await settleJobStatus(ctx, job, ["Complete", "No-Show"].includes(call.Status__c) ? "reopened" : "in_progress", calls);
           else if (["Complete", "No-Show"].includes(changes.Status__c.to)) jobStatusChanged = await settleJobStatus(ctx, job, "complete", calls);
         }
       }

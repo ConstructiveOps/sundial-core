@@ -9,7 +9,7 @@
       POST   /service/estimates/{id}/lines
       PATCH  /service/estimates/{id}/lines/{lineId}
       DELETE /service/estimates/{id}/lines/{lineId}
-      POST   /service/estimates/{id}/add-template | recalculate | send | approve | decline | create-job
+      POST   /service/estimates/{id}/add-template | recalculate | send | approve | decline | create-job | unlock
       GET    /service/estimates/{id}/activity | preview
       POST   /service/jobs
       GET    /service/jobs/{id}/activity | street-view | invoice | labor
@@ -96,7 +96,7 @@ Write-Host "==> /service/estimates/{id}/lines : POST, OPTIONS" -ForegroundColor 
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $lines $m }
 Write-Host "==> /service/estimates/{id}/lines/{lineId} : PATCH, DELETE, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("PATCH", "DELETE", "OPTIONS")) { Wire-Method $lineId $m }
-foreach ($action in @("add-template", "recalculate", "send", "approve", "decline", "create-job")) {
+foreach ($action in @("add-template", "recalculate", "send", "approve", "decline", "create-job", "unlock")) {  # unlock = reopen an invoiced estimate (2026-09-30)
     Write-Host "==> /service/estimates/{id}/$action : POST, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $estId $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }

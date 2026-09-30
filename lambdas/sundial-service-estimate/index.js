@@ -362,6 +362,7 @@ const ROUTES = [
   ["PUT", /^\/service\/jobs\/([^/]+)\/report\/?$/, "saveReport"],
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
   ["POST", /^\/service\/jobs\/([^/]+)\/report\/send\/?$/, "sendReport"],
+  ["POST", /^\/service\/estimates\/([^/]+)\/unlock\/?$/, "unlockEstimate"], // reopen an invoiced estimate (2026-09-30)
   ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
   ["GET", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "getJobInvoice"],
   ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
@@ -1718,6 +1719,7 @@ export function createHandler(deps = {}) {
     previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
     suggestAddress: "service.estimate.write", resolveAddress: "service.estimate.write", // whoever can make an estimate can make its customer
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
+    unlockEstimate: "service.estimate.write", // whoever may edit the estimate may reopen it; the invoice is not touched
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is an Admin's action, everywhere
     jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",

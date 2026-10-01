@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  service-events-2026-10-01 - events on the dispatch board (a meeting, a training, a warehouse
+  day): a Service Call with Visit_Type__c = Event and no job. Adds the "Event" picklist value to
+  Sundial_Service_Call__c.Visit_Type__c (the whole value set is restated - the four existing
+  values plus Event; Service stays the default), two new fields (Event_Name__c, Event_Details__c),
+  and a permission set for the two fields. CustomField members only - nothing here touches
+  object settings or any other field.
+
+  Until this deploys the board Lambda reads calls without the two fields (it notices the
+  refusal and retries) and POST /service/events fails on the picklist. Deploy this FIRST.
+
+  DEPLOY: zip this folder's CONTENTS (package.xml at zip root; node scripts/zip-package.mjs
+  salesforce/service-events-2026-10-01, or Explorer Send-to; NEVER PowerShell 5.1
+  Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package -> CHECK ONLY first,
+  expect 4/4 components (3 fields + 1 permission set), then deploy for real. Assign
+  Sundial_Service_Events to the integration user.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Service_Call__c.Visit_Type__c</members>
+        <members>Sundial_Service_Call__c.Event_Name__c</members>
+        <members>Sundial_Service_Call__c.Event_Details__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Service_Events</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

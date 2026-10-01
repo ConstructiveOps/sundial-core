@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Field permissions on the two event fields of Sundial_Service_Call__c (2026-10-01) for the Sundial
+  INTEGRATION USER (assign to it after deploy). Object access on the call is already granted by
+  Sundial_Service_Objects; this set adds only the two new fields.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Sundial Service Events</label>
+    <description>2026-10-01: field access on Sundial_Service_Call__c.Event_Name__c and Event_Details__c (events on the dispatch board) for the Sundial integration user.</description>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Service_Call__c.Event_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Service_Call__c.Event_Details__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+</PermissionSet>

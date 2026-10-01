@@ -200,6 +200,17 @@ export const hoursOf = (minutes) => Math.round((minutes / 60) * 100) / 100;
  * The report. `techs` = [{ id, name }], `days` = Sundial_Tech_Day__c rows, `calls` = service
  * call rows (Tech__c, Clock_Intervals__c, the job's name / customer). `week` from weekBounds.
  */
+/**
+ * What a call is "about" on the report (kept in step with index.js's callSubject — day.js
+ * cannot import index.js): the job, or for an event (Visit_Type__c = Event, 2026-10-01) the
+ * word "Event" with the event's name as the customer.
+ */
+export function callSubject(c) {
+  if (c?.Visit_Type__c === "Event") return { key: `event:${(c.Event_Name__c ?? "").trim().toLowerCase() || c.Id}`, jobId: null, jobNumber: "Event", customer: c.Event_Name__c ?? null, address: null };
+  const j = c?.Sundial_Service_Job__r ?? {};
+  return { key: c?.Sundial_Service_Job__c ?? "__none", jobId: c?.Sundial_Service_Job__c ?? null, jobNumber: j.Name ?? null, customer: j.Customer_Name_at_Creation__c ?? null, address: j.Address_at_Creation__c ?? null };
+}
+
 export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
   const nowMs = Date.parse(now);
   const today = localDate(new Date(nowMs), timeZone);
@@ -234,10 +245,11 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
         callMsByDate.set(date, (callMsByDate.get(date) ?? 0) + ms);
         if (!spansByDate.has(date)) spansByDate.set(date, []);
         spansByDate.get(date).push([a, b]);
-        const jobId = c.Sundial_Service_Job__c ?? "__none";
+        // An event (no job) is its own row: "Event" as the job, the event's name as the customer.
+        const subject = callSubject(c);
+        const jobId = subject.key;
         if (!jobs.has(jobId)) {
-          const j = c.Sundial_Service_Job__r ?? {};
-          jobs.set(jobId, { jobId: c.Sundial_Service_Job__c ?? null, jobNumber: j.Name ?? null, customer: j.Customer_Name_at_Creation__c ?? null, address: j.Address_at_Creation__c ?? null, ms: 0, calls: new Set() });
+          jobs.set(jobId, { jobId: subject.jobId, jobNumber: subject.jobNumber, customer: subject.customer, address: subject.address, ms: 0, calls: new Set() });
         }
         const jr = jobs.get(jobId);
         jr.ms += ms;
@@ -547,7 +559,8 @@ export function createDayHandlers(d, h) {
       // Every clock in / out in the week, one line each (an open one runs to now).
       const entries = [];
       for (const c of calls) {
-        const job = c.Sundial_Service_Job__r ?? {};
+        const subject = callSubject(c); // an event reads "Event" / its name (2026-10-01)
+        const job = { Name: subject.jobNumber, Customer_Name_at_Creation__c: subject.customer, Address_at_Creation__c: subject.address };
         for (const i of liveIntervals(parseIntervals(c.Clock_Intervals__c))) {
           const a = Date.parse(i.in);
           const b = i.out ? Date.parse(i.out) : nowMs;

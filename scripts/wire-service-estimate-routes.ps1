@@ -17,7 +17,7 @@
       GET    /service/jobs/{id}/card                                   (the card on file, 2026-09-28)
       POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
       POST   /service/labor/default-rate
-      GET    /service/invoices/{id} | /service/invoices/{id}/preview
+      GET    /service/invoices/report | /service/invoices/{id} | /service/invoices/{id}/preview
       POST   /service/invoices/{id}/payments | send | void | charge   (charge: the card on file, 2026-09-17)
       POST   /webhooks/stripe/{tenant}                                  (Stripe -> Sundial, signature-gated)
       POST   /service/price-book-items
@@ -146,6 +146,9 @@ Write-Host "==> /service/invoices/{id} : GET, OPTIONS" -ForegroundColor Cyan
 $invoices = Ensure-Resource $service "invoices"
 $invId    = Ensure-Resource $invoices "{id}"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invId $m }
+Write-Host "==> /service/invoices/report : GET, OPTIONS (the week's invoices for accounting, 2026-10-01)" -ForegroundColor Cyan
+$invRep = Ensure-Resource $invoices "report"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invRep $m }
 Write-Host "==> /service/invoices/{id}/preview : GET, OPTIONS" -ForegroundColor Cyan
 $invPv = Ensure-Resource $invId "preview"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invPv $m }

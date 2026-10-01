@@ -430,6 +430,8 @@ export function parseChecklistState(json) {
 }
 /** The checklist with each item's state, plus what still blocks Complete. */
 export function checklistFor(call) {
+  // An event (2026-10-01) has no checklist: nothing to photograph, no customer to walk through.
+  if (call?.Visit_Type__c === "Event") return { key: "event", title: "Event", items: [], missing: [], complete: true };
   const tpl = DEFAULT_CHECKLIST; // Checklist_Template_Key__c selects a template once there are several
   const state = parseChecklistState(call?.Checklist_State__c);
   const items = tpl.items.map((it) => {
@@ -1083,7 +1085,8 @@ export function createTechHandlers(d, h) {
       } else if (status === "Complete") {
         if (call.Status__c !== "In Progress") return jsonResponse(409, cors, { error: "state", code: "CALL_NOT_STARTED", status: call.Status__c, message: "Clock in before completing the call." });
         const gate = checklistFor(call);
-        if (!gate.complete && !(ctx.scope === "tenant" && body?.override === true)) {
+        // An event (no job, 2026-10-01) has nothing to hand over: no checklist gate.
+        if (!gate.complete && call.Visit_Type__c !== "Event" && !(ctx.scope === "tenant" && body?.override === true)) {
           return jsonResponse(409, cors, { error: "checklist", code: "CHECKLIST_INCOMPLETE", missing: gate.missing, checklist: gate, message: "Finish the checklist before completing the call." });
         }
         const ev = applyClockEvent(log, { kind: "clock_out", at, gps, eventId });

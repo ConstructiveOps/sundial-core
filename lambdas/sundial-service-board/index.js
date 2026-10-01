@@ -95,6 +95,11 @@ export const CALL_SELECT =
   "Scheduled_End__c, Status__c, Cancel_Reason__c, Actual_Start__c, Actual_End__c, Duration_Minutes__c, Work_Notes__c, " +
   "Private_Notes__c, Geofence_Verified__c, Photos_Count__c, Billable_to_Customer__c, Billable_Hours__c, Bill_Rate__c, " +
   "Clock_Intervals__c, SystemModstamp, CreatedDate, " +
+  // Events (2026-10-01): a call with Visit_Type__c = Event, no job — a meeting, training,
+  // a warehouse day. The name is what payroll shows as the "customer"; both are optional on
+  // any other call. salesforce/service-events-2026-10-01 adds them; the handler strips them
+  // from every SELECT until the org has them (see createHandler).
+  "Event_Name__c, Event_Details__c, " +
   "Tech__r.First_Name__c, Tech__r.Last_Name__c, " +
   "Sundial_Service_Job__r.Name, Sundial_Service_Job__r.Status__c, Sundial_Service_Job__r.Priority__c, " +
   "Sundial_Service_Job__r.Service_Type__c, Sundial_Service_Job__r.Customer_Name_at_Creation__c, " +
@@ -150,20 +155,30 @@ const techName = (r) => [r?.First_Name__c, r?.Last_Name__c].filter(Boolean).join
  * broadcast of one call derives the state from the job alone, which is right whenever
  * the job's status has settled (Invoiced / Paid) and "not invoiced" otherwise.
  */
+/** An event is a call with no job: Visit_Type__c = Event (2026-10-01). */
+export const isEventCall = (c) => c?.Visit_Type__c === "Event";
+export { callSubject } from "./day.js";
+
 export function callToBoard(c, invoiceByJob = null) {
   const job = c.Sundial_Service_Job__r || {};
   const invoiceStatus = invoiceByJob?.get?.(c.Sundial_Service_Job__c) ?? null;
+  const event = isEventCall(c);
   return {
     id: c.Id,
     number: c.Name ?? null,
+    // An event wears the job's clothes so every card, list and report shows it without
+    // special cases: jobNumber "Event", the name as the customer, the details as the issue.
+    isEvent: event,
+    eventName: event ? c.Event_Name__c ?? null : null,
+    eventDetails: event ? c.Event_Details__c ?? null : null,
     jobId: c.Sundial_Service_Job__c ?? null,
-    jobNumber: job.Name ?? null,
+    jobNumber: event ? "Event" : job.Name ?? null,
     jobStatus: job.Status__c ?? null,
     customerId: job.Sundial_Customer__c ?? null,
-    customerName: job.Customer_Name_at_Creation__c ?? null,
+    customerName: event ? c.Event_Name__c ?? null : job.Customer_Name_at_Creation__c ?? null,
     address: job.Address_at_Creation__c ?? null,
     phone: job.Primary_Phone_at_Creation__c ?? null,
-    issueDescription: job.Issue_Description__c ?? null,
+    issueDescription: event ? c.Event_Details__c ?? null : job.Issue_Description__c ?? null,
     paymentStatus: job.Payment_Status__c ?? null,
     invoiceStatus,
     invoiceState: invoiceStateFor({ jobStatus: job.Status__c ?? null, paymentStatus: job.Payment_Status__c ?? null, invoiceStatus }),
@@ -302,6 +317,7 @@ const ROUTES = [
   ["GET", /^\/service\/board\/?$/, "board"],
   ["GET", /^\/service\/jobs\/([^/]+)\/calls\/?$/, "jobCalls"],
   ["POST", /^\/service\/jobs\/([^/]+)\/calls\/?$/, "createCall"],
+  ["POST", /^\/service\/events\/?$/, "createEvent"], // a meeting / training / warehouse day on the board (2026-10-01)
   ["PATCH", /^\/service\/calls\/([^/]+)\/?$/, "patchCall"],
   ["POST", /^\/service\/calls\/([^/]+)\/cancel\/?$/, "cancelCall"],
   ["POST", /^\/service\/calls\/([^/]+)\/unschedule\/?$/, "unscheduleCall"],
@@ -355,6 +371,7 @@ const ACTION_FOR = Object.freeze({
   board: "service.board.read",
   jobCalls: "service.board.read",
   createCall: "service.call.write",
+  createEvent: "service.call.write",
   patchCall: "service.call.write",
   cancelCall: "service.call.write",
   unscheduleCall: "service.call.write",
@@ -413,9 +430,28 @@ function sfError(cors, err, where) {
 // Handler factory
 // ---------------------------------------------------------------------------
 export function createHandler(deps = {}) {
+  // Until salesforce/service-events-2026-10-01 is deployed the org has no Event_* fields: a
+  // SELECT that names them is refused outright. Rather than fail every board read, the first
+  // such refusal strips the two columns and retries, and every later query goes without them
+  // (events then simply cannot be created). Remembered per warm instance; a redeploy re-checks.
+  let eventFields = null;
+  const rawSfQuery = deps.sfQuery ?? realSfQuery;
+  const stripEventFields = (soql) => soql.replace(/Event_Name__c, Event_Details__c, /g, "").replace(/, Event_Name__c, Event_Details__c/g, "");
+  async function guardedSfQuery(soql, ...rest) {
+    if (eventFields === false) return rawSfQuery(stripEventFields(soql), ...rest);
+    try {
+      const r = await rawSfQuery(soql, ...rest);
+      if (eventFields === null && /Event_Name__c/.test(soql)) eventFields = true;
+      return r;
+    } catch (e) {
+      if (eventFields !== null || !/Event_(Name|Details)__c/.test(String(e?.sfBody ?? e?.message ?? ""))) throw e;
+      eventFields = false;
+      return rawSfQuery(stripEventFields(soql), ...rest);
+    }
+  }
   const d = {
     resolveIdentity: realResolveIdentity,
-    sfQuery: realSfQuery,
+    sfQuery: guardedSfQuery,
     sfCreateRecord: realSfCreateRecord,
     sfUpdateRecord: realSfUpdateRecord,
     getSupabaseClient: realGetSupabaseClient,
@@ -431,6 +467,7 @@ export function createHandler(deps = {}) {
     now: () => new Date(),
     env: process.env,
     ...deps,
+    sfQuery: guardedSfQuery,
   };
   // The tech's "on my way" text goes through the same sender as the office's panel.
   const sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, broadcast: d.broadcast, now: d.now, env: d.env, ...(d.sendSms ? { sendSms: d.sendSms } : {}) });
@@ -452,7 +489,7 @@ export function createHandler(deps = {}) {
   async function notifyTech(ctx, { kind, techId, call, job, stamp }) {
     if (!techId) return;
     const when = call?.Scheduled_Start__c ? fmtWhen(call.Scheduled_Start__c, DEFAULTS.timeZone) : null;
-    const label = jobLabel(job ?? call?.Sundial_Service_Job__r);
+    const label = isEventCall(call) ? `Event · ${call.Event_Name__c ?? ""}`.trim() : jobLabel(job ?? call?.Sundial_Service_Job__r);
     const title =
       kind === "scheduled" ? `New call${when ? ` ${when}` : ""}: ${label}` :
       kind === "moved" ? `Moved to ${when ?? "a new time"}: ${label}` :
@@ -648,8 +685,10 @@ export function createHandler(deps = {}) {
       const [{ techs, source }, calls, unscheduled, unscheduledCalls] = await Promise.all([
         loadTechs(tenantId),
         d.sfQuery(
+          // Cancelled calls are off the board (2026-10-01, Harmon): they were covering live
+          // calls in the same window. They are still on the job page and in the activity.
           `SELECT ${CALL_SELECT} FROM ${CALL_SF_OBJECT} WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-            `AND Scheduled_Start__c >= ${soqlDateTime(from)} AND Scheduled_Start__c < ${soqlDateTime(to)}` +
+            `AND Scheduled_Start__c >= ${soqlDateTime(from)} AND Scheduled_Start__c < ${soqlDateTime(to)} AND Status__c != 'Cancelled'` +
             (techFilter ? ` AND Tech__c = '${soqlEscapeString(techFilter)}'` : "") +
             ` ORDER BY Scheduled_Start__c`
         ),
@@ -747,6 +786,71 @@ export function createHandler(deps = {}) {
       await announce(ctx, { kind: "call", action: "created", call: shaped, jobStatus: job.Status__c });
       if (tech && !unscheduled) await notifyTech(ctx, { kind: "scheduled", techId: tech.Id, call: call || { Id: created.id, ...fields }, job, stamp: start });
       return jsonResponse(201, cors, { success: true, call: shaped, jobStatus: job.Status__c, jobStatusChanged: jobStatus, ...notify });
+    },
+
+    /**
+     * An event on the board (2026-10-01, Harmon): a meeting, a training, a warehouse day —
+     * anything the techs attend that is not a customer's job. It is a Service Call with
+     * Visit_Type__c = Event and no job, one per tech (the same shape as a multi-tech job), so
+     * the dispatch board, the phone, the clock and the payroll report all already know how to
+     * carry it. No customer, no estimate, no email; the tech hears about it like any call.
+     * Payroll shows it as a job called "Event" with the event's name as the customer.
+     */
+    async createEvent({ ctx, body }) {
+      const { tenantId, cors } = ctx;
+      const name = strOrNull(body?.name);
+      if (!name) return bad(cors, "NAME_REQUIRED", "Give the event a name (it is what the techs and the payroll report see).");
+      const details = strOrNull(body?.details);
+      const start = isoOrNull(body?.start);
+      if (!start) return bad(cors, "START_REQUIRED", "start must be an ISO datetime.");
+      const end = isoOrNull(body?.end) ?? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString();
+      if (Date.parse(end) <= Date.parse(start)) return bad(cors, "WINDOW_INVALID", "end must be after start.");
+      const techIds = [...new Set((Array.isArray(body?.techIds) ? body.techIds : [body?.techId]).map(strOrNull).filter(Boolean))];
+      if (!techIds.length) return bad(cors, "TECH_REQUIRED", "Pick at least one technician.");
+      const techs = [];
+      for (const id of techIds) {
+        const t = await loadTech(id, tenantId);
+        if (!t) return bad(cors, "TECH_INVALID", "One of the technicians is not an active user in this tenant.");
+        techs.push(t);
+      }
+      const created = [];
+      const failures = [];
+      for (const tech of techs) {
+        const fields = {
+          Client__c: tenantId,
+          Visit_Type__c: "Event",
+          Visit_Sub_Type__c: "On-Site",
+          Tech__c: tech.Id,
+          Scheduled_Start__c: start,
+          Scheduled_End__c: end,
+          Status__c: "Scheduled",
+          Event_Name__c: name.slice(0, 100),
+          Event_Details__c: details ? details.slice(0, 32000) : null,
+        };
+        for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
+        let rec;
+        try {
+          rec = await d.sfCreateRecord(CALL_SF_OBJECT, fields);
+        } catch (e) {
+          if (!created.length) return sfError(cors, e, "event create");
+          failures.push({ techId: tech.Id, techName: techName(tech), message: String(e?.sfBody ?? e?.message ?? e).slice(0, 300) });
+          continue;
+        }
+        const call = (await loadCall(rec.id, tenantId)) || { Id: rec.id, ...fields, Tech__r: tech };
+        await act(ctx, {
+          event: EVENTS.SERVICE_CALL_CREATED,
+          recordType: "servicecall",
+          recordSfId: rec.id,
+          jobSfId: null,
+          details: { event: true, name, techId: tech.Id, techName: techName(tech), start, end },
+        });
+        await markStale(CACHE.call, [rec.id], tenantId);
+        const shaped = callToBoard(call);
+        await announce(ctx, { kind: "call", action: "created", call: shaped, jobStatus: null });
+        await notifyTech(ctx, { kind: "scheduled", techId: tech.Id, call, job: { Name: "Event", Customer_Name_at_Creation__c: name }, stamp: start });
+        created.push(shaped);
+      }
+      return jsonResponse(201, cors, { success: true, calls: created, failures });
     },
 
     // --- move / resize / reassign / status ---------------------------------------

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Service_Call__c - the event pieces added on 2026-10-01 ONLY: Visit_Type__c restated with
+  the new "Event" value, plus Event_Name__c and Event_Details__c. package.xml lists them as
+  CustomField members, so this file changes these three fields and touches nothing else on the
+  object. NEVER convert this to a whole-object deploy.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Visit_Type__c</fullName>
+        <description>Drives which parent lookup must be populated and which PWA tab renders the call (D-027). Event (2026-10-01): a meeting / training / warehouse day with no job - scheduled on the dispatch board, attended (clocked) by the techs, shown on payroll as a job called Event.</description>
+        <externalId>false</externalId>
+        <label>Visit Type</label>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Picklist</type>
+        <valueSet>
+            <restricted>true</restricted>
+            <valueSetDefinition>
+                <sorted>false</sorted>
+                <value>
+                    <fullName>Service</fullName>
+                    <default>true</default>
+                    <label>Service</label>
+                </value>
+                <value>
+                    <fullName>Solar Install</fullName>
+                    <default>false</default>
+                    <label>Solar Install</label>
+                </value>
+                <value>
+                    <fullName>Roofing Install</fullName>
+                    <default>false</default>
+                    <label>Roofing Install</label>
+                </value>
+                <value>
+                    <fullName>Commercial Install</fullName>
+                    <default>false</default>
+                    <label>Commercial Install</label>
+                </value>
+                <value>
+                    <fullName>Event</fullName>
+                    <default>false</default>
+                    <label>Event</label>
+                </value>
+            </valueSetDefinition>
+        </valueSet>
+    </fields>
+    <fields>
+        <fullName>Event_Name__c</fullName>
+        <description>The event's name (Visit Type = Event only): "Safety meeting", "Inverter training". What the techs see on the phone and what the payroll report shows as the customer of the job called Event.</description>
+        <externalId>false</externalId>
+        <label>Event Name</label>
+        <length>100</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
+        <fullName>Event_Details__c</fullName>
+        <description>What the event is about, where, what to bring (Visit Type = Event only). Shown on the card and on the phone.</description>
+        <externalId>false</externalId>
+        <label>Event Details</label>
+        <length>32000</length>
+        <required>false</required>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+</CustomObject>

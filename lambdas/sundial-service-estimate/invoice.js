@@ -460,6 +460,90 @@ export function createInvoiceHandlers(d, h) {
       return jsonResponse(200, cors, { success: true, status, invoice: inv ? { id: inv.Id, number: inv.Name ?? null, status: inv.Status__c ?? null, total: inv.Total__c ?? null } : null, snapshot });
     },
 
+    /**
+     * The week's invoices for accounting (2026-10-01, Harmon): every invoice ISSUED in
+     * [from, to] (inclusive dates, the tenant's timezone), void ones included and marked, with
+     * the job's number, customer, address and the bill-to, as rows the portal turns into a CSV.
+     * A stop-gap until the Acumatica integration carries invoices across. Read-only.
+     */
+    async invoiceReport({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const dayRe = /^\d{4}-\d{2}-\d{2}$/;
+      const str = (v) => (v == null ? null : String(v).trim() || null);
+      const from = str(query?.from);
+      const to = str(query?.to) ?? from;
+      const realDay = (v) => dayRe.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v);
+      if (!from || !realDay(from) || !realDay(to)) return bad(cors, "RANGE_INVALID", "from and to must be dates (YYYY-MM-DD).");
+      const tz = d.env?.SERVICE_TIMEZONE || "America/Phoenix";
+      // Local midnight at the start of `from` and the end of `to`, as UTC instants.
+      const localStart = (day) => {
+        const guess = new Date(`${day}T00:00:00Z`);
+        const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+        const p = Object.fromEntries(f.formatToParts(guess).map((x) => [x.type, x.value]));
+        const localAsUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute);
+        return new Date(guess.getTime() - (localAsUtc - guess.getTime()));
+      };
+      const start = localStart(from);
+      const end = new Date(localStart(to).getTime() + 86400000);
+      if (end <= start) return bad(cors, "RANGE_INVALID", "to must not be before from.");
+      if (end - start > 92 * 86400000) return bad(cors, "RANGE_TOO_WIDE", "The report covers at most 92 days at a time.");
+      let rows;
+      try {
+        rows =
+          (await d.sfQuery(
+            `SELECT ${INVOICE_SELECT}, Service_Job__r.Name, Service_Job__r.Customer_Name_at_Creation__c, Service_Job__r.Address_at_Creation__c, ` +
+              `Service_Job__r.Primary_Email_at_Creation__c, Service_Job__r.Service_Type__c, Service_Job__r.Status__c, Service_Job__r.Payment_Status__c ` +
+              `FROM ${INVOICE_SF_OBJECT} WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+              `AND Issued_At__c >= ${start.toISOString()} AND Issued_At__c < ${end.toISOString()} ORDER BY Issued_At__c, Name LIMIT 2000`
+          )) || [];
+      } catch (e) {
+        return sfError(cors, e, "invoice report");
+      }
+      const num = (v) => (v == null || v === "" ? 0 : Number(v) || 0);
+      const invoices = rows.map((r) => {
+        const j = r.Service_Job__r ?? {};
+        const paid = num(r.Paid_Amount__c);
+        const total = num(r.Total__c);
+        return {
+          id: r.Id,
+          number: r.Name ?? null,
+          status: r.Status__c ?? null,
+          issuedAt: r.Issued_At__c ?? null,
+          dueDate: r.Due_Date__c ?? null,
+          sentAt: r.Sent_At__c ?? null,
+          paidAt: r.Paid_At__c ?? null,
+          voidedAt: r.Voided_At__c ?? null,
+          voidReason: r.Void_Reason__c ?? null,
+          jobId: r.Service_Job__c ?? null,
+          jobNumber: j.Name ?? null,
+          jobStatus: j.Status__c ?? null,
+          customer: j.Customer_Name_at_Creation__c ?? null,
+          customerEmail: j.Primary_Email_at_Creation__c ?? null,
+          address: j.Address_at_Creation__c ?? null,
+          serviceType: j.Service_Type__c ?? null,
+          billToType: r.Bill_To_Type__c ?? null,
+          billToName: r.Bill_To_Name__c ?? null,
+          billingReference: r.Billing_Reference__c ?? null,
+          subtotal: num(r.Subtotal__c),
+          discount: num(r.Discount_Amount__c),
+          taxRate: num(r.Tax_Rate__c),
+          tax: num(r.Tax_Amount__c),
+          total,
+          paid,
+          balance: r.Status__c === "Void" ? 0 : Math.round((total - paid) * 100) / 100,
+          acumaticaRef: r.Acumatica_Ref__c ?? null,
+        };
+      });
+      const live = invoices.filter((i) => i.status !== "Void");
+      const sum = (k) => Math.round(live.reduce((a, i) => a + i[k], 0) * 100) / 100;
+      return jsonResponse(200, cors, {
+        from, to, timeZone: tz, count: invoices.length,
+        totals: { invoices: live.length, void: invoices.length - live.length, subtotal: sum("subtotal"), discount: sum("discount"), tax: sum("tax"), total: sum("total"), paid: sum("paid"), balance: sum("balance") },
+        invoices,
+        truncated: rows.length >= 2000,
+      });
+    },
+
     async issueInvoice({ ctx, params, body }) {
       const { tenantId, userId, cors } = ctx;
       const job = await loadJob(params[0], tenantId);

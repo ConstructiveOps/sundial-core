@@ -528,6 +528,68 @@ test("POST /service/calls/{id}/unschedule (2026-09-29): the window is cleared, t
   assert.equal((await call(h, "POST", "/service/calls/SC0000000000000002/unschedule", { baseModstamp: "nope" })).body.code, "CALL_CONFLICT");
 });
 
+test("events (2026-10-01): POST /service/events makes one Event call per tech (no job), it is on the board and the phone, the tech clocks in and completes it with no checklist, and payroll shows it as job 'Event' / customer = the name; cancelled calls are off the board; a move never emails", async () => {
+  const w = fakeWorld();
+  const h = makeHandler(w);
+  // Validation
+  assert.equal((await call(h, "POST", "/service/events", { start: "2026-09-14T15:00:00Z", techIds: ["USR000000000000001"] })).body.code, "NAME_REQUIRED");
+  assert.equal((await call(h, "POST", "/service/events", { name: "Safety meeting", start: "2026-09-14T15:00:00Z" })).body.code, "TECH_REQUIRED");
+  const r = await call(h, "POST", "/service/events", { name: "Safety meeting", details: "Warehouse, bring your PPE", start: "2026-09-14T15:00:00Z", end: "2026-09-14T16:00:00Z", techIds: ["USR000000000000001", "USR000000000000002"] });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.calls.length, 2);
+  assert.deepEqual(r.body.failures, []);
+  const ev = r.body.calls[0];
+  assert.equal(ev.isEvent, true);
+  assert.equal(ev.jobId, null);
+  assert.equal(ev.jobNumber, "Event");
+  assert.equal(ev.customerName, "Safety meeting");
+  assert.equal(ev.issueDescription, "Warehouse, bring your PPE");
+  const recs = w.store.Sundial_Service_Call__c.filter((c) => c.Visit_Type__c === "Event");
+  assert.equal(recs.length, 2);
+  assert.equal(recs[0].Event_Name__c, "Safety meeting");
+  assert.equal(recs[0].Sundial_Service_Job__c, undefined);
+  assert.equal(w.notes.filter((n) => n.kind === "scheduled" && /Event · Safety meeting/.test(n.title)).length, 2, "each tech is told like any call");
+  assert.equal(w.emails.length, 0, "no customer, no email");
+
+  // On the board, in the window; cancelled calls are not.
+  const cancelled = { Id: "SC0000000000000009", Client__c: TENANT, Name: "SC-00009", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000003", Tech__c: "USR000000000000001", Scheduled_Start__c: "2026-09-14T16:00:00.000Z", Scheduled_End__c: "2026-09-14T18:00:00.000Z", Status__c: "Cancelled", Cancel_Reason__c: "x", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" };
+  w.store.Sundial_Service_Call__c.push(cancelled);
+  const board = await call(h, "GET", "/service/board", null, { from: "2026-09-14T00:00:00Z", to: "2026-09-15T00:00:00Z" });
+  assert.ok(board.body.calls.some((c) => c.id === ev.id && c.isEvent));
+  assert.ok(!board.body.calls.some((c) => c.id === "SC0000000000000009"), "a cancelled call is off the board");
+  // A drag (PATCH with a window, no notifyCustomer) never emails the customer.
+  const moved = await call(h, "PATCH", "/service/calls/SC0000000000000001", { start: "2026-09-14T17:00:00Z", end: "2026-09-14T19:00:00Z", techId: "USR000000000000001" });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  assert.equal(moved.body.notified, false);
+  assert.equal(w.emails.length, 0, "moving a card never emails");
+
+  // The phone: on Jake's day, clock in, complete with no checklist.
+  const jake = makeHandler(w, { user: { id: "USR000000000000001", firstName: "Jake", lastName: "Dorsey" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001", actions: ["service.tech.self", "service.tech.read"] } });
+  const day = await call(jake, "GET", "/service/tech/day", null, { date: "2026-09-14" });
+  const mine = day.body.calls.find((c) => c.isEvent);
+  assert.ok(mine, "the event is on the tech's day");
+  assert.equal(mine.checklist.complete, true);
+  w.now = new Date("2026-09-14T15:00:00Z");
+  let t = await call(jake, "POST", `/service/tech/calls/${mine.id}/status`, { status: "In Progress", eventId: "e-1" });
+  assert.equal(t.status, 200, JSON.stringify(t.body));
+  assert.equal(t.body.jobStatusChanged, null);
+  w.now = new Date("2026-09-14T16:00:00Z");
+  t = await call(jake, "POST", `/service/tech/calls/${mine.id}/status`, { status: "Complete", eventId: "e-2" });
+  assert.equal(t.status, 200, JSON.stringify(t.body));
+  assert.equal(t.body.call.status, "Complete");
+
+  // Payroll: a job called Event, the customer is the event's name, one hour.
+  const pay = await call(h, "GET", "/service/payroll", null, { week: "2026-09-14" });
+  assert.equal(pay.status, 200, JSON.stringify(pay.body));
+  const jakeRow = pay.body.techs.find((x) => x.tech.id === "USR000000000000001");
+  const evJob = jakeRow.jobs.find((j) => j.jobNumber === "Event");
+  assert.ok(evJob, JSON.stringify(jakeRow.jobs));
+  assert.equal(evJob.customer, "Safety meeting");
+  assert.equal(evJob.minutes, 60);
+  const tc = await call(jake, "GET", "/service/tech/timecard", null, { week: "2026-09-14" });
+  assert.ok(tc.body.entries.some((e) => e.jobNumber === "Event" && e.customer === "Safety meeting"));
+});
+
 test("GET /service/jobs/{id}/calls returns the job's calls + techs; access gate denies a Technician / sales scope", async () => {
   const w = fakeWorld();
   const h = makeHandler(w);

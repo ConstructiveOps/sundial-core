@@ -225,6 +225,12 @@ function fakeSalesforce() {
       if (pat.endsWith("%")) return v.startsWith(pat.slice(0, -1));
       return v === pat;
     }
+    // datetime bounds (the invoice report, 2026-10-01)
+    if ((m = cond.match(/^(\w+) (>=|<) (\d{4}-\d{2}-\d{2}T[\d:.]+Z)$/))) {
+      const v = rec[m[1]];
+      if (v == null) return false;
+      return m[2] === ">=" ? Date.parse(v) >= Date.parse(m[3]) : Date.parse(v) < Date.parse(m[3]);
+    }
     throw new Error(`fake SOQL cannot evaluate: ${cond}`);
   }
   function evalWhere(rec, where) {
@@ -253,7 +259,12 @@ function fakeSalesforce() {
     let where = (soql.split(" WHERE ")[1] || "").replace(/\s+(ORDER BY|LIMIT).*$/, "").trim();
     const rows = store[obj].filter((r) => (where ? evalWhere(r, where) : true));
     // The one relationship the labor routes read: a call's Tech__r (name + bill rate).
-    return rows.map((r) => (obj === "Sundial_Service_Call__c" && r.Tech__c ? { ...r, Tech__r: store.Sundial_User__c.find((u) => u.Id === r.Tech__c) ?? null } : { ...r }));
+    return rows.map((r) => {
+      if (obj === "Sundial_Service_Call__c" && r.Tech__c) return { ...r, Tech__r: store.Sundial_User__c.find((u) => u.Id === r.Tech__c) ?? null };
+      // The invoice report's join (2026-10-01): an invoice's job.
+      if (obj === "Sundial_Service_Invoice__c" && r.Service_Job__c) return { ...r, Service_Job__r: store.Sundial_Service_Job__c.find((j) => j.Id === r.Service_Job__c) ?? null };
+      return { ...r };
+    });
   };
   const sfCreateRecord = async (obj, fields) => {
     calls.creates.push({ obj, fields: { ...fields } });
@@ -1150,6 +1161,18 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   const again = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
   assert.equal(again.status, 409);
   assert.equal(again.body.code, "INVOICE_EXISTS");
+
+  // The week's invoices for accounting (2026-10-01): issued-date range, the job's details, totals.
+  const rep = await call(h, "GET", "/service/invoices/report", null, { from: "2026-09-07", to: "2026-09-13" });
+  assert.equal(rep.status, 200, JSON.stringify(rep.body));
+  assert.equal(rep.body.count, 1);
+  assert.equal(rep.body.invoices[0].number, inv.Name);
+  assert.equal(rep.body.invoices[0].customer, "Ivy");
+  assert.equal(rep.body.invoices[0].total, 383.6);
+  assert.equal(rep.body.invoices[0].balance, 283.6);
+  assert.equal(rep.body.totals.balance, 283.6);
+  assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-08-01", to: "2026-08-07" })).body.count, 0);
+  assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-13-01" })).body.code, "RANGE_INVALID");
 
   // Harmon (2026-09-30): the office may reopen the estimate anyway. A copy of the invoice as it
   // stands is kept in the job's Files first; the invoice itself is untouched; the estimate goes

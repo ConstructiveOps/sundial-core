@@ -15,10 +15,11 @@ This page is the runbook: what to create, what to paste where, who hears what, a
 | Office | `tech_activity` | a tech clocks in, completes, marks a no-show — or a call is still `Scheduled` 30 minutes past its start | the job |
 | Office | `money` | approved / declined online, deposit or invoice paid, a card failed, club join / ended / past due / cancellation scheduled | the estimate / job / membership |
 | Office | `customer_message` | an inbound text (matched or not), a website call-me, an online booking | the job (or `/service`) |
+| Service managers / the assignee | `service_intake` | **always on — no switch** (Harmon, 2026-10-02): a Service customer created, un-archived or first tagged Service with nobody in Assigned To → every active Admin / Manager / Executive whose default department is Service (minus whoever did it); someone put in Assigned To → that person (not when they assigned themselves). From the Service popups and Add to Service (estimate Lambda) and from the customer page's own edits (`sundial-sf-update`). `lib/service-intake-alerts.js` | `/customers/{id}` |
 
 "The office" = everyone in the tenant whose `profiles.access_scope` is `tenant`, minus whoever did the thing. **"On my way" does not ring the office** — the board's live blocks carry it; seven techs a morning would be noise.
 
-Each person can switch a category off in **Settings → Notifications** (a missing switch is ON), and can turn browser pop-ups off separately. The `mention` bell is independent of the "Email me when I'm @-mentioned" switch.
+Each person can switch a category off in **Settings → Notifications** (a missing switch is ON), and can turn browser pop-ups off separately. `service_intake` is deliberately on neither list: it rides on whether the person has notifications at all. The `mention` bell is independent of the "Email me when I'm @-mentioned" switch.
 
 ## The three deliveries
 

@@ -7,6 +7,14 @@
 //   node scripts/hcp-import.mjs --tenant harmon --apply --limit 25      # a trial: the first 25 customers' worth
 //   node scripts/hcp-import.mjs --tenant harmon --apply --only customers,leads
 //   --in migration/hcp   --out migration/hcp/import   --tech-map migration/hcp/tech-map.json
+//   --stale-days 90      the abandonment cutoff for Archived__c (lib/hcp-disposition.js)
+//   --keep-leads         do NOT archive every job-less customer (Harmon's clean-pipeline ask, 2026-10-02, is the default)
+//
+// What is ACTIVE (2026-10-02, after Harmon's "too many records" feedback): the import stamps
+// Archived__c on customers / jobs / estimates from HCP's signals, gives an open lead its real
+// stage, closes a won / lost one, blanks the "New" the first import left, and writes
+// stale-jobs.csv (what it archived as abandoned) + picklist-gaps.csv (values the org lacks —
+// Tim adds them in Setup, re-run) in the dry run. Rules in lib/hcp-disposition.js.
 //
 // Re-runnable by design — that is the go-live delta: run the pull again, run this again.
 //   • a customer already carrying HCP_Id__c is found by it alone; one the import CREATED is
@@ -27,10 +35,11 @@ import path from "node:path";
 import { sfQuery, sfUpsertMany, describeObject, soqlEscapeString } from "../lib/salesforce.js";
 import {
   HCP_ID_FIELD, writable, callKey, indexExisting, decideCustomer, customerFields, leadFields, lineFields, estimateFields, jobEstimateFields,
-  invoiceState, jobFields, callFields, callStatusFor, invoiceFields, paymentFields, pickOption, techResolver, personName, normalizeEmail, addressLine,
+  invoiceState, jobFields, callFields, callStatusFor, invoiceFields, paymentFields, pickOption, estimateStatus, techResolver, personName, normalizeEmail, addressLine,
 } from "../lib/hcp-import.js";
 import { matchPicklist, unionProjectTypes } from "../lambdas/sundial-service-estimate/customer.js";
 import { toCsv } from "../lib/hcp-api.js";
+import { DEFAULT_STALE_DAYS, claimedEstimates, customerDisposition, estimateDisposition, jobDisposition, leadConversions } from "../lib/hcp-disposition.js";
 
 // ---------------------------------------------------------------- arguments
 const args = process.argv.slice(2);
@@ -46,6 +55,9 @@ const ONLY = (opt("--only", "") || "").split(",").map((x) => x.trim()).filter(Bo
 const IN = path.resolve(opt("--in", path.join("migration", "hcp")));
 const OUT = path.resolve(opt("--out", path.join(IN, "import")));
 const TECH_MAP = path.resolve(opt("--tech-map", path.join(IN, "tech-map.json")));
+const STALE_DAYS = Number(opt("--stale-days", DEFAULT_STALE_DAYS)) || DEFAULT_STALE_DAYS;
+const CLEAN_LEAD_PIPELINE = !flag("--keep-leads");
+const NOW = new Date();
 if (!TENANT) {
   console.error("usage: node scripts/hcp-import.mjs --tenant <slug> [--apply] [--limit N] [--only customers,leads,estimates,jobs]");
   process.exit(2);
@@ -97,6 +109,7 @@ const jobsHcp = await readJson(path.join(RAW, "jobs.json"), []);
 const estimatesHcp = await readJson(path.join(RAW, "estimates.json"), []);
 const invoicesHcp = await readJson(path.join(RAW, "invoices.json"), []);
 const employees = await readJson(path.join(RAW, "employees.json"), []);
+const jobTypes = new Map((await readJson(path.join(RAW, "job_types.json"), [])).map((jt) => [s(jt.id), s(jt.name)]));
 const jobDetail = new Map((await readDir(path.join(RAW, "jobs"))).map((f) => [s(f.job?.id), f]));
 const estDetail = new Map((await readDir(path.join(RAW, "estimates"))).map((f) => [s(f.estimate?.id), f]));
 if (!customersHcp.length || !jobsHcp.length) {
@@ -111,6 +124,12 @@ const reviewRow = (row) => ({ needs_action: /created new|merge by hand|skipped/.
 const errors = [];
 const counts = {};
 const bump = (k, n = 1) => (counts[k] = (counts[k] || 0) + n);
+/** Picklist values the org lacks (field → value → count): picklist-gaps.csv, for Tim to add in Setup. */
+const gaps = new Map();
+const onGap = (field, value) => {
+  const k = `${field}\u0000${value}`;
+  gaps.set(k, (gaps.get(k) || 0) + 1);
+};
 
 // ---------------------------------------------------------------- Salesforce references
 console.log(`HCP import → tenant "${TENANT}" ${APPLY ? "(APPLY)" : "(dry run)"}${LIMIT ? ` limit ${LIMIT}` : ""}\n  phases: ${PHASES.join(", ")}`);
@@ -133,6 +152,17 @@ const hasHcpField = (customerDescribe?.fields || []).some((f) => f.name === HCP_
 if (!hasHcpField) {
   console.error(`${OBJ.customer} has no ${HCP_ID_FIELD} yet — deploy salesforce/hcp-migration-2026-09-25/ first.`);
   process.exit(2);
+}
+const stageValues = picklist("Service_Stage__c");
+const resolutionValues = picklist("Service_Resolution__c");
+const requestTypeValues = picklist("Service_Request_Type__c");
+// The archive flag is the point of the re-run: every object must carry it before anything is written.
+for (const sfObject of [OBJ.customer, OBJ.estimate, OBJ.job]) {
+  const meta = sfObject === OBJ.customer ? customerDescribe : await describeObject(sfObject);
+  if (!(meta?.fields || []).some((f) => f.name === "Archived__c")) {
+    console.error(`${sfObject} has no Archived__c yet — add the checkbox in Setup (docs/migration.md → "What is active") and give the integration user read/edit on it.`);
+    process.exit(2);
+  }
 }
 const CUSTOMER_SELECT = `Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Customer_Type__c, Requested_Project_Types__c, Status__c, Service_Stage__c, Lead_Source__c, ${HCP_ID_FIELD}`;
 const existing = await sfQuery(`SELECT ${CUSTOMER_SELECT} FROM ${OBJ.customer} WHERE Client__c = '${tenantId}'`);
@@ -230,14 +260,57 @@ async function verifyCustomer(written, sfId) {
   console.log(`  canary ok: ${OBJ.customer} ${sfId}`);
 }
 
-// ---------------------------------------------------------------- customers
-// every HCP customer, plus the ones only embedded on a job / estimate / lead
+// ---------------------------------------------------------------- what is active (lib/hcp-disposition.js)
+const invoicesByJob = new Map();
+for (const i of invoicesHcp) {
+  const jid = s(i.job_id);
+  if (!invoicesByJob.has(jid)) invoicesByJob.set(jid, []);
+  invoicesByJob.get(jid).push(i);
+}
+const claimed = claimedEstimates(jobsHcp, estimatesHcp); // HCP estimate id → the job it became
+const jobDisp = new Map(); // HCP job id → { archived, reason, stale }
+for (const j of jobsHcp) jobDisp.set(s(j.id), jobDisposition(j, { st: invoiceState(invoicesByJob.get(s(j.id)) || []), now: NOW, staleDays: STALE_DAYS }));
+const estDisp = new Map(); // HCP estimate id → { archived, reason }
+for (const e of estimatesHcp) estDisp.set(s(e.id), estimateDisposition(e, { convertedTo: claimed.get(s(e.id)) || null, status: estimateStatus(e, pickOption(e)), now: NOW, staleDays: STALE_DAYS }));
 const jobsByCustomer = new Map();
 for (const j of jobsHcp) {
   const cid = s(j.customer?.id);
   if (!jobsByCustomer.has(cid)) jobsByCustomer.set(cid, []);
   jobsByCustomer.get(cid).push(j);
 }
+const leadsByCustomer = new Map();
+for (const l of leadsHcp) {
+  const cid = s(l.customer?.id);
+  if (!leadsByCustomer.has(cid)) leadsByCustomer.set(cid, []);
+  leadsByCustomer.get(cid).push(l);
+}
+const estimatesByCustomer = new Map();
+for (const e of estimatesHcp) {
+  const cid = s(e.customer?.id);
+  if (!estimatesByCustomer.has(cid)) estimatesByCustomer.set(cid, []);
+  estimatesByCustomer.get(cid).push(e);
+}
+const hasOpenLead = (cid) => (leadsByCustomer.get(cid) || []).some((l) => s(l.status).toLowerCase() === "open" && !s(l.lost_at));
+const dispositionFor = (c) => {
+  const cid = s(c.id);
+  return customerDisposition(c, {
+    leads: leadsByCustomer.get(cid) || [],
+    jobs: (jobsByCustomer.get(cid) || []).map((job) => ({ job, disposition: jobDisp.get(s(job.id)) })),
+    estimates: (estimatesByCustomer.get(cid) || []).map((est) => ({ est, disposition: estDisp.get(s(est.id)) })),
+    now: NOW,
+    staleDays: STALE_DAYS,
+    cleanLeadPipeline: CLEAN_LEAD_PIPELINE,
+  });
+};
+const jobsById = new Map(jobsHcp.map((j) => [s(j.id), j]));
+const estimatesById = new Map(estimatesHcp.map((e) => [s(e.id), e]));
+{
+  const n = (m) => [...m.values()].filter((d) => d.archived).length;
+  console.log(`  active (cutoff ${STALE_DAYS} days): jobs ${jobsHcp.length - n(jobDisp)} of ${jobsHcp.length} stay visible (${[...jobDisp.values()].filter((d) => d.stale).length} archived as abandoned → stale-jobs.csv), estimates ${estimatesHcp.length - n(estDisp)} of ${estimatesHcp.length}, HCP estimates converted to a job: ${claimed.size}`);
+}
+
+// ---------------------------------------------------------------- customers
+// every HCP customer, plus the ones only embedded on a job / estimate / lead
 const customerPool = new Map(customersHcp.map((c) => [s(c.id), c]));
 for (const rec of [...jobsHcp, ...estimatesHcp, ...leadsHcp]) {
   const c = rec.customer;
@@ -268,8 +341,12 @@ if (PHASES.includes("customers")) {
       taken.add(rec.Id); // a second HCP record for this household must not re-stamp it on a later run
       // by Salesforce id, like a link: we KNOW the record; an upsert by HCP id that somehow
       // misses would try to create a bare one (2026-09-28: two of 9,424 did exactly that)
-      linkRecords.push({ Id: rec.Id, ...customerFields(c, { mode: created ? "refresh" : "fillBlanks", existing: rec, pickState, leadSources, hasJobs, tenantId }) });
+      const disposition = created ? dispositionFor(c) : null; // a linked record is Sales's — never archived by the import
+      const blankStage = created && s(rec.Service_Stage__c) === "New" && !hasOpenLead(hcpId); // the first import's "New" (2026-09-29)
+      linkRecords.push({ Id: rec.Id, ...customerFields(c, { mode: created ? "refresh" : "fillBlanks", existing: rec, pickState, leadSources, hasJobs, tenantId, disposition, blankStage }) });
       bump(`customers:${created ? "refresh" : "known-linked"}`);
+      if (disposition?.archived) bump(disposition.leadReset ? "customers:archived-lead-reset" : "customers:archived");
+      if (blankStage) bump("customers:stage-New-cleared");
     } else if (d.action === "link") {
       customerSf.set(hcpId, d.sfId);
       if (d.shared) {
@@ -284,9 +361,25 @@ if (PHASES.includes("customers")) {
         if (d.review) review.push(reviewRow({ hcp_customer_id: hcpId, name: personName(c), email: s(c.email), address: addressLine(c.addresses?.[0]), decision: d.review, sundial_id: d.sfId }));
       }
     } else {
-      customerRecords.push(customerFields(c, { mode: "create", pickState, leadSources, hasJobs, tenantId }));
+      const disposition = dispositionFor(c);
+      customerRecords.push(customerFields(c, { mode: "create", pickState, leadSources, hasJobs, tenantId, disposition }));
       bump("customers:create");
+      if (disposition.archived) bump(disposition.leadReset ? "customers:archived-lead-reset" : "customers:archived");
       if (d.review) review.push(reviewRow({ hcp_customer_id: hcpId, name: personName(c), email: s(c.email), address: addressLine(c.addresses?.[0]), decision: d.review, sundial_id: "" }));
+    }
+  }
+  {
+    // Sales's own Leads / Opportunities that HCP also knows (linked, never archived by the import): Tim decides those by hand
+    const seen = new Set();
+    let linkedPipeline = 0;
+    for (const [hcpId, sfId] of customerSf) {
+      if (seen.has(sfId) || idMap.customers[hcpId]?.created === true) continue;
+      seen.add(sfId);
+      if (/^(Lead|Opportunity)$/.test(s(existingById.get(sfId)?.Status__c))) linkedPipeline += 1;
+    }
+    if (linkedPipeline) {
+      bump("customers:linked-lead-or-opportunity-left-alone", linkedPipeline);
+      console.log(`  ${linkedPipeline} linked customer(s) are Sales's Lead / Opportunity — the import never archives a linked record; archive them by hand if the Service list should not show them`);
     }
   }
   console.log(`\ncustomers: ${customerRecords.length + linkRecords.length} to write (${Object.entries(counts).filter(([k]) => k.startsWith("customers:")).map(([k, v]) => `${k.slice(10)} ${v}`).join(", ")})`);
@@ -319,8 +412,24 @@ if (PHASES.includes("leads")) {
     const existingRec = sfId ? existingById.get(sfId) : null;
     const linkedNotCreated = existingRec && idMap.customers[cid]?.created !== true;
     const assigned = l.assigned_employee?.id ? resolveTech(l.assigned_employee.id).sfId : null;
-    const f = leadFields(l, { assignedToId: assigned, leadSources });
-    if (linkedNotCreated && s(existingRec.Service_Stage__c)) delete f.Service_Stage__c; // never overwrite a stage the office set
+    // a won lead resolves on the day its job / estimate was made in HCP
+    const conv = leadConversions(l).map((x) => (x.type === "job" ? jobsById.get(x.id)?.created_at : estimatesById.get(x.id)?.created_at)).filter(Boolean).sort()[0] || null;
+    const jobTypeName = jobTypes.get(s(l.job_fields?.job_type_uuid ?? l.job_fields?.job_type?.id)) || s(l.job_fields?.job_type?.name);
+    // the archive line on Description__c only where the customers phase wrote the flag (created / refreshed, never a linked record)
+    const disposition = existingRec && linkedNotCreated ? null : dispositionFor(customerPool.get(cid) || l.customer || { id: cid });
+    const f = leadFields(l, { assignedToId: assigned, leadSources, stages: stageValues, resolutions: resolutionValues, requestTypes: requestTypeValues, jobTypeName, convertedAt: conv, onGap, disposition });
+    // A linked customer is Sales's: a stage set there stays (unless it is the import's own
+    // "New"), and the outcome fields go with it. A customer the import created takes HCP's
+    // state on every run — that is how the 09-28 run's "Estimate Created" on a won lead becomes
+    // Resolved now (2026-10-02); the office starts working these records after this run.
+    const officeStage = s(existingRec?.Service_Stage__c);
+    if (linkedNotCreated && officeStage && officeStage !== "New") {
+      delete f.Service_Stage__c;
+      delete f.Service_Resolution__c;
+      delete f.Service_Resolved_Date__c;
+      delete f.Call_Attempts__c;
+      bump("leads:stage-kept");
+    }
     if (existingRec) {
       // Solar stays Solar: the type is unioned, never replaced (the customers phase did the same)
       const ct = unionProjectTypes(existingRec.Customer_Type__c, "Service");
@@ -335,7 +444,7 @@ if (PHASES.includes("leads")) {
     } else {
       leadRecords.push({ Id: sfId, [HCP_ID_FIELD]: cid, ...f });
     }
-    bump(`leads:${f.Service_Stage__c ? `stage-${f.Service_Stage__c}` : "stage-left-blank"}`);
+    if (f.Service_Stage__c) bump(`leads:stage-${f.Service_Stage__c}`);
   }
   // one row per Sundial customer: the newest lead wins
   const byKey = new Map();
@@ -348,24 +457,13 @@ if (PHASES.includes("leads")) {
 }
 
 // ---------------------------------------------------------------- estimates + jobs
-const claimed = new Map(); // HCP estimate id → HCP job id (the first job that came from it)
-for (const j of jobsHcp) {
-  const e = s(j.original_estimate_id);
-  if (e && !claimed.has(e)) claimed.set(e, s(j.id));
-}
-const invoicesByJob = new Map();
-for (const i of invoicesHcp) {
-  const jid = s(i.job_id);
-  if (!invoicesByJob.has(jid)) invoicesByJob.set(jid, []);
-  invoicesByJob.get(jid).push(i);
-}
 
 const estimateRecords = [];
 const lineRecordsByEstimate = new Map(); // estimate HCP id → line field rows (Estimate__c filled after the estimate write)
 const jobPlans = [];
 
 if (PHASES.includes("estimates")) {
-  let list = estimatesHcp.filter((e) => !claimed.has(s(e.id)));
+  let list = estimatesHcp; // the ones a job came from too — their own (archived) record, see jobEstimateFields
   if (LIMIT) list = list.filter((e) => limitedCustomerIds.has(s(e.customer?.id)));
   for (const est of list) {
     const customerSfId = sfCustomerFor(est.customer?.id);
@@ -378,9 +476,11 @@ if (PHASES.includes("estimates")) {
     const optLines = (detail?.options || []).find((o) => s(o.option?.id) === s(option?.id))?.line_items || [];
     const stage = /approved/i.test(s(option?.approval_status)) ? "Approved" : "Proposed";
     const rows = optLines.map((li, i) => lineFields(li, { estimateSfId: null, itemsByHcpId, stage, tenantId, index: i }));
-    estimateRecords.push(estimateFields(est, { customerSfId, tenantId, lineRows: rows }));
+    const disposition = estDisp.get(s(est.id));
+    estimateRecords.push(estimateFields(est, { customerSfId, tenantId, lineRows: rows, disposition }));
     lineRecordsByEstimate.set(s(est.id), rows);
     bump("estimates:standalone");
+    if (disposition?.archived) bump(`estimates:archived${claimed.has(s(est.id)) ? "-converted" : ""}`);
   }
 }
 
@@ -398,14 +498,15 @@ if (PHASES.includes("jobs")) {
     const detail = jobDetail.get(jid) || {};
     const invoices = invoicesByJob.get(jid) || [];
     const st = invoiceState(invoices);
-    const hcpEstimateId = [...claimed.entries()].find(([, j]) => j === jid)?.[0] || null;
-    const estKey = hcpEstimateId || `job:${jid}:estimate`;
+    const estKey = `job:${jid}:estimate`;
     const complete = /complete/i.test(s(job.work_status));
+    const disposition = jobDisp.get(jid);
     const sourceLines = detail.line_items?.length ? detail.line_items : st.live?.items || [];
     const rows = sourceLines.map((li, i) => lineFields(li, { estimateSfId: null, itemsByHcpId, stage: complete ? "Completed" : "Approved", tenantId, index: i }));
-    estimateRecords.push(jobEstimateFields(job, { hcpEstimateId, customerSfId, tenantId, lineRows: rows, jobState: st }));
+    estimateRecords.push(jobEstimateFields(job, { customerSfId, tenantId, lineRows: rows, jobState: st, archived: disposition?.archived === true }));
     lineRecordsByEstimate.set(estKey, rows);
-    jobPlans.push({ job, jid, estKey, customerSfId, st, invoices, appointments: detail.appointments || [] });
+    jobPlans.push({ job, jid, estKey, customerSfId, st, invoices, appointments: detail.appointments || [], disposition });
+    if (disposition?.archived) bump(`jobs:archived${disposition.stale ? "-stale" : ""}`);
   }
 }
 
@@ -422,7 +523,7 @@ for (const [estKey, rows] of lineRecordsByEstimate) {
 const lineIds = await upsertAll("lines", OBJ.line, lineRecords);
 for (const [k, v] of lineIds) idMap.lines[k] = v;
 
-const jobRecords = jobPlans.map((p) => jobFields(p.job, { customerSfId: p.customerSfId, estimateSfId: estimateIds.get(p.estKey) || idMap.estimates[p.estKey] || null, tenantId, st: p.st, appointments: p.appointments }));
+const jobRecords = jobPlans.map((p) => jobFields(p.job, { customerSfId: p.customerSfId, estimateSfId: estimateIds.get(p.estKey) || idMap.estimates[p.estKey] || null, tenantId, st: p.st, appointments: p.appointments, disposition: p.disposition }));
 console.log(`jobs: ${jobRecords.length}`);
 const jobIds = await upsertAll("jobs", OBJ.job, jobRecords);
 for (const [k, v] of jobIds) idMap.jobs[k] = v;
@@ -469,12 +570,31 @@ await fs.mkdir(OUT, { recursive: true });
 if (APPLY) await writeJson(path.join(OUT, "id-map.json"), idMap);
 await fs.writeFile(path.join(OUT, "review.csv"), toCsv(review));
 await fs.writeFile(path.join(OUT, "errors.csv"), toCsv(errors));
+// The jobs archived as abandoned — Monday's review list; Unarchive on the job page brings one back.
+const staleRows = jobPlans
+  .filter((p) => p.disposition?.stale)
+  .map((p) => ({
+    hcp_job: s(p.job.invoice_number) || p.jid,
+    customer: personName(p.job.customer),
+    address: addressLine(p.job.address),
+    hcp_status: s(p.job.work_status),
+    scheduled_for: s(p.job.schedule?.scheduled_start).slice(0, 10),
+    last_updated: s(p.job.updated_at).slice(0, 10),
+    reason: p.disposition.reason,
+    sundial_id: idMap.jobs[p.jid] || "",
+  }))
+  .sort((a, b) => a.scheduled_for.localeCompare(b.scheduled_for) || a.last_updated.localeCompare(b.last_updated));
+await fs.writeFile(path.join(OUT, "stale-jobs.csv"), toCsv(staleRows));
+const gapRows = [...gaps.entries()].map(([k, n]) => ({ field: k.split("\u0000")[0], value: k.split("\u0000")[1], leads: n })).sort((a, b) => a.field.localeCompare(b.field) || b.leads - a.leads);
+await fs.writeFile(path.join(OUT, "picklist-gaps.csv"), toCsv(gapRows));
 const summary = [
   `HCP import — ${new Date().toISOString()} — tenant ${TENANT} — ${APPLY ? "APPLIED" : "DRY RUN (nothing written)"}${LIMIT ? ` — limit ${LIMIT}` : ""}`,
   "",
   ...Object.entries(counts).sort().map(([k, v]) => `  ${k.padEnd(32)} ${v}`),
   "",
   `review.csv: ${review.length} row(s) — ${review.filter((r) => r.needs_action === "YES").length} need a decision (needs_action = YES; the rest are notes on how a customer was matched)   errors.csv: ${errors.length} row(s)`,
+  `stale-jobs.csv: ${staleRows.length} job(s) archived as abandoned (cutoff ${STALE_DAYS} days) — Harmon's Monday review; Unarchive on the job page brings one back`,
+  gapRows.length ? `picklist-gaps.csv: ${gapRows.length} value(s) the org lacks — add them in Setup and re-run for the exact stages / sources:\n${gapRows.map((g) => `    ${g.field.padEnd(28)} ${g.value.padEnd(40)} ${g.leads}`).join("\n")}` : "picklist-gaps.csv: none — every HCP value landed on a picklist value",
   APPLY ? "" : "Dry run: re-run with --apply to write. --limit 25 first is a good idea.",
   APPLY ? "Next: a FULL cache resync for customer, estimate, service_line, service_job, service_call, service_invoice, service_payment (docs/migration.md)." : "",
 ].filter((l) => l !== undefined).join("\n");

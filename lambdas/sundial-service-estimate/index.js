@@ -95,6 +95,7 @@ import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-p
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
+import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake-alerts.js";
 import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import {
@@ -166,6 +167,23 @@ export const PROJECT_TYPE_TAG = "Service";
 export const CUSTOMER_TYPE_FIELD = "Customer_Type__c";
 // D-075: the Service module's own pipeline on the customer (docs/service-customer-layout.md).
 export const SERVICE_STAGE_FIELD = "Service_Stage__c";
+/** Archived__c (2026-10-02): off every Service list by default; a reuse of the customer clears it. */
+export const ARCHIVED_FIELD = "Archived__c";
+/**
+ * The intake questions (Harmon, 2026-10-02): asked on every New Customer / Estimate / Job popup,
+ * written on the customer — created or existing. Body key → Sundial_Customer__c field. Each
+ * picklist is describe-guarded: a value the org lacks is a warning, never a failed create.
+ */
+export const INTAKE_FIELDS = Object.freeze({
+  systemOwnership: "System_Ownership__c",
+  propertyType: "Property_Type__c",
+  existingHarmonSystem: "Existing_Harmon_System__c",
+  inverterManufacturer: "Inverter_Manufacturer__c",
+  typeOfService: "Type_of_Service__c",
+  description: "Description__c",
+  nextStep: "Next_Step__c",
+  serviceClubInterest: "Service_Club_Interest__c",
+});
 export const SERVICE_STAGE_NEW = "New";
 export const SERVICE_REQUEST_TYPE_FIELD = "Service_Request_Type__c";
 
@@ -526,6 +544,20 @@ export function createHandler(deps = {}) {
     const f = hit.meta?.fields?.find((x) => x.name === field);
     return f?.picklistValues ?? null;
   }
+  /** Is this field in the org? (describe-guarded, like picklistValues — `null` when describe failed) */
+  async function fieldExists(sfObject, field) {
+    let hit = describeCache.get(sfObject);
+    if (!hit || Date.now() - hit.at > DESCRIBE_TTL_MS) {
+      try {
+        hit = { at: Date.now(), meta: await d.describeObject(sfObject) };
+        describeCache.set(sfObject, hit);
+      } catch (e) {
+        console.error("describe failed:", sfObject, e?.message || e);
+        return null;
+      }
+    }
+    return (hit.meta?.fields || []).some((x) => x.name === field);
+  }
 
   // --- cache stale flags (best-effort, never fail the write) ----------------------
   async function markStale(table, ids, tenantId) {
@@ -620,6 +652,30 @@ export function createHandler(deps = {}) {
   // Returns { ok:true, customer, created, warnings, events } or { ok:false, response }.
   // `events` are activity rows deferred until the estimate/job exists, so the customer
   // step shows up on the job's feed (with the estimate/job ids) rather than floating.
+  /** body.intake → the customer fields to write (only the answers given), with warnings for values the org lacks. */
+  async function intakeUpdates(intake, warnings) {
+    const out = {};
+    if (!intake || typeof intake !== "object") return out;
+    for (const [key, field] of Object.entries(INTAKE_FIELDS)) {
+      const raw = intake[key];
+      if (typeof raw !== "string" || !raw.trim()) continue;
+      const v = raw.trim();
+      if (field === "Description__c") {
+        out[field] = v.slice(0, 32000);
+        continue;
+      }
+      const values = await picklistValues(CUSTOMER_SF_OBJECT, field);
+      if (!values) {
+        warnings.push(`${field} is not in this org yet — the intake answer "${v}" was not saved.`);
+        continue;
+      }
+      const m = matchPicklist(v, values);
+      if (m) out[field] = m;
+      else warnings.push(`"${v}" is not a ${field} value — left blank.`);
+    }
+    return out;
+  }
+
   async function resolveCustomer(body, ctx, cors) {
     const { tenantId } = ctx;
     const events = [];
@@ -628,6 +684,7 @@ export function createHandler(deps = {}) {
       return { ok: false, response: bad(cors, "CUSTOMER_REQUIRED", "Provide customer: { id } or customer: { new: {...} }.") };
     }
     const warnings = [];
+    const intake = await intakeUpdates(body?.intake, warnings);
     // Two department tags, same value: Requested_Project_Types__c (the D-072 tag) and
     // Customer_Type__c (2026-09-19). Each is guarded by the org's describe — a field or a
     // picklist value the org lacks is a warning, never a failed create.
@@ -643,10 +700,28 @@ export function createHandler(deps = {}) {
     if (spec.id) {
       const customer = await loadCustomer(String(spec.id), tenantId);
       if (!customer) return { ok: false, response: notFound(cors) };
-      const upd = {};
+      const upd = { ...intake };
+      // Newly Service (the intake alert cares): the department tag was not there before this call.
+      const taggedNow = !String(customer[CUSTOMER_TYPE_FIELD] ?? "").split(";").map((x) => x.trim()).includes(PROJECT_TYPE_TAG);
+      let unarchived = false;
       for (const t of tags) {
         const merged = unionProjectTypes(customer[t.field], t.tag);
         if (merged) upd[t.field] = merged;
+      }
+      // An archived customer (2026-10-02, the HCP import's address book) who calls in and gets
+      // an estimate / job / Service entry is active again: the flag comes off in the same write.
+      // Guarded by describe (an org without the field skips it) and read first (no write on
+      // the thousands that are not archived).
+      if (await fieldExists(CUSTOMER_SF_OBJECT, ARCHIVED_FIELD)) {
+        try {
+          const rows = await d.sfQuery(`SELECT ${ARCHIVED_FIELD} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
+          if (rows?.[0]?.[ARCHIVED_FIELD] === true) {
+            upd[ARCHIVED_FIELD] = false;
+            unarchived = true;
+          }
+        } catch (e) {
+          console.error("archived read failed:", e?.message || e); // bookkeeping only
+        }
       }
       if (Object.keys(upd).length) {
         try {
@@ -654,13 +729,14 @@ export function createHandler(deps = {}) {
           Object.assign(customer, upd);
           await markStale(CACHE.customer, [customer.Id], tenantId);
           const [field, to] = Object.entries(upd)[0]; // one feed row per pick; `fields` carries both when both changed
-          events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field, to, fields: upd } });
+          events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field, to, fields: upd, unarchived: upd[ARCHIVED_FIELD] === false || undefined } });
         } catch (e) {
           // Tagging is bookkeeping; the estimate/job still gets created.
           warnings.push(`Could not tag the customer with ${PROJECT_TYPE_TAG}: ${e?.sfBody || e?.message || e}`);
+          unarchived = false;
         }
       }
-      return { ok: true, customer, created: false, warnings, events };
+      return { ok: true, customer, created: false, warnings, events, unarchived, taggedNow };
     }
 
     if (spec.new) {
@@ -697,6 +773,7 @@ export function createHandler(deps = {}) {
       });
       fields.Client__c = tenantId;
       for (const t of tags) fields[t.field] = t.tag;
+      Object.assign(fields, intake);
       let created;
       try {
         created = await d.sfCreateRecord(CUSTOMER_SF_OBJECT, fields);
@@ -704,10 +781,28 @@ export function createHandler(deps = {}) {
         return { ok: false, response: sfError(cors, e, "customer create") };
       }
       const customer = { Id: created.id, ...fields };
-      events.push({ event: EVENTS.CUSTOMER_CREATED, recordType: "customer", recordSfId: customer.Id, details: { name: fields.Name, tagged: tag ? [tag] : [], viaPopup: true } });
-      return { ok: true, customer, created: true, warnings, events };
+      events.push({ event: EVENTS.CUSTOMER_CREATED, recordType: "customer", recordSfId: customer.Id, details: { name: fields.Name, tagged: tag ? [tag] : [], viaPopup: true, intake: Object.keys(intake).length ? Object.keys(intake) : undefined } });
+      return { ok: true, customer, created: true, warnings, events, unarchived: false, taggedNow: true };
     }
     return { ok: false, response: bad(cors, "CUSTOMER_REQUIRED", "customer must carry id or new.") };
+  }
+
+  /**
+   * The Service intake alerts (Harmon, 2026-10-02), after a popup's customer landed:
+   * someone was just put in Assigned To → that person; a customer that is new to Service
+   * (created, un-archived, or tagged Service for the first time) with nobody assigned → the
+   * Service managers. Best-effort, after every write.
+   */
+  async function intakeAlerts(ctx, r, { assignedTo = null, assignedBefore = null } = {}) {
+    const customer = r?.customer;
+    if (!customer?.Id) return;
+    const reason = r.created ? "created" : r.unarchived ? "unarchived" : r.taggedNow ? "created" : null;
+    if (assignedTo && assignedTo !== assignedBefore) {
+      await alertAssigned({ notifier: d.notifier, tenantId: ctx.tenantId, customer, assignedToSfId: assignedTo, actorUserSfId: ctx.userId, actorName: ctx.actor?.name ?? null, now: d.now() });
+      return;
+    }
+    if (!reason || assignedTo || assignedBefore) return;
+    await alertUnassignedCustomer({ notifier: d.notifier, sfQuery: d.sfQuery, tenantId: ctx.tenantId, customer: { ...customer, Assigned_To__c: null }, reason, actorUserSfId: ctx.userId, now: d.now() });
   }
 
   async function flushEvents(ctx, events, refs) {
@@ -854,12 +949,14 @@ export function createHandler(deps = {}) {
       let customerCreated = false;
       let warnings = [];
       let customerEvents = [];
+      let resolved = null;
       if (body?.isTemplate !== true) {
         const r = await resolveCustomer(body, ctx, cors);
         if (!r.ok) return r.response;
         ({ customer, warnings } = r);
         customerCreated = r.created;
         customerEvents = r.events;
+        resolved = r;
       }
       let est;
       try {
@@ -878,6 +975,7 @@ export function createHandler(deps = {}) {
       const full = await loadEstimate(est.id, tenantId);
       const { totals } = await recomputeAndStore(full, tenantId);
       await flushEvents(ctx, customerEvents, { estimateSfId: est.id });
+      if (resolved) await intakeAlerts(ctx, resolved);
       await act(ctx, {
         event: EVENTS.ESTIMATE_CREATED, recordType: "estimate", recordSfId: est.id, estimateSfId: est.id,
         details: { number: full?.Name ?? null, isTemplate: body?.isTemplate === true, customerId: customer?.Id ?? null, customerCreated, linesCreated: lineResult.createdIds.length + (template?.count ?? 0), templateId: body?.templateId ?? null, total: totals.total },
@@ -1361,9 +1459,10 @@ export function createHandler(deps = {}) {
         // popup), so an existing customer's current stage is read here, guarded.
         let currentStage = null;
         if (!created) {
-          const rows = await d.sfQuery(`SELECT ${SERVICE_STAGE_FIELD} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
+          const rows = await d.sfQuery(`SELECT ${SERVICE_STAGE_FIELD}, Assigned_To__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
           currentStage = rows?.[0]?.[SERVICE_STAGE_FIELD] ?? null;
           customer[SERVICE_STAGE_FIELD] = currentStage;
+          customer.Assigned_To__c = rows?.[0]?.Assigned_To__c ?? null;
         }
         if (created || !currentStage) upd[SERVICE_STAGE_FIELD] = newStage;
       }
@@ -1374,7 +1473,7 @@ export function createHandler(deps = {}) {
         if (m) upd[SERVICE_REQUEST_TYPE_FIELD] = m;
         else warnings.push(`Request type "${req.requestType}" is not a ${SERVICE_REQUEST_TYPE_FIELD} value — left blank.`);
       }
-      if (typeof req.description === "string" && req.description.trim()) upd.Description__c = req.description.trim().slice(0, 32000);
+      if (typeof req.description === "string" && req.description.trim() && !body?.intake?.description) upd.Description__c = req.description.trim().slice(0, 32000);
       if (typeof req.assignedTo === "string" && SF_ID_RE.test(req.assignedTo)) {
         upd.Assigned_To__c = req.assignedTo;
         upd.Assigned_Date__c = d.now().toISOString().slice(0, 10);
@@ -1396,6 +1495,7 @@ export function createHandler(deps = {}) {
         }
       }
       await flushEvents(ctx, events, {});
+      await intakeAlerts(ctx, r, { assignedTo: upd.Assigned_To__c ?? null, assignedBefore: customer.Assigned_To__c ?? null });
       return jsonResponse(created ? 201 : 200, cors, {
         success: true,
         customerId: customer.Id,
@@ -1453,6 +1553,7 @@ export function createHandler(deps = {}) {
       const full = await loadEstimate(est.id, tenantId);
       const { totals } = await recomputeAndStore(full, tenantId);
       await flushEvents(ctx, customerEvents, { estimateSfId: est.id, jobSfId: job.id });
+      await intakeAlerts(ctx, r);
       await act(ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.id, details: { quickCreate: true, customerId: customer.Id, customerCreated, linesCreated: lineResult.createdIds.length + (template?.count ?? 0), total: totals.total } });
       return jsonResponse(201, cors, {
         success: true,

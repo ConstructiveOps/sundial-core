@@ -36,6 +36,8 @@ import {
 } from "../../lib/salesforce.js";
 import { resolveIdentity } from "../../lib/identity.js";
 import { getSupabaseClient } from "../../lib/supabase.js";
+import { createNotifier } from "../../lib/notify.js";
+import { alertAssigned, alertUnassignedCustomer, isServiceCustomer } from "../../lib/service-intake-alerts.js";
 
 // --- Object allowlist (the security spine) ---------------------------------
 // The {object} path param is one of these short keys. Anything else => 400.
@@ -155,6 +157,55 @@ function activityRefs(objectKey, record, recordId) {
 function activityActor(identity) {
   const u = identity?.user ?? {};
   return { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null };
+}
+
+// --- The Service intake alerts (Harmon, 2026-10-02; lib/service-intake-alerts.js) ----------
+// The customer page edits Assigned To and Archive / Unarchive through THIS route, so the two
+// always-on alerts fire here as well as in the estimate Lambda: an assignment → the assignee;
+// a Service customer un-archived (or created here) with nobody assigned → the Service managers.
+let notifierCache = null;
+function notifier() {
+  if (!notifierCache) notifierCache = createNotifier({ getSupabaseClient, env: process.env });
+  return notifierCache;
+}
+const INTAKE_ALERT_FIELDS = ["Assigned_To__c", "Archived__c"];
+function touchesIntakeAlertFields(fields) {
+  const keys = Object.keys(fields || {}).map((k) => k.toLowerCase());
+  return INTAKE_ALERT_FIELDS.some((f) => keys.includes(f.toLowerCase()));
+}
+/** The customer as it was before the PATCH, for the alert decisions (null when not needed / unreadable). */
+async function readCustomerForAlerts(entry, recordId, tenantId) {
+  try {
+    const rows = await sfQuery(
+      `SELECT Id, Name, First_Name__c, Last_Name__c, Assigned_To__c, Archived__c, Customer_Type__c FROM ${entry.sfObject} ` +
+        `WHERE Id = '${soqlEscapeString(recordId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`,
+    );
+    return rows?.[0] ?? null;
+  } catch (e) {
+    console.error("intake alert pre-read failed:", e?.message || String(e));
+    return null;
+  }
+}
+const pick = (obj, name) => {
+  const k = Object.keys(obj || {}).find((x) => x.toLowerCase() === name.toLowerCase());
+  return k ? obj[k] : undefined;
+};
+async function customerIntakeAlertsAfterUpdate({ before, clean, recordId, tenantId, identity }) {
+  if (!before) return;
+  const actor = activityActor(identity);
+  const after = { ...before };
+  const assignedTo = pick(clean, "Assigned_To__c");
+  const archived = pick(clean, "Archived__c");
+  if (assignedTo !== undefined) after.Assigned_To__c = assignedTo || null;
+  if (archived !== undefined) after.Archived__c = archived === true;
+  if (assignedTo && assignedTo !== before.Assigned_To__c) {
+    await alertAssigned({ notifier: notifier(), tenantId, customer: after, assignedToSfId: assignedTo, actorUserSfId: actor.id, actorName: actor.name });
+    return;
+  }
+  const unarchived = before.Archived__c === true && archived === false;
+  if (unarchived && !after.Assigned_To__c && isServiceCustomer(after)) {
+    await alertUnassignedCustomer({ notifier: notifier(), sfQuery, tenantId, customer: { ...after, Id: recordId }, reason: "unarchived", actorUserSfId: actor.id });
+  }
 }
 
 /**
@@ -723,6 +774,8 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
 
   // 4b) Service objects: capture the values about to change, for the activity row.
   const before = await readBeforeForActivity(objectKey, entry, recordId, tenantId, Object.keys(clean));
+  // 4c) A customer's Assigned To / Archived edit: what it was, for the intake alerts (2026-10-02).
+  const customerBefore = objectKey === "customer" && touchesIntakeAlertFields(clean) ? await readCustomerForAlerts(entry, recordId, tenantId) : null;
 
   // 5) PATCH to Salesforce (success is 204 No Content).
   const resp = await sfWrite(
@@ -748,6 +801,9 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
   } catch (e) {
     console.error("cache stale-flag threw (update):", e?.message || String(e));
   }
+
+  // 6b) The intake alerts, after the write (best-effort; never fails the save).
+  if (customerBefore) await customerIntakeAlertsAfterUpdate({ before: customerBefore, clean, recordId, tenantId, identity });
 
   // 7) Activity tracker (service objects only). Best-effort, after the write.
   if (SERVICE_ACTIVITY_KEYS[objectKey]) {
@@ -928,6 +984,13 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
     /* fall through with null id */
   }
   const newId = created?.id ?? null;
+
+  // A Service customer made through this generic route with nobody assigned (2026-10-02): the
+  // Service managers hear it, exactly as from the Service popups.
+  if (newId && objectKey === "customer" && isServiceCustomer(payload) && !pick(payload, "Assigned_To__c")) {
+    const actor = activityActor(identity);
+    await alertUnassignedCustomer({ notifier: notifier(), sfQuery, tenantId, customer: { ...payload, Id: newId, Assigned_To__c: null }, reason: "created", actorUserSfId: actor.id });
+  }
 
   // Activity tracker (service objects only). Best-effort, after the write.
   if (newId && SERVICE_ACTIVITY_KEYS[objectKey]) {

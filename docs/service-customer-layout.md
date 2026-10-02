@@ -94,7 +94,6 @@ office actually types on most contacts):
 | Field | Label on the page | Notes |
 |---|---|---|
 | `Service_Request_Type__c` * | What they need | new |
-| `Description__c` * | The request | long text — what the customer said, in their words; carried onto the estimate's job description by hand for now |
 | `Service_Stage__c` * | Service stage | new |
 | `Assigned_To__c` * | Assigned to | user dropdown; writes the lookup |
 | `Assigned_Date__c` | Assigned on | date |
@@ -112,6 +111,20 @@ office actually types on most contacts):
 | `Referred_By__c` | Referred by | text |
 | `Lead_Date__c` | Lead date | date |
 | `First_Contact_Date__c` | First contact | date |
+
+### 1b. Intake (2026-10-02, Harmon's intake form)
+The eight questions every New Customer / New Estimate / New Job popup asks under the customer block, always shown here, every picklist the org's own (fields Tim added in Setup):
+
+| Field | Label on the page |
+|---|---|
+| `System_Ownership__c` | Do you own or lease the system? |
+| `Property_Type__c` | Is the property residential or commercial? (moved here from Property) |
+| `Existing_Harmon_System__c` | Did Harmon install this system? |
+| `Inverter_Manufacturer__c` | What brand is your solar inverter? |
+| `Type_of_Service__c` | What type of work do you need done? |
+| `Description__c` | Tell us more about your issue. (moved here from Request — the old "The request") |
+| `Next_Step__c` | What would you like to do next? |
+| `Service_Club_Interest__c` | Are you interested in signing up for our active monitoring service? It's $9.99 per month or $99 per year. |
 
 ### 2. Contact
 `First_Name__c` · `Last_Name__c` · `Primary_Phone__c` · `Secondary_Phone__c` ·

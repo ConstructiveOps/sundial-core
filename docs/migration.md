@@ -110,6 +110,7 @@ node scripts/hcp-import.mjs --tenant harmon --apply        # the lot (≈ 27,000
 Reports land in `migration\hcp\import\`: `SUMMARY.txt`, `review.csv` (every customer match
 worth a note; `needs_action = YES` marks the ones a person must decide — an ambiguous match
 created new, a lead with no customer — the rest are notes on how a customer was matched),
+`stale-jobs.csv` and `picklist-gaps.csv` (see *What is active*),
 `errors.csv` (rows Salesforce refused, with its message), `id-map.json`
 (HCP id → Sundial id, and whether the import created the customer or linked it — the file that
 makes a re-run treat each customer the right way; keep it).
@@ -125,10 +126,10 @@ A customer the import CREATED is refreshed from HCP on every run until cutover.
 
 | HCP | Sundial | Notes |
 |---|---|---|
-| customer | `Sundial_Customer__c` | `Status__c` = Customer when it has a job, else Lead — **no `Service_Stage__c`** (2026-09-29: the first run stamped ~7,400 of them `New` and buried the office's pipeline; `scripts/clear-new-service-stage.mjs` cleared it, the office sets the stage by hand); `Lead_Source__c` only when HCP's value is a picklist value; `notes` → `Description__c` |
-| lead | the customer's hub record | `Service_Stage__c` Estimate Created (converted) / Closed (`lost_at`, resolution Not Interested) — an open lead gets **no stage** (2026-09-29); `Description__c` gets `HCP lead #… · pipeline status`, tags, job fields; `Assigned_To__c` by the tech map; a stage the office already set is never overwritten |
-| estimate (not claimed by a job) | `Sundial_Estimate__c` + `Sundial_Service_Line__c` per line of the approved option, else option 1 (other options in `Version_Log__c`) | Approved / Declined / Sent; `Tax_Amount__c` = option total − lines |
-| job | `Sundial_Service_Job__c` + its one estimate (the claimed HCP estimate via `original_estimate_id`, else `job:{id}:estimate`) + lines from the job's line items (else the invoice's items) | status: canceled → Closed/Cancelled; complete → Paid / Invoiced / Closed ($0) / Ready to Bill; scheduled → Scheduled; in progress → In Progress; unscheduled → Ready to Schedule. `Office_Notes__c` starts `Migrated from Housecall Pro — HCP job #1042` + tags + lead source + the job's notes field |
+| customer | `Sundial_Customer__c` | `Status__c` = Customer when it has a job, else Lead; no stage of its own (the lead sets it — see below; a `New` left by the first run is cleared on a refresh when HCP has no open lead); **`Archived__c`** from the rules under *What is active* (created / refreshed customers only — a linked Sales record is never archived), the reason as the trailing line of `Description__c` (`Archived by the HCP import: …`); `Lead_Source__c` only when HCP's value is a picklist value; `notes` → `Description__c` |
+| lead | the customer's hub record | **open** → the stage HCP's `pipeline_status` means (New Lead / Unassigned / Assigned → New; First / Second / Third Contact → Contact Attempt Made with `Call_Attempts__c` 1 / 2 / 3; Working On – Waiting on Customer → Waiting on Customer; Working On – Waiting on Service/Quote → In Progress; On Hold → **On Hold** once the org has it, Waiting on Customer until then), `Service_Request_Type__c` from the lead's HCP job type when the org has that value; **won** → Resolved · Job Created / Estimate Created, resolved on the day the job / estimate was made; **lost** → Closed · **Lost** (Not Interested until the org has it), resolved on `lost_at`. `Description__c` gets `HCP lead #… · pipeline status`, tags, job type; `Assigned_To__c` by the tech map. A stage Sales set on a LINKED customer is never overwritten; a customer the import created takes HCP's state on every run |
+| estimate | `Sundial_Estimate__c` + `Sundial_Service_Line__c` per line of the approved option, else option 1 (other options in `Version_Log__c`) | Approved / Declined / Expired / Sent; `Tax_Amount__c` = option total − lines; `Archived__c` per *What is active*. An estimate a job came from (matched on the **option** id — a job's `original_estimate_id` is `est_…`, the estimate's own id `csr_…`; 0 of 77 matched by estimate id before 2026-10-02) is its own record, archived "converted to HCP job #…" — never the job's estimate |
+| job | `Sundial_Service_Job__c` + its one estimate (`job:{id}:estimate`, always made for the job) + lines from the job's line items (else the invoice's items) | status: canceled → Closed/Cancelled; complete → Paid / Invoiced / Closed ($0) / Ready to Bill; scheduled → Scheduled; in progress → In Progress; unscheduled → Ready to Schedule. `Archived__c` per *What is active* (the job's estimate follows it). `Office_Notes__c` starts `Migrated from Housecall Pro — HCP job #1042` + tags + lead source + `Archived by the HCP import: <reason>` when archived + the job's notes field |
 | appointment | `Sundial_Service_Call__c`, one per tech (`{appointment}:{employee}` when several) | Arizona times (fixed −07:00); Complete calls get `Actual_*` from the job's clock (single appointment) else the window; a tech without a Sundial user is named in `Private_Notes__c` |
 | invoice | `Sundial_Service_Invoice__c`, `Name` = the HCP invoice number | Paid / Partially Paid / Sent / Issued / Draft / Void; tax, discount, paid, balance from the list record |
 | payment / refund | `Sundial_Service_Payment__c` | Payment / Refund, method Card / Check / ACH / Other, Succeeded |
@@ -137,6 +138,44 @@ Not carried: HCP's notes feed and photos (the web-app route), `job_fields` beyon
 description, the service-plan memberships (D-073 rows are born from Sundial's own join).
 `settleMoney()` is not involved — the import writes the settled fields directly, once, from
 HCP's own paid / due numbers.
+
+### What is active (2026-10-02)
+
+Harmon's feedback after the first import: ~9,500 customers in the Service list, a board
+full of "New", and the real work buried. HCP has no archived flag on its API; it has signals,
+and `lib/hcp-disposition.js` turns them into `Archived__c` (a plain checkbox, added in Setup on
+`Sundial_Customer__c`, `Sundial_Estimate__c`, `Sundial_Service_Job__c`; `sql/2026-10-02_archived.sql`
+gives the cache its `archived` column; the import refuses to run until the three fields exist).
+Every Service list and board hides archived rows until **Show archived** is ticked; search never
+hides them; **Archive / Unarchive** sits on the customer, job and estimate pages; a popup that
+reuses an archived customer (New Estimate / New Job / Add to Service) un-archives it. The
+cutoff for "abandoned" is `--stale-days` (default **90**).
+
+| | archived when | stays visible |
+|---|---|---|
+| job | cancelled in HCP (`deleted_at` = HCP's own archive); complete and paid, or $0; complete + unpaid **and tagged `invoiced …`** (Harmon's "handed to Acumatica" tag); **stale**: `scheduled` with a start more than 90 days back and never started, or `needs scheduling` untouched for 90 days | in progress; scheduled ahead; needs scheduling touched this season; complete + unpaid + **untagged** (shown as Invoiced so the office can check it was billed) |
+| estimate | converted to a job; cancelled / declined / expired; untouched for 90 days | a live quote |
+| customer | **every customer with no job in HCP** — the import's `Status__c` rule makes those Leads, and Harmon opens Sundial with a clean Lead / Opportunity pipeline (the 11th-hour ask, 2026-10-02): open HCP lead or not, live estimate or not (the estimate stays on its own list). Its stage is still written, for Show archived. `--keep-leads` restores the older rule (archive only when nothing is open and nothing happened in 90 days). A customer **with** jobs: archived when nothing is open (no open HCP lead, no live job, no live estimate) **and** no activity across the household for 90 days | a customer with a live job, or a job in the past plus an open lead / live estimate, or anyone with jobs touched this season |
+
+The reason is written next to the flag: jobs in `Office_Notes__c` (its own line, before the
+job's HCP notes — the job page shows the field under Initial remote diagnosis), standalone
+estimates in `Internal_Notes__c` (the estimate page shows it under Scope summary), customers as
+the trailing line of `Description__c`; the job's own estimate carries the flag only. Stale jobs
+keep their HCP status (Scheduled / Ready to Schedule) — only the flag and the
+`Office_Notes__c` line say abandoned — and are listed in `migration\hcp\import\stale-jobs.csv`
+for Monday's review; Unarchive on the job page brings one back. `picklist-gaps.csv` lists
+every HCP value the org's picklists lack (an `On Hold` stage, a `Lost` resolution, lead
+sources, the lead's job types as request types) with counts: add them in Setup, re-run, and
+the exact value lands instead of the nearest one. On the 2026-09-26 pull with the 90-day
+cutoff: **209 of 2,222 jobs**, **64 of 272 estimates** and **~340 of 9,600 customers** stay
+visible — every one of them a Customer with a job; zero Leads (52 jobs listed as abandoned,
+76 estimates archived as converted). Sales's own Leads / Opportunities that HCP also knows
+(linked records) are never archived by the import; the dry run counts them
+(`customers:linked-lead-or-opportunity-left-alone`) for Tim to archive by hand if wanted.
+
+A re-run re-stamps `Archived__c` from HCP's state on every HCP-origin record (it is HCP's
+view until cutover); an archive the office sets by hand on a Sundial-born record is never
+touched, and a linked Sales customer never is either.
 
 **Clearing a stage the import should not have set** (2026-09-29): `node scripts/clear-new-service-stage.mjs --tenant harmon` lists every customer of the tenant at `Service_Stage__c = New` and writes `migration/service-stage-new-harmon.csv` (`Id, Service_Stage__c` blank — DataLoader *Update* with "Insert null values" ticked); `--apply` blanks them through the API instead, canary first, then batches of 200 by `Id`. Only the value `New`, only that tenant, idempotent. Then a full `customer` cache resync. (`POST /service/customers` — the office's own New Customer / Add to Service — still opens a customer at `New`: that one is deliberate.)
 

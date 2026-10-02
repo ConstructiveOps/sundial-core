@@ -22,7 +22,18 @@ mock.module("../lib/salesforce.js", {
   namedExports: {
     soqlEscapeString: (v) => String(v).replace(/'/g, "\\'"),
     async describeObject() {
-      return { fields: [{ name: "HCP_Id__c" }, { name: "Lead_Source__c", picklistValues: [{ value: "Web", active: true }, { value: "Phone", active: true }] }, { name: "State__c", picklistValues: [{ value: "AZ", active: true }] }] };
+      return {
+        fields: [
+          { name: "HCP_Id__c" },
+          { name: "Archived__c" },
+          { name: "Lead_Source__c", picklistValues: [{ value: "Web", active: true }, { value: "Phone", active: true }] },
+          { name: "State__c", picklistValues: [{ value: "AZ", active: true }] },
+          // the org's Service pipeline: no "On Hold" stage, no "Lost" resolution yet (both reported as gaps)
+          { name: "Service_Stage__c", picklistValues: ["New", "Contact Attempt Made", "In Progress", "Waiting on Customer", "Waiting on Other Department", "Estimate Created", "Resolved", "Closed"].map((value) => ({ value, active: true })) },
+          { name: "Service_Resolution__c", picklistValues: ["Estimate Created", "Job Created", "Not Interested", "Other"].map((value) => ({ value, active: true })) },
+          { name: "Service_Request_Type__c", picklistValues: [{ value: "Inverter Down", active: true }] },
+        ],
+      };
     },
     async sfQuery(soql) {
       if (/FROM Sundial_Tenant__c/.test(soql)) return [{ Id: "a0TENANT000001" }];
@@ -68,8 +79,10 @@ mock.module("../lib/salesforce.js", {
 });
 
 const jobs = [
-  { id: "job_1", invoice_number: "1042", work_status: "complete", description: "Breaker trips", notes: "gate 1234", total_amount: 45000, subtotal: 42000, original_estimate_id: "est_1", customer: { id: "cus_1", first_name: "Cy", last_name: "Diaz", email: "cy.diaz@example.com", mobile_number: "6025550100" }, address: { street: "9 Elm St", city: "Mesa", state: "AZ", zip: "85201" }, work_timestamps: { started_at: "2026-09-01T15:05:00Z", completed_at: "2026-09-01T16:50:00Z" }, schedule: {}, tags: [], created_at: "2026-08-30T10:00:00Z", updated_at: "2026-09-02T10:00:00Z" },
+  { id: "job_1", invoice_number: "1042", work_status: "complete", description: "Breaker trips", notes: "gate 1234", total_amount: 45000, subtotal: 42000, original_estimate_id: "o1", original_estimate_uuids: ["o1"], customer: { id: "cus_1", first_name: "Cy", last_name: "Diaz", email: "cy.diaz@example.com", mobile_number: "6025550100" }, address: { street: "9 Elm St", city: "Mesa", state: "AZ", zip: "85201" }, work_timestamps: { started_at: "2026-09-01T15:05:00Z", completed_at: "2026-09-01T16:50:00Z" }, schedule: {}, tags: [], created_at: "2026-08-30T10:00:00Z", updated_at: "2026-09-02T10:00:00Z" },
   { id: "job_2", invoice_number: "1043", work_status: "scheduled", description: "Panel offline", total_amount: 0, customer: { id: "cus_2", first_name: "New", last_name: "Person", email: "new@example.com" }, address: { street: "12 Oak Ave", city: "Tempe", state: "AZ", zip: "85281" }, schedule: { scheduled_start: "2026-10-01T15:00:00Z" }, created_at: "2026-09-20T10:00:00Z", updated_at: "2026-09-20T10:00:00Z" },
+  // scheduled last winter and never started: archived as abandoned, listed in stale-jobs.csv
+  { id: "job_3", invoice_number: "0900", work_status: "scheduled", description: "Old visit", total_amount: 10000, customer: { id: "cus_2", first_name: "New", last_name: "Person", email: "new@example.com" }, address: { street: "12 Oak Ave", city: "Tempe", state: "AZ", zip: "85281" }, schedule: { scheduled_start: "2025-12-02T15:00:00Z" }, work_timestamps: {}, created_at: "2025-11-20T10:00:00Z", updated_at: "2025-11-20T10:00:00Z", tags: [] },
 ];
 
 async function seedRaw(dir) {
@@ -83,18 +96,25 @@ async function seedRaw(dir) {
     { id: "cus_3", first_name: "Only", last_name: "Lead", email: "lead@example.com", addresses: [] },
     // a second HCP record for the Diaz household (same email): shares the solar customer, never stamps HCP_Id__c
     { id: "cus_4", first_name: "Cy", last_name: "Diaz", email: "cy.diaz@example.com", addresses: [] },
+    { id: "cus_5", first_name: "Gone", last_name: "Quiet", email: "quiet@example.com", addresses: [], created_at: "2025-03-01T10:00:00Z", updated_at: "2025-03-01T10:00:00Z" },
+    // the 2025 address-book load: no job, no estimate, no lead → archived
+    { id: "cus_6", first_name: "Address", last_name: "Book", email: "book@example.com", addresses: [], created_at: "2025-03-01T10:00:00Z", updated_at: "2025-03-01T10:00:00Z" },
   ]);
   await w("leads.json", [
-    { id: "lead_1", number: "L-9", status: "open", pipeline_status: "Contacted", lead_source: "Phone", customer: { id: "cus_3", first_name: "Only", last_name: "Lead", email: "lead@example.com" }, address: { street: "1 Lead Ln", zip: "85000" }, tags: [], assigned_employee: { id: "e1" }, conversions: [] },
-    { id: "lead_2", number: "L-77", status: "open", customer: { id: "cus_4", first_name: "Cy", last_name: "Diaz", email: "cy.diaz@example.com" }, address: {}, tags: [], conversions: [] },
+    { id: "lead_1", number: "L-9", status: "open", pipeline_status: "Second Contact", lead_source: "Phone", customer: { id: "cus_3", first_name: "Only", last_name: "Lead", email: "lead@example.com" }, address: { street: "1 Lead Ln", zip: "85000" }, tags: [], assigned_employee: { id: "e1" }, conversions: [], job_fields: { job_type_uuid: "jbt_1", business_unit_uuid: null } },
+    { id: "lead_2", number: "L-77", status: "open", pipeline_status: "On Hold", customer: { id: "cus_4", first_name: "Cy", last_name: "Diaz", email: "cy.diaz@example.com" }, address: {}, tags: [], conversions: [] },
+    // lost in June on a customer with nothing else: Closed, archived
+    { id: "lead_3", number: "L-80", status: "lost", pipeline_status: "Lost", lost_at: "2026-06-10T10:00:00Z", customer: { id: "cus_5", first_name: "Gone", last_name: "Quiet", email: "quiet@example.com" }, address: {}, tags: [], conversions: [] },
   ]);
+  await w("job_types.json", [{ id: "jbt_1", name: "Inverter Down " }]);
   await w("employees.json", [{ id: "e1", first_name: "Jake", last_name: "Dorsey", email: "JAKE@harmon.test", role: "field_tech" }, { id: "e2", first_name: "Old", last_name: "Tech", email: "old@harmon.test" }, { id: "e3", first_name: "Sam", last_name: "Lee", email: "sam.personal@example.com" }]);
   await w("jobs.json", jobs);
   await w("jobs/job_1.json", { job: jobs[0], line_items: [{ id: "li_1", name: "Inverter", description: "x".repeat(400), quantity: 1, unit_price: 210000, unit_cost: 150000, kind: "materials", service_item_id: "svc_1", taxable: true, order_index: 0 }, { id: "li_2", name: "Labor", quantity: 2, unit_price: 12000, kind: "labor", order_index: 1 }], appointments: [{ id: "ap_1", start_date: "2026-09-01", start_time: "08:00", end_time: "10:00", dispatched_employees_ids: ["e1", "e2"] }], errors: {} });
+  await w("jobs/job_3.json", { job: jobs[2], line_items: [], appointments: [], errors: {} });
   await w("jobs/job_2.json", { job: jobs[1], line_items: [], appointments: [{ id: "ap_2", start_date: "2026-10-01", start_time: "08:00", end_time: "10:00", dispatched_employees_ids: ["e1"] }], errors: {} });
   await w("estimates.json", [
-    { id: "est_1", estimate_number: "E-1", customer: jobs[0].customer, address: jobs[0].address, options: [{ id: "o1", name: "Option 1", total_amount: 45000, approval_status: "customer_approved" }], created_at: "2026-08-29T10:00:00Z" },
-    { id: "est_2", estimate_number: "E-2", customer: { id: "cus_2", first_name: "New", last_name: "Person" }, address: jobs[1].address, options: [{ id: "o2", name: "Good", total_amount: 99000, approval_status: "pending" }, { id: "o3", name: "Better", total_amount: 150000, approval_status: "pending" }], created_at: "2026-09-21T10:00:00Z" },
+    { id: "est_1", estimate_number: "E-1", work_status: "created job from estimate", customer: jobs[0].customer, address: jobs[0].address, options: [{ id: "o1", name: "Option 1", total_amount: 45000, approval_status: "customer_approved" }], created_at: "2026-08-29T10:00:00Z", updated_at: "2026-08-30T10:00:00Z" },
+    { id: "est_2", estimate_number: "E-2", work_status: "needs scheduling", customer: { id: "cus_2", first_name: "New", last_name: "Person" }, address: jobs[1].address, options: [{ id: "o2", name: "Good", total_amount: 99000, approval_status: "pending" }, { id: "o3", name: "Better", total_amount: 150000, approval_status: "pending" }], created_at: "2026-09-21T10:00:00Z", updated_at: "2026-09-21T10:00:00Z" },
   ]);
   await w("estimates/est_2.json", { estimate: { id: "est_2" }, options: [{ option: { id: "o2" }, line_items: [{ id: "eli_1", name: "Panel", quantity: 3, unit_price: 33000, kind: "materials" }] }, { option: { id: "o3" }, line_items: [{ id: "eli_2", name: "Panel+", quantity: 3, unit_price: 50000 }] }], errors: {} });
   await w("invoices.json", [{ id: "inv_1", invoice_number: "1042", status: "paid", amount: 45000, subtotal: 42000, due_amount: 0, job_id: "job_1", invoice_date: "2026-09-02T00:00:00Z", paid_at: "2026-09-03T00:00:00Z", taxes: [{ amount: 3000 }], discounts: [], items: [], payments: [{ id: "p1", amount: 45000, payment_method: "credit_card", paid_at: "2026-09-03T00:00:00Z" }], refunds: [] }]);
@@ -119,8 +139,20 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   assert.equal(upserts.length, 0, "a dry run writes nothing");
   const summary = await fs.readFile(path.join(dir, "import", "SUMMARY.txt"), "utf8");
   assert.match(summary, /DRY RUN/);
-  assert.match(summary, /customers:create\s+2/, summary);
-  assert.match(summary, /jobs:planned\s+2\n/, "jobs counted once");
+  assert.match(summary, /customers:create\s+4/, summary);
+  assert.match(summary, /customers:archived-lead-reset\s+3/, "the open-lead customer, the lost-lead household and the address-book entry: all Leads, all archived (the clean pipeline)");
+  assert.doesNotMatch(summary, /customers:archived\s/, "nobody with a job is archived in this fixture");
+  assert.match(summary, /jobs:planned\s+3\n/, "jobs counted once");
+  assert.match(summary, /jobs:archived\s+1\n/, "job_1: complete and paid");
+  assert.match(summary, /jobs:archived-stale\s+1/, "job_3: scheduled last winter, never started");
+  assert.match(summary, /estimates:archived-converted\s+1/, "est_1 became job_1 (matched on the option id)");
+  assert.match(summary, /stale-jobs.csv: 1 job/);
+  assert.match(summary, /Service_Stage__c\s+On Hold\s+1/, "a stage the org lacks is a gap, not a crash");
+  assert.match(summary, /Service_Resolution__c\s+Lost\s+1/);
+  const stale = await fs.readFile(path.join(dir, "import", "stale-jobs.csv"), "utf8");
+  assert.match(stale, /0900,New Person,.*scheduled,2025-12-02,2025-11-20,scheduled for 2025-12-02 in HCP and never started/);
+  const gapCsv = await fs.readFile(path.join(dir, "import", "picklist-gaps.csv"), "utf8");
+  assert.match(gapCsv, /Service_Stage__c,On Hold,1/);
   assert.match(summary, /customers:link-by-email\s+1/, summary);
   const techTpl = await fs.readFile(path.join(dir, "import", "tech-map.template.csv"), "utf8");
   assert.match(techTpl, /Old Tech,old@harmon.test,,,NO Sundial user/);
@@ -139,30 +171,55 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   assert.equal(solar.Street__c, "9 Elm St", "Sales's street stays");
   assert.equal(solar.Status__c, "Customer");
   assert.match(solar.Description__c ?? "", /HCP lead #L-77/, "the shared household's lead lands on the solar record by Salesforce id");
-  assert.equal(solar.Service_Stage__c ?? null, null, "an open lead sets no stage (2026-09-29) — the office does");
+  assert.equal(solar.Service_Stage__c, "Waiting on Customer", "On Hold → the nearest stage the org has");
+  assert.equal(solar.Archived__c, undefined, "a linked (Sales) customer is never archived by the import");
   // the new customer: created as a Customer (has a job); the lead-only one as a Lead in the pipeline
   const c2 = rec("Sundial_Customer__c", "cus_2");
   assert.equal(c2.Status__c, "Customer");
+  assert.equal(c2.Archived__c, false, "an open job keeps the customer visible");
   assert.equal(c2.Client__c, "a0TENANT000001");
   assert.equal(c2.Lead_Source__c, undefined, "'Yard sign' is not a picklist value");
   const c3 = rec("Sundial_Customer__c", "cus_3");
   assert.equal(c3.Status__c, "Lead");
-  assert.equal(c3.Service_Stage__c ?? null, null, "a lead-only customer gets no stage either (2026-09-29)");
+  assert.equal(c3.Service_Stage__c, "Contact Attempt Made", "Second Contact → the stage it means");
+  assert.equal(c3.Call_Attempts__c, 2);
+  assert.equal(c3.Service_Request_Type__c, "Inverter Down", "the lead's HCP job type, matched to the org's request types");
+  assert.equal(c3.Archived__c, true, "a Lead (no job) is archived — the clean pipeline (2026-10-02); the stage is still there for Show archived");
+  assert.match(c3.Description__c, /\nArchived by the HCP import: would start as a Lead — Harmon opens Sundial with a clean Lead \/ Opportunity pipeline$/);
   assert.equal(c3.Lead_Source__c, "Phone");
   assert.equal(c3.Assigned_To__c, "a1USER00000001");
-  assert.match(c3.Description__c, /HCP lead #L-9 · Contacted \(open\)/);
-  // estimates: est_1 claimed by job_1 (Invoiced, the job's lines); est_2 standalone with option "Good"'s lines only; job_2 gets its own
+  assert.match(c3.Description__c, /HCP lead #L-9 · Second Contact \(open\)/);
+  assert.match(c3.Description__c, /Job type: Inverter Down/);
+  const c5 = rec("Sundial_Customer__c", "cus_5");
+  assert.equal(c5.Archived__c, true, "lost in June, nothing else: archived");
+  assert.equal(c5.Service_Stage__c, "Closed");
+  assert.equal(c5.Service_Resolution__c, "Not Interested", "until the org has a Lost value");
+  assert.equal(c5.Service_Resolved_Date__c, "2026-06-10");
+  assert.match(c5.Description__c, /HCP lead #L-80 · Lost \(lost\)\nArchived by the HCP import: would start as a Lead/, "the reason trails the lead block");
+  const c6 = rec("Sundial_Customer__c", "cus_6");
+  assert.equal(c6.Archived__c, true, "the address book is archived");
+  assert.equal(c6.Description__c, "Archived by the HCP import: would start as a Lead — Harmon opens Sundial with a clean Lead / Opportunity pipeline");
+  assert.equal(c2.Description__c?.includes("Archived by") ?? false, false, "an active customer (has a job) carries no archive line");
+  // estimates: est_1 is the quote job_1 came from — its own record, Approved, ARCHIVED (converted); the
+  // job carries job:job_1:estimate with the job's lines; est_2 standalone with option "Good"'s lines only
   const e1 = rec("Sundial_Estimate__c", "est_1");
-  assert.equal(e1.Status__c, "Invoiced");
+  assert.equal(e1.Status__c, "Approved");
+  assert.equal(e1.Archived__c, true);
+  assert.match(e1.Internal_Notes__c, /Archived by the HCP import: converted to HCP job #1042/);
   assert.equal(e1.Sundial_Customer__c, "a1PSOLAR000001");
   assert.equal(e1.Total__c, 450);
-  assert.equal(e1.Subtotal__c, 2340);
-  assert.equal(e1.Material_Subtotal__c, 0, "the price-book item is a Product: subtotal only, like totals.js");
-  assert.equal(e1.Labor_Subtotal__c, 240);
+  const je1 = rec("Sundial_Estimate__c", "job:job_1:estimate");
+  assert.equal(je1.Status__c, "Invoiced");
+  assert.equal(je1.Archived__c, true, "the job's estimate follows the job");
+  assert.equal(je1.Subtotal__c, 2340);
+  assert.equal(je1.Material_Subtotal__c, 0, "the price-book item is a Product: subtotal only, like totals.js");
+  assert.equal(je1.Labor_Subtotal__c, 240);
   const e2 = rec("Sundial_Estimate__c", "est_2");
   assert.equal(e2.Status__c, "Sent");
+  assert.equal(e2.Archived__c, false);
   assert.equal(e2.Total__c, 990);
   assert.ok(rec("Sundial_Estimate__c", "job:job_2:estimate"));
+  assert.equal(rec("Sundial_Estimate__c", "job:job_2:estimate").Archived__c, false);
   assert.ok(rec("Sundial_Service_Line__c", "eli_1"));
   assert.equal(rec("Sundial_Service_Line__c", "eli_2"), undefined, "the other option's lines are not written");
   const l1 = rec("Sundial_Service_Line__c", "li_1");
@@ -171,20 +228,28 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   assert.ok(l1.Description__c.endsWith("…"));
   assert.equal(rec("Sundial_Service_Job__c", "job_1").Estimate_Total__c, undefined, "the job's estimate formulas are never sent");
   assert.equal(rec("Sundial_Service_Invoice__c", "inv_1").Balance__c, undefined);
-  assert.equal(l1.Estimate__c, e1.Id);
+  assert.equal(l1.Estimate__c, je1.Id);
   assert.equal(l1.Price_Book_Item__c, "a1ITEM00000001");
   assert.equal(l1.Kind__c, "Product");
   assert.equal(l1.Stage__c, "Completed");
   // jobs
   const j1 = rec("Sundial_Service_Job__c", "job_1");
-  assert.equal(j1.Estimate__c, e1.Id);
+  assert.equal(j1.Estimate__c, je1.Id);
   assert.equal(j1.Sundial_Customer__c, "a1PSOLAR000001");
   assert.equal(j1.Status__c, "Paid");
   assert.equal(j1.Payment_Status__c, "Paid");
-  assert.equal(e1.Service_Job__c, j1.Id, "the estimate points back at its job");
+  assert.equal(j1.Archived__c, true, "complete and paid: done");
+  assert.match(j1.Office_Notes__c, /Archived by the HCP import: complete and paid in HCP/);
+  assert.equal(je1.Service_Job__c, j1.Id, "the estimate points back at its job");
+  assert.equal(e1.Service_Job__c, undefined, "the quote it came from is not the job's estimate");
   const j2 = rec("Sundial_Service_Job__c", "job_2");
   assert.equal(j2.Status__c, "Scheduled");
+  assert.equal(j2.Archived__c, false);
   assert.equal(j2.Sundial_Customer__c, c2.Id);
+  const j3 = rec("Sundial_Service_Job__c", "job_3");
+  assert.equal(j3.Status__c, "Scheduled", "the status is HCP's; only the flag says abandoned");
+  assert.equal(j3.Archived__c, true);
+  assert.match(j3.Office_Notes__c, /scheduled for 2025-12-02 in HCP and never started/);
   // calls: two techs on ap_1 → two calls; e2 has no Sundial user
   const callKeys = [...store.get("Sundial_Service_Call__c").keys()].filter((k) => k.startsWith("ap_1:"));
   assert.equal(callKeys.length, 2);
@@ -214,13 +279,25 @@ test("hcp-import: dry run writes only reports; --apply lands everything on HCP i
   const firstCount = upserts.length;
   const sizes = [...store.entries()].map(([k, m]) => [k, m.size]);
 
+  // Between runs: the first import's "New" sits on the address-book customer; Sales moved the
+  // linked solar customer to In Progress by hand; the import-created lead customer was advanced
+  // in HCP. The re-run clears the first, keeps the second, re-stamps the third from HCP.
+  rec("Sundial_Customer__c", "cus_6").Service_Stage__c = "New";
+  solar.Service_Stage__c = "In Progress";
+  rec("Sundial_Customer__c", "cus_3").Service_Stage__c = "Estimate Created";
   // second apply: same records, same ids, nothing new
   await runImport(dir, ["--apply"]);
+  assert.equal(rec("Sundial_Customer__c", "cus_6").Service_Stage__c, null, "a stale New is cleared on a customer with no open lead");
+  assert.equal(solar.Service_Stage__c, "In Progress", "a stage Sales set on a linked customer is never overwritten");
+  assert.equal(rec("Sundial_Customer__c", "cus_3").Service_Stage__c, "Contact Attempt Made", "an import-created customer takes HCP's state on every run");
   assert.ok(upserts.length > firstCount);
   assert.deepEqual([...store.entries()].map(([k, m]) => [k, m.size]), sizes, `no duplicates on a re-run: ${[...store.get("Sundial_Customer__c").keys()]}`);
   assert.equal(rec("Sundial_Service_Job__c", "job_1").Id, j1.Id);
   const summary2 = await fs.readFile(path.join(dir, "import", "SUMMARY.txt"), "utf8");
-  assert.match(summary2, /customers:refresh\s+2/, "the two the import created are refreshed");
+  assert.match(summary2, /customers:refresh\s+4/, "the four the import created are refreshed");
+  assert.match(summary2, /customers:archived-lead-reset\s+3/, "archive flags are HCP's view, re-stamped on every run");
   assert.match(summary2, /customers:known-linked\s+1/, "the linked one only gets blanks filled");
+  assert.match(summary2, /customers:stage-New-cleared\s+1/);
+  assert.match(summary2, /leads:stage-kept\s+1/, "the linked solar customer");
   assert.doesNotMatch(summary2, /failed/, "nothing failed on the re-run");
 });

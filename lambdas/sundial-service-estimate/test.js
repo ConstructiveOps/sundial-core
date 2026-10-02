@@ -218,6 +218,11 @@ function fakeSalesforce() {
     if ((m = cond.match(/^(\w+) != '(.*)'$/))) return String(rec[m[1]] ?? "").toLowerCase() !== m[2].toLowerCase();
     if ((m = cond.match(/^(\w+) != null$/))) return rec[m[1]] != null;
     if ((m = cond.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
+    // IN ('a', 'b') — the intake alert's manager query (2026-10-02)
+    if ((m = cond.match(/^(\w+) IN \((.*?)\)?$/))) { // the trailing ")" may already be stripped above
+      const wanted = m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "").toLowerCase());
+      return wanted.includes(String(rec[m[1]] ?? "").toLowerCase());
+    }
     if ((m = cond.match(/^(\w+) LIKE '(.*)'$/))) {
       const v = String(rec[m[1]] ?? "").toLowerCase();
       const pat = m[2].toLowerCase();
@@ -303,6 +308,15 @@ function fakeSalesforce() {
             { name: "Service_Stage__c", picklistValues: ["New", "Contact Attempt Made", "In Progress", "Waiting on Customer", "Waiting on Other Department", "Estimate Created", "Resolved", "Closed"].map((value) => ({ value, active: true })) },
             { name: "Service_Request_Type__c", picklistValues: ["System Not Producing", "Monitoring Offline", "Roof Leak", "General Question", "Other"].map((value) => ({ value, active: true })) },
             { name: "Lead_Source__c", picklistValues: ["Web", "Referral", "Previous Customer", "Harmon Direct"].map((value) => ({ value, active: true })) },
+            { name: "Archived__c", type: "boolean" }, // 2026-10-02: off the lists; a reuse clears it
+            // the intake questions (2026-10-02)
+            { name: "System_Ownership__c", picklistValues: ["Own", "Lease", "PPA", "Not sure"].map((value) => ({ value, active: true })) },
+            { name: "Property_Type__c", picklistValues: ["Residential", "Commercial"].map((value) => ({ value, active: true })) },
+            { name: "Existing_Harmon_System__c", picklistValues: ["Yes", "No", "Not sure"].map((value) => ({ value, active: true })) },
+            { name: "Inverter_Manufacturer__c", picklistValues: ["SolarEdge", "Enphase", "SMA", "Fronius", "Tesla", "Other", "Not sure"].map((value) => ({ value, active: true })) },
+            { name: "Type_of_Service__c", picklistValues: ["Repair", "Maintenance", "Inspection", "Removal & Reinstall"].map((value) => ({ value, active: true })) },
+            { name: "Next_Step__c", picklistValues: ["Schedule a visit", "Get a quote", "Call me back"].map((value) => ({ value, active: true })) },
+            { name: "Service_Club_Interest__c", picklistValues: ["Yes", "No", "Maybe later"].map((value) => ({ value, active: true })) },
           ]),
         ]
       : [],
@@ -524,6 +538,84 @@ test("POST /service/customers (D-075): a NEW customer is tagged Service and open
   assert.equal(old.Service_Stage__c, "In Progress");
   const plain = await call(h, "POST", "/service/customers", { customer: { id: oldId }, request: { requestType: "Not a type" } });
   assert.match(plain.body.warnings.join(" "), /Request type "Not a type"/);
+  assert.equal(old.Archived__c, undefined, "a customer that was never archived is not written to");
+
+  // An ARCHIVED customer (the HCP address book, 2026-10-02) who calls in: the flag comes off with the tag.
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Dusty Book", Primary_Email__c: "dusty@x.com", Customer_Type__c: "Service", Requested_Project_Types__c: "Service", Archived__c: true });
+  const dustyId = fake.store.Sundial_Customer__c.at(-1).Id;
+  const back = await call(h, "POST", "/service/customers", { customer: { id: dustyId } });
+  assert.equal(back.status, 200);
+  const dusty = fake.store.Sundial_Customer__c.find((c) => c.Id === dustyId);
+  assert.equal(dusty.Archived__c, false, "Add to Service on an archived customer un-archives it");
+  assert.equal(dusty.Service_Stage__c, "New");
+
+  // The intake questions + the two always-on alerts (Harmon, 2026-10-02). The office: two Service
+  // managers, one Sales manager, one inactive Service manager; Paige (USER) is one of the two.
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Paige", Last_Name__c: "King", Access_Level__c: "Admin", Default_Department__c: "Service", Active__c: true });
+  const paige = fake.store.Sundial_User__c.at(-1);
+  paige.Id = USER; // the signed-in user
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Larry", Last_Name__c: "Boss", Access_Level__c: "Manager", Default_Department__c: "Service", Active__c: true });
+  const larry = fake.store.Sundial_User__c.at(-1);
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Sam", Last_Name__c: "Sales", Access_Level__c: "Manager", Default_Department__c: "Residential Solar", Active__c: true });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Gone", Last_Name__c: "Exec", Access_Level__c: "Executive", Default_Department__c: "Service", Active__c: false });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Jake", Last_Name__c: "Tech", Access_Level__c: "Technician", Default_Department__c: "Service", Active__c: true });
+  const jake = fake.store.Sundial_User__c.at(-1);
+  fake.notes.length = 0;
+  const intake = { systemOwnership: "Lease", propertyType: "Residential", existingHarmonSystem: "Yes", inverterManufacturer: "SolarEdge", typeOfService: "Repair", description: "Inverter shows a red light since Tuesday", nextStep: "Schedule a visit", serviceClubInterest: "Maybe later", bogus: "x" };
+  const made = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Ivy", lastName: "Intake", phone: "602-555-0199" } }, intake });
+  assert.equal(made.status, 201);
+  const ivy = fake.store.Sundial_Customer__c.find((c) => c.Id === made.body.customerId);
+  assert.equal(ivy.System_Ownership__c, "Lease");
+  assert.equal(ivy.Property_Type__c, "Residential");
+  assert.equal(ivy.Existing_Harmon_System__c, "Yes");
+  assert.equal(ivy.Inverter_Manufacturer__c, "SolarEdge");
+  assert.equal(ivy.Type_of_Service__c, "Repair");
+  assert.equal(ivy.Description__c, "Inverter shows a red light since Tuesday");
+  assert.equal(ivy.Next_Step__c, "Schedule a visit");
+  assert.equal(ivy.Service_Club_Interest__c, "Maybe later");
+  assert.equal(ivy.Service_Stage__c, "New");
+  // alert 1: nobody assigned → the ACTIVE Service managers, minus Paige who did it
+  assert.equal(fake.notes.length, 1, JSON.stringify(fake.notes));
+  assert.equal(fake.notes[0].category, "service_intake");
+  assert.equal(fake.notes[0].kind, "customer_unassigned");
+  assert.deepEqual(fake.notes[0].userSfIds, [larry.Id], "Larry only: Paige did it, Sam is Sales, Gone is inactive, Jake is a tech");
+  assert.match(fake.notes[0].title, /New Service customer — nobody assigned/);
+  assert.equal(fake.notes[0].url, `/customers/${ivy.Id}`);
+  // an unknown picklist value is a warning, never a refusal
+  const warned = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Wal", lastName: "Warn", phone: "602-555-0198" } }, intake: { inverterManufacturer: "Acme" } });
+  assert.equal(warned.status, 201);
+  assert.match(warned.body.warnings.join(" "), /"Acme" is not a Inverter_Manufacturer__c value/);
+  // alert 2: created WITH an assignee → the assignee hears it, the managers do not
+  fake.notes.length = 0;
+  const assigned = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Al", lastName: "Assigned", phone: "602-555-0197" } }, request: { assignedTo: jake.Id } });
+  assert.equal(assigned.status, 201);
+  assert.equal(fake.notes.length, 1);
+  assert.equal(fake.notes[0].kind, "customer_assigned");
+  assert.deepEqual(fake.notes[0].userSfIds, [jake.Id]);
+  assert.match(fake.notes[0].title, /Al Assigned was assigned to you/);
+  assert.match(fake.notes[0].body, /Paige King put you in Assigned To/);
+  // assigning yourself is silent
+  fake.notes.length = 0;
+  await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Me", lastName: "Mine", phone: "602-555-0196" } }, request: { assignedTo: USER } });
+  assert.equal(fake.notes.length, 0, "self-assignment: no alert");
+  // the estimate popup on an EXISTING archived customer: the intake answers land, the un-archive alerts the managers
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Old Archived", Primary_Email__c: "oa@x.com", Customer_Type__c: "Service", Requested_Project_Types__c: "Service", Archived__c: true });
+  const oaId = fake.store.Sundial_Customer__c.at(-1).Id;
+  fake.notes.length = 0;
+  const est = await call(h, "POST", "/service/estimates", { customer: { id: oaId }, intake: { typeOfService: "Inspection", description: "Annual check" } });
+  assert.equal(est.status, 201);
+  const oa = fake.store.Sundial_Customer__c.find((c) => c.Id === oaId);
+  assert.equal(oa.Archived__c, false);
+  assert.equal(oa.Type_of_Service__c, "Inspection");
+  assert.equal(oa.Description__c, "Annual check");
+  assert.equal(fake.notes.length, 1);
+  assert.equal(fake.notes[0].kind, "customer_unassigned");
+  assert.match(fake.notes[0].title, /Old Archived is back in Service — nobody assigned/);
+  // the same existing, already-Service, not-archived customer again: no alert (nothing is new about them)
+  fake.notes.length = 0;
+  await call(h, "POST", "/service/jobs", { customer: { id: oaId }, job: {} });
+  assert.equal(fake.notes.length, 0, "an existing Service customer reused: nobody is told");
+  fake.store.Sundial_User__c.length = 0;
 
   // The org without the package: the customer is created and the reason is said.
   fake.flags.noServiceFields = true;

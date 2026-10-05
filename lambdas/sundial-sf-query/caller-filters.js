@@ -43,9 +43,23 @@ export const IGNORED_FILTER_COLUMNS = (() => {
   return s;
 })();
 
-/** Sortable columns per object (indexed or small enough). Absent object = default order only. */
+/**
+ * Sortable columns per object. Absent object = default order only. A sort runs after the
+ * WHERE (status, stage, …), over at most one status's rows (~18k for Harmon's Leads), so an
+ * unindexed column costs milliseconds.
+ *
+ * customer: every column the Sales table can sort by. street / primary_phone /
+ * requested_project_types added 2026-10-05 so the Address, Phone and Requested Types
+ * headers keep sorting once the table pages server-side. Requested_Project_Types__c is a
+ * multi-select picklist, which SOQL cannot ORDER BY — the live cold-cache path falls back
+ * to the default order for it (SOQL_UNSORTABLE_TYPES in index.js); the cache path sorts it
+ * as text.
+ */
 export const SORT_ALLOWLIST = {
-  customer: ["created_date", "name", "last_name", "status", "stage", "sales_rep_name", "lead_source", "call_attempts"],
+  customer: [
+    "created_date", "name", "last_name", "status", "stage", "sales_rep_name", "lead_source", "call_attempts",
+    "street", "primary_phone", "requested_project_types",
+  ],
 };
 
 /** The pipeline route's narrowing columns (sundial_customer_pipeline's p_narrow). */

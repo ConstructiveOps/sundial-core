@@ -1,5 +1,9 @@
 # Sundial — Progress Log
 
+## 2026-10-05 (evening) — Three more sortable customer columns for the server-side Sales table
+
+The portal's Sales table moves to server-side paging (harmon-crm `feature/sales-server-side`), so a header click becomes `?sort=`. Three of its columns had no server sort: **Address, Phone, Requested Types**. `SORT_ALLOWLIST.customer` gains `street`, `primary_phone`, `requested_project_types` (`lambdas/sundial-sf-query/caller-filters.js`). Checked in the describe first: `Street__c` (string) and `Primary_Phone__c` (phone) are SOQL-sortable; **`Requested_Project_Types__c` is a multi-select picklist, `sortable: false`** — on the live cold-cache path that sort falls back to the default order (`SOQL_UNSORTABLE_TYPES` in `index.js`) instead of a SOQL error; the cache path, which serves every normal read, sorts it as text. No index: a sort runs over one status's rows (≤ ~18k). Tests +2 (caller-filters, handler incl. both cold-path cases). **Must be deployed (`.\deploy.ps1 sundial-sf-query`) before harmon-crm's `feature/sales-server-side` merges** — until then those three headers would answer `400 INVALID_SORT`.
+
 ## 2026-10-05 (later) — The Sales page can stop downloading the customer object: a pipeline endpoint for counts, and filtered, sorted pages (D-080)
 
 **Why.** After D-079 a page is fast but the Sales page still pulls all ~39k customers (~8 s) because the tabs' badges, the Stage / Rep / Source options, the board's columns and "hide empty", the 500-row table and the Service-only exclusion are all worked out in the browser from the full set. This is the backend half; the portal rewrite is Prompt 3 (target: first paint under 2 s).

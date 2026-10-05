@@ -88,7 +88,8 @@ mock.module("../../lib/supabase.js", {
 });
 
 const COLS = ["sf_id", "client_sf_id", "tenant_id", "created_date", "is_stale", "last_synced_at", "cache_version",
-  "name", "status", "stage", "lead_source", "customer_type", "sales_rep_sf_id", "sales_rep_name", "dealer_sf_id", "call_attempts", "primary_email"];
+  "name", "status", "stage", "lead_source", "customer_type", "sales_rep_sf_id", "sales_rep_name", "dealer_sf_id", "call_attempts", "primary_email",
+  "street", "primary_phone", "requested_project_types"];
 globalThis.fetch = async (url) => {
   if (String(url).includes("/rest/v1/")) {
     const properties = Object.fromEntries(COLS.map((c) => [c, {}]));
@@ -100,6 +101,7 @@ globalThis.fetch = async (url) => {
       { name: "Id", type: "id" }, { name: "Client__c", type: "reference" }, { name: "Name", type: "string" },
       { name: "Status__c", type: "picklist" }, { name: "Stage__c", type: "picklist" }, { name: "Customer_Type__c", type: "multipicklist" },
       { name: "Sales_Rep__c", type: "reference" }, { name: "CreatedDate", type: "datetime" },
+      { name: "Street__c", type: "string" }, { name: "Primary_Phone__c", type: "phone" }, { name: "Requested_Project_Types__c", type: "multipicklist" },
     ] }),
   };
 };
@@ -258,6 +260,29 @@ test("list: an empty filtered page with a genuinely EMPTY tenant cache still goe
   assert.match(select, /Status__c = 'Lead'/);
   assert.match(select, /\(Customer_Type__c = null OR Customer_Type__c != 'Service'\)/);
   assert.match(select, /ORDER BY Name ASC NULLS LAST, Id ASC/);
+});
+
+test("sort on street / phone / requested types: the cache sorts them; the cold path sorts street and falls back for the multi-select", async () => {
+  ctx.rows = [row("a1P000000000001AAA")];
+  for (const col of ["street", "primary_phone", "requested_project_types"]) {
+    ctx.ops = [];
+    _resetFreshnessMemo();
+    const res = await handler(ev("/sf/customer", { qs: { "f[status]": "Lead", sort: `${col}:desc` } }));
+    assert.equal(res.statusCode, 200, col);
+    assert.deepEqual(cacheOps().filter(([op]) => op === "order").slice(0, 2), [["order", col, false], ["order", "sf_id", true]], col);
+  }
+  // Cold path (tenant cache empty): Street__c is ORDER BY-able; Requested_Project_Types__c
+  // (multipicklist) is not, so it must fall back to the default order, never a SOQL error.
+  ctx.rows = [];
+  ctx.tenantRows = 0;
+  ctx.soql = [];
+  await handler(ev("/sf/customer", { qs: { "f[status]": "Lead", sort: "street:asc" } }));
+  assert.match(ctx.soql.find((s) => !/COUNT/.test(s)), /ORDER BY Street__c ASC NULLS LAST, Id ASC/);
+  ctx.soql = [];
+  await handler(ev("/sf/customer", { qs: { "f[status]": "Lead", sort: "requested_project_types:asc" } }));
+  const sel = ctx.soql.find((s) => !/COUNT/.test(s));
+  assert.doesNotMatch(sel, /ORDER BY Requested_Project_Types__c/);
+  assert.match(sel, /ORDER BY CreatedDate DESC NULLS LAST, Id ASC/);
 });
 
 test("search: f[] / not[] narrow a ?q= search server-side", async () => {

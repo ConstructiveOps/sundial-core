@@ -17,7 +17,7 @@ import {
   PIPELINE_NARROW_COLUMNS,
 } from "./caller-filters.js";
 
-const COLS = new Set(["sf_id", "status", "stage", "lead_source", "customer_type", "call_attempts", "sales_rep_name", "sales_rep_sf_id", "dealer_sf_id", "client_sf_id", "created_date", "name"]);
+const COLS = new Set(["sf_id", "status", "stage", "lead_source", "customer_type", "call_attempts", "sales_rep_name", "sales_rep_sf_id", "dealer_sf_id", "client_sf_id", "created_date", "name", "street", "primary_phone", "requested_project_types"]);
 const m = (obj) => new Map(Object.entries(obj).map(([k, v]) => [k, Array.isArray(v) ? v : [v]]));
 
 /** A recording stand-in for a supabase-js builder. */
@@ -145,6 +145,13 @@ test("sort: allowlisted column with direction; default asc; NOT allowlisted → 
   assert.equal(bad.body.code, "INVALID_SORT");
   assert.equal(parseSort({ sort: "name;drop" }, "customer", COLS).body.code, "INVALID_SORT");
   assert.equal(parseSort({ sort: "name:sideways" }, "customer", COLS).body.code, "INVALID_SORT");
+});
+
+test("sort: the Sales table's Address / Phone / Requested Types columns are sortable (2026-10-05)", () => {
+  for (const col of ["street", "primary_phone", "requested_project_types"]) {
+    assert.deepEqual(parseSort({ sort: `${col}:desc` }, "customer", COLS).sort, { column: col, ascending: false }, col);
+  }
+  assert.equal(parseSort({ sort: "street:asc" }, "job", COLS).body.code, "INVALID_SORT", "customer only");
 });
 
 test("sort: an object with no allowlist may only sort by created_date", () => {

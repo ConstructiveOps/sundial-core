@@ -1378,6 +1378,10 @@ export function includesOrExpr(column, value) {
 // Not enforcing (ACCESS_MODEL_MODE off / shadow) = tenant only, exactly what the list
 // serves in that mode. Counts come from the cache as it stands (D-079 keeps it current);
 // no Salesforce call is ever made here.
+// Field types SOQL refuses in ORDER BY (describe `sortable: false`). The cold-cache path
+// falls back to the default order for them; the cache path sorts them as text.
+const SOQL_UNSORTABLE_TYPES = new Set(["multipicklist", "textarea", "encryptedstring"]);
+
 const PIPELINE_OBJECTS = new Set(["customer"]);
 const PIPELINE_ACCESS_COLUMNS = new Set(["sales_rep_sf_id", "dealer_sf_id"]);
 
@@ -1914,10 +1918,13 @@ async function listColdCacheFallback(ctx) {
     createdDateSources?.[createdDateSources.length - 1] || "CreatedDate";
   const sfOffset = Math.min(offset, 2000); // SOQL OFFSET hard cap
   // ?sort= (D-080): created_date is the coalesced column, so it keeps orderField; any
-  // other allowlisted column is its own Salesforce field. Unmappable → default order.
+  // other allowlisted column is its own Salesforce field. Unmappable, or a type SOQL
+  // cannot ORDER BY (a multi-select picklist like Requested_Project_Types__c, a long text
+  // area) → the default order rather than a SOQL error.
   let orderBy = `${orderField} DESC NULLS LAST, Id ASC`;
   if (sort) {
-    const sortField = sort.column === "created_date" ? orderField : columnToField(sort.column)?.name;
+    const f = sort.column === "created_date" ? null : columnToField(sort.column);
+    const sortField = sort.column === "created_date" ? orderField : f && !SOQL_UNSORTABLE_TYPES.has(f.type) ? f.name : null;
     if (sortField) orderBy = `${sortField} ${sort.ascending ? "ASC" : "DESC"} NULLS LAST, Id ASC`;
   }
   const soql =

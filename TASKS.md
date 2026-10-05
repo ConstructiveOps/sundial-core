@@ -4,6 +4,17 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Sales page without the download: GET /sf/customer/pipeline + f[] / not[] / sort (D-080) — BUILT, NOT DEPLOYED (2026-10-05, branch `feature/sales-pipeline-endpoint`)
+
+Backend only; the portal does not change until Prompt 3. Nothing here changes what today's Sales page receives (new parameters only, defaults unchanged).
+
+- [x] `sundial_customer_pipeline` + the route + `f[]` / `not[]` / `sort` + tests (suite 1347; the SQL function tested against real Postgres).
+- [ ] **(1) Supabase → SQL editor**: open and **Run** `sql/sundial_customer_pipeline.sql`, then `sql/2026-10-05_sales_pipeline_indexes.sql`. Then run the two check queries at the bottom of the first file — the browser-role check must say **false, false**.
+- [ ] **(2) PowerShell**, in the `sundial-core` folder: `.\deploy.ps1 sundial-sf-query`
+- [ ] **(3) PowerShell:** `.\scripts\wire-sales-pipeline-route.ps1` and answer **y** to "Deploy API". It ends with the address to try.
+- [ ] **(4) harmon-crm `main`** — only after Prompt 3 (the Sales page rewritten to use the pipeline + pages) is reviewed and merged.
+- [ ] Prompt 3 must respect the **Lambda concurrency quota of 10**: load as pipeline + one page; board columns a few at a time.
+
 ## Sales list speed: cache freshness from the scheduled sync, narrow list rows, gzip (D-079) — BUILT, NOT DEPLOYED (2026-10-05, branch `feature/cache-freshness-from-sync`)
 
 The "before" numbers are in PROGRESS.md (2026-10-05). **Order matters: the backend (steps 1–3) is deployed BEFORE the harmon-crm branch `feature/list-fields-projection` merges.** Nothing breaks the other way round — today's `sundial-sf-query` simply ignores `?fields=list` — but the narrow rows only arrive once step 2 is live, so merge the portal after it.

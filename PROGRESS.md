@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-10-05 (later) — The Sales page can stop downloading the customer object: a pipeline endpoint for counts, and filtered, sorted pages (D-080)
+
+**Why.** After D-079 a page is fast but the Sales page still pulls all ~39k customers (~8 s) because the tabs' badges, the Stage / Rep / Source options, the board's columns and "hide empty", the 500-row table and the Service-only exclusion are all worked out in the browser from the full set. This is the backend half; the portal rewrite is Prompt 3 (target: first paint under 2 s).
+
+**Built (branch `feature/sales-pipeline-endpoint`).**
+- **`GET /sf/customer/pipeline`** → `public.sundial_customer_pipeline` (`sql/sundial_customer_pipeline.sql`): `by_status`, `by_stage`, `reps` and `sources` per status, reps / sources as tuples. Run against the live cache (as a plain read-only query — the Supabase connection here is read-only, so the function itself was not installed): **18,313 bytes, ~47 ms**, Lead 17,970 · Opportunity 7,739 · Past Customer 3,693 · Customer 368 (the same counts an independent query gave). `SECURITY DEFINER`, EXECUTE revoked from PUBLIC / anon / authenticated. Access filter from `enforce` (rep / dealer equalities; anything else 403), the caller's `f[stage|sales_rep_name|lead_source]` narrowing kept separate for the board's counts.
+- **List: `f[col]=v`** (repeat = any of, empty = blank), **`not[col]=v`** (exact, null-safe), **`sort=col:dir`** (customer allowlist), on the page, the count, `?q=` search and the cold path; tenant / access columns ignored. An empty filtered page answers from the cache instead of going live to Salesforce.
+- **Two traps, both measured live and pinned in comments, tests and D-080:** `customer_type <> 'Service'` / PostgREST `neq` drops the 29,749 NULL-typed customers (21 rows returned where 29,770 are right) → `IS DISTINCT FROM` / `or(is.null,neq)`; API Gateway keeps only the last value of a repeated query key → `multiValueQueryStringParameters`. Also checked live: two `.or()` groups AND correctly (7,667 = SQL truth); quoted values (`Clean Energy Experts "B"`) match exactly.
+- `scripts/wire-sales-pipeline-route.ps1` (its own `/sf/{object}/pipeline` resource), `sql/2026-10-05_sales_pipeline_indexes.sql`, `docs/api-endpoints.md`.
+
+**Tests.** `sql/sundial_customer_pipeline.test.js` (12, the real SQL file in PGlite — counts, Service-only out / NULL and `Solar;Service` in, rep and dealer scopes, narrowing, fail-closed keys, **anon / authenticated refused**), `caller-filters.test.js` (18), `pipeline.test.js` (15, through the handler: same access filter on counts and lists, access columns ignored, 400s, 403 parity, repeated keys, `total` unchanged by `fields=list`, empty filtered page stays on the cache). Suite **1347**, all passing. New devDependency `@electric-sql/pglite`.
+
 ## 2026-10-05 — The Sales list stops re-reading Salesforce: the cache trusts the scheduled sync, list rows get narrow, responses get gzipped (D-079)
 
 **The complaint.** Harmon: the Sales list "takes forever". **Why, measured before changing anything:**

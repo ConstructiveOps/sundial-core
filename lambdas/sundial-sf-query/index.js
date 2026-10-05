@@ -44,6 +44,17 @@ import { createShadow, resolveMode, MODES } from "./shadow.js";
 // READ-TIME FRESHNESS (D-079): the cache is authoritative while sundial-cache-sync is
 // healthy for the object; otherwise the old 10-minute per-row TTL. See freshness.js.
 import { resolveFreshness, isRowFresh, logFreshness } from "./freshness.js";
+// f[] / not[] / sort on the list, and the pipeline's narrowing (D-080). See caller-filters.js
+// for the two traps it guards: repeated keys (multiValueQueryStringParameters) and NULLs.
+import {
+  readMulti,
+  parseCallerFilters,
+  parseSort,
+  applyCallerFiltersToQuery,
+  callerFiltersToSoql,
+  filtersToNarrow,
+  PIPELINE_NARROW_COLUMNS,
+} from "./caller-filters.js";
 // ACCESS MODEL ENFORCEMENT (D-064 Phase 3, §7.3). Under ACCESS_MODEL_MODE=enforce these
 // decide what is SERVED. Under off/shadow they are not consulted by any serving line.
 import {
@@ -581,6 +592,7 @@ function mapIdentityError(code) {
 //   { kind: "picklist",  objectKey, field } -> GET /sf/meta/{object}/picklist/{field}
 //   { kind: "picklists", objectKey }        -> GET /sf/meta/{object}/picklists (batch)
 //   { kind: "users" }                        -> GET /sf/users (tenant users lookup)
+//   { kind: "pipeline",  objectKey }        -> GET /sf/{object}/pipeline (counts, D-080)
 //   { kind: "single",    objectKey, id }    -> GET /sf/{object}/{id}
 //   { kind: "list",      objectKey }        -> GET /sf/{object}
 //   { kind: "none" }                         -> unrecognized
@@ -635,6 +647,15 @@ function extractRoute(event) {
   //     NOT match it.
   if (/\/sf\/users\/?$/.test(path)) {
     return { kind: "users" };
+  }
+
+  // 1d) Pipeline counts: GET /sf/{object}/pipeline (D-080). Its own API Gateway
+  //     resource (scripts/wire-sales-pipeline-route.ps1); also recognised when it
+  //     arrives through /sf/{object}/{id} with id "pipeline" — a Salesforce id is 15 or
+  //     18 alphanumerics, so the literal can never be a record id.
+  const pipelineMatch = path.match(/\/sf\/([^/?]+)\/pipeline\/?$/);
+  if (pipelineMatch || pp.id === "pipeline") {
+    return { kind: "pipeline", objectKey: pp.object || decodeURIComponent(pipelineMatch[1]) };
   }
 
   // 2) Generic object routes (existing behavior, unchanged).
@@ -1241,7 +1262,7 @@ async function handleSingleRead(ctx) {
 // count:"exact" returns the full match total even though only SEARCH_CAP rows come
 // back. `term` is already sanitized (no wildcard/injection); each ILIKE value is
 // double-quoted for PostgREST so name chars (space ' . & -) are treated literally.
-async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, searchPhoneCols, term, cors, parentColumn, parentId, shadow, objectKey, enforce, access }) {
+async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, searchCacheCols, searchPhoneCols, term, cors, parentColumn, parentId, shadow, objectKey, enforce, access, callerFilters = null }) {
   const cols = (searchCacheCols || []).filter((c) => columnSet.has(c));
   if (cols.length === 0) {
     // No searchable columns: the served answer is an empty set for everyone, so the new
@@ -1275,6 +1296,9 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
   if (parentId && parentColumn && columnSet.has(parentColumn)) {
     cq = cq.eq(parentColumn, parentId);
   }
+  // f[] / not[] (D-080): a search inside a status (and minus the Service-only
+  // customers) stays server-side, so `total` is the true match count in that status.
+  cq = applyCallerFiltersToQuery(cq, callerFilters);
   if (columnSet.has("created_date")) {
     cq = cq
       .order("created_date", { ascending: false, nullsFirst: false })
@@ -1295,15 +1319,18 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
   const total = count ?? records.length;
   // SHADOW: the same ILIKE or-group and the same parent filter are applied to the new
   // count, so what is compared is "this search under the old scope" vs "this search under
-  // the new scope" — not "this search" vs "the whole object".
-  await shadow.list({
-    path: "search.cache",
-    cacheTable,
-    oldCount: records.length,
-    oldTotal: total,
-    or: orExpr,
-    filters: parentId && parentColumn ? [{ column: parentColumn, value: parentId }] : [],
-  });
+  // the new scope" — not "this search" vs "the whole object". Skipped under f[] / not[]:
+  // the shadow count cannot replay them, and an uncomparable line is noise.
+  if (!callerFilters?.active) {
+    await shadow.list({
+      path: "search.cache",
+      cacheTable,
+      oldCount: records.length,
+      oldTotal: total,
+      or: orExpr,
+      filters: parentId && parentColumn ? [{ column: parentColumn, value: parentId }] : [],
+    });
+  }
   return jsonResponse(200, cors, {
     source: "cache",
     count: records.length,
@@ -1339,8 +1366,82 @@ export function includesOrExpr(column, value) {
   return [`${column}.eq."${v}"`, q(`${v};*`), q(`*;${v}`), q(`*;${v};*`)].join(",");
 }
 
+// --- GET /sf/customer/pipeline (D-080) -----------------------------------------
+// The Sales page's status badges, stage columns and Rep / Source options in one small
+// answer — sql/sundial_customer_pipeline.sql does the GROUP BY. Two filters, kept apart:
+//   p_filters  the ACCESS filter, from `enforce` (never request input). Customer's row
+//              filter is equalities only (tenant + rep or dealer); anything this route
+//              cannot express — a cacheOr, an unexpected column, a tenant mismatch — is a
+//              403, not a wider count.
+//   p_narrow   the caller's f[stage|sales_rep_name|lead_source] (any-of, '' = blank), so
+//              the board's column counts follow the Rep / Source pickers.
+// Not enforcing (ACCESS_MODEL_MODE off / shadow) = tenant only, exactly what the list
+// serves in that mode. Counts come from the cache as it stands (D-079 keeps it current);
+// no Salesforce call is ever made here.
+const PIPELINE_OBJECTS = new Set(["customer"]);
+const PIPELINE_ACCESS_COLUMNS = new Set(["sales_rep_sf_id", "dealer_sf_id"]);
+
+async function handlePipelineRead({ supabase, objectKey, tenantId, enforce, multi, cors }) {
+  if (!PIPELINE_OBJECTS.has(objectKey)) {
+    return jsonResponse(400, cors, { error: "pipeline_unsupported", code: "PIPELINE_UNSUPPORTED" });
+  }
+  // Same answer as the list for a closed module (§3.1: a LIST denial is 403).
+  if (enforce?.deny) {
+    return jsonResponse(403, cors, { error: "forbidden", code: enforce.code || DENY.MODULE_FORBIDDEN });
+  }
+  const eq = {};
+  if (enforce) {
+    if (enforce.cacheOr) {
+      console.error("pipeline: access filter has an OR group this route cannot apply — refusing");
+      return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+    }
+    for (const { column, value } of enforce.cache || []) {
+      if (column === "client_sf_id") {
+        if (value !== tenantId) return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+        continue;
+      }
+      if (!PIPELINE_ACCESS_COLUMNS.has(column)) {
+        console.error(`pipeline: access column ${column} not supported — refusing`);
+        return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+      }
+      eq[column] = value;
+    }
+  }
+
+  const parsed = parseCallerFilters(multi || new Map(), null, { allowColumns: PIPELINE_NARROW_COLUMNS, allowNot: false });
+  if (!parsed.ok) return jsonResponse(parsed.status, cors, parsed.body);
+  const narrow = filtersToNarrow(parsed.filters);
+
+  const started = Date.now();
+  const { data, error } = await supabase.rpc("sundial_customer_pipeline", {
+    p_client_sf_id: tenantId,
+    p_filters: { eq },
+    p_narrow: narrow,
+  });
+  if (error) {
+    console.error("pipeline rpc error:", error.message);
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  const body = {
+    by_status: data?.by_status ?? {},
+    by_stage: data?.by_stage ?? {},
+    reps: data?.reps ?? {},
+    sources: data?.sources ?? {},
+    narrowed: !!narrow,
+  };
+  const res = jsonResponse(200, cors, body);
+  console.log(JSON.stringify({
+    pipeline: objectKey,
+    ms: Date.now() - started,
+    bytes: res.body.length,
+    narrowed: !!narrow,
+    scoped: Object.keys(eq),
+  }));
+  return res;
+}
+
 async function handleListRead(ctx) {
-  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, searchFields, parentFilter, qs, cors, shadow, objectKey, enforce, access } =
+  const { supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, searchFields, parentFilter, qs, multi, cors, shadow, objectKey, enforce, access } =
     ctx;
 
   // §3.1: a module closed to this scope is 403 MODULE_FORBIDDEN on a LIST (unlike a
@@ -1389,6 +1490,18 @@ async function handleListRead(ctx) {
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
   // ?fields=list -> the screen's column list (LIST_PROJECTION), else null = unchanged.
   const listColumns = listProjectionFor(objectKey, qs);
+  // f[] / not[] / sort (D-080, caller-filters.js). Validated before anything runs: an
+  // unknown column is a 400 naming it; the tenant / access columns are dropped, never
+  // honoured. ANDed AFTER the access filter below, so they can only narrow.
+  const parsedFilters = parseCallerFilters(multi || new Map(), columnSet);
+  if (!parsedFilters.ok) return jsonResponse(parsedFilters.status, cors, parsedFilters.body);
+  const callerFilters = parsedFilters.filters;
+  if (callerFilters.ignored.length) {
+    console.warn(`list: ignored caller filter on access column(s) ${callerFilters.ignored.join(", ")}`);
+  }
+  const parsedSort = parseSort(qs, objectKey, columnSet);
+  if (!parsedSort.ok) return jsonResponse(parsedSort.status, cors, parsedSort.body);
+  const sort = parsedSort.sort;
 
   const { fields } = await getQueryableFields(sfObject);
   const { selectFields, selectList } = buildCacheSelect(fields, columnSet, createdDateSources);
@@ -1459,7 +1572,7 @@ async function handleListRead(ctx) {
       parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
-      shadow, objectKey, enforce, access, listColumns,
+      shadow, objectKey, enforce, access, listColumns, callerFilters, sort, fields,
       shadowPath: searchTerm ? "search.live.parent_uncached" : "list.live.parent_uncached",
       // The parent COLUMN is missing from this cache table, which is why we are on the
       // live path at all — so the shadow count cannot apply it either. Without a way to
@@ -1482,6 +1595,8 @@ async function handleListRead(ctx) {
       parentColumn: parentId ? parentFilter.cacheColumn : null,
       parentId,
       shadow, objectKey, enforce, access,
+      // A search inside a status stays server-side: f[] / not[] narrow it (D-080).
+      callerFilters,
     });
   }
 
@@ -1525,6 +1640,15 @@ async function handleListRead(ctx) {
     if (filterColumn && columnSet.has(filterColumn)) {
       q = filterOp === "includes" ? q.or(includesOrExpr(filterColumn, filterValue)) : q.eq(filterColumn, filterValue);
     }
+    // f[] / not[] (D-080): after the access filter, on the COUNT and the page alike
+    // (same builder), so `total` stays exact.
+    q = applyCallerFiltersToQuery(q, callerFilters);
+    // ?sort= (D-080): an allowlisted column, NULLS LAST, sf_id as the stable tie-breaker
+    // so paging never duplicates or skips a row.
+    if (sort) {
+      q = q.order(sort.column, { ascending: sort.ascending, nullsFirst: false }).order("sf_id", { ascending: true });
+      return q;
+    }
     // Order newest-first by created_date WHEN the cache actually has that column;
     // otherwise fall back to the stable sf_id order. This keeps the endpoint healthy
     // and self-healing while the created_date column/backfill is rolled out — a
@@ -1557,6 +1681,22 @@ async function handleListRead(ctx) {
   //    for THAT PARENT's children and correctly returns an empty list — instead of
   //    treating the empty related list as a cold cache and returning the tenant's
   //    entire table. Same reasoning for the rep clause, which cannot reach here.
+  //
+  //    With f[] / not[] an EMPTY result is ordinary (a board column with no cards, a
+  //    rep with no Leads) and must not send every such request to Salesforce. So the
+  //    cache counts as cold only if the TENANT has no rows for this object at all — one
+  //    head-only probe, paid only on an empty filtered page.
+  if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0) && callerFilters.active) {
+    const { count: tenantRows, error: probeErr } = await supabase
+      .from(cacheTable)
+      .select("sf_id", { count: "exact", head: true })
+      .eq("client_sf_id", tenantId)
+      .limit(1);
+    if (!probeErr && (tenantRows ?? 0) > 0) {
+      logFreshness({ mode: "n/a", objectKey }, { path: "list", rows: 0, offset, stale: 0, soql: 0, filters: callerFilters.any.length + callerFilters.not.length });
+      return jsonResponse(200, cors, { source: "cache", count: 0, total: 0, limit, offset, hasMore: false, records: [] });
+    }
+  }
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
@@ -1565,10 +1705,11 @@ async function handleListRead(ctx) {
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
-      shadow, objectKey, enforce, access, listColumns,
+      shadow, objectKey, enforce, access, listColumns, callerFilters, sort, fields,
       shadowPath: "list.live.cold",
-      // An INCLUDES filter is not an equality the shadow count can replay — uncomparable.
-      shadowFilters: filterOp === "includes" ? null : parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
+      // An INCLUDES filter or a caller f[] / not[] is not an equality list the shadow
+      // count can replay — uncomparable.
+      shadowFilters: filterOp === "includes" || callerFilters.active ? null : parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
   }
 
@@ -1673,13 +1814,15 @@ async function handleListRead(ctx) {
     soql: Math.ceil(staleRows.length / REFETCH_ID_CHUNK_SIZE),
     refetchMs,
     fields: listColumns ? "list" : "all",
+    filters: callerFilters.any.length + callerFilters.not.length,
+    sort: sort ? `${sort.column}:${sort.ascending ? "asc" : "desc"}` : null,
   });
   // SHADOW: the main path, and the cheap one — for tenant scope the new filter IS this
   // query's filter, so no second query is issued at all (see shadow.js). Every caller
   // filter this query applied is handed over so the comparison is like-for-like.
   // An ?op=includes filter is not an equality the shadow count can replay — skipped, the
   // same "uncomparable" rule the live paths apply with shadowFilters === null.
-  if (filterOp !== "includes") {
+  if (filterOp !== "includes" && !callerFilters.active) {
     await shadow.list({
       path: "list.cache",
       cacheTable,
@@ -1715,6 +1858,7 @@ async function listColdCacheFallback(ctx) {
     selectFields, selectList, filterFieldName, filterValue, filterOp, limit, offset,
     parentSfField, parentId, searchTerm, searchSfFields,
     shadow, objectKey, shadowPath, shadowFilters, enforce, access, listColumns = null,
+    callerFilters = null, sort = null, fields = null,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
@@ -1742,6 +1886,15 @@ async function listColdCacheFallback(ctx) {
     if (phone) for (const f of searchSfFields) if (/Phone/.test(f)) likes.push(`${f} LIKE '${phone}'`);
     where += ` AND (${likes.join(" OR ")})`;
   }
+  // f[] / not[] (D-080) as SOQL, ANDed after everything above. The cache column is
+  // mapped back to its Salesforce field through the describe; values are typed per field
+  // (a bad literal is a 400, never a SOQL error).
+  const columnToField = (col) => (fields || []).find((f) => sfFieldToColumn(f) === col) || null;
+  if (callerFilters?.active) {
+    const soqlFilters = callerFiltersToSoql(callerFilters, columnToField, soqlEscapeString);
+    if (!soqlFilters.ok) return jsonResponse(soqlFilters.status, cors, soqlFilters.body);
+    for (const c of soqlFilters.clauses) where += ` AND ${c}`;
+  }
 
   // Exact total for the pager (aggregate COUNT(Id) returns one row {c:N}).
   let total = 0;
@@ -1760,9 +1913,16 @@ async function listColdCacheFallback(ctx) {
   const orderField =
     createdDateSources?.[createdDateSources.length - 1] || "CreatedDate";
   const sfOffset = Math.min(offset, 2000); // SOQL OFFSET hard cap
+  // ?sort= (D-080): created_date is the coalesced column, so it keeps orderField; any
+  // other allowlisted column is its own Salesforce field. Unmappable → default order.
+  let orderBy = `${orderField} DESC NULLS LAST, Id ASC`;
+  if (sort) {
+    const sortField = sort.column === "created_date" ? orderField : columnToField(sort.column)?.name;
+    if (sortField) orderBy = `${sortField} ${sort.ascending ? "ASC" : "DESC"} NULLS LAST, Id ASC`;
+  }
   const soql =
     `SELECT ${selectList} FROM ${sfObject} WHERE ${where} ` +
-    `ORDER BY ${orderField} DESC NULLS LAST, Id ASC LIMIT ${limit} OFFSET ${sfOffset}`;
+    `ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${sfOffset}`;
   const sfRecords = await sfQuery(soql);
 
   const now = new Date().toISOString();
@@ -2257,6 +2417,19 @@ export const handler = async (event) => {
       return await handleUsersRead({ tenantId, cors, shadow, enforce });
     }
 
+    // Pipeline counts (D-080): the same identity and the same `enforce` as the list, so
+    // a scope the list would 403 is 403 here too.
+    if (route.kind === "pipeline") {
+      return await handlePipelineRead({
+        supabase: await getSupabaseClient(),
+        objectKey,
+        tenantId,
+        enforce,
+        multi: readMulti(event, event.queryStringParameters || {}),
+        cors,
+      });
+    }
+
     const supabase = await getSupabaseClient();
     const columnSet = await getCacheColumns(entry.cacheTable);
 
@@ -2295,7 +2468,9 @@ export const handler = async (event) => {
       const full = String(qs.full).toLowerCase() === "true";
       return await handleSingleRead({ ...shared, id: route.id, full });
     }
-    return await handleListRead({ ...shared, qs });
+    // Repeated keys (f[stage]=A&f[stage]=B) survive ONLY in the multi-value map —
+    // see caller-filters.js readMulti.
+    return await handleListRead({ ...shared, qs, multi: readMulti(event, qs) });
   } catch (err) {
     console.error("sf-query unexpected error:", err?.message || String(err));
     return jsonResponse(500, cors, { error: "server_error" });

@@ -1053,10 +1053,13 @@ not headroom. Memory **512 MB** matches the other integration Lambdas and holds 
 buffered recording comfortably (the download is capped at 50 MB, which is far above any
 real call; a phone recording is a few MB).
 
-> ⚠️ **Account concurrency quota is 10 in us-west-1**, shared by every function (see
-> the G2 note in `docs/api-endpoints.md`). The platform-event path processes a batch
-> **sequentially** for that reason — fanning out buys nothing and risks throttles. A
-> large retry-Flow batch will be slow rather than parallel; that is intentional.
+> **Concurrency (corrected 2026-10-05).** When this was written the account's Lambda
+> concurrency quota in us-west-1 was **10**, shared by every function, and the
+> platform-event path processes a batch **sequentially** for that reason. The quota was
+> raised to **1000** on 2026-08-18 (re-verified live 2026-10-05: 7-day peak 25, 0
+> throttles — see the G2 note in `docs/api-endpoints.md`), so throttling no longer
+> forces it. The batch is still sequential: a large retry-Flow batch is rare and slow
+> rather than parallel. Making it parallel would be a deliberate change, not a fix.
 
 ---
 

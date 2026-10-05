@@ -13,7 +13,7 @@ Backend only; the portal does not change until Prompt 3. Nothing here changes wh
 - [ ] **(2) PowerShell**, in the `sundial-core` folder: `.\deploy.ps1 sundial-sf-query`
 - [ ] **(3) PowerShell:** `.\scripts\wire-sales-pipeline-route.ps1` and answer **y** to "Deploy API". It ends with the address to try.
 - [ ] **(4) harmon-crm `main`** — only after Prompt 3 (the Sales page rewritten to use the pipeline + pages) is reviewed and merged.
-- [ ] Prompt 3 must respect the **Lambda concurrency quota of 10**: load as pipeline + one page; board columns a few at a time.
+- [x] ~~Prompt 3 must respect a Lambda concurrency quota of 10~~ — **wrong, corrected 2026-10-05:** the quota is **1000** (raised 2026-08-18, re-verified live: `L-B99A9384` = 1000, no reserved cap on `sundial-sf-query`, 7-day peak 25, 0 throttles). Prompt 3: load as pipeline + one page for speed; board columns in parallel with a modest cap (6, like `listAllRecords`).
 
 ## Sales list speed: cache freshness from the scheduled sync, narrow list rows, gzip (D-079) — BUILT, NOT DEPLOYED (2026-10-05, branch `feature/cache-freshness-from-sync`)
 
@@ -1327,7 +1327,7 @@ Punchlist: `../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md` → G2 / G2b / G2c (t
 - [x] Batched cache upsert/delete; **Salesforce token stampede guard** in `lib/salesforce.js` (concurrent cold callers share one JWT round trip, cleared on settle).
 - [x] Live-Salesforce list paths (cold cache, TEMP Sales-Rep restrict) keep the original 500 cap — SOQL `OFFSET` caps at 2000.
 - [x] Verified: 5000 rows/5000 unique ids, zero cross-page overlap, 7-wide burst × 2 rounds = 0 failures, all objects under Lambda's 6 MB response limit.
-- [ ] **TIM (console, G2b): raise the Lambda concurrency quota 10 → 1000** in Service Quotas (us-west-1, `L-B99A9384`). **This is the actual root cause and it is still live** — >10 simultaneous invocations anywhere in the account still 500.
+- [x] **TIM (console, G2b): raise the Lambda concurrency quota 10 → 1000** in Service Quotas (us-west-1, `L-B99A9384`). Done 2026-08-18 (see "verified **1000**" above); re-verified live 2026-10-05 — 1000, 7-day peak 25, 0 throttles.
 - [ ] **TIM (console, G2b, same row): raise Supabase "Max Rows" 1000 → 5000** (Settings → API). Optional perf only; the Lambda is correct without it.
 - [x] **Frontend (harmon-crm):** `DEFAULT_PAGE_SIZE` in `src/lib/api.ts` is now 5000 (done same day by the frontend session). **This constant and `MAX_LIMIT` must stay in sync** — asking for more than the server serves is silently truncated to the server's cap, not an error.
 - [ ] **G2c: `GET /sf/{object}/counts?by=stage`** — server-side status counts so tab badges stay correct during partial loads. **Assessed: not a trivial aggregate.** PostgREST aggregates are disabled on this project (`select=stage,count()` → `PGRST123`), so it needs a tenant-scoped Postgres RPC (`group by`) + an API Gateway route wire (`scripts/wire-*.ps1` pattern). Small but real. **DEFERRED by Tim 2026-08-10** — with the 7-request sweep + retries, partial loads should be rare enough that the banner disclosure is acceptable for Phase 1; build it if Harmon actually hits it. **When we do: it is `stage` that drives the tab badges**, not `status`, and it would be the repo's first RPC.

@@ -93,7 +93,7 @@ For non-real-time cache maintenance:
 
 The `sundial-cache-sync` Lambda keeps the cache current. Three modes:
 
-- **Incremental (default):** queries `WHERE SystemModstamp > <per-object watermark>` (bounded first-run lookback of 24h), ordered ascending, and advances the watermark to the batch's max modstamp. Meant for the EventBridge schedule. Suitable for an empty event `{}` (all objects) or `{ "object": "solar" }` (one).
+- **Incremental (default):** queries `WHERE SystemModstamp > <per-object watermark>` (bounded first-run lookback of 24h), ordered ascending, and advances the watermark to the batch's max modstamp. **On a schedule since 2026-10-05 (D-079)** — two EventBridge rules, see "Freshness is the sync job's health" below. Accepts `{}` (all objects), `{ "object": "solar" }` (one) or `{ "objects": [...], "intervalMinutes": 5 }` (what the rules send). For an object with a cached **cross-object formula** column, the WHERE also takes rows whose parent changed (`OR Estimate__r.SystemModstamp > <watermark>`, derived by `lib/formula-parents.js`), because a formula changing value does not move the child's own `SystemModstamp`. A run that finds nothing is one SOQL and no cache write. Every run writes a row to `public.cache_sync_runs` (ok or not).
 - **Full resync:** `{ "mode": "full" }` (optionally `+ "object"`) ignores the watermark window and pulls **every** record for the object(s). Use it to **backfill after a bulk data load** whose records fall outside the incremental window, or whenever a cache count has drifted below Salesforce. Idempotent (upsert on `sf_id`) — safe to re-run.
 - **Reconcile:** `{ "mode": "reconcile" }` — **deletes** cache rows whose Salesforce record no longer exists. Closes the deletion blind spot below. **Manual invoke only; not on any schedule.** See its own section.
 
@@ -391,11 +391,70 @@ Phase 6 filtered `tenant_id = current_user_tenant_id()` where the function retur
 `client_sf_id`-shaped value from an empty table — which is exactly why they denied
 everything by accident.
 
-### 2. The TTL is a flat 10 minutes
+### 2. Freshness is the sync job's health, not a per-row TTL (D-079, 2026-10-05)
 
-`CACHE_TTL_MS` in `sundial-sf-query`. A row is trustworthy on read only if BOTH
-`is_stale` is false/null AND it was synced inside that window; failing either sends it
-back to Salesforce on read. There is no per-object tuning.
+*Until 2026-10-05 this section read "The TTL is a flat 10 minutes": a row was trustworthy
+only if `is_stale` was false AND `last_synced_at` was under 10 minutes old. With the sync
+on no schedule, every Sales load after a quiet gap re-fetched all ~39k customers from
+Salesforce — see PROGRESS.md 2026-10-05 for the measurements.*
+
+**The rule** (`lambdas/sundial-sf-query/freshness.js`, used by the list read and the
+single-record cache read alike):
+
+1. Once per request, read the latest **ok incremental** run for the object from
+   `public.cache_sync_runs` (memoised 60 s per warm Lambda container).
+2. **Healthy** — it finished within **3 × the interval that run recorded**
+   (`expected_interval_s`), or within `CACHE_SYNC_HEALTHY_MS` (default 15 min) for a run
+   with no interval (a manual invoke). Then the cache is **authoritative**: a row is fresh
+   iff `is_stale` is not true. The read only goes back to Salesforce for rows something
+   explicitly flagged (a service Lambda's `markStale`, a write-through failure).
+3. **Not healthy** — no run, an old run, a failed run, the table missing, the lookup
+   erroring. Then the **old rule exactly**: `is_stale` false AND `last_synced_at` within
+   `CACHE_TTL_MS` (default 10 min, now an env var). A dead schedule degrades to
+   slow-but-correct, never to stale-and-silent.
+
+Each request logs one JSON line `{"freshness":"sync"|"ttl", object, lastRunAt, barMs,
+stale, soql, refetchMs, fields, …}` — CloudWatch Logs Insights:
+`filter freshness = "ttl" | stats count(*) by object` shows any object the sync has
+stopped covering.
+
+**The schedule — two tiers** (`scripts/wire-cache-sync-schedule.ps1`):
+
+| Rule | Rate | Objects | Healthy bar |
+|---|---|---|---|
+| `sundial-cache-sync-incremental` | 5 min | customer, solar, job, estimate, servicecall, serviceinvoice | 15 min |
+| `sundial-cache-sync-incremental-cold` | 30 min | roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership | 90 min |
+
+Each rule passes `{ "objects": [...], "intervalMinutes": N }`; the interval rides on the
+run row, so each object is judged by its own schedule. **Lag:** a change made directly
+in Salesforce shows in the portal within one interval (≤5 min hot, ≤30 min cold) — the
+old TTL allowed up to 10 minutes for everything.
+
+**API cost.** A zero-change run is one SOQL per object: 6 × 288 + 8 × 48 = **~2,112
+queries a day**, plus whatever actually changed (paged at 2,000 rows per query). Before:
+the customer list alone re-fetched ~197 queries per stale Sales load — **~2,300 a day**
+on the 2026-09-21 → 10-05 average, plus every other list. The win is latency and
+predictability more than budget: the cost moves off the user's screen into a job.
+
+**Formula columns.** `node scripts/check-cache-formula-coverage.mjs` lists every cached
+formula column and the parent it is covered through, and exits 1 on any the sync cannot
+keep fresh (TODAY()/NOW(), `$` globals, polymorphic lookups). On 2026-10-05: job's four
+`estimate_*` columns via `Estimate__r`, customer/solar `sales_rep_name` via
+`Sales_Rep__r`, nothing uncoverable. Re-run it after adding a formula column to a cache.
+
+**Narrow list rows — `?fields=list`.** `LIST_PROJECTION` in `sundial-sf-query` names, per
+object, the cache columns the list screens render; with `?fields=list` the SELECT and the
+response carry only those (applied after the access projection, so it can only narrow).
+Customer: 767 → 391 bytes/row. `pricebookitem` is deliberately absent: its edit modal
+saves the list row back. `list-projection.test.js` holds each screen's column list with
+file evidence — a screen that starts reading a new column must add it there and to the
+registry, or the column renders blank.
+
+**Compression.** API Gateway (`5sktfwldh1`) → Settings → Content encoding, minimum
+1,024 bytes, then Deploy API to `prod`. API Gateway gzips any response over 1 KB for a
+browser that sends `Accept-Encoding: gzip` (all of them). `sundial-sf-query` returns
+plain JSON and never sets `isBase64Encoded`, so nothing in the Lambda changes. Measured
+on customer: 767 → 77 bytes/row gzipped; with `?fields=list`, 40.
 
 ### 3. The row-filter columns, and what they replaced
 

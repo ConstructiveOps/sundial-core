@@ -9,8 +9,10 @@
 // WHY THIS EXISTS (2026-09-18): the list endpoint reads the cache first and only asks
 // Salesforce when the cache has NOTHING for the tenant/object. A cache with a few rows
 // (items made from the portal) never learns about rows that arrived by DataLoader, a
-// Flow, or an admin — until sundial-cache-sync runs. It runs on demand today (no
-// EventBridge schedule yet), so a bulk import "vanishes" in the portal until you run it.
+// Flow, or an admin — until sundial-cache-sync runs. Since 2026-10-05 (D-079) it runs on
+// a schedule (every 5 min for the hot objects, 30 for the rest), so a bulk import shows
+// up within one interval; a gap that persists means the sync is failing — check
+// public.cache_sync_runs for the object's latest rows.
 
 import { sfQuery, soqlEscapeString } from "../lib/salesforce.js";
 import { getSupabaseClient } from "../lib/supabase.js";

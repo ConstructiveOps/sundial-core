@@ -4,6 +4,27 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Sales list speed: cache freshness from the scheduled sync, narrow list rows, gzip (D-079) — BUILT, NOT DEPLOYED (2026-10-05, branch `feature/cache-freshness-from-sync`)
+
+The "before" numbers are in PROGRESS.md (2026-10-05). **Order matters: the backend (steps 1–3) is deployed BEFORE the harmon-crm branch `feature/list-fields-projection` merges.** Nothing breaks the other way round — today's `sundial-sf-query` simply ignores `?fields=list` — but the narrow rows only arrive once step 2 is live, so merge the portal after it.
+
+- [x] `freshness.js` + `cache_sync_runs` + the two-tier schedule script + the formula-parent sync + `?fields=list` + the coverage check — built and tested (suite 1302).
+- [ ] **(1) Supabase → SQL editor** → open `sql/sundial_cache_sync_runs.sql`, paste it in, **Run**. (Creates the run-log table. Re-runnable.)
+- [ ] **(2) PowerShell**, in the `sundial-core` folder:
+      `.\deploy.ps1 sundial-cache-sync`
+      then
+      `.\deploy.ps1 sundial-sf-query`
+      (Until the first scheduled run lands, the read Lambda keeps the old 10-minute rule — safe in this order.)
+- [ ] **(3) PowerShell:** `.\scripts\wire-cache-sync-schedule.ps1` and answer **y** to the full resync. It re-reads customer, solar and roofing in full (a few minutes, customer is the long one), THEN creates the two schedules, and prints both rules' state at the end. Five minutes later, in the Supabase SQL editor:
+      `select distinct on (object) object, ok, finished_at, expected_interval_s from cache_sync_runs where mode = 'incremental' order by object, finished_at desc;`
+      — six objects with `expected_interval_s` 300 should show `ok = true`; the other eight appear within 30 minutes with 1800.
+- [ ] **(4) AWS Console → API Gateway → REST APIs → the Sundial API (`5sktfwldh1`) → Settings** → Content encoding → tick **"Enable"**, minimum size **1024** bytes → **Save** → then **Resources → Actions → Deploy API** → stage **`prod`**. (API Gateway then gzips every response over 1 KB; browsers already send `Accept-Encoding: gzip`. No code change; the Lambda never sets `isBase64Encoded`. ~30 MB → ~3 MB per Sales load on its own, ~1.6 MB with step 6.)
+- [ ] **(5)** Open the Sales page twice, **12 minutes apart**, and read the seconds off the browser's **Network** tab (F12 → Network → the `/sf/customer` rows → the longest "Time"). Write both numbers next to the "before" in PROGRESS.md (2026-10-05 → **After**).
+- [ ] **(6) harmon-crm:** merge `feature/list-fields-projection` (only after step 2). Vercel deploys it; re-do step 5 once more for the narrow-row number.
+- [ ] After any new formula field joins a cache table: `node scripts/check-cache-formula-coverage.mjs` (exit 1 = a column the sync cannot keep fresh; see the script header).
+- [ ] Watch for a week: CloudWatch Logs Insights on `/aws/lambda/sundial-sf-query` — `filter ispresent(freshness) | stats count(*) by freshness, object` — any `ttl` means that object's schedule is not landing.
+- [ ] Optional later: add `CACHE_TTL_MS` / `CACHE_SYNC_HEALTHY_MS` on `sundial-sf-query` only if the defaults (10 min / 15 min) need tuning.
+
 ## Demo tenant `conops-demo` (Constructive Operations marketing demo) — TOOLING BUILT, NOTHING SEEDED (2026-09-30)
 
 Portal: the `conops-demo` repo (scrubbed copy of harmon-crm; its own README / CLIENT_DIVERGENCE.md). Backend: the shared Lambdas, after the D-078 guards below are deployed. Runbook: `docs/demo-tenant-seed.md`.
@@ -1270,7 +1291,7 @@ lands only after its server change is verified in prod. Branch per repo per phas
 - [x] Backfill run + verified: customer 31,948 & solar 4,545 caches now match Salesforce; paginated API verified live
 - [x] **List/board ordering by record created date (newest first):** `created_date` cache column (+ tenant index) on customer/solar/roofing; mapped `CreatedDate` (Solar: `COALESCE(Contract_Date__c, CreatedDate)`); endpoint `ORDER BY created_date DESC NULLS LAST, sf_id` (resilient to a missing column); backfilled + verified newest-first. Frontend needs no change (preserves backend order).
 - [ ] **Frontend (harmon-crm, separate session):** send `limit`/`offset`, consume `total`/`hasMore`, add pager or load-more; boards fetch per-stage counts + lazy-load cards (must NOT pull 40k); Dashboard use aggregates not a 50-row page. See the bug report for the exact file/line changes.
-- [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param, EventBridge schedule for incremental `sundial-cache-sync`
+- [ ] Follow-ups: server-side search/filter across the full set, list virtualization (react-window), optional `orderBy` param. *(The EventBridge schedule for incremental `sundial-cache-sync` is built: D-079, section at the top.)*
 
 ## Cache deletion blind spot + reconcile mode (2026-08-11, D-051)
 

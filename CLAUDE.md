@@ -157,6 +157,7 @@ The portal does not query Salesforce on every read. Doing so would exhaust the o
 - **Writes** go to Salesforce first; on success, update the cache and broadcast invalidation via Supabase Realtime
 - **Out-of-band changes** (Salesforce Flows, Zapier writes, admin edits) fire Platform Events that Lambda consumes and propagates to the cache
 - **Critical operations** (payments, scheduling commits, Acumatica writes) explicitly bypass cache and read fresh from Salesforce
+- **Freshness is the sync job's health, not a per-row clock** (D-079, 2026-10-05, `lambdas/sundial-sf-query/freshness.js`): `sundial-cache-sync` runs every 5 min (customer, solar, job, estimate, servicecall, serviceinvoice) and every 30 min (the rest) and logs each run in `public.cache_sync_runs`; while an object's last ok run is within 3 × its interval, a cache row is fresh unless flagged `is_stale`, otherwise the old 10-minute TTL. A cached cross-object formula column is kept fresh by the sync's parent-modstamp OR — run `scripts/check-cache-formula-coverage.mjs` after adding one. List screens ask for `?fields=list` (`LIST_PROJECTION`; never the price book, whose edit modal saves the list row back)
 
 Estimated API call reduction: 80-95 percent compared to a no-cache design.
 

@@ -47,9 +47,10 @@
 
 import { getSalesforceToken, sfQuery } from "../../lib/salesforce.js";
 import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
+import { parentModstampPaths, incrementalWhere, readPath } from "../../lib/formula-parents.js";
 
 // --- Object allowlist / map (mirrors sundial-sf-query) ---------------------
-const OBJECT_ALLOWLIST = {
+export const OBJECT_ALLOWLIST = {
   solar: { sfObject: "Sundial_Solar__c", cacheTable: "sundial_solar_cache" },
   customer: {
     sfObject: "Sundial_Customer__c",
@@ -140,6 +141,10 @@ function resolveCreatedDate(record, sources) {
 
 // --- Sync tuning -----------------------------------------------------------
 const SYNC_STATE_TABLE = "sundial_sync_state";
+// One row per object per run (D-079). sundial-sf-query reads the latest ok incremental
+// row per object to decide whether the cache is authoritative. Kept RUNS_RETENTION_DAYS.
+const SYNC_RUNS_TABLE = "cache_sync_runs";
+const RUNS_RETENTION_DAYS = 14;
 // First-run backstop when an object has no stored watermark: only look back this
 // far, so the first run is bounded (not an unbounded full-history scan). Chosen
 // value: 24h. Trade-off noted in the runbook — records changed longer ago than
@@ -510,6 +515,47 @@ async function writeSyncState(supabase, objectKey, { modstamp, status, count }) 
   if (error) throw new Error(`sync-state write failed (${objectKey}): ${error.message}`);
 }
 
+// --- Run log (cache_sync_runs) — best-effort, never fails a sync -------------
+async function recordRun(supabase, row) {
+  try {
+    const { error } = await supabase.from(SYNC_RUNS_TABLE).insert(row);
+    if (error) console.error(`cache-sync: ${SYNC_RUNS_TABLE} insert error (${row.object}):`, error.message);
+  } catch (e) {
+    console.error(`cache-sync: ${SYNC_RUNS_TABLE} insert threw (${row.object}):`, e?.message || String(e));
+  }
+}
+
+async function pruneRuns(supabase) {
+  try {
+    const cutoff = new Date(Date.now() - RUNS_RETENTION_DAYS * 86400 * 1000).toISOString();
+    const { error } = await supabase.from(SYNC_RUNS_TABLE).delete().lt("started_at", cutoff);
+    if (error) console.error(`cache-sync: ${SYNC_RUNS_TABLE} prune error:`, error.message);
+  } catch (e) {
+    console.error(`cache-sync: ${SYNC_RUNS_TABLE} prune threw:`, e?.message || String(e));
+  }
+}
+
+// --- Parent-modstamp paths (cross-object formula columns, D-079) -------------
+// Derived once per warm container per object from the describe — see
+// lib/formula-parents.js for why. An uncoverable column is logged every cold start
+// (scripts/check-cache-formula-coverage.mjs is the loud version).
+const parentPathsCache = new Map();
+async function getParentPaths(objectKey, sfObject, columnSet) {
+  if (parentPathsCache.has(objectKey)) return parentPathsCache.get(objectKey);
+  const meta = await getRawDescribe(sfObject);
+  const result = await parentModstampPaths({
+    sfObject,
+    fields: meta.fields || [],
+    isCached: (f) => !EXCLUDED_FIELD_TYPES.has(f.type) && columnSet.has(sfFieldToColumn(f)),
+    describe: getRawDescribe,
+  });
+  for (const u of result.uncoverable) {
+    console.warn(`cache-sync: ${objectKey}.${u.field} cannot be kept fresh by the sync: ${u.reason}`);
+  }
+  parentPathsCache.set(objectKey, result.paths);
+  return result.paths;
+}
+
 // --- Per-object sync -------------------------------------------------------
 // full=false (default): incremental — only records changed since the watermark
 //   (or the bounded first-run lookback).
@@ -540,9 +586,12 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
 
   // Sync SELECT = cache-backed fields + SystemModstamp (watermark) + Client__r.Name
   // (tenant slug for the tenant_id column). Dedupe so nothing is selected twice.
+  // Incremental only: the parents whose change can move a cached formula column
+  // (D-079). Their SystemModstamp is selected too, so the watermark can include it.
+  const parentPaths = full ? [] : await getParentPaths(objectKey, entry.sfObject, columnSet);
   const names = selectFields.map((f) => f.name);
   const seen = new Set(names.map((n) => n.toLowerCase()));
-  for (const extra of ["SystemModstamp", "Client__r.Name"]) {
+  for (const extra of ["SystemModstamp", "Client__r.Name", ...parentPaths.map((p) => `${p}.SystemModstamp`)]) {
     if (!seen.has(extra.toLowerCase())) {
       names.push(extra);
       seen.add(extra.toLowerCase());
@@ -566,11 +615,16 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
   // cap AND the tie bug where >2000 records sharing one SystemModstamp could be
   // split across a page boundary and partially skipped by the "> watermark" cursor.
   //   - full:        every record for the object (ignores the window).
-  //   - incremental: only records changed since the watermark / first-run lookback.
+  //   - incremental: only records changed since the watermark / first-run lookback,
+  //     OR whose formula-feeding parent changed (incrementalWhere, D-079).
+  //
+  // ZERO-CHANGE RUN = ONE SOQL AND NO CACHE WRITE (pinned by sync-runs.test.js): an
+  // empty result returns below before any cache read or upsert. That is what makes a
+  // 5-minute schedule cheap (D-079 runbook: objects × runs/day SOQL, nothing else).
   const soql = full
     ? `SELECT ${syncSelectList} FROM ${entry.sfObject} ORDER BY SystemModstamp ASC`
     : `SELECT ${syncSelectList} FROM ${entry.sfObject} ` +
-      `WHERE SystemModstamp > ${watermarkIso} ORDER BY SystemModstamp ASC`;
+      `WHERE ${incrementalWhere(watermarkIso, parentPaths)} ORDER BY SystemModstamp ASC`;
   const records = await sfQuery(soql);
 
   if (!records || records.length === 0) {
@@ -579,11 +633,18 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
   }
 
   // Max SystemModstamp across ALL returned records (incl. skipped null-tenant
-  // ones) so the watermark can't stall on a window of tenant-less records.
-  let maxMs = 0;
-  for (const rec of records) {
-    const ms = Date.parse(rec.SystemModstamp);
+  // ones) so the watermark can't stall on a window of tenant-less records. The
+  // parents' modstamps count too, and an incremental watermark never moves BACKWARDS:
+  // a run that only found parent-changed rows (whose own modstamps are old) must not
+  // rewind the cursor and re-pull the window next time.
+  let maxMs = full ? 0 : Date.parse(watermarkIso) || 0;
+  const bump = (v) => {
+    const ms = Date.parse(v);
     if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
+  };
+  for (const rec of records) {
+    bump(rec.SystemModstamp);
+    for (const p of parentPaths) bump(readPath(rec, `${p}.SystemModstamp`));
   }
   const newWatermark = new Date(maxMs).toISOString();
 
@@ -672,9 +733,10 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
 }
 
 // --- handler ---------------------------------------------------------------
-// Suitable for an empty/scheduled EventBridge event (no input required). For
-// manual testing, pass { "object": "solar" } to sync a single object; with no
-// object, all five are synced. One object's failure never aborts the others.
+// Suitable for an empty/scheduled EventBridge event (no input required). The two
+// D-079 rules pass { "objects": [...], "intervalMinutes": 5 | 30 }. For manual
+// testing, pass { "object": "solar" } to sync a single object; with neither, every
+// allowlisted object is synced. One object's failure never aborts the others.
 export const handler = async (event) => {
   const summary = { startedAt: new Date().toISOString(), objects: {} };
 
@@ -705,17 +767,25 @@ export const handler = async (event) => {
     };
   }
 
-  // Which objects to sync?
-  const requested = event?.object;
+  // Which objects to sync? { "object": "customer" } for one, { "objects": [...] } for a
+  // list (the two EventBridge rules pass their tier's list — D-079), else all.
+  const requested = Array.isArray(event?.objects) ? event.objects : event?.object ? [event.object] : null;
   let objectKeys;
   if (requested) {
-    if (!OBJECT_ALLOWLIST[requested]) {
-      return { ok: false, error: "OBJECT_NOT_ALLOWED", object: requested };
+    const bad = requested.find((k) => !OBJECT_ALLOWLIST[k]);
+    if (bad) {
+      return { ok: false, error: "OBJECT_NOT_ALLOWED", object: bad };
     }
-    objectKeys = [requested];
+    objectKeys = requested;
   } else {
     objectKeys = Object.keys(OBJECT_ALLOWLIST);
   }
+
+  // The schedule interval of the rule that invoked us (5 for the hot tier, 30 for the
+  // rest). Recorded on each run row so sundial-sf-query judges an object by ITS OWN
+  // schedule (healthy = finished within 3 × interval). Absent on a manual invoke.
+  const intervalMinutes = Number(event?.intervalMinutes);
+  const expectedIntervalS = Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? Math.round(intervalMinutes * 60) : null;
 
   // FULL RESYNC toggle: { "mode": "full" } (or { "full": true }) ignores the
   // incremental watermark window and pulls EVERY record for each selected object.
@@ -736,6 +806,7 @@ export const handler = async (event) => {
     summary.mode = "reconcile";
     summary.dryRun = event?.dryRun === true;
     for (const objectKey of objectKeys) {
+      const startedAt = new Date().toISOString();
       try {
         summary.objects[objectKey] = await reconcileObject(supabase, objectKey, {
           dryRun: event?.dryRun === true,
@@ -746,6 +817,12 @@ export const handler = async (event) => {
         console.error(`cache-sync reconcile: object ${objectKey} failed:`, msg);
         summary.objects[objectKey] = { mode: "reconcile", deleted: 0, status: "error", error: msg };
       }
+      const r = summary.objects[objectKey];
+      await recordRun(supabase, {
+        object: objectKey, mode: "reconcile", started_at: startedAt, finished_at: new Date().toISOString(),
+        ok: String(r.status).startsWith("ok"), rows_upserted: 0, watermark: null,
+        error: String(r.status).startsWith("ok") ? null : r.error || r.status, expected_interval_s: null,
+      });
     }
     summary.finishedAt = new Date().toISOString();
     console.log("cache-sync reconcile summary:", JSON.stringify(summary));
@@ -756,6 +833,7 @@ export const handler = async (event) => {
 
   // Per-object try/catch so one object's failure doesn't abort the rest.
   for (const objectKey of objectKeys) {
+    const startedAt = new Date().toISOString();
     try {
       summary.objects[objectKey] = await syncObject(supabase, objectKey, { full });
     } catch (e) {
@@ -772,7 +850,22 @@ export const handler = async (event) => {
         );
       }
     }
+    // One cache_sync_runs row per object per run, ok or not (D-079). A skipped object
+    // (no cache table yet) is NOT ok: its cache cannot be authoritative.
+    const r = summary.objects[objectKey];
+    await recordRun(supabase, {
+      object: objectKey,
+      mode: full ? "full" : "incremental",
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      ok: r.status === "ok",
+      rows_upserted: r.processed ?? 0,
+      watermark: r.status === "ok" ? r.newWatermark ?? null : null,
+      error: r.status === "ok" ? null : String(r.error || r.status).slice(0, 500),
+      expected_interval_s: expectedIntervalS,
+    });
   }
+  await pruneRuns(supabase);
 
   summary.finishedAt = new Date().toISOString();
   console.log("cache-sync summary:", JSON.stringify(summary));

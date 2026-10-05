@@ -41,6 +41,9 @@ import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
 // inert and this file behaves exactly as it did before Phase 2. See shadow.js for why it
 // can never change a response and never throw.
 import { createShadow, resolveMode, MODES } from "./shadow.js";
+// READ-TIME FRESHNESS (D-079): the cache is authoritative while sundial-cache-sync is
+// healthy for the object; otherwise the old 10-minute per-row TTL. See freshness.js.
+import { resolveFreshness, isRowFresh, logFreshness } from "./freshness.js";
 // ACCESS MODEL ENFORCEMENT (D-064 Phase 3, §7.3). Under ACCESS_MODEL_MODE=enforce these
 // decide what is SERVED. Under off/shadow they are not consulted by any serving line.
 import {
@@ -314,6 +317,92 @@ const SEARCH_FIELDS = {
   },
 };
 
+// --- List projection (?fields=list) ----------------------------------------
+// The cache columns a LIST SCREEN renders, per object (2026-10-05, D-079 Change 3).
+// A Sales load was ~860 bytes/row for a table that shows ~10 columns; ?fields=list
+// returns only these. Each list is the UNION of every harmon-crm screen that lists the
+// object with ?fields=list (table, board, filters, sort, CSV, client-side helpers) —
+// see LIST_PROJECTION_SOURCES in list-projection.test.js for the file evidence. A
+// column a screen reads but this list omits renders BLANK, so widen it before a
+// screen starts reading a new column.
+//
+// Applied AFTER the access projection (projectRow), so it can only NARROW. Without
+// ?fields=list, or for an object not listed here, the response is unchanged.
+//
+// NOT LISTED ON PURPOSE: pricebookitem. PriceBookItemModal edits the LIST ROW without
+// a refetch and PATCHes every field back, so a narrowed row would null fields on save
+// (data loss, not a blank cell). Small table; it keeps the full row.
+const LIST_META = ["sf_id", "created_date", "last_synced_at", "is_stale"];
+export const LIST_PROJECTION = {
+  // SalesPage + CustomersTable/Board + STATUS_EXTRA_COLUMNS (call_attempts), and
+  // ServiceCustomersPage (service-customers.ts helpers).
+  customer: [
+    ...LIST_META,
+    "name", "first_name", "last_name", "street", "city", "state", "postal_code", "primary_phone",
+    "status", "stage", "customer_type", "requested_project_types", "lead_source", "call_attempts",
+    "sales_rep_sf_id", "sales_rep_name",
+    "service_stage", "service_request_type", "assigned_to_sf_id", "next_follow_up_date", "last_contact_date", "archived",
+  ],
+  // DashboardPage (sums, Recent sort on last_synced_at) + SolarProjectsPage table/board/filters.
+  solar: [
+    ...LIST_META,
+    "stage", "project_name", "first_name", "last_name", "customer_name_at_creation", "address", "address_at_creation",
+    "system_size", "system_size_kw", "contract_amount", "harmon_job_number", "contract_type",
+    "authority_having_jurisdiction", "utility_company", "project_manager", "sales_rep_name",
+  ],
+  // RoofingProjectsPage. first/last name + the two amounts are not cache columns yet
+  // (blank on the page before and after); listed so they flow once the columns exist.
+  roofing: [
+    ...LIST_META,
+    "stage", "project_name", "first_name", "last_name", "customer_name_at_creation",
+    "contract_presented_amount", "total_proposal_cost",
+  ],
+  // ServiceJobsPage + reportMarkerFor (report_sent_at, bill_to_type).
+  job: [
+    ...LIST_META,
+    "name", "status", "archived", "customer_name_at_creation", "address_at_creation", "priority",
+    "estimate_status", "estimate_total", "bill_to_type", "report_sent_at", "intake_date",
+  ],
+  // ServiceEstimatesPage (incl. the Templates view).
+  estimate: [
+    ...LIST_META,
+    "name", "status", "archived", "is_template", "template_name", "customer_name_at_creation",
+    "version", "total", "service_job_sf_id", "last_sent_at", "valid_until",
+  ],
+  // ServiceInvoicesPage (row click needs service_job_sf_id; CSV uses its own route).
+  serviceinvoice: [
+    ...LIST_META,
+    "name", "status", "service_job_sf_id", "issued_at", "due_date", "acumatica_entered_at",
+    "bill_to_type", "bill_to_name", "billing_reference", "total", "paid_amount", "balance",
+  ],
+};
+
+/** ?fields=list for an object that has a projection -> its column list, else null. */
+export function listProjectionFor(objectKey, qs) {
+  if (String(qs?.fields ?? "").toLowerCase() !== "list") return null;
+  return LIST_PROJECTION[objectKey] ?? null;
+}
+
+/**
+ * The PostgREST select for a projected list: the projection's columns that exist in
+ * the cache, plus the control columns the freshness partition reads. Narrowing the
+ * SELECT (not just the response) keeps the unread columns in the database.
+ */
+export function buildProjectedSelect(columns, columnSet) {
+  if (!columnSet || columnSet.size === 0) return "*";
+  const cols = new Set();
+  for (const c of [...columns, ...LIST_CONTROL_COLUMNS]) if (columnSet.has(c)) cols.add(c);
+  return cols.size > 0 ? [...cols].join(",") : "*";
+}
+
+/** Narrow one already access-projected row to the list columns. */
+export function applyListProjection(row, columns) {
+  if (!columns) return row;
+  const out = {};
+  for (const c of columns) if (row[c] !== undefined) out[c] = row[c];
+  return out;
+}
+
 // Sanitize a raw ?q= term. Returns a cleaned term (>= 2 chars) or null. Escapes by
 // RESTRICTING to name-safe characters — drops every ILIKE/SOQL metacharacter
 // (% _ " ( ) , \ / etc.), so neither an ILIKE wildcard nor a SOQL/PostgREST break
@@ -399,10 +488,10 @@ const SF_LIVE_MAX_LIMIT = 500;
 const POSTGREST_PAGE_SIZE = 1000;
 
 // --- Read-time cache freshness ---------------------------------------------
-// A cache row is trustworthy on read only if BOTH: is_stale is false/null AND it
-// was synced within this TTL window. A row failing EITHER is refreshed from
-// Salesforce on read (see isRowFresh). Change this one constant to tune staleness.
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+// The rule lives in ./freshness.js (D-079): while the incremental sync is healthy for
+// the object, a row is fresh iff is_stale is not true; otherwise the pre-D-079 rule
+// (is_stale false AND last_synced_at within CACHE_TTL_MS, default 10 min, now an env
+// var). A row that is not fresh is refreshed from Salesforce on read.
 // Max record Ids per SOQL IN() when surgically re-fetching stale rows. Beyond
 // this we chunk into multiple queries (a single IN is fine at current volumes).
 const REFETCH_ID_CHUNK_SIZE = 200;
@@ -746,20 +835,6 @@ async function getExistingCacheVersion(supabase, table, sfId, tenantId) {
   return data?.cache_version ?? 0;
 }
 
-// --- Read-time freshness rule (SINGLE definition, used everywhere) ----------
-// A cache row is fresh/trustworthy only if BOTH hold:
-//   1. is_stale is false or null (an explicit is_stale === true fails), AND
-//   2. last_synced_at is within the TTL window (now - last_synced_at <= TTL).
-// A row failing EITHER is "stale" and must be refreshed from Salesforce on read.
-// Missing/invalid last_synced_at is treated as stale (fail-closed).
-function isRowFresh(row, nowMs) {
-  if (!row) return false;
-  if (row.is_stale === true) return false;
-  const syncedMs = row.last_synced_at ? Date.parse(row.last_synced_at) : NaN;
-  if (!Number.isFinite(syncedMs)) return false;
-  return nowMs - syncedMs <= CACHE_TTL_MS;
-}
-
 // --- LIST/SEARCH response projection (6 MB Lambda payload cap) -------------
 // Lambda hard-caps a response payload at 6,291,556 bytes. Past it the runtime
 // never delivers the response at all — it logs
@@ -1087,7 +1162,10 @@ async function handleSingleRead(ctx) {
     // path below, which carries the same clause and returns 0 rows -> 404. Two chances
     // to deny, none to leak.
     const visible = !enforce || rowVisible(objectKey, access, cached);
-    if (cached && visible && isRowFresh(cached, Date.now())) {
+    const rule = cached ? await resolveFreshness(supabase, objectKey) : null;
+    const fresh = !!cached && isRowFresh(cached, rule);
+    if (rule) logFreshness(rule, { path: "single", stale: fresh ? 0 : 1 });
+    if (cached && visible && fresh) {
       // SHADOW: the cache row already carries sales_rep_sf_id / dealer_sf_id (Phase 1),
       // which is exactly what the TEMP guard could not do and why it skipped this
       // shortcut. Evaluating the row in hand costs nothing.
@@ -1309,6 +1387,8 @@ async function handleListRead(ctx) {
   if (limit > MAX_LIMIT) limit = MAX_LIMIT;
   let offset = parseInt(qs.offset, 10);
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  // ?fields=list -> the screen's column list (LIST_PROJECTION), else null = unchanged.
+  const listColumns = listProjectionFor(objectKey, qs);
 
   const { fields } = await getQueryableFields(sfObject);
   const { selectFields, selectList } = buildCacheSelect(fields, columnSet, createdDateSources);
@@ -1379,7 +1459,7 @@ async function handleListRead(ctx) {
       parentId,
       searchTerm,
       searchSfFields: searchTerm ? searchFields.sf : null,
-      shadow, objectKey, enforce, access,
+      shadow, objectKey, enforce, access, listColumns,
       shadowPath: searchTerm ? "search.live.parent_uncached" : "list.live.parent_uncached",
       // The parent COLUMN is missing from this cache table, which is why we are on the
       // live path at all — so the shadow count cannot apply it either. Without a way to
@@ -1425,7 +1505,9 @@ async function handleListRead(ctx) {
   //    database — see buildListSelect and the 6 MB payload note. The control
   //    columns the freshness partition below reads (is_stale, last_synced_at,
   //    cache_version, sf_id) are always included.
-  const listSelect = buildListSelect(columnSet);
+  //    ?fields=list narrows the SELECT itself to the screen's columns (+ control
+  //    columns) — see LIST_PROJECTION.
+  const listSelect = listColumns ? buildProjectedSelect(listColumns, columnSet) : buildListSelect(columnSet);
   const makeCacheQuery = (withCount) => {
     let q = supabase
       .from(cacheTable)
@@ -1483,19 +1565,22 @@ async function handleListRead(ctx) {
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT), offset,
-      shadow, objectKey, enforce, access,
+      shadow, objectKey, enforce, access, listColumns,
       shadowPath: "list.live.cold",
       // An INCLUDES filter is not an equality the shadow count can replay — uncomparable.
       shadowFilters: filterOp === "includes" ? null : parentId ? [{ column: parentFilter.cacheColumn, value: parentId }] : [],
     });
   }
 
-  // d. Partition ONLY THIS PAGE into fresh vs stale per the single freshness rule.
+  // d. Partition ONLY THIS PAGE into fresh vs stale per the single freshness rule
+  //    (freshness.js, D-079): authoritative cache while the sync is healthy for this
+  //    object, the 10-minute row TTL when it is not.
   const nowMs = Date.now();
+  const rule = await resolveFreshness(supabase, objectKey, nowMs);
   const freshBySfId = new Map();
   const staleRows = [];
   for (const row of pageRows) {
-    if (isRowFresh(row, nowMs)) freshBySfId.set(row.sf_id, row);
+    if (isRowFresh(row, rule, nowMs)) freshBySfId.set(row.sf_id, row);
     else staleRows.push(row);
   }
 
@@ -1503,6 +1588,7 @@ async function handleListRead(ctx) {
   //    (chunked). A stale id NOT returned by Salesforce was deleted/moved tenant.
   const refreshedBySfId = new Map();
   const deletedIds = [];
+  let refetchMs = 0;
   if (staleRows.length > 0) {
     const staleIds = staleRows.map((r) => r.sf_id).filter(Boolean);
     const versionBySfId = new Map(
@@ -1510,7 +1596,9 @@ async function handleListRead(ctx) {
     );
     const nowIso = new Date().toISOString();
 
+    const refetchStartMs = Date.now();
     const refetched = await refetchByIds({ sfObject, selectList, tenantId, ids: staleIds });
+    refetchMs = Date.now() - refetchStartMs;
     const refetchedById = new Map(refetched.map((rec) => [rec.Id, rec]));
 
     const refreshedRows = [];
@@ -1569,11 +1657,23 @@ async function handleListRead(ctx) {
     // projectListRow drops nulls and long text — a PAYLOAD concern (the 6 MB cap).
     // projectRow drops columns this role may not see — an ACCESS concern (§4.3).
     // Access last, so a column can never survive by being re-added by the other.
-    records.push(projectRow(objectKey, access, projectListRow(chosen)));
+    // ?fields=list narrows LAST of all, so it can only remove what access allowed.
+    records.push(applyListProjection(projectRow(objectKey, access, projectListRow(chosen)), listColumns));
   }
 
   const adjustedTotal = Math.max(0, (total ?? records.length) - deletedIds.length);
   const source = staleRows.length === 0 ? "cache" : "cache+salesforce";
+  // ONE line per request naming the freshness rule and what it cost (D-079). This is
+  // the "after" measurement: refetched rows / SOQL chunks / ms per page.
+  logFreshness(rule, {
+    path: "list",
+    rows: records.length,
+    offset,
+    stale: staleRows.length,
+    soql: Math.ceil(staleRows.length / REFETCH_ID_CHUNK_SIZE),
+    refetchMs,
+    fields: listColumns ? "list" : "all",
+  });
   // SHADOW: the main path, and the cheap one — for tenant scope the new filter IS this
   // query's filter, so no second query is issued at all (see shadow.js). Every caller
   // filter this query applied is handed over so the comparison is like-for-like.
@@ -1614,7 +1714,7 @@ async function listColdCacheFallback(ctx) {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
     selectFields, selectList, filterFieldName, filterValue, filterOp, limit, offset,
     parentSfField, parentId, searchTerm, searchSfFields,
-    shadow, objectKey, shadowPath, shadowFilters, enforce, access,
+    shadow, objectKey, shadowPath, shadowFilters, enforce, access, listColumns = null,
   } = ctx;
 
   let where = `Client__c = '${soqlEscapeString(tenantId)}'`;
@@ -1707,7 +1807,7 @@ async function listColdCacheFallback(ctx) {
     limit,
     offset,
     hasMore: offset + mappedRows.length < total,
-    records: mappedRows.map((r) => projectRow(objectKey, access, r)),
+    records: mappedRows.map((r) => applyListProjection(projectRow(objectKey, access, r), listColumns)),
   });
 }
 

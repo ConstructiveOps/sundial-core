@@ -16,7 +16,9 @@
       POST   /service/jobs/{id}/invoice | labor
       GET    /service/jobs/{id}/card                                   (the card on file, 2026-09-28)
       POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
-      POST   /service/labor/default-rate
+      GET    /service/jobs/{id}/costing                                (job costing, 2026-10-05)
+      POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
+      GET    /service/labor/rates                                       (the rate sheet, 2026-10-05)
       GET    /service/invoices/report | /service/invoices/{id} | /service/invoices/{id}/preview
       POST   /service/invoices/{id}/payments | send | void | charge   (charge: the card on file, 2026-09-17)
       POST   /webhooks/stripe/{tenant}                                  (Stripe -> Sundial, signature-gated)
@@ -127,6 +129,10 @@ foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepSend $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }
+# Job costing (2026-10-05): cost vs. billed, Admin / Executive.
+Write-Host "==> /service/jobs/{id}/costing : GET, OPTIONS" -ForegroundColor Cyan
+$jobCosting = Ensure-Resource $jobId "costing"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobCosting $m }
 # The office's card on file (D-072 amendment 11, 2026-09-28).
 Write-Host "==> /service/jobs/{id}/card : GET, OPTIONS" -ForegroundColor Cyan
 $jobCard = Ensure-Resource $jobId "card"
@@ -140,6 +146,11 @@ Write-Host "==> /service/labor/default-rate : POST, OPTIONS" -ForegroundColor Cy
 $labor = Ensure-Resource $service "labor"
 $laborRate = Ensure-Resource $labor "default-rate"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $laborRate $m }
+Write-Host "==> /service/labor/cost-rate : POST, OPTIONS ; /service/labor/rates : GET, OPTIONS" -ForegroundColor Cyan
+$laborCost = Ensure-Resource $labor "cost-rate"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $laborCost $m }
+$laborRates = Ensure-Resource $labor "rates"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $laborRates $m }
 Write-Host "==> /service/jobs : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobs $m }
 Write-Host "==> /service/invoices/{id} : GET, OPTIONS" -ForegroundColor Cyan

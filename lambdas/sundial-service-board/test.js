@@ -551,6 +551,19 @@ test("events (2026-10-01): POST /service/events makes one Event call per tech (n
   assert.equal(w.notes.filter((n) => n.kind === "scheduled" && /Event · Safety meeting/.test(n.title)).length, 2, "each tech is told like any call");
   assert.equal(w.emails.length, 0, "no customer, no email");
 
+  // A range (2026-10-05): PTO Mon 9/14 – Fri 9/18, weekdays, one tech → five Event calls, one notice.
+  const notesBefore = w.notes.length;
+  const pto = await call(h, "POST", "/service/events", { name: "PTO", start: "2026-09-14T14:00:00Z", end: "2026-09-14T23:00:00Z", untilDate: "2026-09-18", repeat: "weekdays", techIds: ["USR000000000000002"] });
+  assert.equal(pto.status, 201, JSON.stringify(pto.body));
+  assert.equal(pto.body.days, 5);
+  assert.equal(pto.body.calls.length, 5);
+  assert.deepEqual(pto.body.calls.map((c) => c.start.slice(0, 13)), ["2026-09-14T14", "2026-09-15T14", "2026-09-16T14", "2026-09-17T14", "2026-09-18T14"]);
+  assert.ok(pto.body.calls.every((c) => c.isEvent && c.customerName === "PTO"));
+  assert.equal(w.notes.length - notesBefore, 1, "the tech is told once about the series, not five times");
+  assert.match(w.notes.at(-1).title, /PTO \(5 days\)/);
+  assert.equal((await call(h, "POST", "/service/events", { name: "PTO", start: "2026-09-14T14:00:00Z", untilDate: "2026-09-13", techIds: ["USR000000000000002"] })).body.code, "UNTIL_BEFORE_START");
+  assert.equal((await call(h, "POST", "/service/events", { name: "PTO", start: "2026-09-14T14:00:00Z", untilDate: "2026-09-18", repeat: "monthly", techIds: ["USR000000000000002"] })).body.code, "REPEAT_INVALID");
+
   // On the board, in the window; cancelled calls are not.
   const cancelled = { Id: "SC0000000000000009", Client__c: TENANT, Name: "SC-00009", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000003", Tech__c: "USR000000000000001", Scheduled_Start__c: "2026-09-14T16:00:00.000Z", Scheduled_End__c: "2026-09-14T18:00:00.000Z", Status__c: "Cancelled", Cancel_Reason__c: "x", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" };
   w.store.Sundial_Service_Call__c.push(cancelled);

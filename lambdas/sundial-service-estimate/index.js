@@ -187,8 +187,18 @@ export const INTAKE_FIELDS = Object.freeze({
 export const SERVICE_STAGE_NEW = "New";
 export const SERVICE_REQUEST_TYPE_FIELD = "Service_Request_Type__c";
 
-// Tenant config placeholders — read from Sundial_Tenant__c config when that surface
-// lands (service-workflows.md §12). GET FROM HARMON: validity days, default template.
+// Tenant settings on Sundial_Tenant__c (2026-10-05, the first of that surface — fields Tim
+// adds in Setup, every one describe-guarded so an org without them simply has no default):
+//   Default_Tax_Rate__c          Percent — stamped on every new estimate's Tax_Rate__c
+//   Default_Tax_Jurisdiction__c  Text    — its Tax_Jurisdiction__c label ("Phoenix")
+//   Labor_Burden_Percent__c      Percent — a tech's burdened cost = Hourly_Cost_Rate__c × (1 + this)
+export const TENANT_SF_OBJECT_SETTINGS = "Sundial_Tenant__c";
+export const TENANT_SETTINGS_FIELDS = Object.freeze({
+  defaultTaxRate: "Default_Tax_Rate__c",
+  defaultTaxJurisdiction: "Default_Tax_Jurisdiction__c",
+  laborBurdenPercent: "Labor_Burden_Percent__c",
+});
+// Tenant config placeholders (service-workflows.md §12). GET FROM HARMON: validity days, default template.
 export const DEFAULTS = Object.freeze({
   validDays: 30,
   publicTokenDays: 45,
@@ -392,6 +402,9 @@ const ROUTES = [
   ["GET", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "getLabor"],
   ["POST", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "saveLabor"],
   ["POST", /^\/service\/labor\/default-rate\/?$/, "setDefaultRate"],
+  ["POST", /^\/service\/labor\/cost-rate\/?$/, "setDefaultCostRate"],
+  ["GET", /^\/service\/labor\/rates\/?$/, "listRates"], // the rate sheet (2026-10-05)
+  ["GET", /^\/service\/jobs\/([^/]+)\/costing\/?$/, "getCosting"],
   ["GET", /^\/service\/estimates\/([^/]+)\/activity\/?$/, "estimateActivity"],
   ["POST", /^\/service\/tech\/calls\/([^/]+)\/estimate-lines\/?$/, "techAddLines"], // the tech app (service.tech.self)
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/street-view\/?$/, "techJobStreetView"], // the tech app (service.tech.read): the house, read-only
@@ -543,6 +556,37 @@ export function createHandler(deps = {}) {
     }
     const f = hit.meta?.fields?.find((x) => x.name === field);
     return f?.picklistValues ?? null;
+  }
+  /**
+   * The tenant's settings (TENANT_SETTINGS_FIELDS), each null when the org lacks the field
+   * or the tenant left it blank; `missing` names the fields the org does not have yet.
+   * Cached with the describes (DESCRIBE_TTL_MS) — one tenant row read per cold start.
+   */
+  const tenantSettingsCache = new Map();
+  async function tenantSettings(tenantId) {
+    const hit = tenantSettingsCache.get(tenantId);
+    if (hit && Date.now() - hit.at < DESCRIBE_TTL_MS) return hit.value;
+    const value = { defaultTaxRate: null, defaultTaxJurisdiction: null, laborBurdenPercent: null, missing: [] };
+    const present = [];
+    for (const [key, field] of Object.entries(TENANT_SETTINGS_FIELDS)) {
+      const exists = await fieldExists(TENANT_SF_OBJECT_SETTINGS, field);
+      if (exists) present.push([key, field]);
+      else value.missing.push(field);
+    }
+    if (present.length && tenantId) {
+      try {
+        const rows = await d.sfQuery(`SELECT ${present.map(([, f]) => f).join(", ")} FROM ${TENANT_SF_OBJECT_SETTINGS} WHERE Id = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+        const row = rows?.[0] || {};
+        for (const [key, field] of present) {
+          const v = row[field];
+          value[key] = v == null || v === "" ? null : key === "defaultTaxJurisdiction" ? String(v) : Number(v);
+        }
+      } catch (e) {
+        console.error("tenant settings read failed:", e?.message || e);
+      }
+    }
+    tenantSettingsCache.set(tenantId, { at: Date.now(), value });
+    return value;
   }
   /** Is this field in the org? (describe-guarded, like picklistValues — `null` when describe failed) */
   async function fieldExists(sfObject, field) {
@@ -836,6 +880,13 @@ export function createHandler(deps = {}) {
     if (!isTemplate) {
       fields.Sundial_Customer__c = customer.Id;
       Object.assign(fields, snapshotFields(customer));
+      // The tenant's default tax (2026-10-05): Tax_Rate__c was null on every new estimate, so
+      // a taxable line added $0 of tax until someone typed a rate on each estimate.
+      if (extra.Tax_Rate__c === undefined) {
+        const settings = await tenantSettings(tenantId);
+        if (settings.defaultTaxRate != null) fields.Tax_Rate__c = settings.defaultTaxRate;
+        if (extra.Tax_Jurisdiction__c === undefined && settings.defaultTaxJurisdiction) fields.Tax_Jurisdiction__c = settings.defaultTaxJurisdiction;
+      }
       // A Service Club member's estimate starts with the plan's discount (D-073.7) unless
       // the caller set a discount of its own; the office can change it like any discount.
       if (extra.Discount_Value__c === undefined) {
@@ -1801,7 +1852,7 @@ export function createHandler(deps = {}) {
   H.jobCardLink = stripeH.jobCardLink;
   H.jobCharge = stripeH.jobCharge;
   Object.assign(H, createAddressHandlers(d, { jsonResponse, bad }));
-  Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE }));
+  Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE, tenantSettings, fieldExists, estimateTotals: (est, lines) => computeTotals(lines.map(lineFromRecord), estimateFromRecord(est)) }));
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
   // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
   if (!d.sms) d.sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, now: d.now, ...(d.sendSms ? { sendSms: d.sendSms } : {}), ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
@@ -1828,6 +1879,7 @@ export function createHandler(deps = {}) {
     jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",
     jobCharge: "service.card.charge", // Admin / Executive (lib/access.js ACTION_LEVELS)
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
+    getCosting: "service.costing.read", setDefaultCostRate: "service.costing.write", listRates: "service.costing.read",
     getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", sendReport: "service.estimate.send",
     techAddLines: "service.tech.self",
     // Service Club (D-073): reads for anyone in the office, writes their own key.

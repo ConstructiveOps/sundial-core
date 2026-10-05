@@ -183,6 +183,42 @@ touched, and a linked Sales customer never is either.
 `service_job`, `service_call`, `service_invoice`, `service_payment` (the cache-sync Lambda,
 `{ "object": "…", "mode": "full" }`), then open a migrated job in the portal.
 
+### Notes, Bill-To and the tax rate — the 2026-10-05 fix-up
+
+Harmon's first week on the imported data (2026-10-05) turned up three things the import got
+wrong, and the office had been working the records since Monday, so a re-run was not the fix.
+
+- **Notes.** HCP's job `notes` is a **list** of `{ id, content }` (2,643 notes on 1,815 jobs, up
+  to 6,679 characters) and the import wrote `s(job.notes)` → every job's Office notes ended in
+  `[object Object]`. `lib/hcp-bill-to.js` `jobNotesText()` joins the contents (blank-line
+  separated); `jobFields` now puts the notes at the end of `Office_Notes__c` **and** under the
+  title in `Issue_Description__c` (`jobIssueDescription`), so a tech reading the job sees them.
+- **Bill-To.** HCP has no Bill-To field; Harmon's office encoded the payer in the job's one-line
+  `description` ("Solar - SunRun Standard Truck Roll", "Solar - SMA RMA", "Other - APS Quoted
+  Cost", "Solar - Warranty Repair" — 316 distinct titles, 626 blank). The import stamped every
+  job `Bill_To_Type__c = Customer`. `billToFromTitle()` reads the title back: a named partner
+  (SunRun / Spruce → **Leasing Partner**; Omnidian / ChargePoint / APS → **Other**, name set,
+  `Service_Type__c = Partner Work Order`), `RMA` + a brand (SMA, Tesla, Qcells, Fronius,
+  Enphase, SolarEdge, Generac, Tigo → **Manufacturer**, `Warranty`), `warranty` → **Internal
+  Warranty** (`Non Warranty` stays the customer's), O&M / inspection → `Maintenance`, the usual
+  service-call words → `Paid Service`, a blank title decides nothing. It is a keyword guess over
+  free text: every job is listed with its rule in `bill-to-review.csv` for the office to check.
+- **Tax rate.** HCP computed tax by **jurisdiction** — a `tax` line item named for the city
+  ("Phoenix", "Maricopa County", "Cave Creek Retail tax"; 49 of 2,265 jobs charged any tax,
+  mostly on labor-only work with non-taxable materials). The import stored `Tax_Amount__c` but
+  no `Tax_Rate__c`, so opening such an estimate recomputed its tax to $0. The fix-up derives the
+  rate (tax ÷ the taxable lines' value) and copies the city into `Tax_Jurisdiction__c`.
+
+`scripts/hcp-backfill-notes-billto.mjs --tenant harmon [--apply]` (planning in
+`lib/hcp-backfill.js`, pure, tested) writes ONLY: `Office_Notes__c` (`[object Object]` replaced,
+or the notes appended under "HCP notes:" — never removed), `Issue_Description__c` (only while it
+is still exactly the HCP title), `Bill_To_Type__c` / `Bill_To_Name__c` (only while still the
+import's `Customer` with no name), `Service_Type__c` (only while blank), estimates' `Tax_Rate__c`
+(only while null with tax above zero) and `Tax_Jurisdiction__c` (only while blank). Dry run by
+default (`bill-to-review.csv`, `backfill-plan.csv` in `migration/hcp/import/`); `--apply` is
+canary-first and batched. Idempotent. Needs the pull in `migration/hcp/raw/` and AWS credentials
+(Tim's PowerShell, not the device VM).
+
 ## Sunbase → Sundial Sales (Phase 1 / Phase 3 commercial)
 
 Not yet written here.

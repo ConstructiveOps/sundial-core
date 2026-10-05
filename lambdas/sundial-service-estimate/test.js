@@ -319,7 +319,11 @@ function fakeSalesforce() {
             { name: "Service_Club_Interest__c", picklistValues: ["Yes", "No", "Maybe later"].map((value) => ({ value, active: true })) },
           ]),
         ]
-      : [],
+      : obj === "Sundial_Tenant__c" && flags.tenantSettings
+        ? [{ name: "Default_Tax_Rate__c", type: "percent" }, { name: "Default_Tax_Jurisdiction__c", type: "string" }, { name: "Labor_Burden_Percent__c", type: "percent" }]
+        : obj === "Sundial_User__c" && flags.costRate
+          ? [{ name: "Hourly_Cost_Rate__c", type: "currency" }]
+          : [],
   });
   // A PostgREST-shaped stub over three things: stale flags, the activity table, and
   // the file-metadata table (the estimate PDF registers a row there on send).
@@ -1389,6 +1393,101 @@ test("labor helpers: clock → quarter hours, row sources, entry validation", ()
   assert.equal(none.amount, 0);
   assert.deepEqual(parseLaborEntry({ id: "a0K000000000001AAA", billable: true, hours: "1.5", rate: 99.999 }), { id: "a0K000000000001AAA", billable: true, hours: 1.5, rate: 100, problems: [] });
   assert.ok(parseLaborEntry({ id: "nope", hours: -1 }).problems.length === 2);
+});
+
+const mgrOf = (fake) => makeHandler(fake, { access: { level: "Manager", scope: "tenant", userId: USER, tenantId: TENANT } });
+test("costing (2026-10-05): the tenant's default tax rate lands on a new estimate; a tech's cost rate × burden is the job's labor cost; margin = revenue − costs; Admin-only", async () => {
+  const fake = fakeSalesforce();
+  fake.flags.tenantSettings = true;
+  fake.flags.costRate = true;
+  fake.store.Sundial_Tenant__c[0] = { Id: TENANT, Name: "harmon", Default_Tax_Rate__c: 8.6, Default_Tax_Jurisdiction__c: "Phoenix, AZ", Labor_Burden_Percent__c: 80 };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cost" });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, Active__c: true, Access_Level__c: "Technician", First_Name__c: "Jake", Last_Name__c: "Dorsey", Hourly_Bill_Rate__c: 120, Hourly_Cost_Rate__c: 40 });
+  await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, Active__c: true, Access_Level__c: "Technician", First_Name__c: "New", Last_Name__c: "Guy", Hourly_Bill_Rate__c: 120 });
+  const [jake, newGuy] = fake.store.Sundial_User__c;
+  const h = makeHandler(fake);
+  // A material line at 100 taxable, a flat-rate labor line at 275 whose book cost is 50.
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Diagnostic", kind: "Labor", unitPrice: 275 }, { description: "Optimizer", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  const jobId = fake.store.Sundial_Service_Job__c[0].Id;
+  assert.equal(est.Tax_Rate__c, 8.6, "the tenant's default rate, not null");
+  assert.equal(est.Tax_Jurisdiction__c, "Phoenix, AZ");
+  assert.equal(est.Tax_Amount__c, 8.6, "8.6% of the taxable 100");
+  assert.equal(est.Total__c, 383.6);
+  fake.store.Sundial_Service_Line__c[0].Unit_Labor_Cost__c = 50; // the book's internal cost of the flat-rate item
+  fake.store.Sundial_Service_Line__c[1].Unit_Material_Cost__c = 60;
+  // Jake clocked 1h37 (→ 1.75 h) and is billed; New Guy clocked an hour, not billed, and has no cost rate.
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-1", Sundial_Service_Job__c: jobId, Tech__c: jake.Id, Status__c: "Complete", Actual_Start__c: "2026-09-14T15:00:00Z", Actual_End__c: "2026-09-14T16:37:00Z" });
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Name: "SC-2", Sundial_Service_Job__c: jobId, Tech__c: newGuy.Id, Status__c: "Complete", Actual_Start__c: "2026-09-15T15:00:00Z", Actual_End__c: "2026-09-15T16:00:00Z" });
+  const [c1] = fake.store.Sundial_Service_Call__c;
+
+  const lab = await call(h, "GET", `/service/jobs/${jobId}/labor`);
+  assert.equal(lab.body.burdenPercent, 80);
+  assert.equal(lab.body.calls[0].techCostRate, 40);
+  assert.equal(lab.body.calls[0].costRate, 72, "40 × 1.8");
+  assert.equal(lab.body.calls[0].cost, 126, "1.75 h × 72");
+  assert.equal(lab.body.calls[1].costRate, null);
+  const bill = await call(h, "POST", `/service/jobs/${jobId}/labor`, { calls: [{ id: c1.Id, billable: true }] });
+  assert.equal(bill.status, 200, JSON.stringify(bill.body));
+  const timeLine = fake.store.Sundial_Service_Line__c.find((l) => l.Source__c === "Time");
+  assert.equal(timeLine.Unit_Labor_Cost__c, 72, "the burdened rate is remembered on the Time line");
+
+  const c = await call(h, "GET", `/service/jobs/${jobId}/costing`);
+  assert.equal(c.status, 200, JSON.stringify(c.body));
+  assert.equal(c.body.revenueSource, "estimate");
+  assert.equal(c.body.revenue, cents(275 + 100 + 210 + 8.6));
+  assert.equal(c.body.materialCost, 60);
+  assert.equal(c.body.laborLineCost, 50, "the flat-rate item's book cost — never the Time line (that is the clock below)");
+  assert.equal(c.body.techLaborCost, 126, "Jake's clock; New Guy's hour has no rate");
+  assert.equal(c.body.techHours, 2.75);
+  assert.equal(c.body.totalCost, 236);
+  assert.equal(c.body.margin, cents(593.6 - 236));
+  assert.equal(c.body.calls.length, 2);
+  assert.equal(c.body.calls[1].billable, false, "an unbilled call still cost the company its hour");
+  assert.ok(c.body.warnings.some((w) => w.startsWith("New Guy has no hourly cost rate")));
+
+  // A tech's cost rate is set here (Admin), and clears with null.
+  const cr = await call(h, "POST", "/service/labor/cost-rate", { userId: newGuy.Id, rate: 35 });
+  assert.equal(cr.status, 200, JSON.stringify(cr.body));
+  assert.equal(newGuy.Hourly_Cost_Rate__c, 35);
+  const c2 = await call(h, "GET", `/service/jobs/${jobId}/costing`);
+  assert.equal(c2.body.techLaborCost, cents(126 + 63));
+  assert.equal(c2.body.warnings.length, 0);
+  assert.equal((await call(h, "POST", "/service/labor/cost-rate", { userId: newGuy.Id, rate: -1 })).body.code, "RATE_INVALID");
+
+  // The rate sheet: both techs, pay × burden shown.
+  const sheet = await call(h, "GET", "/service/labor/rates");
+  assert.equal(sheet.status, 200, JSON.stringify(sheet.body));
+  assert.equal(sheet.body.burdenPercent, 80);
+  assert.deepEqual(sheet.body.techs.map((u) => [u.name, u.billRate, u.costRate, u.burdenedRate]), [["Jake Dorsey", 120, 40, 72], ["New Guy", 120, 35, 63]]);
+  assert.equal((await call(mgrOf(fake), "GET", "/service/labor/rates")).status, 403);
+
+  // Once invoiced, the invoice's total is the revenue.
+  const inv = await call(h, "POST", `/service/jobs/${jobId}/invoice`, {});
+  assert.equal(inv.status, 201);
+  const c3 = await call(h, "GET", `/service/jobs/${jobId}/costing`);
+  assert.equal(c3.body.revenueSource, "invoice");
+  assert.equal(c3.body.revenue, inv.body.invoice.Total__c);
+
+  // A Manager cannot see costs — not on the costing route, and not on the labor rows either; an org without the fields says so.
+  const mgr = makeHandler(fake, { access: { level: "Manager", scope: "tenant", userId: USER, tenantId: TENANT } });
+  assert.equal((await call(mgr, "GET", `/service/jobs/${jobId}/costing`)).status, 403);
+  const mgrLabor = await call(mgr, "GET", `/service/jobs/${jobId}/labor`);
+  assert.equal(mgrLabor.status, 200);
+  assert.equal(mgrLabor.body.burdenPercent, null);
+  assert.ok(mgrLabor.body.calls.every((c) => c.techCostRate === null && c.costRate === null && c.cost === null), "pay rates are an Admin's to see");
+  assert.equal(mgrLabor.body.calls[0].rate, 120, "the bill rate is still there");
+  assert.equal((await call(mgr, "POST", "/service/labor/cost-rate", { userId: newGuy.Id, rate: 1 })).status, 403);
+  const bare = fakeSalesforce();
+  await bare.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Bare" });
+  const hb = makeHandler(bare);
+  await call(hb, "POST", "/service/jobs", { customer: { id: bare.store.Sundial_Customer__c[0].Id }, lines: [{ description: "x", kind: "Material", unitPrice: 10, taxable: true }] });
+  assert.equal(bare.store.Sundial_Estimate__c[0].Tax_Rate__c ?? null, null, "no tenant default → the old behaviour (no rate)");
+  const cb = await call(hb, "GET", `/service/jobs/${bare.store.Sundial_Service_Job__c[0].Id}/costing`);
+  assert.equal(cb.status, 200);
+  assert.ok(cb.body.warnings.some((w) => w.includes("Hourly_Cost_Rate__c")));
+  assert.equal((await call(hb, "POST", "/service/labor/cost-rate", { userId: USER, rate: 1 })).body.code, "FIELD_MISSING");
 });
 
 test("labor billing: billable calls become Labor lines (Source Time), edits rewrite them, unbilling removes them, the invoice locks them", async () => {

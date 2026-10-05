@@ -453,7 +453,7 @@ export function checklistFor(call) {
 }
 
 // --- dates ------------------------------------------------------------------------
-function tzOffsetMs(date, timeZone) {
+export function tzOffsetMs(date, timeZone) {
   const f = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const p = Object.fromEntries(f.formatToParts(date).map((x) => [x.type, x.value]));
   return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - date.getTime();
@@ -466,6 +466,16 @@ export function localDate(date, timeZone) {
 /** Local midnight of (y, mo, d) in a timezone, as a UTC instant — DST-safe (two passes). */
 function localMidnightUtc(y, mo, d, timeZone) {
   const guess = Date.UTC(y, mo - 1, d);
+  let t = guess - tzOffsetMs(new Date(guess), timeZone);
+  const off2 = tzOffsetMs(new Date(t), timeZone);
+  if (guess - off2 !== t) t = guess - off2;
+  return new Date(t);
+}
+/** The UTC instant of a local wall-clock time (ms since that day's local midnight) on a date — DST-safe like localMidnightUtc. */
+export function localTimeUtc(dateStr, wallMs, timeZone) {
+  const m = String(dateStr ?? "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const guess = Date.UTC(+m[1], +m[2] - 1, +m[3]) + wallMs;
   let t = guess - tzOffsetMs(new Date(guess), timeZone);
   const off2 = tzOffsetMs(new Date(t), timeZone);
   if (guess - off2 !== t) t = guess - off2;

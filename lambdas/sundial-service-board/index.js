@@ -57,6 +57,7 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realDeleteObject, realListPhotos, realPresignPut } from "./tech.js";
 import { createDayHandlers } from "./day.js";
+import { eventOccurrences, MAX_OCCURRENCES, REPEATS } from "./events.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
 import { createTenantSettings } from "../../lib/tenant-settings.js";
@@ -486,10 +487,10 @@ export function createHandler(deps = {}) {
    * The dedupe key carries the call's modstamp-ish `stamp` so a genuine second move rings
    * again while a retried request does not.
    */
-  async function notifyTech(ctx, { kind, techId, call, job, stamp }) {
+  async function notifyTech(ctx, { kind, techId, call, job, stamp, suffix = "" }) {
     if (!techId) return;
     const when = call?.Scheduled_Start__c ? fmtWhen(call.Scheduled_Start__c, DEFAULTS.timeZone) : null;
-    const label = isEventCall(call) ? `Event · ${call.Event_Name__c ?? ""}`.trim() : jobLabel(job ?? call?.Sundial_Service_Job__r);
+    const label = (isEventCall(call) ? `Event · ${call.Event_Name__c ?? ""}`.trim() : jobLabel(job ?? call?.Sundial_Service_Job__r)) + suffix;
     const title =
       kind === "scheduled" ? `New call${when ? ` ${when}` : ""}: ${label}` :
       kind === "moved" ? `Moved to ${when ?? "a new time"}: ${label}` :
@@ -805,6 +806,19 @@ export function createHandler(deps = {}) {
       if (!start) return bad(cors, "START_REQUIRED", "start must be an ISO datetime.");
       const end = isoOrNull(body?.end) ?? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString();
       if (Date.parse(end) <= Date.parse(start)) return bad(cors, "WINDOW_INVALID", "end must be after start.");
+      // A range (2026-10-05): `untilDate` + `repeat` → the same window on each matching day.
+      const expanded = eventOccurrences({ start, end, repeat: strOrNull(body?.repeat), untilDate: strOrNull(body?.untilDate), timeZone: DEFAULTS.timeZone });
+      if (expanded.problem) {
+        const why = {
+          REPEAT_INVALID: `repeat must be one of ${REPEATS.join(", ")}.`,
+          UNTIL_INVALID: "untilDate must be a YYYY-MM-DD date.",
+          UNTIL_BEFORE_START: "The through date is before the event's first day.",
+          TOO_MANY: `That is more than ${MAX_OCCURRENCES} days per tech — shorten the range.`,
+          NO_DATES: "No day in that range matches the repeat pattern.",
+          WINDOW_INVALID: "end must be after start.",
+        }[expanded.problem];
+        return bad(cors, expanded.problem, why ?? "The event's dates are invalid.");
+      }
       const techIds = [...new Set((Array.isArray(body?.techIds) ? body.techIds : [body?.techId]).map(strOrNull).filter(Boolean))];
       if (!techIds.length) return bad(cors, "TECH_REQUIRED", "Pick at least one technician.");
       const techs = [];
@@ -815,42 +829,46 @@ export function createHandler(deps = {}) {
       }
       const created = [];
       const failures = [];
+      const many = expanded.occurrences.length > 1;
       for (const tech of techs) {
-        const fields = {
-          Client__c: tenantId,
-          Visit_Type__c: "Event",
-          Visit_Sub_Type__c: "On-Site",
-          Tech__c: tech.Id,
-          Scheduled_Start__c: start,
-          Scheduled_End__c: end,
-          Status__c: "Scheduled",
-          Event_Name__c: name.slice(0, 100),
-          Event_Details__c: details ? details.slice(0, 32000) : null,
-        };
-        for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
-        let rec;
-        try {
-          rec = await d.sfCreateRecord(CALL_SF_OBJECT, fields);
-        } catch (e) {
-          if (!created.length) return sfError(cors, e, "event create");
-          failures.push({ techId: tech.Id, techName: techName(tech), message: String(e?.sfBody ?? e?.message ?? e).slice(0, 300) });
-          continue;
+        for (const occ of expanded.occurrences) {
+          const fields = {
+            Client__c: tenantId,
+            Visit_Type__c: "Event",
+            Visit_Sub_Type__c: "On-Site",
+            Tech__c: tech.Id,
+            Scheduled_Start__c: occ.start,
+            Scheduled_End__c: occ.end,
+            Status__c: "Scheduled",
+            Event_Name__c: name.slice(0, 100),
+            Event_Details__c: details ? details.slice(0, 32000) : null,
+          };
+          for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
+          let rec;
+          try {
+            rec = await d.sfCreateRecord(CALL_SF_OBJECT, fields);
+          } catch (e) {
+            if (!created.length) return sfError(cors, e, "event create");
+            failures.push({ techId: tech.Id, techName: techName(tech), start: occ.start, message: String(e?.sfBody ?? e?.message ?? e).slice(0, 300) });
+            continue;
+          }
+          const call = (await loadCall(rec.id, tenantId)) || { Id: rec.id, ...fields, Tech__r: tech };
+          await act(ctx, {
+            event: EVENTS.SERVICE_CALL_CREATED,
+            recordType: "servicecall",
+            recordSfId: rec.id,
+            jobSfId: null,
+            details: { event: true, name, techId: tech.Id, techName: techName(tech), start: occ.start, end: occ.end, ...(many ? { series: { untilDate: body.untilDate, repeat: body.repeat ?? "daily", days: expanded.occurrences.length } } : {}) },
+          });
+          await markStale(CACHE.call, [rec.id], tenantId);
+          const shaped = callToBoard(call);
+          await announce(ctx, { kind: "call", action: "created", call: shaped, jobStatus: null });
+          // A multi-day event tells the tech once, about the first day, not once per day.
+          if (occ === expanded.occurrences[0]) await notifyTech(ctx, { kind: "scheduled", techId: tech.Id, call, job: { Name: "Event", Customer_Name_at_Creation__c: name }, stamp: occ.start, suffix: many ? ` (${expanded.occurrences.length} days)` : "" });
+          created.push(shaped);
         }
-        const call = (await loadCall(rec.id, tenantId)) || { Id: rec.id, ...fields, Tech__r: tech };
-        await act(ctx, {
-          event: EVENTS.SERVICE_CALL_CREATED,
-          recordType: "servicecall",
-          recordSfId: rec.id,
-          jobSfId: null,
-          details: { event: true, name, techId: tech.Id, techName: techName(tech), start, end },
-        });
-        await markStale(CACHE.call, [rec.id], tenantId);
-        const shaped = callToBoard(call);
-        await announce(ctx, { kind: "call", action: "created", call: shaped, jobStatus: null });
-        await notifyTech(ctx, { kind: "scheduled", techId: tech.Id, call, job: { Name: "Event", Customer_Name_at_Creation__c: name }, stamp: start });
-        created.push(shaped);
       }
-      return jsonResponse(201, cors, { success: true, calls: created, failures });
+      return jsonResponse(201, cors, { success: true, calls: created, failures, days: expanded.occurrences.length });
     },
 
     // --- move / resize / reassign / status ---------------------------------------

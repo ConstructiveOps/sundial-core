@@ -20,6 +20,17 @@ Backend half; the Bill To picker and the TypeScript `customerDisplayName` are ha
 - [ ] **When Solar is picked back up:** `feature/solar-pipeline` and this branch both edit `SORT_ALLOWLIST` in `lambdas/sundial-sf-query/caller-filters.js` (this one adds `display_name_sort` to `customer`; Solar adds the `solar` list + `SORT_COMPOSITE` and a composite-aware `parseSort`) and the `LIST_PROJECTION` / test files around it — a small, adjacent-lines merge conflict; keep both. `package.json`'s test list conflicts the same way.
 - [ ] Later: pass SERVICE DATE to the job report (`report.js` + the public page) — the model supports it (`serviceDate`), nothing passes it yet.
 
+## Solar page + Dashboard without the download: GET /sf/solar/pipeline + solar sort (D-080 amendment 1) — BUILT, NOT DEPLOYED (2026-10-06, branch `feature/solar-pipeline`)
+
+Backend only; nothing the portal receives today changes (new route answer, new sort keys). ⚠️ **When Prompt B ships, the Dashboard's "Active Projects" drops from 3,300 to 421** for Harmon — on purpose: Archive now counts as finished (D-080 amendment 1). Tell Harmon before it goes live.
+
+- [x] `sundial_solar_pipeline` (counts + `stats`), the `PIPELINE` registry, the solar sort allowlist + composite `customer_name`, the index file, tests (SQL 15, handler 24, caller-filters 23; suite 1392).
+- [ ] **(1) Supabase → SQL editor**: open and **Run** `sql/sundial_solar_pipeline.sql`. The last query prints two columns — both must say **false**. Then open and **Run** `sql/2026-10-06_solar_pipeline_indexes.sql` (it prints the new index's name).
+- [ ] **(2) PowerShell**, in the `sundial-core` folder: `.\deploy.ps1 sundial-sf-query`
+- [ ] **(3) Do NOT run `.\scripts\wire-sales-pipeline-route.ps1`.** The route is `/sf/{object}/pipeline`, already wired for customer and already matching solar (checked in API Gateway 2026-10-06: GET + OPTIONS present). Nothing about its shape changed.
+- [ ] **(4) harmon-crm `main`** — only after Prompt B (the Solar page and Dashboard rewritten to use the pipeline + pages) is reviewed and merged.
+- [ ] Later, only if Harmon notices: an exact Customer sort (267 last-name-only projects sort at the end today) via a stored generated column in the solar cache.
+
 ## Sales page without the download: GET /sf/customer/pipeline + f[] / not[] / sort (D-080) — BUILT, NOT DEPLOYED (2026-10-05, branch `feature/sales-pipeline-endpoint`)
 
 Backend only; the portal does not change until Prompt 3. Nothing here changes what today's Sales page receives (new parameters only, defaults unchanged).

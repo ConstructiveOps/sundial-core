@@ -60,10 +60,40 @@ export const SORT_ALLOWLIST = {
     "created_date", "name", "last_name", "status", "stage", "sales_rep_name", "lead_source", "call_attempts",
     "street", "primary_phone", "requested_project_types",
   ],
+  // solar (D-080 amendment 1, 2026-10-06): every header on harmon-crm's ProjectsTable,
+  // mapped from what each column's get() reads:
+  //   Project → project_name · Customer → customer_name (composite, below) ·
+  //   Address → address · Harmon Job # → harmon_job_number · Contract Type → contract_type ·
+  //   Stage → stage · System Size → system_size · AHJ → authority_having_jurisdiction ·
+  //   Utility → utility_company · Project Manager → project_manager · Sales Rep → sales_rep_name
+  // Approximations, measured on Harmon's 4,522 rows 2026-10-06:
+  //   - Customer: the page shows "first last", else the snapshot name. The server sorts
+  //     first_name, then last_name — the 267 projects with ONLY a last name sort at the
+  //     end instead of among the names (no row needs the snapshot fallback today).
+  //   - Address: the page shows address, else address_at_creation; one row differs.
+  //   - System Size: the page reads system_size_kw, else system_size; system_size_kw is
+  //     empty on every row, so system_size (numeric — sorts as a number) is the answer.
+  //   - Text sorts by the database collation (en_US), not the browser's numeric-aware
+  //     compare; Harmon's job numbers (130665 … S231117) order the same either way.
+  solar: [
+    "created_date", "project_name", "customer_name", "address", "harmon_job_number", "contract_type",
+    "stage", "system_size", "authority_having_jurisdiction", "utility_company", "project_manager", "sales_rep_name",
+  ],
 };
 
-/** The pipeline route's narrowing columns (sundial_customer_pipeline's p_narrow). */
+/**
+ * Sort keys that are SEVERAL cache columns, in order (each NULLS LAST, then sf_id). A key
+ * here must also be in SORT_ALLOWLIST; every column must exist in the cache, or the sort
+ * is a 400 like any other. A plain key is its own single column.
+ */
+export const SORT_COMPOSITE = {
+  solar: { customer_name: ["first_name", "last_name"] },
+};
+
+/** The customer pipeline's narrowing columns (sundial_customer_pipeline's p_narrow). */
 export const PIPELINE_NARROW_COLUMNS = ["stage", "sales_rep_name", "lead_source"];
+/** The solar pipeline's narrowing columns (sundial_solar_pipeline's p_narrow). */
+export const SOLAR_PIPELINE_NARROW_COLUMNS = ["stage", "project_manager", "sales_rep_name"];
 
 /**
  * Every query key → its list of values. multiValueQueryStringParameters FIRST (see the
@@ -129,16 +159,22 @@ export function parseCallerFilters(multi, columnSet, { allowColumns = null, allo
   return { ok: true, filters };
 }
 
-/** ?sort=col:dir → { column, ascending } | null (absent); { error } when not allowed. */
+/**
+ * ?sort=key:dir → { column, columns, ascending } | null (absent); { error } when not allowed.
+ * `column` is the key as asked; `columns` the cache columns it orders by (one, or a
+ * SORT_COMPOSITE list), applied in order, all in the same direction.
+ */
 export function parseSort(qs, objectKey, columnSet) {
   const raw = qs?.sort;
   if (raw == null || String(raw).trim() === "") return { ok: true, sort: null };
   const m = String(raw).trim().match(/^([a-z][a-z0-9_]*)(?::(asc|desc))?$/i);
   const allowed = SORT_ALLOWLIST[objectKey] ?? ["created_date"];
-  if (!m || !allowed.includes(m[1].toLowerCase()) || !columnSet?.has(m[1].toLowerCase())) {
+  const key = m ? m[1].toLowerCase() : null;
+  const columns = key ? SORT_COMPOSITE[objectKey]?.[key] ?? [key] : [];
+  if (!m || !allowed.includes(key) || !columns.every((c) => columnSet?.has(c))) {
     return fail(400, "INVALID_SORT", { sort: String(raw).slice(0, 80), allowed });
   }
-  return { ok: true, sort: { column: m[1].toLowerCase(), ascending: (m[2] || "asc").toLowerCase() === "asc" } };
+  return { ok: true, sort: { column: key, columns, ascending: (m[2] || "asc").toLowerCase() === "asc" } };
 }
 
 // A PostgREST double-quoted value: backslash and double quote escaped. Verified against
@@ -215,7 +251,7 @@ export function callerFiltersToSoql(filters, columnToField, soqlEscapeString) {
   return { ok: true, clauses };
 }
 
-/** f[] for the pipeline → sundial_customer_pipeline's p_narrow, or null when none. */
+/** f[] for the pipeline → the pipeline function's p_narrow, or null when none. */
 export function filtersToNarrow(filters) {
   if (!filters?.any?.length) return null;
   const out = {};

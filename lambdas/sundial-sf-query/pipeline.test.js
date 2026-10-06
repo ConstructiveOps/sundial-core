@@ -8,7 +8,10 @@
 // Pinned:
 //   - the pipeline goes through the SAME enforce path as the list: a rep's access filter
 //     reaches the RPC's p_filters exactly as it reaches the list query;
-//   - a closed module is 403 on both; a non-customer pipeline is 400;
+//   - a closed module is 403 on both; an object not in the PIPELINE registry is 400;
+//   - solar (D-080 amendment 1): the solar function with the terminal rule's two lists,
+//     the rep filter reaching p_filters, solar's own narrowing columns, the composite
+//     customer_name sort on the cache and the cold SOQL path;
 //   - f[] on the access columns can't widen or replace the access filter (ignored);
 //   - f[] repeats arrive through multiValueQueryStringParameters;
 //   - total is the same with and without ?fields=list;
@@ -90,10 +93,16 @@ mock.module("../../lib/supabase.js", {
 const COLS = ["sf_id", "client_sf_id", "tenant_id", "created_date", "is_stale", "last_synced_at", "cache_version",
   "name", "status", "stage", "lead_source", "customer_type", "sales_rep_sf_id", "sales_rep_name", "dealer_sf_id", "call_attempts", "primary_email",
   "street", "primary_phone", "requested_project_types"];
+// The solar cache's real list columns (live schema, 2026-10-06).
+const SOLAR_COLS = ["sf_id", "client_sf_id", "tenant_id", "created_date", "is_stale", "last_synced_at", "cache_version",
+  "project_name", "first_name", "last_name", "customer_name_at_creation", "address", "address_at_creation",
+  "harmon_job_number", "contract_type", "stage", "system_size", "system_size_kw", "authority_having_jurisdiction",
+  "utility_company", "project_manager", "sales_rep_name", "sales_rep_sf_id", "dealer_sf_id", "contract_amount"];
 globalThis.fetch = async (url) => {
   if (String(url).includes("/rest/v1/")) {
     const properties = Object.fromEntries(COLS.map((c) => [c, {}]));
-    return { ok: true, status: 200, json: async () => ({ definitions: { sundial_customer_cache: { properties }, sundial_service_job_cache: { properties } } }) };
+    const solar = Object.fromEntries(SOLAR_COLS.map((c) => [c, {}]));
+    return { ok: true, status: 200, json: async () => ({ definitions: { sundial_customer_cache: { properties }, sundial_service_job_cache: { properties }, sundial_solar_cache: { properties: solar } } }) };
   }
   return {
     ok: true, status: 200,
@@ -102,6 +111,10 @@ globalThis.fetch = async (url) => {
       { name: "Status__c", type: "picklist" }, { name: "Stage__c", type: "picklist" }, { name: "Customer_Type__c", type: "multipicklist" },
       { name: "Sales_Rep__c", type: "reference" }, { name: "CreatedDate", type: "datetime" },
       { name: "Street__c", type: "string" }, { name: "Primary_Phone__c", type: "phone" }, { name: "Requested_Project_Types__c", type: "multipicklist" },
+      // Solar's sortable columns (describe shared by every object in this mock).
+      { name: "First_Name__c", type: "string" }, { name: "Last_Name__c", type: "string" },
+      { name: "System_Size__c", type: "double" }, { name: "Utility_Company__c", type: "picklist" },
+      { name: "Address__c", type: "textarea" },
     ] }),
   };
 };
@@ -180,10 +193,112 @@ test("pipeline: a narrowing column outside stage/rep/source is 400; not[] is 400
   assert.equal(ctx.rpc.length, 0);
 });
 
-test("pipeline: any object but customer is 400 PIPELINE_UNSUPPORTED", async () => {
-  const res = await handler(ev("/sf/job/pipeline"));
+test("pipeline: an object not in the PIPELINE registry is 400 PIPELINE_UNSUPPORTED (job, roofing)", async () => {
+  for (const obj of ["job", "roofing"]) {
+    const res = await handler(ev(`/sf/${obj}/pipeline`));
+    assert.equal(res.statusCode, 400, obj);
+    assert.equal(JSON.parse(res.body).code, "PIPELINE_UNSUPPORTED", obj);
+  }
+  assert.equal(ctx.rpc.length, 0);
+});
+
+test("pipeline registry: customer's response keys are unchanged by the generalisation", async () => {
+  const body = JSON.parse((await handler(ev("/sf/customer/pipeline"))).body);
+  assert.deepEqual(Object.keys(body).sort(), ["by_stage", "by_status", "narrowed", "reps", "sources"]);
+});
+
+// --- solar pipeline (D-080 amendment 1) ---------------------------------------------------
+
+const SOLAR_RPC = {
+  by_stage: { Permitting: 3, "": 1 },
+  pms: [["Pat", 3]],
+  reps: [["Ann", 4]],
+  stats: { total_projects: 4, in_progress: 3, contract_total: 50000, system_size_kw_total: 21.5, recent: [["a1Q1", "P1", "Ada Lee", "Permitting", "2026-10-05T10:00:00Z"]] },
+};
+
+test("solar pipeline: calls sundial_solar_pipeline with the terminal rule from ONE place; shapes the answer", async () => {
+  const { TERMINAL_STAGE_TERMS, NOT_TERMINAL_STAGES } = await import("./index.js");
+  ctx.rpcResult = SOLAR_RPC;
+  const res = await handler(ev("/sf/solar/pipeline"));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(ctx.rpc, [{
+    fn: "sundial_solar_pipeline",
+    args: {
+      p_client_sf_id: TENANT, p_filters: { eq: {} }, p_narrow: null,
+      p_terminal_terms: [...TERMINAL_STAGE_TERMS], p_not_terminal: [...NOT_TERMINAL_STAGES],
+    },
+  }]);
+  assert.deepEqual([...TERMINAL_STAGE_TERMS], ["complete", "cancel", "pto", "closed", "archive"]);
+  assert.deepEqual([...NOT_TERMINAL_STAGES], ["Billing Complete - Pending Closeout"]);
+  assert.deepEqual(JSON.parse(res.body), { ...SOLAR_RPC, narrowed: false });
+});
+
+test("solar pipeline: a rep's access filter reaches p_filters (so the Dashboard's stats are the rep's book)", async () => {
+  asRep();
+  ctx.rpcResult = SOLAR_RPC;
+  const res = await handler(ev("/sf/solar/pipeline"));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(ctx.rpc[0].args.p_filters, { eq: { sales_rep_sf_id: REP } });
+});
+
+test("solar pipeline: narrows on stage / project_manager / sales_rep_name; anything else 400", async () => {
+  ctx.rpcResult = SOLAR_RPC;
+  const ok = await handler(ev("/sf/solar/pipeline", { multi: { "f[project_manager]": ["Pat", ""], "f[sales_rep_name]": ["Ann"] } }));
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ctx.rpc[0].args.p_narrow, {
+    project_manager: { values: ["Pat"], blank: true }, sales_rep_name: { values: ["Ann"], blank: false },
+  });
+  assert.equal(JSON.parse(ok.body).narrowed, true);
+  assert.equal((await handler(ev("/sf/solar/pipeline", { qs: { "f[lead_source]": "Web" } }))).statusCode, 400, "customer's column, not solar's");
+  assert.equal((await handler(ev("/sf/customer/pipeline", { qs: { "f[project_manager]": "Pat" } }))).statusCode, 400, "solar's column, not customer's");
+  assert.equal(ctx.rpc.length, 1);
+});
+
+test("solar pipeline: an empty RPC answer is shaped to empty values, never undefined", async () => {
+  ctx.rpcResult = null;
+  const body = JSON.parse((await handler(ev("/sf/solar/pipeline"))).body);
+  assert.deepEqual(body, {
+    by_stage: {}, pms: [], reps: [],
+    stats: { total_projects: 0, in_progress: 0, contract_total: null, system_size_kw_total: null, recent: [] },
+    narrowed: false,
+  });
+});
+
+// --- solar list sort (D-080 amendment 1) ---------------------------------------------------
+
+const solarOps = () => ctx.ops.filter((o) => o.table === "sundial_solar_cache").flatMap((o) => o.ops);
+const solarRow = (id) => ({ sf_id: id, client_sf_id: TENANT, project_name: "P", stage: "Permitting", created_date: "2026-01-01", last_synced_at: ago(1), is_stale: false });
+
+test("solar sort: customer_name orders first_name then last_name, NULLS LAST, sf_id tie-break; system_size is one column", async () => {
+  ctx.rows = [solarRow("a1Q000000000001AAA")];
+  const res = await handler(ev("/sf/solar", { qs: { "f[stage]": "Permitting", sort: "customer_name:desc" } }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(solarOps().filter(([op]) => op === "order").slice(0, 3),
+    [["order", "first_name", false], ["order", "last_name", false], ["order", "sf_id", true]]);
+
+  ctx.ops = [];
+  _resetFreshnessMemo();
+  await handler(ev("/sf/solar", { qs: { sort: "system_size:asc" } }));
+  assert.deepEqual(solarOps().filter(([op]) => op === "order").slice(0, 2), [["order", "system_size", true], ["order", "sf_id", true]]);
+});
+
+test("solar sort: a customer-only key is 400 on solar", async () => {
+  const res = await handler(ev("/sf/solar", { qs: { sort: "lead_source:asc" } }));
   assert.equal(res.statusCode, 400);
-  assert.equal(JSON.parse(res.body).code, "PIPELINE_UNSUPPORTED");
+  assert.equal(JSON.parse(res.body).code, "INVALID_SORT");
+});
+
+test("solar sort, cold path: the composite becomes two SOQL keys; a textarea (Address__c) falls back to default", async () => {
+  ctx.rows = [];
+  ctx.tenantRows = 0;
+  await handler(ev("/sf/solar", { qs: { sort: "customer_name:asc" } }));
+  assert.match(ctx.soql.find((s) => s.startsWith("SELECT ") && !/COUNT/.test(s)),
+    /ORDER BY First_Name__c ASC NULLS LAST, Last_Name__c ASC NULLS LAST, Id ASC/);
+  ctx.soql = [];
+  await handler(ev("/sf/solar", { qs: { sort: "address:asc" } }));
+  const sel = ctx.soql.find((s) => s.startsWith("SELECT ") && !/COUNT/.test(s));
+  assert.doesNotMatch(sel, /ORDER BY Address__c/);
+  assert.match(sel, /DESC NULLS LAST, Id ASC/);
 });
 
 test("pipeline: a scope the list would 403 is 403 here too (Technician on customer)", async () => {

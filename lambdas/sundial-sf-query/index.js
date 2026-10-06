@@ -54,6 +54,7 @@ import {
   callerFiltersToSoql,
   filtersToNarrow,
   PIPELINE_NARROW_COLUMNS,
+  SOLAR_PIPELINE_NARROW_COLUMNS,
 } from "./caller-filters.js";
 // ACCESS MODEL ENFORCEMENT (D-064 Phase 3, §7.3). Under ACCESS_MODEL_MODE=enforce these
 // decide what is SERVED. Under off/shadow they are not consulted by any serving line.
@@ -1366,9 +1367,11 @@ export function includesOrExpr(column, value) {
   return [`${column}.eq."${v}"`, q(`${v};*`), q(`*;${v}`), q(`*;${v};*`)].join(",");
 }
 
-// --- GET /sf/customer/pipeline (D-080) -----------------------------------------
-// The Sales page's status badges, stage columns and Rep / Source options in one small
-// answer — sql/sundial_customer_pipeline.sql does the GROUP BY. Two filters, kept apart:
+// --- GET /sf/{object}/pipeline (D-080; solar = amendment 1) ----------------------
+// customer: the Sales page's status badges, stage columns and Rep / Source options.
+// solar: the Solar page's stage columns and PM / Rep options AND the Dashboard's stats.
+// One small answer each; the SQL function in the PIPELINE registry (below) does the
+// GROUP BY. Two filters, kept apart:
 //   p_filters  the ACCESS filter, from `enforce` (never request input). Customer's row
 //              filter is equalities only (tenant + rep or dealer); anything this route
 //              cannot express — a cacheOr, an unexpected column, a tenant mismatch — is a
@@ -1382,11 +1385,58 @@ export function includesOrExpr(column, value) {
 // falls back to the default order for them; the cache path sorts them as text.
 const SOQL_UNSORTABLE_TYPES = new Set(["multipicklist", "textarea", "encryptedstring"]);
 
-const PIPELINE_OBJECTS = new Set(["customer"]);
 const PIPELINE_ACCESS_COLUMNS = new Set(["sales_rep_sf_id", "dealer_sf_id"]);
 
+// The Dashboard's "Active Projects" rule (D-080 amendment 1, 2026-10-06) — its ONE home.
+// sundial_solar_pipeline applies it; nothing else decides it. A stage is TERMINAL when it
+// CONTAINS one of the terms (case-insensitive — the substring rule DashboardPage's
+// isTerminalStage() used), unless it is exactly one of NOT_TERMINAL_STAGES.
+//   "archive" added 2026-10-06 at Harmon's request: Archive is 2,913 of 4,523 projects
+//     and the old rule counted every one of them as in progress.
+//   "Billing Complete - Pending Closeout" is still open work (it waits on closeout) but
+//     contains "complete", so it is named as the exception.
+// Measured live 2026-10-06: old list 3,300 in progress, this list 421.
+export const TERMINAL_STAGE_TERMS = Object.freeze(["complete", "cancel", "pto", "closed", "archive"]);
+export const NOT_TERMINAL_STAGES = Object.freeze(["Billing Complete - Pending Closeout"]);
+
+// One entry per object that has a pipeline. An object NOT here is 400
+// PIPELINE_UNSUPPORTED. Each names its SQL function, the f[] columns it narrows on, any
+// extra arguments, and the response it shapes (absent keys → empty, never undefined).
+// The access filter, the 403s and the log line are shared by every entry.
+export const PIPELINE = Object.freeze({
+  customer: {
+    rpc: "sundial_customer_pipeline",
+    narrowColumns: PIPELINE_NARROW_COLUMNS,
+    extraArgs: () => ({}),
+    shape: (d) => ({
+      by_status: d?.by_status ?? {},
+      by_stage: d?.by_stage ?? {},
+      reps: d?.reps ?? {},
+      sources: d?.sources ?? {},
+    }),
+  },
+  solar: {
+    rpc: "sundial_solar_pipeline",
+    narrowColumns: SOLAR_PIPELINE_NARROW_COLUMNS,
+    extraArgs: () => ({ p_terminal_terms: [...TERMINAL_STAGE_TERMS], p_not_terminal: [...NOT_TERMINAL_STAGES] }),
+    shape: (d) => ({
+      by_stage: d?.by_stage ?? {},
+      pms: d?.pms ?? [],
+      reps: d?.reps ?? [],
+      stats: {
+        total_projects: d?.stats?.total_projects ?? 0,
+        in_progress: d?.stats?.in_progress ?? 0,
+        contract_total: d?.stats?.contract_total ?? null,
+        system_size_kw_total: d?.stats?.system_size_kw_total ?? null,
+        recent: d?.stats?.recent ?? [],
+      },
+    }),
+  },
+});
+
 async function handlePipelineRead({ supabase, objectKey, tenantId, enforce, multi, cors }) {
-  if (!PIPELINE_OBJECTS.has(objectKey)) {
+  const entry = Object.hasOwn(PIPELINE, objectKey) ? PIPELINE[objectKey] : null;
+  if (!entry) {
     return jsonResponse(400, cors, { error: "pipeline_unsupported", code: "PIPELINE_UNSUPPORTED" });
   }
   // Same answer as the list for a closed module (§3.1: a LIST denial is 403).
@@ -1412,27 +1462,22 @@ async function handlePipelineRead({ supabase, objectKey, tenantId, enforce, mult
     }
   }
 
-  const parsed = parseCallerFilters(multi || new Map(), null, { allowColumns: PIPELINE_NARROW_COLUMNS, allowNot: false });
+  const parsed = parseCallerFilters(multi || new Map(), null, { allowColumns: entry.narrowColumns, allowNot: false });
   if (!parsed.ok) return jsonResponse(parsed.status, cors, parsed.body);
   const narrow = filtersToNarrow(parsed.filters);
 
   const started = Date.now();
-  const { data, error } = await supabase.rpc("sundial_customer_pipeline", {
+  const { data, error } = await supabase.rpc(entry.rpc, {
     p_client_sf_id: tenantId,
     p_filters: { eq },
     p_narrow: narrow,
+    ...entry.extraArgs(),
   });
   if (error) {
     console.error("pipeline rpc error:", error.message);
     return jsonResponse(500, cors, { error: "server_error" });
   }
-  const body = {
-    by_status: data?.by_status ?? {},
-    by_stage: data?.by_stage ?? {},
-    reps: data?.reps ?? {},
-    sources: data?.sources ?? {},
-    narrowed: !!narrow,
-  };
+  const body = { ...entry.shape(data), narrowed: !!narrow };
   const res = jsonResponse(200, cors, body);
   console.log(JSON.stringify({
     pipeline: objectKey,
@@ -1647,10 +1692,12 @@ async function handleListRead(ctx) {
     // f[] / not[] (D-080): after the access filter, on the COUNT and the page alike
     // (same builder), so `total` stays exact.
     q = applyCallerFiltersToQuery(q, callerFilters);
-    // ?sort= (D-080): an allowlisted column, NULLS LAST, sf_id as the stable tie-breaker
-    // so paging never duplicates or skips a row.
+    // ?sort= (D-080): an allowlisted key — one column, or a composite like solar's
+    // customer_name (first_name, last_name) — each NULLS LAST, sf_id as the stable
+    // tie-breaker so paging never duplicates or skips a row.
     if (sort) {
-      q = q.order(sort.column, { ascending: sort.ascending, nullsFirst: false }).order("sf_id", { ascending: true });
+      for (const col of sort.columns) q = q.order(col, { ascending: sort.ascending, nullsFirst: false });
+      q = q.order("sf_id", { ascending: true });
       return q;
     }
     // Order newest-first by created_date WHEN the cache actually has that column;
@@ -1920,12 +1967,17 @@ async function listColdCacheFallback(ctx) {
   // ?sort= (D-080): created_date is the coalesced column, so it keeps orderField; any
   // other allowlisted column is its own Salesforce field. Unmappable, or a type SOQL
   // cannot ORDER BY (a multi-select picklist like Requested_Project_Types__c, a long text
-  // area) → the default order rather than a SOQL error.
+  // area) → the default order rather than a SOQL error. A composite key (solar's
+  // customer_name) is all-or-nothing: one unsortable column → the default order.
   let orderBy = `${orderField} DESC NULLS LAST, Id ASC`;
   if (sort) {
-    const f = sort.column === "created_date" ? null : columnToField(sort.column);
-    const sortField = sort.column === "created_date" ? orderField : f && !SOQL_UNSORTABLE_TYPES.has(f.type) ? f.name : null;
-    if (sortField) orderBy = `${sortField} ${sort.ascending ? "ASC" : "DESC"} NULLS LAST, Id ASC`;
+    const dir = sort.ascending ? "ASC" : "DESC";
+    const sortFields = sort.columns.map((col) => {
+      if (col === "created_date") return orderField;
+      const f = columnToField(col);
+      return f && !SOQL_UNSORTABLE_TYPES.has(f.type) ? f.name : null;
+    });
+    if (sortFields.every(Boolean)) orderBy = `${sortFields.map((n) => `${n} ${dir} NULLS LAST`).join(", ")}, Id ASC`;
   }
   const soql =
     `SELECT ${selectList} FROM ${sfObject} WHERE ${where} ` +

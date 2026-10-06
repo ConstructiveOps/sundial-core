@@ -15,6 +15,9 @@ import {
   pgrstQuote,
   IGNORED_FILTER_COLUMNS,
   PIPELINE_NARROW_COLUMNS,
+  SOLAR_PIPELINE_NARROW_COLUMNS,
+  SORT_ALLOWLIST,
+  SORT_COMPOSITE,
 } from "./caller-filters.js";
 
 const COLS = new Set(["sf_id", "status", "stage", "lead_source", "customer_type", "call_attempts", "sales_rep_name", "sales_rep_sf_id", "dealer_sf_id", "client_sf_id", "created_date", "name", "street", "primary_phone", "requested_project_types"]);
@@ -137,8 +140,8 @@ test("no filters → the builder is untouched", () => {
 // --- sort ------------------------------------------------------------------------------
 
 test("sort: allowlisted column with direction; default asc; NOT allowlisted → 400", () => {
-  assert.deepEqual(parseSort({ sort: "name:desc" }, "customer", COLS).sort, { column: "name", ascending: false });
-  assert.deepEqual(parseSort({ sort: "call_attempts" }, "customer", COLS).sort, { column: "call_attempts", ascending: true });
+  assert.deepEqual(parseSort({ sort: "name:desc" }, "customer", COLS).sort, { column: "name", columns: ["name"], ascending: false });
+  assert.deepEqual(parseSort({ sort: "call_attempts" }, "customer", COLS).sort, { column: "call_attempts", columns: ["call_attempts"], ascending: true });
   assert.equal(parseSort({}, "customer", COLS).sort, null);
   const bad = parseSort({ sort: "primary_email:asc" }, "customer", COLS);
   assert.equal(bad.status, 400);
@@ -149,7 +152,7 @@ test("sort: allowlisted column with direction; default asc; NOT allowlisted → 
 
 test("sort: the Sales table's Address / Phone / Requested Types columns are sortable (2026-10-05)", () => {
   for (const col of ["street", "primary_phone", "requested_project_types"]) {
-    assert.deepEqual(parseSort({ sort: `${col}:desc` }, "customer", COLS).sort, { column: col, ascending: false }, col);
+    assert.deepEqual(parseSort({ sort: `${col}:desc` }, "customer", COLS).sort, { column: col, columns: [col], ascending: false }, col);
   }
   assert.equal(parseSort({ sort: "street:asc" }, "job", COLS).body.code, "INVALID_SORT", "customer only");
 });
@@ -161,6 +164,48 @@ test("sort: an object with no allowlist may only sort by created_date", () => {
 
 test("sort: an allowlisted column the cache table lacks is refused", () => {
   assert.equal(parseSort({ sort: "last_name:asc" }, "customer", COLS).body.code, "INVALID_SORT");
+});
+
+// --- solar sort (D-080 amendment 1, 2026-10-06) -----------------------------------------
+
+// The live solar cache's columns (2026-10-06).
+const SOLAR_COLS = new Set(["sf_id", "client_sf_id", "created_date", "project_name", "first_name", "last_name",
+  "customer_name_at_creation", "address", "address_at_creation", "harmon_job_number", "contract_type", "stage",
+  "system_size", "system_size_kw", "authority_having_jurisdiction", "utility_company", "project_manager", "sales_rep_name"]);
+
+test("solar sort: every ProjectsTable header has a key, each a real cache column", () => {
+  // Header → key, from harmon-crm src/components/solar/ProjectsTable.tsx COLUMNS[].get.
+  const HEADERS = {
+    Project: "project_name", Customer: "customer_name", Address: "address", "Harmon Job #": "harmon_job_number",
+    "Contract Type": "contract_type", Stage: "stage", "System Size": "system_size", AHJ: "authority_having_jurisdiction",
+    Utility: "utility_company", "Project Manager": "project_manager", "Sales Rep": "sales_rep_name",
+  };
+  for (const [label, key] of Object.entries(HEADERS)) {
+    const r = parseSort({ sort: `${key}:asc` }, "solar", SOLAR_COLS);
+    assert.ok(r.ok, `${label} (${key}) must sort`);
+    assert.ok(r.sort.columns.every((c) => SOLAR_COLS.has(c)), label);
+  }
+  assert.deepEqual([...SORT_ALLOWLIST.solar].sort(), ["created_date", ...Object.values(HEADERS)].sort(), "no extra keys");
+});
+
+test("solar sort: customer_name is the composite first_name, last_name; the direction applies to both", () => {
+  assert.deepEqual(parseSort({ sort: "customer_name:desc" }, "solar", SOLAR_COLS).sort,
+    { column: "customer_name", columns: ["first_name", "last_name"], ascending: false });
+  assert.deepEqual(SORT_COMPOSITE.solar.customer_name, ["first_name", "last_name"]);
+});
+
+test("solar sort: a composite whose column the cache lacks is refused; customer_name is solar-only", () => {
+  const noLast = new Set([...SOLAR_COLS].filter((c) => c !== "last_name"));
+  assert.equal(parseSort({ sort: "customer_name:asc" }, "solar", noLast).body.code, "INVALID_SORT");
+  assert.equal(parseSort({ sort: "customer_name:asc" }, "customer", COLS).body.code, "INVALID_SORT");
+  assert.equal(parseSort({ sort: "lead_source:asc" }, "solar", SOLAR_COLS).body.code, "INVALID_SORT");
+});
+
+test("solar pipeline narrowing columns are solar's own", () => {
+  assert.deepEqual(SOLAR_PIPELINE_NARROW_COLUMNS, ["stage", "project_manager", "sales_rep_name"]);
+  const opt = { allowColumns: SOLAR_PIPELINE_NARROW_COLUMNS, allowNot: false };
+  assert.ok(parseCallerFilters(m({ "f[project_manager]": "Pat" }), null, opt).ok);
+  assert.equal(parseCallerFilters(m({ "f[lead_source]": "Web" }), null, opt).body.code, "INVALID_FILTER_FIELD");
 });
 
 // --- SOQL form (cold-cache path) ------------------------------------------------------

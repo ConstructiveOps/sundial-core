@@ -140,7 +140,7 @@ See DECISIONS.md D-043 for the access model.
 - `forceFresh` — reserved (not yet honored on the list path).
 - `f[<cacheColumn>]=<value>` — (2026-10-05, D-080) **multi-filter on cache columns.** Repeatable: different columns are ANDed; the **same column repeated means any of its values**; an **empty value means blank** (NULL or `''`) — `f[stage]=&f[stage]=Odd` is "blank or Odd", the Sales board's *Other* column in one request. The column must exist in the object's cache table, else `400 INVALID_FILTER_FIELD` with `field` naming it; the tenant and access columns (`client_sf_id`, `tenant_id`, `sales_rep_sf_id`, `dealer_sf_id`, `access_level`, `supabase_user_id`) are **ignored, never honoured** — the access filter is applied first and cannot be replaced or widened. Limits: 20 columns, 100 values per column, 255 characters per value. Applied to the count and the page alike (`total` stays exact), to `q` search, and on the live cold-cache path as typed SOQL (a value that is not a valid literal for the field's type is `400 INVALID_FILTER_VALUE`). **⚠️ Repeated keys are read from `multiValueQueryStringParameters`**: API Gateway's REST proxy keeps only the LAST value of a repeated key in `queryStringParameters`, so reading that alone would silently turn any-of into its last value. An empty filtered page answers `total: 0` from the cache while the tenant has cached rows for the object — it never falls to the live Salesforce path.
 - `not[<cacheColumn>]=<value>` — (D-080) **exact-value exclusion, the only negative form.** Keeps blanks: `not[customer_type]=Service` is `customer_type IS NULL OR customer_type <> 'Service'` (**⚠️ a plain `neq` drops NULLs** — on Harmon's customers it returned 21 rows where the answer is 29,770; 29,749 customers have no type). A value is required (`not[x]=` is `400 INVALID_FILTER_VALUE`); repeating it excludes each value. Same column rules as `f[]`.
-- `sort` — (D-080) `<column>:<asc|desc>` (direction defaults to `asc`) from a per-object allowlist; customer: `created_date`, `name`, `last_name`, `status`, `stage`, `sales_rep_name`, `lead_source`, `call_attempts`, and (2026-10-05, for the Sales table's Address / Phone / Requested Types headers) `street`, `primary_phone`, `requested_project_types`; every other object: `created_date` only. On the live cold-cache path a column whose Salesforce type cannot be ORDERed BY in SOQL (`Requested_Project_Types__c` is a multi-select picklist) falls back to the default order instead of erroring; the cache path sorts it as text. NULLS LAST, then `sf_id` ascending as the stable tie-breaker. Anything else is `400 INVALID_SORT` (with `allowed`). Absent = the default order, unchanged (`created_date` DESC NULLS LAST, `sf_id`).
+- `sort` — (D-080) `<column>:<asc|desc>` (direction defaults to `asc`) from a per-object allowlist; customer: `created_date`, `name`, `last_name`, `status`, `stage`, `sales_rep_name`, `lead_source`, `call_attempts`, and (2026-10-05, for the Sales table's Address / Phone / Requested Types headers) `street`, `primary_phone`, `requested_project_types`; solar (2026-10-06, D-080 amendment 1 — one key per Solar table header): `created_date`, `project_name`, `customer_name` (a **composite**: `first_name` then `last_name`, both in the asked direction, each NULLS LAST), `address`, `harmon_job_number`, `contract_type`, `stage`, `system_size` (numeric), `authority_having_jurisdiction`, `utility_company`, `project_manager`, `sales_rep_name`; every other object: `created_date` only. On the live cold-cache path a column whose Salesforce type cannot be ORDERed BY in SOQL (`Requested_Project_Types__c` is a multi-select picklist, solar's `Address__c` a text area) falls back to the default order instead of erroring — a composite falls back if either of its columns would; the cache path sorts it as text. NULLS LAST, then `sf_id` ascending as the stable tie-breaker. Anything else is `400 INVALID_SORT` (with `allowed`). Absent = the default order, unchanged (`created_date` DESC NULLS LAST, `sf_id`).
 
 **`?parentId=` — supported objects and behavior**
 
@@ -204,9 +204,9 @@ Adding a child object is **one entry** in the `PARENT_FILTER` registry in
 
 > **⚠️ AWS Lambda concurrency quota (the G2 root cause — fixed):** until 2026-08-18 this account's **"Concurrent executions" quota in us-west-1 was 10**, not the AWS default of 1000, shared by every function. It was raised to **1000** that day; **re-verified live 2026-10-05**: quota `L-B99A9384` = 1000, account `ConcurrentExecutions` = 1000 (all unreserved), no reserved concurrency on `sundial-sf-query`, a 7-day `ConcurrentExecutions` daily maximum of **7–25** (25 on 2026-09-28 — impossible under the old 10) and **0 throttles**. Kept here because the symptom is unmistakable if it ever comes back: invocations past the quota are rejected are rejected with `TooManyRequestsException` *before the function runs*, and API Gateway surfaces that as **`500 {"message": "Internal server error"}` in ~65 ms with no CloudWatch log line and no `Errors` metric**. That generic body is API Gateway's, not ours (this Lambda returns `{"error":"server_error"}`) — so if you ever see it with no matching log entry, suspect the quota, not the code. Diagnose with `ConcurrentExecutions` (Max) and `Throttles` in CloudWatch, and `aws service-quotas get-service-quota --service-code lambda --quota-code L-B99A9384 --region us-west-1`.
 
-#### `GET /sf/{object}/pipeline` (2026-10-05, D-080)
+#### `GET /sf/{object}/pipeline` (2026-10-05, D-080; solar 2026-10-06, amendment 1)
 
-The Sales page's header in **one small answer**: status badge counts, stage counts per status (board columns, "hide empty", column headers), and the Rep / Source option lists per status — so the page never downloads the ~30k-row customer object to count it. **`customer` only**; any other object is `400 PIPELINE_UNSUPPORTED`.
+The Sales page's header in **one small answer**: status badge counts, stage counts per status (board columns, "hide empty", column headers), and the Rep / Source option lists per status — so the page never downloads the ~30k-row customer object to count it. The objects come from the **`PIPELINE` registry** in `sundial-sf-query` (each entry: SQL function, narrowing columns, response shape) — **`customer`** (this section) and **`solar`** (below); an object not in the registry is `400 PIPELINE_UNSUPPORTED`.
 
 **Query**
 - `f[stage]`, `f[sales_rep_name]`, `f[lead_source]` — optional narrowing with the list's `f[]` rules (repeat = any of, empty = blank, read from `multiValueQueryStringParameters`). The portal calls it **once without** narrowing (tabs + options) and **once with** the board's Stage / Rep / Source picks (board counts). Any other column, or any `not[]`, is `400 INVALID_FILTER_FIELD`; an access column is ignored, as on the list.
@@ -228,6 +228,37 @@ The Sales page's header in **one small answer**: status badge counts, stage coun
 **Implementation.** `public.sundial_customer_pipeline(p_client_sf_id, p_filters, p_narrow)` (`sql/sundial_customer_pipeline.sql`) — `SECURITY DEFINER`, EXECUTE revoked from `PUBLIC`, `anon` and `authenticated` (a definer function the browser could call would read any tenant's counts), granted to `service_role`; static SQL, unknown filter keys raise. ~47 ms over the whole tenant. Counts come from the cache as it stands; no Salesforce call. One log line per request: `{"pipeline":"customer","ms","bytes","narrowed","scoped"}`. Route: its own API Gateway resource (`scripts/wire-sales-pipeline-route.ps1`); the Lambda also recognises it arriving as `/sf/{object}/{id}` with id `pipeline`.
 
 > **Concurrency note for the portal:** the account's Lambda concurrency quota is **1000** (re-verified 2026-10-05; the 7-day peak across every function was 25), so throttling is not a constraint on the Sales page. Load it as *pipeline + one page* for speed — two small requests are the 2-second first paint — and fetch board columns in parallel with a modest cap (the existing `listAllRecords` uses 6), which keeps a busy board from spiking the count needlessly.
+
+##### `GET /sf/solar/pipeline` (2026-10-06, D-080 amendment 1)
+
+The Solar Projects page's stage columns and PM / Sales Rep option counts **and** the Dashboard's four stat cards + Recent Projects, in one answer — so neither page downloads the solar object (once the portal moves over in Prompt B). The Dashboard calls it without narrowing; the Solar board calls it with its pickers.
+
+**Query** — `f[stage]`, `f[project_manager]`, `f[sales_rep_name]`, with the same `f[]` rules as above. Any other column (customer's `f[lead_source]` included) or any `not[]` is `400 INVALID_FILTER_FIELD`; an access column is ignored.
+
+**Response**
+```json
+{
+  "by_stage": { "Archive": 2913, "Cancelled": 1183, "Green Tagged": 172, "": 6 },
+  "pms":  [["Pat Example", 1210], [null, 678], ...],
+  "reps": [["Ann Example", 402], [null, 1226], ...],
+  "stats": {
+    "total_projects": 4523,
+    "in_progress": 421,
+    "contract_total": 151234567.89,
+    "system_size_kw_total": 81354.72,
+    "recent": [["a1Q…", "Lee Residence", "Ada Lee", "Permitting", "2026-10-06T18:55:01.123+00:00"], ...]
+  },
+  "narrowed": false
+}
+```
+- **`by_stage`** has no status level — the Solar page has no Status tabs; stage is the grouping. Blank stage under `""`.
+- **`pms` / `reps`** are `[value, n]` tuples, most first, a blank value as `null`. They are the COUNTS behind the dropdowns; the page keeps its own option rules (PMs = the picklist's active values, reps = names on records ∩ active users).
+- **`stats`** cover the SAME rows as the counts: the access filter AND any narrowing. `in_progress` = stage not blank and not terminal (below). `contract_total` = Σ `contract_amount`; `system_size_kw_total` = Σ **`system_size`** — the column the Dashboard summed, in kW (`system_size_kw` is empty on every Harmon row as of 2026-10-06). Both are `null`, not `0`, when no row has a value (the card shows "—"). `recent` = the 6 most recently synced rows, `[sf_id, project_name, customer_name, stage, last_synced_at]`, `customer_name` = first + last name, else the snapshot name (the page's `customerName()`).
+- **The terminal rule has one home**: `TERMINAL_STAGE_TERMS` + `NOT_TERMINAL_STAGES` in `lambdas/sundial-sf-query/index.js`, passed to the function as `p_terminal_terms` / `p_not_terminal`. A stage is terminal when it **contains** one of `complete`, `cancel`, `pto`, `closed`, `archive` (case-insensitive — the Dashboard's old substring rule plus `archive`), unless it is **exactly** `Billing Complete - Pending Closeout` (still open work). Live 2026-10-06: **421** of Harmon's 4,523 projects in progress; the old four-word rule gave **3,300** (Archive, 2,913 projects, counted as active). See D-080 amendment 1.
+
+**Access** — identical to the customer pipeline (rep → `sales_rep_sf_id`, dealer → `dealer_sf_id`, tenant → `{}`; an OR group or another column → `403`), so a rep's Dashboard is the rep's book.
+
+**Implementation** — `public.sundial_solar_pipeline(p_client_sf_id, p_filters, p_narrow, p_terminal_terms, p_not_terminal)` (`sql/sundial_solar_pipeline.sql`), the same grants as the customer one (EXECUTE revoked from `PUBLIC`, `anon`, `authenticated`; granted to `service_role`), static SQL, unknown keys raise. Index: `sql/2026-10-06_solar_pipeline_indexes.sql`. **Same API Gateway resource** as customer (`/sf/{object}/pipeline` — no wiring change). Log line `{"pipeline":"solar",…}`.
 
 #### `GET /sf/{object}/{id}`
 

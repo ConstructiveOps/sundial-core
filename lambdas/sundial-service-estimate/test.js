@@ -103,6 +103,16 @@ test("normalizeNewCustomer requires a name and an email-or-phone", () => {
   assert.equal(ok.value.firstName, "Ann");
 });
 
+test("normalizeNewCustomer: a company needs its company name; its contact's names are optional (D-081)", () => {
+  assert.deepEqual(normalizeNewCustomer({ isCompany: true, phone: "602-555-0000" }).missing, ["companyName"]);
+  assert.deepEqual(normalizeNewCustomer({ isCompany: true, companyName: "   ", firstName: "Dana", phone: "602-555-0000" }).missing, ["companyName"], "the contact does not stand in for the company name");
+  const co = normalizeNewCustomer({ isCompany: true, companyName: " SunRun ", email: "ap@sunrun.com" });
+  assert.equal(co.ok, true);
+  assert.equal(co.value.companyName, "SunRun");
+  // A company name without the box ticked is not a company — and does not stand in for a person's name.
+  assert.deepEqual(normalizeNewCustomer({ companyName: "SunRun", phone: "602-555-0000" }).missing, ["firstName|lastName"]);
+});
+
 test("candidateSoql is tenant-scoped and escapes input; matchCandidates matches exactly", () => {
   const c = { email: "o'brien@x.com", phone: "(602) 555-1234", street: "123 N Main St", postalCode: "85001-1234" };
   const soql = candidateSoql(TENANT, c);
@@ -145,6 +155,24 @@ test("buildNewCustomerFields: Name is First Last, blanks dropped, state via pick
   assert.equal(f.Name, "Ann Lee");
   assert.equal(f.State__c, "AZ");
   assert.equal("Street__c" in f, false);
+  assert.equal("Is_Company__c" in f, false, "a person never writes the company fields");
+});
+
+test("buildNewCustomerFields: a company's Name is its company name, the contact kept in First / Last (D-081)", () => {
+  const f = buildNewCustomerFields({ isCompany: true, companyName: "SunRun", firstName: "Dana", lastName: "Ruiz", email: "ap@sunrun.com" });
+  assert.equal(f.Name, "SunRun");
+  assert.equal(f.Is_Company__c, true);
+  assert.equal(f.Company_Name__c, "SunRun");
+  assert.equal(f.First_Name__c, "Dana");
+  assert.equal(f.Last_Name__c, "Ruiz");
+  const bare = buildNewCustomerFields({ isCompany: true, companyName: "APS", phone: "602-555-0000" });
+  assert.equal(bare.Name, "APS");
+  assert.equal("First_Name__c" in bare, false);
+});
+
+test("matchCandidates names a company candidate by its company name (D-081)", () => {
+  const m = matchCandidates([{ Id: "1", Name: "C-0042", Is_Company__c: true, Company_Name__c: "SunRun", Primary_Email__c: "ap@sunrun.com" }], { email: "ap@sunrun.com" });
+  assert.equal(m[0].name, "SunRun");
 });
 
 // ---------------------------------------------------------------------------
@@ -571,7 +599,7 @@ test("POST /service/customers (D-075): a NEW customer is tagged Service and open
   await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Jake", Last_Name__c: "Tech", Access_Level__c: "Technician", Default_Department__c: "Service", Active__c: true });
   const jake = fake.store.Sundial_User__c.at(-1);
   fake.notes.length = 0;
-  const intake = { systemOwnership: "Lease", propertyType: "Residential", existingHarmonSystem: "Yes", inverterManufacturer: "SolarEdge", typeOfService: "Repair", description: "Inverter shows a red light since Tuesday", nextStep: "Schedule a visit", serviceClubInterest: "Maybe later", bogus: "x" };
+  const intake = { systemOwnership: "Lease", propertyType: "Residential", existingHarmonSystem: "Yes", inverterManufacturer: "SolarEdge", typeOfService: "Repair", description: "Inverter shows a red light since Tuesday", nextStep: "Schedule a visit", serviceClubInterest: "Maybe later", warrantyNotes: "Panels: 25 yr SunPower. Inverter: Enphase to 2031.", bogus: "x" };
   const made = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Ivy", lastName: "Intake", phone: "602-555-0199" } }, intake });
   assert.equal(made.status, 201);
   const ivy = fake.store.Sundial_Customer__c.find((c) => c.Id === made.body.customerId);
@@ -583,6 +611,7 @@ test("POST /service/customers (D-075): a NEW customer is tagged Service and open
   assert.equal(ivy.Description__c, "Inverter shows a red light since Tuesday");
   assert.equal(ivy.Next_Step__c, "Schedule a visit");
   assert.equal(ivy.Service_Club_Interest__c, "Maybe later");
+  assert.equal(ivy.Warranty_Notes__c, "Panels: 25 yr SunPower. Inverter: Enphase to 2031.", "free text, no picklist check (D-081)");
   assert.equal(ivy.Service_Stage__c, "New");
   // alert 1: nobody assigned → the ACTIVE Service managers, minus Paige who did it
   assert.equal(fake.notes.length, 1, JSON.stringify(fake.notes));

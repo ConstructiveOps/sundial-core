@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-10-07 (later) — A Service popup can create a company; warranty notes on the intake; the tech app names a company by its company name (D-081 amendment 1)
+
+**Why.** The portal half of D-081 (harmon-crm `feature/company-customers`) puts a "This is a company" toggle on the Service popups and a Warranty question on the intake — but the popups' create path (`customer.js`) still refused a record without a first or last name and dropped anything else, and `INTAKE_FIELDS` had no warranty key, so both would have failed silently or loudly. Found while reading the contract for the portal prompt.
+
+**Built (branch `feature/company-customer-create`, from `master`).**
+- `customer.js`: `NEW_CUSTOMER_FIELDS` gains `isCompany` / `companyName`; `normalizeNewCustomer` — a company needs `companyName` (`missing: ["companyName"]`), its first / last optional; a person as before (a company name without the box is ignored); `buildNewCustomerFields` writes `Is_Company__c`, `Company_Name__c` and `Name` = the company name; a duplicate candidate's `name` is `customerDisplayName`.
+- `index.js` `INTAKE_FIELDS`: `warrantyNotes` → `Warranty_Notes__c`, right after the inverter, free text like `Description__c` (no picklist check). `CUSTOMER_INVALID` message mentions the company name.
+- `sundial-service-board/tech.js`: `TECH_CUSTOMER_SELECT` + `Is_Company__c`, `Company_Name__c`; `customerToView` names by `customerDisplayName` (was `Name` first — a person whose record Name is "Haughn Residence" now reads "Mark Haughn", the one rule); the tech search also matches `Company_Name__c`.
+- Docs: `docs/api-endpoints.md` customer block; the fixtures / `customer-name.js` pointers now name harmon-crm `src/lib/customer-name.ts` (which runs a copy of the fixtures).
+
+**Tests.** estimate Lambda 58 (+3: company normalize, company field map, candidate name; the intake handler test asserts `Warranty_Notes__c`), board 30 (+1 `customerToView`; the pinned `TECH_CUSTOMER_SELECT` updated). **Deploy:** `.deploy.ps1 sundial-service-estimate`, `.deploy.ps1 sundial-service-board` — BEFORE the portal branch merges (until then a company from a Service popup is refused with "needs a name").
+
 ## 2026-10-07 — The payer is a Customer record, and the invoice looks like Harmon's HCP invoice (D-081)
 
 **Why.** A partner job's payer was a typed name (`Bill_To_Name__c`) — 414 of Harmon's jobs named 13 payers that way and none was a record, so the invoice to SunRun could print the name and nothing else, and "Sunrun Inc" was a different payer from "sunrun". Harmon also sent the HCP invoice it uses today as the layout to match, and its company name was missing under the logo (the PDF printed the name only when there was no logo).

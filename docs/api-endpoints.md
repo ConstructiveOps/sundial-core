@@ -1091,12 +1091,12 @@ Both `POST /service/estimates` and `POST /service/jobs` take:
 
 ```json
 "customer": { "id": "a1P…" }
-"customer": { "new": { "firstName","lastName","street","city","state","postalCode","email","phone" }, "confirmNew": false }
+"customer": { "new": { "isCompany","companyName","firstName","lastName","street","city","state","postalCode","email","phone" }, "confirmNew": false }
 ```
 
 - `id` → the customer is loaded tenant-scoped and `Requested_Project_Types__c` gets
   `Service` **union-added** (skipped silently if already present).
-- `new` → name + (email or phone) required. A **soft duplicate sweep** (exact email, 10-digit
+- `new` → name + (email or phone) required. **A company** (D-081, 2026-10-07): `isCompany: true` + `companyName` (required; `400 CUSTOMER_INVALID` `missing: ["companyName"]` without it) — written as `Is_Company__c`, `Company_Name__c` and the record `Name`; `firstName` / `lastName` are then its optional contact. A duplicate candidate's `name` is its display name (`customerDisplayName`). `intake.warrantyNotes` → `Warranty_Notes__c` (free text, like `description`). A **soft duplicate sweep** (exact email, 10-digit
   phone, zip + house number + street token) returns **409 `DUPLICATE_CANDIDATES`** with
   `candidates:[{id,name,email,phone,address,reasons}]`; resend with `confirmNew: true` to
   create anyway. The new customer gets `Requested_Project_Types__c = Service`, `State__c`

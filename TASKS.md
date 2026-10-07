@@ -4,7 +4,17 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## The payer is a Customer record + the HCP-style invoice (D-081) — BUILT, NOT DEPLOYED (2026-10-07, branch `feature/bill-to-customer`, from `master`)
+## Deploy what is on `master` now: Solar pipeline (D-080 amendment 1) + company customers in the Service popups (D-081 amendment 1) — ON MASTER, NOT DEPLOYED (2026-10-07)
+
+`master` now carries D-080 amendment 1 (cherry-picked from the parked `feature/solar-pipeline`, `d30f792`) and `feature/company-customer-create` (D-081 amendment 1). Full suite 1445, all passing; every Lambda below bundles. In this order:
+
+- [ ] **(1) Supabase → SQL editor**: open and **Run** `sql/sundial_solar_pipeline.sql`. Its last query prints two columns — **both must say `false`, `false`** (the browser roles cannot run the function). If either says `true`, stop and tell Claude.
+- [ ] **(2) Supabase → SQL editor**: open and **Run** `sql/2026-10-06_solar_pipeline_indexes.sql` (it prints the new index's name).
+- [ ] **(3) PowerShell**, in the `sundial-core` folder, one at a time: `.\deploy.ps1 sundial-sf-query` · `.\deploy.ps1 sundial-service-estimate` · `.\deploy.ps1 sundial-service-board`
+- [ ] Do NOT run `.\scripts\wire-sales-pipeline-route.ps1` — `/sf/{object}/pipeline` is already wired and already matches solar.
+- [ ] The D-081 steps below (secret, `sql/2026-10-07_company_customers.sql`, `sundial-sf-update`, `sundial-service-public`, the three full syncs, the backfill) still apply if not done yet; deploying a Lambda twice is harmless — the last deploy from `master` wins.
+
+## The payer is a Customer record + the HCP-style invoice (D-081) — ON MASTER, NOT DEPLOYED (2026-10-07, from `feature/bill-to-customer`)
 
 Backend half; the Bill To picker and the TypeScript `customerDisplayName` are harmon-crm Prompt 2. Branched from **`master`**, not `feature/solar-pipeline` — Solar (D-080 amendment 1) is parked and must not ride along.
 
@@ -17,10 +27,10 @@ Backend half; the Bill To picker and the TypeScript `customerDisplayName` are ha
 - [ ] **(5) harmon-crm `main`** — only after Prompt 2 (the Bill To picker, Is Company on the customer, `customerDisplayName` in TS pinned to `lib/customer-name.fixtures.json`) is reviewed and merged.
 - [ ] **(6) Test on the ZZ customer** (`a1P7y00000AmyXCEAZ`, never a live one): create a company customer **"ZZ Bill-To Co"** (Is Company ticked, a contact First/Last, a mailing address) → on the ZZ customer, New Job → Bill to: **Leasing Partner** → pick "ZZ Bill-To Co" → add a line → Issue invoice → the PDF shows **"Harmon Electric" under the logo**, the company top-left with `Attn:` and its address, the ZZ customer under SERVICE ADDRESS, PAYMENT TERMS Upon receipt and AMOUNT DUE in the box. Void the invoice afterwards and re-seed with `node scripts/create-portal-test-record.mjs --apply`.
 - [ ] **Merge + push `master` in the same pass as the deploy** (CLAUDE.md git rule).
-- [ ] **When Solar is picked back up:** `feature/solar-pipeline` and this branch both edit `SORT_ALLOWLIST` in `lambdas/sundial-sf-query/caller-filters.js` (this one adds `display_name_sort` to `customer`; Solar adds the `solar` list + `SORT_COMPOSITE` and a composite-aware `parseSort`) and the `LIST_PROJECTION` / test files around it — a small, adjacent-lines merge conflict; keep both. `package.json`'s test list conflicts the same way.
+- [x] *(done 2026-10-07: Solar cherry-picked onto `master` as `4e78ea7`; `display_name_sort` and the solar list both kept in `SORT_ALLOWLIST`, the test lists unioned, the D-081 sort test updated for the composite-aware `parseSort` in `b3d37ee`)* **When Solar is picked back up:** `feature/solar-pipeline` and this branch both edit `SORT_ALLOWLIST` in `lambdas/sundial-sf-query/caller-filters.js` (this one adds `display_name_sort` to `customer`; Solar adds the `solar` list + `SORT_COMPOSITE` and a composite-aware `parseSort`) and the `LIST_PROJECTION` / test files around it — a small, adjacent-lines merge conflict; keep both. `package.json`'s test list conflicts the same way.
 - [ ] Later: pass SERVICE DATE to the job report (`report.js` + the public page) — the model supports it (`serviceDate`), nothing passes it yet.
 
-## Solar page + Dashboard without the download: GET /sf/solar/pipeline + solar sort (D-080 amendment 1) — BUILT, NOT DEPLOYED (2026-10-06, branch `feature/solar-pipeline`)
+## Solar page + Dashboard without the download: GET /sf/solar/pipeline + solar sort (D-080 amendment 1) — ON MASTER, NOT DEPLOYED (2026-10-06; cherry-picked onto `master` 2026-10-07 — deploy steps are in the top section)
 
 Backend only; nothing the portal receives today changes (new route answer, new sort keys). ⚠️ **When Prompt B ships, the Dashboard's "Active Projects" drops from 3,300 to 421** for Harmon — on purpose: Archive now counts as finished (D-080 amendment 1). Tell Harmon before it goes live.
 

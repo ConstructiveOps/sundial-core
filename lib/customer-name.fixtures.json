@@ -1,5 +1,5 @@
 {
-  "_comment": "D-081. customerDisplayName's contract, shared by lib/customer-name.js and harmon-crm src/lib/service-customers.ts. Each case is given in cache-column spelling; the JS test also runs it in Salesforce spelling. Change the rule in BOTH places and here.",
+  "_comment": "D-081. customerDisplayName's contract, shared by lib/customer-name.js and harmon-crm src/lib/customer-name.ts (which runs a copy of this file, src/lib/__fixtures__/customer-name.fixtures.json). Each case is given in cache-column spelling; the JS test also runs it in Salesforce spelling. Change the rule in BOTH places and here.",
   "cases": [
     { "label": "company with a name", "record": { "is_company": true, "company_name": "SunRun", "first_name": "Dana", "last_name": "Ruiz", "name": "SunRun" }, "expected": "SunRun" },
     { "label": "company name is trimmed", "record": { "is_company": true, "company_name": "  APS  " }, "expected": "APS" },

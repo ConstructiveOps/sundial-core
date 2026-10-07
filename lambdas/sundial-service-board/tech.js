@@ -46,6 +46,7 @@
 import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { soqlEscapeString } from "../../lib/salesforce.js";
+import { customerDisplayName } from "../../lib/customer-name.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, FILE_METADATA_TABLE, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
 import { syncCallNotesToJob } from "./job-notes.js";
@@ -68,7 +69,7 @@ export const TECH_ESTIMATE_SELECT =
   "Id, Name, Client__c, Status__c, Version__c, Is_Template__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
   "Sundial_Customer__c, Service_Job__c, Subtotal__c, Discount_Amount__c, Tax_Amount__c, Total__c, Deposit_Amount__c, Last_Sent_At__c, Approved_At__c, CreatedDate";
 export const TECH_CUSTOMER_SELECT =
-  "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate";
+  "Id, Name, First_Name__c, Last_Name__c, Is_Company__c, Company_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate";
 /** Customer_Type__c (multi-select, 2026-09-19): the values the list filter accepts. Anything else is ignored. */
 export const CUSTOMER_TYPES = Object.freeze(["Solar", "Roofing", "Commercial", "Service"]);
 const CLOCK_FUTURE_GRACE_MS = 5 * 60 * 1000;
@@ -632,7 +633,8 @@ export function customerToView(c) {
   const address = [c.Street__c, [c.City__c, c.State__c].filter(Boolean).join(", "), c.Postal_Code__c].filter(Boolean).join(", ");
   return {
     id: c.Id,
-    name: c.Name ?? [c.First_Name__c, c.Last_Name__c].filter(Boolean).join(" ") ?? null,
+    // One name rule (D-081): a company by its company name, else First + Last, else Name.
+    name: customerDisplayName(c),
     firstName: c.First_Name__c ?? null,
     lastName: c.Last_Name__c ?? null,
     address: address || null,
@@ -1615,7 +1617,7 @@ export function createTechHandlers(d, h) {
     },
     async techCustomers({ ctx, query }) {
       const { tenantId, cors } = ctx;
-      const like = searchWhere(query?.q, ["Name", "First_Name__c", "Last_Name__c", "Street__c", "City__c", "Postal_Code__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Primary_Email__c"]);
+      const like = searchWhere(query?.q, ["Name", "First_Name__c", "Last_Name__c", "Company_Name__c", "Street__c", "City__c", "Postal_Code__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Primary_Email__c"]);
       // ?type=Service narrows to customers whose Customer_Type__c (multi-select) includes it.
       const type = CUSTOMER_TYPES.find((t) => t.toLowerCase() === String(query?.type || "").trim().toLowerCase()) ?? null;
       const where =

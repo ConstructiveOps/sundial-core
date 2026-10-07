@@ -181,6 +181,9 @@ export const INTAKE_FIELDS = Object.freeze({
   propertyType: "Property_Type__c",
   existingHarmonSystem: "Existing_Harmon_System__c",
   inverterManufacturer: "Inverter_Manufacturer__c",
+  // Free text (D-081, 2026-10-07), asked right after the inverter: what the customer's
+  // warranties are and with whom. Written like Description__c, no picklist check.
+  warrantyNotes: "Warranty_Notes__c",
   typeOfService: "Type_of_Service__c",
   description: "Description__c",
   nextStep: "Next_Step__c",
@@ -709,7 +712,7 @@ export function createHandler(deps = {}) {
       const raw = intake[key];
       if (typeof raw !== "string" || !raw.trim()) continue;
       const v = raw.trim();
-      if (field === "Description__c") {
+      if (field === "Description__c" || field === "Warranty_Notes__c") {
         out[field] = v.slice(0, 32000);
         continue;
       }
@@ -791,7 +794,7 @@ export function createHandler(deps = {}) {
     if (spec.new) {
       const norm = normalizeNewCustomer(spec.new);
       if (!norm.ok) {
-        return { ok: false, response: bad(cors, "CUSTOMER_INVALID", "New customer needs a name and an email or phone.", { missing: norm.missing }) };
+        return { ok: false, response: bad(cors, "CUSTOMER_INVALID", "New customer needs a name (a company name for a company) and an email or phone.", { missing: norm.missing }) };
       }
       const c = norm.value;
       // Soft duplicate guard — unless the office already looked and said "create anyway".

@@ -52,6 +52,8 @@ function reset() {
   ctx.writes = [];
   ctx.warns = [];
   ctx.userLookup = { Id: REP_B, Dealer__c: DEALER_B };
+  ctx.jobBefore = null;
+  ctx.payers = [];
   process.env.ACCESS_MODEL_MODE = "enforce";
 }
 
@@ -72,6 +74,14 @@ mock.module("../../lib/salesforce.js", {
       // answer differently, or the invariant-2 tests would pass on the wrong row.
       if (/FROM Sundial_User__c/.test(soql)) {
         return ctx.userLookup ? [ctx.userLookup] : [];
+      }
+      // D-081: the job's Bill To as it is, and the paying-customer read (tenant-scoped).
+      if (/SELECT Id, Bill_To_Type__c, Bill_To_Customer__c FROM Sundial_Service_Job__c/.test(soql)) {
+        return ctx.jobBefore ? [ctx.jobBefore] : [];
+      }
+      if (/Company_Name__c.* FROM Sundial_Customer__c/.test(soql)) {
+        const id = soql.match(/Id = '([^']+)'/)?.[1];
+        return (ctx.payers || []).filter((p) => p.Id === id && soql.includes(`Client__c = '${TENANT}'`));
       }
       return ctx.soqlRows;
     },
@@ -100,6 +110,11 @@ const DESCRIBE_FIELDS = [
   { name: "Last_Name__c", updateable: true, createable: true },
   { name: "Commission_Total__c", updateable: true, createable: true },
   { name: "Burden_Rate__c", updateable: true, createable: true },
+  // D-081: the job's Bill To trio (the one describe serves every object here).
+  { name: "Bill_To_Type__c", updateable: true, createable: true },
+  { name: "Bill_To_Customer__c", updateable: true, createable: true },
+  { name: "Bill_To_Name__c", updateable: true, createable: true },
+  { name: "Priority__c", updateable: true, createable: true },
 ];
 
 globalThis.fetch = async (url, init) => {
@@ -534,4 +549,70 @@ test("a SALES role still cannot reach any of this", async () => {
     0,
     "the lookup never runs for a role that cannot reassign"
   );
+});
+
+// ---------------------------------------------------------------------------
+// D-081 — a job's Bill To on the job page: the type + the paying customer, the name derived
+// ---------------------------------------------------------------------------
+const JOB_1 = "a1X000000000001AAA";
+const SUNRUN = { Id: "a1P0000000SUNRUNAA", Is_Company__c: true, Company_Name__c: "SunRun", First_Name__c: "Dana", Last_Name__c: "Ruiz" };
+
+test("D-081: Leasing Partner + a paying customer → the name is derived, in the SAME write", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.soqlRows = [{ Id: JOB_1 }];
+  ctx.jobBefore = { Id: JOB_1, Bill_To_Type__c: "Customer", Bill_To_Customer__c: null };
+  ctx.payers = [SUNRUN];
+  const res = await handler(patchEvent("job", JOB_1, { Bill_To_Type__c: "Leasing Partner", Bill_To_Customer__c: SUNRUN.Id }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(ctx.writes.length, 1);
+  assert.deepEqual(ctx.writes[0].body, { Bill_To_Type__c: "Leasing Partner", Bill_To_Customer__c: SUNRUN.Id, Bill_To_Name__c: "SunRun" });
+});
+
+test("D-081: a partner type with no paying customer is 400 BILL_TO_CUSTOMER_REQUIRED, nothing written", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.soqlRows = [{ Id: JOB_1 }];
+  ctx.jobBefore = { Id: JOB_1, Bill_To_Type__c: "Customer", Bill_To_Customer__c: null };
+  const res = await handler(patchEvent("job", JOB_1, { Bill_To_Type__c: "Manufacturer" }));
+  assert.equal(res.statusCode, 400);
+  const body = JSON.parse(res.body);
+  assert.equal(body.code, "BILL_TO_CUSTOMER_REQUIRED");
+  assert.equal(body.field, "Bill_To_Customer__c");
+  assert.equal(ctx.writes.length, 0);
+});
+
+test("D-081: another tenant's customer as the payer is refused like a missing one", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.soqlRows = [{ Id: JOB_1 }];
+  ctx.jobBefore = { Id: JOB_1, Bill_To_Type__c: "Leasing Partner", Bill_To_Customer__c: SUNRUN.Id };
+  ctx.payers = []; // the id exists only in another tenant: the tenant-scoped read finds nothing
+  const res = await handler(patchEvent("job", JOB_1, { Bill_To_Customer__c: "a1P0000000OTHERTAA" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(JSON.parse(res.body).code, "BILL_TO_CUSTOMER_NOT_FOUND");
+  assert.equal(ctx.writes.length, 0);
+});
+
+test("D-081: back to Customer clears the payer and the name", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.soqlRows = [{ Id: JOB_1 }];
+  ctx.jobBefore = { Id: JOB_1, Bill_To_Type__c: "Leasing Partner", Bill_To_Customer__c: SUNRUN.Id };
+  const res = await handler(patchEvent("job", JOB_1, { Bill_To_Type__c: "Customer" }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(ctx.writes[0].body, { Bill_To_Type__c: "Customer", Bill_To_Customer__c: null, Bill_To_Name__c: null });
+});
+
+test("D-081: Bill_To_Name__c from the caller is ignored (and logged), the rest of the PATCH lands", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.soqlRows = [{ Id: JOB_1 }];
+  const res = await handler(patchEvent("job", JOB_1, { Bill_To_Name__c: "Typed by hand", Priority__c: "High" }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(ctx.writes[0].body, { Priority__c: "High" });
+  assert.ok(ctx.warns.some((w) => /Bill_To_Name__c/.test(w) && /D-081/.test(w)));
+  assert.equal(ctx.soqlSeen.filter((q) => /Bill_To_Type__c, Bill_To_Customer__c FROM/.test(q)).length, 0, "no Bill To pre-read when the type / payer are untouched");
+});
+
+test("D-081: a customer PATCH is untouched by the job rule", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(patchEvent("customer", CUST_1, { Bill_To_Name__c: "x" }));
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(ctx.writes[0].body, { Bill_To_Name__c: "x" });
 });

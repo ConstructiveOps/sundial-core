@@ -187,7 +187,7 @@ Paige's "bread and butter": the Fronius 7.7 template, the removal/reinstall temp
 
 Everything already in the ticket workbook **minus** the estimate states and the per-visit Bill-To, **plus**:
 - `Estimate__c` (required lookup, the 1:1 pair). Money on the job = **cross-object formulas** to the estimate (`Estimate__r.Total__c` etc.) — no sync, no drift.
-- **Bill-To (job-level only):** `Bill_To_Type__c` (Customer / Internal Warranty / Manufacturer / Leasing Partner / Other), `Bill_To_Partner__c`, `Billing_Reference__c` (partner WO#, indexed, printed). Removed from the service call.
+- **Bill-To (job-level only):** `Bill_To_Type__c` (Customer / Internal Warranty / Manufacturer / Leasing Partner / Other), `Billing_Reference__c` (partner WO#, indexed, printed). Removed from the service call. **D-081 (2026-10-07): the payer is a customer record** — `Bill_To_Customer__c` (Lookup → `Sundial_Customer__c`, usually a company with `Is_Company__c`), required when the type is not Customer; `Bill_To_Name__c` is derived from it by the server (`lib/bill-to.js`). The design's `Bill_To_Partner__c` was never built.
 - **Notes (9/9 meeting):** `Office_Notes__c` (append-only stamped, internal) and `Customer_Summary__c` (the paragraph for receipt/report). Tech notes are read from the service calls' `Work_Notes__c` and shown on the job — not duplicated.
 - `Street_View_Image_Key__c` (9/9 ask; S3 key, fetched once at geocode time) — **[Recommended, cheap]**.
 - Time roll-ups from service calls (Flow, D-065.3 stands for **time**).
@@ -211,7 +211,7 @@ out for approval on the next send; a description-only edit leaves it Approved.
 
 ### 5.5 `Sundial_Service_Invoice__c` — one per job
 
-`Service_Job__c` (required), `Name` = job number (`-2` on reissue), `Status__c` (Draft / Issued / Sent / Partially Paid / Paid / Void), Bill-To snapshot (type, partner, reference), frozen amounts (`Subtotal__c`, `Discount_Amount__c`, `Tax_Amount__c`, `Total__c`), `Paid_Amount__c` (Flow roll-up from payments), `Balance__c` (formula), `Issued_At__c`, `Sent_At__c`, `Due_Date__c`, `PDF_S3_Key__c`, `Acumatica_Ref__c`, `Acumatica_Entered_At__c` (the bridge-period hand-entry stamp; Heather's weekly digest = invoices where this is null), `Voided_At__c`, `Void_Reason__c`. Stripe fields leave this object — they belong on payments.
+`Service_Job__c` (required), `Name` = job number (`-2` on reissue), `Status__c` (Draft / Issued / Sent / Partially Paid / Paid / Void), Bill-To snapshot (type, reference, and since D-081 the payer: `Bill_To_Customer__c`, `Bill_To_Name__c`, `Bill_To_Address__c` — taken at issue, re-taken on the `-2` reissue, never rewritten by a void), frozen amounts (`Subtotal__c`, `Discount_Amount__c`, `Tax_Amount__c`, `Total__c`), `Paid_Amount__c` (Flow roll-up from payments), `Balance__c` (formula), `Issued_At__c`, `Sent_At__c`, `Due_Date__c`, `PDF_S3_Key__c`, `Acumatica_Ref__c`, `Acumatica_Entered_At__c` (the bridge-period hand-entry stamp; Heather's weekly digest = invoices where this is null), `Voided_At__c`, `Void_Reason__c`. Stripe fields leave this object — they belong on payments.
 
 ### 5.6 `Sundial_Service_Payment__c` (PAY-#) **[Recommended — new]**
 

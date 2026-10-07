@@ -98,6 +98,8 @@ import { createNotifier } from "../../lib/notify.js";
 import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake-alerts.js";
 import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { customerDisplayName } from "../../lib/customer-name.js";
+import { resolveBillTo, billToCustomerLoader } from "../../lib/bill-to.js";
 import {
   buildKey,
   listRecordFiles,
@@ -309,8 +311,11 @@ const JOB_CREATE_FIELDS = Object.freeze({
   intakeChannel: ["Intake_Channel__c", (v) => v],
   intakeDate: ["Intake_Date__c", strOrNull],
   assignedToId: ["Assigned_To__c", strOrNull],
+  // Bill To (D-081): the type says what kind of payer, billToCustomerId says who; both are
+  // decided by lib/bill-to.js resolveBillTo BEFORE anything is created (jobBillTo below).
+  // billToName is no longer accepted — the name is derived from the paying customer.
   billToType: ["Bill_To_Type__c", (v) => v],
-  billToName: ["Bill_To_Name__c", strOrNull],
+  billToCustomerId: ["Bill_To_Customer__c", strOrNull],
   billingReference: ["Billing_Reference__c", strOrNull],
   originatingSolarId: ["Originating_Solar_Project__c", strOrNull],
   originatingRoofingId: ["Originating_Roofing_Project__c", strOrNull],
@@ -855,7 +860,7 @@ export function createHandler(deps = {}) {
 
   function snapshotFields(customer) {
     return {
-      Customer_Name_at_Creation__c: customer.Name ?? [customer.First_Name__c, customer.Last_Name__c].filter(Boolean).join(" ") ?? null,
+      Customer_Name_at_Creation__c: customerDisplayName(customer), // D-081: the company name for a company
       Address_at_Creation__c: [customer.Street__c, customer.City__c, customer.State__c, customer.Postal_Code__c].filter(Boolean).join(", ") || null,
       Primary_Phone_at_Creation__c: customer.Primary_Phone__c ?? null,
       Primary_Email_at_Creation__c: customer.Primary_Email__c ?? null,
@@ -970,8 +975,33 @@ export function createHandler(deps = {}) {
     return { ids, count: ids.length };
   }
 
-  async function createJobRecord({ customer, estimateId, body, tenantId }) {
+  /**
+   * The Bill To fields for a new job (D-081, lib/bill-to.js). Run BEFORE the customer /
+   * estimate are created so a 400 never leaves half a job behind. Returns resolveBillTo's
+   * answer; `billToName` in the body is ignored (the name is derived) and logged once.
+   */
+  async function jobBillTo(jobBody, tenantId) {
+    if (jobBody && Object.prototype.hasOwnProperty.call(jobBody, "billToName")) {
+      console.warn(JSON.stringify({ ignoredField: "billToName", reason: "Bill_To_Name__c is derived from Bill_To_Customer__c (D-081)" }));
+    }
+    return resolveBillTo({
+      type: jobBody?.billToType === undefined ? undefined : strOrNull(jobBody.billToType) ?? "",
+      customerId: jobBody?.billToCustomerId,
+      before: null,
+      loadCustomer: billToCustomerLoader({ sfQuery: d.sfQuery, soqlEscapeString, tenantId }),
+    });
+  }
+  const billToRefused = (cors, r) => jsonResponse(r.status, cors, { error: r.code.toLowerCase(), code: r.code, field: "Bill_To_Customer__c", message: r.message });
+
+  async function createJobRecord({ customer, estimateId, body, tenantId, billTo = null }) {
     const { fields: extra, rejected } = translate(body?.job || {}, JOB_CREATE_FIELDS);
+    // The Bill To trio comes ONLY from resolveBillTo (callers that never send one — the
+    // Service Club's public pages — get the default: the job's own customer pays).
+    delete extra.Bill_To_Type__c;
+    delete extra.Bill_To_Customer__c;
+    const resolved = billTo ?? (await jobBillTo(body?.job, tenantId));
+    if (!resolved.ok) throw Object.assign(new Error(resolved.message), { billTo: resolved });
+    Object.assign(extra, resolved.fields);
     const fields = {
       Client__c: tenantId,
       Sundial_Customer__c: customer.Id,
@@ -1469,9 +1499,11 @@ export function createHandler(deps = {}) {
       }
       const customer = await loadCustomer(est.Sundial_Customer__c, tenantId);
       if (!customer) return bad(cors, "ESTIMATE_NO_CUSTOMER", "The estimate has no customer; set one before creating a job.");
+      const billTo = await jobBillTo(body?.job, tenantId);
+      if (!billTo.ok) return billToRefused(cors, billTo);
       let job;
       try {
-        job = await createJobRecord({ customer, estimateId: est.Id, body: { job: { intakeChannel: "Estimate Conversion", ...(body?.job || {}) } }, tenantId });
+        job = await createJobRecord({ customer, estimateId: est.Id, body: { job: { intakeChannel: "Estimate Conversion", ...(body?.job || {}) } }, tenantId, billTo });
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Service_Job__c: job.id });
       } catch (e) {
         return sfError(cors, e, "job create");
@@ -1562,6 +1594,10 @@ export function createHandler(deps = {}) {
       if (body?.estimateId) {
         return H.createJobFromEstimate({ ctx, params: [String(body.estimateId)], body });
       }
+      // Bill To first (D-081): a missing / unknown payer must refuse before the customer
+      // and estimate exist, not after.
+      const billTo = await jobBillTo(body?.job, tenantId);
+      if (!billTo.ok) return billToRefused(cors, billTo);
       const r = await resolveCustomer(body, ctx, cors);
       if (!r.ok) return r.response;
       const { customer, created: customerCreated, warnings, events: customerEvents } = r;
@@ -1575,7 +1611,7 @@ export function createHandler(deps = {}) {
       }
       let job;
       try {
-        job = await createJobRecord({ customer, estimateId: est.id, body, tenantId });
+        job = await createJobRecord({ customer, estimateId: est.id, body, tenantId, billTo });
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.id, { Service_Job__c: job.id });
       } catch (e) {
         // Compensate: an estimate with no job is legal, but this one was never meant to

@@ -148,6 +148,9 @@ resolution in the access model; the three hierarchy fields below it are legacy.
 - `Alternate_Contact_Name__c` — Text
 - `Alternate_Contact_Phone__c` — Phone
 - `Alternate_Contact_Email__c` — Email
+- `Is_Company__c` — Checkbox (D-081, 2026-10-07). The record is a COMPANY — SunRun, APS, a manufacturer — that can be a job's payer. Its name is `Company_Name__c`; First / Last on a company are its contact (printed "Attn:" on the invoice), never its name.
+- `Company_Name__c` — Text(255) (D-081). The display name of a company (`lib/customer-name.js` `customerDisplayName`: company name when `Is_Company__c` and set, else First + Last, else `Name`). Searched by the customer search (the Bill To picker).
+- `Warranty_Notes__c` — Long Text Area(32768) (D-081, 2026-10-07; cache column `warranty_notes`).
 - `Status__c` — Picklist: Lead, Opportunity, Customer, Past Customer
 - `Lead_Source__c` — Picklist
 - `Lead_Date__c` — Date
@@ -235,6 +238,20 @@ Not written on any other status: a non-signed event never moves the pipeline, a 
 - One-to-many with standard `Asset` records (installed systems via custom lookup field on Asset)
 
 **Important Note:** When ownership changes or address corrections happen, this record is updated in place. The project records' snapshot fields preserve "who was here when this work was done."
+
+### Bill To — the payer is a customer record (D-081, 2026-10-07)
+
+The service job's payer is two fields: **`Bill_To_Type__c`** (Customer / Internal Warranty / Manufacturer / Leasing Partner / Other — what KIND of payer; drives card-on-file, the hosted-page rule and the report marker) and **`Bill_To_Customer__c`** (Lookup → `Sundial_Customer__c` — WHO). The rules, enforced by `lib/bill-to.js` on every job write:
+
+| Object | Field | Rule |
+|---|---|---|
+| `Sundial_Service_Job__c` | `Bill_To_Customer__c` | Null when the type is `Customer` (the job's own `Sundial_Customer__c` pays). REQUIRED for any other type (`400 BILL_TO_CUSTOMER_REQUIRED`). A customer in the same tenant. |
+| `Sundial_Service_Job__c` | `Bill_To_Name__c` | DERIVED from the paying customer's display name on every write that touches the type or the payer. Callers cannot set it. A rename of the payer does not flow back (refreshes on the job's next Bill To save). |
+| `Sundial_Service_Invoice__c` | `Bill_To_Customer__c` | Snapshot at issue: the job's payer, or the job's own customer when the type is Customer. The record whose `Acumatica_Customer_ID__c` the future invoice push will use. |
+| `Sundial_Service_Invoice__c` | `Bill_To_Name__c` | Snapshot at issue: the payer's display name. |
+| `Sundial_Service_Invoice__c` | `Bill_To_Address__c` | Text(255). Snapshot at issue: the payer's site address as one line ("street, city, ST zip"), else its mailing address. |
+
+The `-2` reissue re-snapshots; a void never rewrites. Cache columns: `bill_to_customer_sf_id` (job, invoice), `bill_to_address` (invoice), `is_company` / `company_name` / `warranty_notes` (customer) and the generated `display_name_sort` (customer; the Customer header's sort) — `sql/2026-10-07_company_customers.sql`.
 
 ---
 

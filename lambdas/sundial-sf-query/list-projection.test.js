@@ -251,6 +251,9 @@ const LIST_PROJECTION_SOURCES = {
       "next_follow_up_date", "first_name", "last_name", "name", "street", "city", "state", "postal_code",
       "lead_source", "last_contact_date", "customer_type",
     ],
+    // D-081 (harmon-crm Prompt 2): customerDisplayName reads is_company + company_name; the
+    // Bill To picker lists companies first.
+    "lib/service-customers.ts customerDisplayName + the Bill To picker": ["is_company", "company_name"],
   },
   solar: {
     "pages/DashboardPage.tsx + pages/SolarProjectsPage.tsx + components/solar/{ProjectsTable,ProjectsBoard,record-display}": [
@@ -270,6 +273,7 @@ const LIST_PROJECTION_SOURCES = {
       "sf_id", "archived", "status", "created_date", "name", "customer_name_at_creation", "address_at_creation",
       "priority", "estimate_status", "estimate_total", "bill_to_type", "report_sent_at", "intake_date",
     ],
+    "D-081: the job's paying customer (harmon-crm Prompt 2)": ["bill_to_customer_sf_id"],
   },
   estimate: {
     "pages/service/ServiceEstimatesPage.tsx": [
@@ -282,6 +286,7 @@ const LIST_PROJECTION_SOURCES = {
       "sf_id", "status", "acumatica_entered_at", "issued_at", "created_date", "service_job_sf_id", "name",
       "bill_to_type", "bill_to_name", "billing_reference", "total", "paid_amount", "balance", "due_date",
     ],
+    "D-081: the payer snapshot (harmon-crm Prompt 2)": ["bill_to_customer_sf_id", "bill_to_address"],
   },
 };
 

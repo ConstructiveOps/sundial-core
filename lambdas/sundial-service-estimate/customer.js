@@ -22,9 +22,12 @@ export const NEW_CUSTOMER_FIELDS = Object.freeze({
   phone: "Primary_Phone__c",
 });
 
-/** The columns the duplicate matcher reads back. */
+/**
+ * The columns the duplicate matcher reads back — also every customer read that feeds a
+ * name snapshot, so Is_Company__c / Company_Name__c ride along (D-081, customerDisplayName).
+ */
 export const CANDIDATE_SELECT =
-  "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, " +
+  "Id, Name, First_Name__c, Last_Name__c, Is_Company__c, Company_Name__c, Street__c, City__c, State__c, Postal_Code__c, " +
   "Primary_Email__c, Primary_Phone__c, Alternate_Contact_Phone__c, Alternate_Contact_Email__c, Requested_Project_Types__c, Customer_Type__c";
 /** The sweep's row cap (2026-10-07: was 25 with no ORDER BY — a real twin could fall off the end). */
 export const CANDIDATE_LIMIT = 200;

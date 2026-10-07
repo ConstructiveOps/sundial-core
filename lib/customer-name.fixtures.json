@@ -1,0 +1,15 @@
+{
+  "_comment": "D-081. customerDisplayName's contract, shared by lib/customer-name.js and harmon-crm src/lib/service-customers.ts. Each case is given in cache-column spelling; the JS test also runs it in Salesforce spelling. Change the rule in BOTH places and here.",
+  "cases": [
+    { "label": "company with a name", "record": { "is_company": true, "company_name": "SunRun", "first_name": "Dana", "last_name": "Ruiz", "name": "SunRun" }, "expected": "SunRun" },
+    { "label": "company name is trimmed", "record": { "is_company": true, "company_name": "  APS  " }, "expected": "APS" },
+    { "label": "company with a blank name falls back to the person", "record": { "is_company": true, "company_name": "   ", "first_name": "Dana", "last_name": "Ruiz" }, "expected": "Dana Ruiz" },
+    { "label": "company name ignored when the box is not ticked", "record": { "is_company": false, "company_name": "SunRun", "first_name": "Mark", "last_name": "Haughn" }, "expected": "Mark Haughn" },
+    { "label": "person, first and last", "record": { "first_name": "Mark", "last_name": "Haughn", "name": "C-000123" }, "expected": "Mark Haughn" },
+    { "label": "person, last name only", "record": { "last_name": "Haughn" }, "expected": "Haughn" },
+    { "label": "person, first name only", "record": { "first_name": "Mark" }, "expected": "Mark" },
+    { "label": "no names at all: the record name", "record": { "name": "Haughn Residence" }, "expected": "Haughn Residence" },
+    { "label": "company with no company name and no person: the record name", "record": { "is_company": true, "name": "Spruce Power" }, "expected": "Spruce Power" },
+    { "label": "nothing", "record": {}, "expected": null }
+  ]
+}

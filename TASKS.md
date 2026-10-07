@@ -4,6 +4,19 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Welcome Call writes: one writer per record, status precedence, call-time log order (D-082) — production bug, 2026-10-07 (branch `feature/welcome-call-concurrency`)
+
+Dora Tolle (`a1P7y00000BOqojEAD`): two rep-form calls swept in parallel; the voicemail's write erased the Verified one. Confirmed in CloudWatch (two containers, 15:15:17 → 15:15:22 UTC, overlapping).
+
+- [x] Per-record lock (`lib/record-lock.js` + `sql/2026-10-07_record_locks.sql`) around every status / log write — webhook, backfill, match note, correction, dialer; fresh read after the lock; 30 s wait → orphan-match 409 / webhook 503, no write.
+- [x] Status precedence replaces terminal-protection, on both result paths; attempts ceiling kept.
+- [x] Log entries in call-time order (`call_at=`), every call kept, idempotency on `call_id` (whole-id match).
+- [x] Tests (welcome-call 141, lock 6, SQL 4; the two parallel-race tests fail with the lock switched off); suite 1466. Runbook, DECISIONS (D-082), CLAUDE.md.
+- [ ] **(1) Supabase → SQL editor**: open and **Run** `sql/2026-10-07_record_locks.sql`. Its last query must print **false, false, false, false**. (Claude cannot run this — its Supabase connection is read-only.) Must happen BEFORE step 2: the new Lambda fails closed without the lock table, so every Welcome Call write would answer 409 / 503 until the SQL is in.
+- [ ] **(2)** `.\deploy.ps1 sundial-welcome-call`
+- [ ] **(3) Repair Dora** — one orphan-match run for `call_85dddbbe46a420febc8c31ccaaf`; confirm Verified, both entries (connected on top), both recordings in her Files.
+- [ ] **(4)** Merge `feature/welcome-call-concurrency` into `master` and push, in the same pass as the deploy.
+
 ## Deploy what is on `master` now: Solar pipeline (D-080 amendment 1) + company customers in the Service popups (D-081 amendment 1) — ON MASTER, NOT DEPLOYED (2026-10-07)
 
 `master` now carries D-080 amendment 1 (cherry-picked from the parked `feature/solar-pipeline`, `d30f792`) and `feature/company-customer-create` (D-081 amendment 1). Full suite 1445, all passing; every Lambda below bundles. In this order:

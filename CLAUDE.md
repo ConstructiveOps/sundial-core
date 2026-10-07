@@ -72,7 +72,7 @@ All third-party costs (Salesforce licenses, AWS, Supabase, Vercel, FullCalendar 
 | Payments | Stripe | Service payments (D-072 amendment 8), Service Club subscriptions (D-073) |
 | SMS | Twilio (under the hood, not branded in client docs) | Customer texting from the job page (`sundial-sms`, built 2026-09-15); appointment reminders next |
 | Email | SendGrid or Salesforce email | Customer comms, automated notifications |
-| AI Voice | Retell.ai | **Welcome Call (built, D-054):** automated post-sale contract verification, triggered from Salesforce via one platform event over Event Relay/EventBridge; no portal UI. Also the engine for after-hours service intake — that one is still an add-on service, not built into the platform. |
+| AI Voice | Retell.ai | **Welcome Call (built, D-054):** automated post-sale contract verification, triggered from Salesforce via one platform event over Event Relay/EventBridge; no portal UI. **Every write of its status / log is serialised per record and merged into a fresh read under a Supabase lock row (`lockedWelcomeCallUpdate`, `lib/record-lock.js`; 30 s wait → 409 / 503, never a stale write); a result's status only ever moves UP the precedence table (Verified > Verified - Exceptions > Refused > Failed - Max Attempts > No Answer > Calling > Queued > Not Started); log entries sit in CALL-time order (`call_at=`)** — D-082, after two parallel sweep iterations erased a Verified result (2026-10-07). Also the engine for after-hours service intake — that one is still an add-on service, not built into the platform. |
 | Scheduling Library (Phase 3) | FullCalendar Premium with Scheduler plugin | Drag-and-drop install scheduling board |
 | Version Control | GitHub | Source code repository |
 

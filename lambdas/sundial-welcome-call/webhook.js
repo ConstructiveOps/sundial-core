@@ -28,9 +28,9 @@ import crypto from "node:crypto";
 import { constantTimeEquals } from "../../lib/secure-compare.js";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
-import { MAX_ATTEMPTS, durationMmSs, phoenixStamp } from "./format.js";
-import { archiveRecording } from "./recording.js";
-import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import { MAX_ATTEMPTS, durationMmSs, phoenixStamp, resolveStatusPrecedence } from "./format.js";
+import { archiveRecording, callRecordedAt } from "./recording.js";
+import { lockedWelcomeCallUpdate, insertLogEntryByTime, RecordLockTimeout, CUSTOMER_SF_OBJECT } from "./writeback.js";
 
 export const SIGNATURE_HEADER = "x-retell-signature";
 
@@ -532,6 +532,8 @@ export const RECORDING_UNAVAILABLE = "unavailable — see ledger/CloudWatch";
  * @param {object} args.analysis     - custom_analysis_data
  * @param {object} args.call         - the Retell call object
  * @param {string|null} [args.recordingKey] - permanent S3 key, when archived
+ * @param {Date|null} [args.callAt]  - when the CALL happened (start_timestamp); written as
+ *                                     `call_at=` on the header so the log orders by call time (D-082)
  */
 export function buildResultLogEntry({
   stamp,
@@ -540,6 +542,7 @@ export function buildResultLogEntry({
   analysis,
   call,
   recordingKey = null,
+  callAt = null,
 }) {
   // A never-connected call says so ON THE HEADER, with the evidence. Its block below is
   // all "none" and N, which alone reads like a conversation that went badly.
@@ -547,9 +550,10 @@ export function buildResultLogEntry({
   const result = connection.connected
     ? status
     : `${status} (not answered — ${connection.reason})`;
+  const at = callAt instanceof Date && Number.isFinite(callAt.getTime()) ? ` · call_at=${callAt.toISOString()}` : "";
   const header =
     `${ENTRY_MARKER}${stamp} · ${origin} · Result: ${result} · ` +
-    `call_id=${call?.call_id ?? "unknown"}`;
+    `call_id=${call?.call_id ?? "unknown"}${at}`;
 
   const lines = [header];
 
@@ -605,10 +609,12 @@ export function buildResultLogEntry({
  */
 export function alreadyProcessed(logText, callId) {
   if (!callId || typeof logText !== "string" || logText === "") return false;
-  const needle = `call_id=${callId}`;
+  // A whole-id match: `call_id=call_abc` must not match `call_id=call_abcd`, and the
+  // `call_at=` token that follows the id since D-082 must not break it.
+  const needle = new RegExp(`call_id=${String(callId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`);
   return logText
     .split("\n")
-    .some((line) => line.includes(needle) && line.includes("Result:"));
+    .some((line) => needle.test(line) && line.includes("Result:"));
 }
 
 // ---------------------------------------------------------------------------
@@ -698,10 +704,11 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
   const logApi = schema.apiName("welcomeCallLog");
   const statusApi = schema.apiName("welcomeCallStatus");
   const tenantId = get("client") ?? null;
-  const existingLog = record[logApi];
 
-  // ---- Idempotency: Retell may redeliver ----------------------------------
-  if (alreadyProcessed(existingLog, callId)) {
+  // ---- Idempotency, first look: Retell may redeliver -----------------------
+  // A cheap check on the first read, so a redelivery does not re-download the audio. It
+  // is repeated INSIDE the lock on a fresh read — this one only saves work.
+  if (alreadyProcessed(record[logApi], callId)) {
     console.log(
       `welcome-call webhook: call_id=${callId} already recorded on ${recordId} — ack and skip.`
     );
@@ -712,24 +719,14 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
   }
 
   const analysis = call?.call_analysis?.custom_analysis_data ?? {};
-  const attempts = Number(get("welcomeCallAttempts")) || 0;
-  // Connection is checked inside, before the verification_result mapping.
-  const { status, outcome, connection } = resolveCallStatus(call, { attempts });
-
-  // The attempt this result belongs to. metadata.attempt_no is what the placing side
-  // stamped; the stored counter is the fallback for a call placed some other way.
-  const attemptNo = Number(call?.metadata?.attempt_no) || attempts || 1;
+  const callAt = callRecordedAt(call, now);
 
   // ---- Recording: after the ledger forward, before the writeback lands -----
   //
   // Sequenced here so the archived key can go INTO the log line the writeback is about
   // to save — one Salesforce write, not two. `archiveRecording` never throws, so the
-  // writeback below runs whatever happens to the audio.
-  //
-  // Placing it after the idempotency check means a redelivery does not re-download a
-  // few MB to overwrite an identical object. The trade: if the very first delivery
-  // stored the status but failed the recording, a redelivery will not retry the audio.
-  // The Retell URL is in the log line and in the ledger row for exactly that case.
+  // writeback below runs whatever happens to the audio. It runs OUTSIDE the record lock:
+  // a 20 s download must not hold up another call's write for the same customer.
   const recording = await archiveRecording({
     call,
     sfRecordId: record.Id,
@@ -741,50 +738,76 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
   // bytes in an unknown state, and an unknown state does not get named in the log.
   const recordingKey = recording.ok && recording.verified ? (recording.key ?? null) : null;
 
-  const entry = buildResultLogEntry({
-    stamp: phoenixStamp(now),
-    origin: `Attempt ${attemptNo}`,
-    status,
-    analysis,
-    call,
-    recordingKey,
-  });
-  // Capacity from the describe, not a constant — the field has been resized once.
-  const nextLog = prependLogEntry(existingLog, entry, schema.fieldLength("welcomeCallLog"));
-
-  const sfFields = { [statusApi]: status, [logApi]: nextLog };
-
+  // ---- The write: under the record's lock, merged into a FRESH read (D-082) ----
+  //
+  // Two calls for one customer can finish seconds apart. Each merges into what the record
+  // holds NOW: the status by precedence (a result never downgrades — voicemail after a
+  // verification leaves Verified), the entry at its call-time position in the log.
+  let done;
   try {
-    const applied = await applyWelcomeCallUpdate({
+    done = await lockedWelcomeCallUpdate({
       recordId: record.Id,
-      tenantId,
-      sfFields,
-      cacheValues: { welcome_call_status: status, welcome_call_log: nextLog },
-      broadcastPayload: {
-        call_id: callId,
-        outcome,
-        recording_url: call?.recording_url ?? null,
-        recording_key: recordingKey,
-        call_summary: call?.call_analysis?.call_summary ?? null,
+      read: async () => (await sfQuery(soql))?.[0] ?? null,
+      plan: (fresh) => {
+        const freshGet = schema.reader(fresh);
+        const existingLog = fresh[logApi];
+        if (alreadyProcessed(existingLog, callId)) return { skip: true, outcome: { result: "duplicate" } };
+
+        const attempts = Number(freshGet("welcomeCallAttempts")) || 0;
+        // Connection is checked inside, before the verification_result mapping.
+        const { status, outcome, connection } = resolveCallStatus(call, { attempts });
+        const current = statusApi ? String(fresh[statusApi] ?? "").trim() : "";
+        const precedence = resolveStatusPrecedence(current, status);
+
+        // The attempt this result belongs to. metadata.attempt_no is what the placing side
+        // stamped; the stored counter is the fallback for a call placed some other way.
+        const attemptNo = Number(call?.metadata?.attempt_no) || attempts || 1;
+        const kept = !precedence.changed && current && current !== status;
+
+        const entry = buildResultLogEntry({
+          stamp: phoenixStamp(callAt),
+          origin: kept ? `Attempt ${attemptNo} (status kept: ${current})` : `Attempt ${attemptNo}`,
+          // The entry always states the call's OWN result.
+          status,
+          analysis,
+          call,
+          recordingKey,
+          callAt,
+        });
+        // Capacity from the describe, not a constant — the field has been resized once.
+        const nextLog = insertLogEntryByTime(existingLog, entry, callAt.getTime(), schema.fieldLength("welcomeCallLog"));
+        const sfFields = { [logApi]: nextLog };
+        const cacheValues = { welcome_call_log: nextLog };
+        if (precedence.changed && statusApi) {
+          sfFields[statusApi] = status;
+          cacheValues.welcome_call_status = status;
+        }
+        return {
+          tenantId,
+          sfFields,
+          cacheValues,
+          broadcastPayload: {
+            call_id: callId,
+            outcome,
+            status: precedence.status,
+            recording_url: call?.recording_url ?? null,
+            recording_key: recordingKey,
+            call_summary: call?.call_analysis?.call_summary ?? null,
+          },
+          outcome: { result: "updated", status, recordStatus: precedence.status, kept, outcome, connection, attemptNo },
+        };
       },
     });
-    console.log(
-      `welcome-call RESULT ${recordId}: ${outcome}` +
-        `${connection.connected ? "" : ` (${connection.reason})`} -> ${status} (attempt ${attemptNo}, ` +
-        `call_id=${callId}, forwarded=${forwarded.ok}, cache=${applied.cache}, ` +
-        `realtime=${applied.realtime}, recording=${recording.key ?? recording.reason ?? "none"})`
-    );
-    return {
-      status: 200,
-      body: {
-        received: true,
-        forwarded: forwarded.ok,
-        salesforce: "updated",
-        welcomeCallStatus: status,
-        recording: recordingKey,
-      },
-    };
   } catch (e) {
+    if (e instanceof RecordLockTimeout) {
+      // 503, not 409: Retell retries a 5xx (the ledger already has the call, and the
+      // idempotency check makes the redelivery safe). Nothing was written.
+      console.error(`welcome-call webhook: ${e.message} — call_id=${callId}, asking Retell to retry.`);
+      return {
+        status: 503,
+        body: { received: true, forwarded: forwarded.ok, error: "record_locked", code: "RECORD_LOCKED" },
+      };
+    }
     // 5xx ON PURPOSE so Retell retries: the ledger already has the call, and the
     // idempotency guard makes a redelivery safe (it re-reads the log, finds no
     // "Result:" line for this call_id, and writes it once).
@@ -797,6 +820,35 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
       body: { received: true, forwarded: forwarded.ok, error: "salesforce_writeback_failed" },
     };
   }
+
+  if (!done.written) {
+    const result = done.outcome?.result;
+    console.log(`welcome-call webhook: call_id=${callId} on ${recordId}: ${result} (under lock) — nothing written.`);
+    return {
+      status: 200,
+      body: { received: true, forwarded: forwarded.ok, salesforce: result === "duplicate" ? "duplicate" : result },
+    };
+  }
+
+  const o = done.outcome;
+  console.log(
+    `welcome-call RESULT ${recordId}: ${o.outcome}` +
+      `${o.connection.connected ? "" : ` (${o.connection.reason})`} -> ${o.status}` +
+      `${o.kept ? ` (record kept ${o.recordStatus} by precedence)` : ""} (attempt ${o.attemptNo}, ` +
+      `call_id=${callId}, forwarded=${forwarded.ok}, cache=${done.applied.cache}, ` +
+      `realtime=${done.applied.realtime}, recording=${recording.key ?? recording.reason ?? "none"})`
+  );
+  return {
+    status: 200,
+    body: {
+      received: true,
+      forwarded: forwarded.ok,
+      salesforce: "updated",
+      welcomeCallStatus: o.recordStatus,
+      callResult: o.status,
+      recording: recordingKey,
+    },
+  };
 }
 
 /** Is this an event we deliberately ignore? */

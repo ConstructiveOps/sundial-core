@@ -35,7 +35,7 @@ import {
   toE164US,
 } from "./format.js";
 import { createPhoneCall } from "./retell.js";
-import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import { lockedWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
 import { getConfig } from "./config.js";
 import { integrationEnabled } from "../../lib/tenant-guard.js";
 
@@ -112,14 +112,15 @@ async function readCustomerFresh(recordId, schema) {
 async function logSkipToSalesforce({ record, schema, tenantId, line }) {
   const logApi = schema.apiName("welcomeCallLog");
   if (!logApi) return; // no log field in this org — CloudWatch is the only record
-  const next = prependLogEntry(record[logApi], line, schema.fieldLength("welcomeCallLog"));
   try {
-    await applyWelcomeCallUpdate({
+    // Under the record's lock, merged into a fresh read (D-082) — the log is written whole.
+    await lockedWelcomeCallUpdate({
       recordId: record.Id,
-      tenantId,
-      sfFields: { [logApi]: next },
-      cacheValues: { welcome_call_log: next },
-      broadcastPayload: { reason: "skipped" },
+      read: () => readCustomerFresh(record.Id, schema),
+      plan: (fresh) => {
+        const next = prependLogEntry(fresh[logApi], line, schema.fieldLength("welcomeCallLog"));
+        return { tenantId, sfFields: { [logApi]: next }, cacheValues: { welcome_call_log: next }, broadcastPayload: { reason: "skipped" } };
+      },
     });
   } catch (e) {
     // A failed skip-note must not turn a skip into a retry loop.
@@ -285,13 +286,6 @@ export async function placeWelcomeCall(recordId, { now = new Date() } = {}) {
 
   const line =
     `${phoenixStamp(now)} · Attempt ${attemptNo} · Call placed · call_id=${call.callId}`;
-  const nextLog = prependLogEntry(record[logApi], line, schema.fieldLength("welcomeCallLog"));
-
-  const sfFields = {
-    [statusApi]: "Calling",
-    [attemptsApi]: attemptNo,
-    [logApi]: nextLog,
-  };
 
   // If this write fails the call is ALREADY DIALING, so the throw is not a rollback —
   // it is a request for the relay to retry the bookkeeping. The idempotency guard on
@@ -299,16 +293,28 @@ export async function placeWelcomeCall(recordId, { now = new Date() } = {}) {
   // "Calling" status, and rewrites the same three fields. The one real cost of a
   // retry is a second dial, which the "Calling" status is there to prevent — hence
   // the loud error.
-  const applied = await applyWelcomeCallUpdate({
+  //
+  // Under the record's lock, merged into a FRESH read (D-082): the log is written whole,
+  // and a result for an earlier attempt may have landed since this record was read.
+  // Precedence does NOT apply here — placing a call is not a result, and a retry after
+  // No Answer has to move the record to Calling (the eligibility guard above is what keeps
+  // a settled customer from being dialed).
+  const { applied } = await lockedWelcomeCallUpdate({
     recordId: record.Id,
-    tenantId,
-    sfFields,
-    cacheValues: {
-      welcome_call_status: "Calling",
-      welcome_call_attempts: attemptNo,
-      welcome_call_log: nextLog,
+    read: () => readCustomerFresh(record.Id, schema),
+    plan: (fresh) => {
+      const nextLog = prependLogEntry(fresh[logApi], line, schema.fieldLength("welcomeCallLog"));
+      return {
+        tenantId,
+        sfFields: { [statusApi]: "Calling", [attemptsApi]: attemptNo, [logApi]: nextLog },
+        cacheValues: {
+          welcome_call_status: "Calling",
+          welcome_call_attempts: attemptNo,
+          welcome_call_log: nextLog,
+        },
+        broadcastPayload: { call_id: call.callId, attempt_no: attemptNo },
+      };
     },
-    broadcastPayload: { call_id: call.callId, attempt_no: attemptNo },
   });
 
   console.log(

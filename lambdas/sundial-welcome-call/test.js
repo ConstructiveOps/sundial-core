@@ -245,6 +245,14 @@ function resetCtx() {
   // not-ready-yet 404 followed by a 200. Empty falls back to recordingResponse.
   ctx.recordingResponses = [];
   ctx.recordingFetches = 0;
+  // D-082: the record lock (an in-memory sundial_record_locks) and an opt-in STATEFUL
+  // Salesforce — reads return the rows as updated so far, so concurrent writers can race.
+  ctx.locks = new Map();
+  ctx.lockOps = [];
+  ctx.lockHeldBy = null; // a holder that never releases (the lock-timeout test)
+  ctx.stateful = false;
+  ctx.retellGetCallById = null;
+  process.env.WELCOME_CALL_LOCK_WAIT_MS = "2000";
   process.env.ZAPIER_RESULTS_HOOK_URL = "https://hooks.zapier.com/hooks/catch/1/abc/";
   delete process.env.RETELL_API_KEY;
   delete process.env.RETELL_FROM_NUMBER;
@@ -270,10 +278,20 @@ mock.module("../../lib/salesforce.js", {
     describeObject: async () => ({ fields: ctx.describeFields }),
     sfQuery: async (soql) => {
       ctx.soqlSeen.push(soql);
+      if (ctx.stateful) {
+        // A real round trip: yield, then answer with copies of the rows as they are NOW.
+        await new Promise((r) => setTimeout(r, 5));
+        return ctx.queryRows.map((r) => ({ ...r }));
+      }
       return ctx.queryRows;
     },
     sfUpdateRecord: async (obj, id, fields) => {
       if (ctx.sfUpdateThrows) throw new Error(ctx.sfUpdateThrows);
+      if (ctx.stateful) {
+        await new Promise((r) => setTimeout(r, 5));
+        const row = ctx.queryRows.find((r) => r.Id === id);
+        if (row) Object.assign(row, fields);
+      }
       ctx.sfUpdates.push({ obj, id, fields });
       return { ok: true, id };
     },
@@ -284,8 +302,30 @@ mock.module("../../lib/salesforce.js", {
 // uses: .update().eq().eq(), .insert().select().maybeSingle(), and
 // .select().eq().limit().maybeSingle(). The metadata select reads back what the
 // inserts recorded, so the "skip if already registered" path is really exercised.
+/** sundial_record_lock_acquire / _release over ctx.locks — same semantics as the SQL. */
+async function lockRpc(fn, args) {
+  ctx.lockOps.push({ fn, key: args.p_key, holder: args.p_holder });
+  if (fn === "sundial_record_lock_acquire") {
+    if (ctx.lockHeldBy) return { data: false, error: null };
+    const cur = ctx.locks.get(args.p_key);
+    if (cur && cur.expiresAt > Date.now()) return { data: false, error: null };
+    ctx.locks.set(args.p_key, { holder: args.p_holder, expiresAt: Date.now() + args.p_ttl_seconds * 1000 });
+    return { data: true, error: null };
+  }
+  if (fn === "sundial_record_lock_release") {
+    const cur = ctx.locks.get(args.p_key);
+    if (cur && cur.holder === args.p_holder) {
+      ctx.locks.delete(args.p_key);
+      return { data: true, error: null };
+    }
+    return { data: false, error: null };
+  }
+  return { data: null, error: { message: `unknown rpc ${fn}` } };
+}
+
 function supabaseStub() {
   return {
+    rpc: lockRpc,
     from(table) {
       const rec = { table, op: null, patch: null, row: null, filters: {} };
       const finish = () => {
@@ -461,7 +501,9 @@ globalThis.fetch = async (url, init = {}) => {
   // Separated from create-phone-call because it carries no body to parse.
   if (u.includes("api.retellai.com/v2/get-call")) {
     ctx.retellGetCalls.push({ url: u, headers: init?.headers });
-    const { status, body } = ctx.retellGetCallResponse;
+    const requestedId = decodeURIComponent(u.split("/v2/get-call/")[1] ?? "");
+    // D-082 tests: a different call per id (two calls for one customer).
+    const { status, body } = ctx.retellGetCallById?.[requestedId] ? { status: 200, body: ctx.retellGetCallById[requestedId] } : ctx.retellGetCallResponse;
     // Echo the requested id back, the way the real endpoint does — otherwise a test
     // matching call_abc123 would get a payload claiming to be a different call, and
     // the idempotency marker written to the log would be for the wrong id.
@@ -878,8 +920,10 @@ test("place call: Retell payload, SF writeback, cache and broadcast", async () =
   assert.equal(res.callId, "call_abc123");
   assert.equal(res.attemptNo, 1);
 
-  // Fresh read from Salesforce, not the cache.
-  assert.equal(ctx.soqlSeen.length, 1);
+  // Fresh reads from Salesforce, not the cache: the eligibility read, then the read
+  // INSIDE the record lock that the write merges into (D-082).
+  assert.equal(ctx.soqlSeen.length, 2);
+  assert.equal(ctx.soqlSeen[1], ctx.soqlSeen[0]);
   assert.match(ctx.soqlSeen[0], /FROM Sundial_Customer__c WHERE Id = 'a1P7y00000AUo6TEAT'/);
 
   const sent = ctx.retellCalls[0];
@@ -1005,7 +1049,7 @@ test("D-078: a record with NO tenant is skipped too (fail closed)", async () => 
 test("D-078: the tenant slug is asked for on the existing SELECT, and only when the org has Client__c", async () => {
   fresh();
   await place.placeWelcomeCall(baseCustomer().Id, { now: IN_WINDOW });
-  assert.equal(ctx.soqlSeen.length, 1);
+  assert.equal(ctx.soqlSeen.length, 2, "the eligibility read + the fresh read under the lock — no separate tenant query");
   assert.match(ctx.soqlSeen[0], /Client__c/);
   assert.match(ctx.soqlSeen[0], /, Client__r\.Name FROM Sundial_Customer__c/);
   // An org without the lookup: the relationship is not selected (the query would fail),
@@ -1453,7 +1497,7 @@ test("webhook: a ring-out is written as No Answer, and the header says why", asy
   assert.equal(fields.Welcome_Call_Status__c, "No Answer");
   assert.match(
     fields.Welcome_Call_Log__c,
-    /^── .* · Attempt 2 · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+    /^── .* · Attempt 2 · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01 · call_at=\S+$/m
   );
   // The block keeps its format — empty fields read as none/N.
   assert.match(fields.Welcome_Call_Log__c, /^Call Summary: none$/m);
@@ -1492,7 +1536,7 @@ test("result writeback records outcome, mismatches and recording url", async () 
   assert.equal(fields.Welcome_Call_Status__c, "Verified - Exceptions");
   const entry = fields.Welcome_Call_Log__c;
 
-  assert.match(entry, /^── .* · Attempt 1 · Result: Verified - Exceptions · call_id=call_abc123$/m);
+  assert.match(entry, /^── .* · Attempt 1 · Result: Verified - Exceptions · call_id=call_abc123 · call_at=\S+$/m);
   assert.match(entry, /^Call Summary: Customer confirmed all terms\.$/m);
   assert.match(entry, /^Mismatched Items: email address; monthly payment$/m);
   assert.match(entry, /^Unconfirmed Items: utility bill$/m);
@@ -1607,7 +1651,7 @@ test("the result line goes on TOP of the existing log", async () => {
   await handler(signedWebhookEvent(analyzedPayload()));
   const lines = ctx.sfUpdates[0].fields.Welcome_Call_Log__c.split("\n");
   // The new BLOCK goes on top, intact, with the older single-line history below it.
-  assert.match(lines[0], /^── .* · Attempt 1 · Result: Verified · call_id=call_abc123$/);
+  assert.match(lines[0], /^── .* · Attempt 1 · Result: Verified · call_id=call_abc123 · call_at=\S+$/);
   assert.match(lines[1], /^Call Summary: /);
   assert.match(lines.at(-1), /Call placed/);
 });
@@ -2119,7 +2163,7 @@ test("orphan-match promotes the recording, logs it, and deletes the holding obje
 
   // The log now carries the FULL result, not a one-line "matched" note.
   const entry = ctx.sfUpdates[0].fields.Welcome_Call_Log__c;
-  assert.match(entry, /^── .* · rep-form call · Result: .* · call_id=call_abc123$/m);
+  assert.match(entry, /^── .* · rep-form call · Result: .* · call_id=call_abc123 · call_at=\S+$/m);
   assert.equal(body.backfill, "backfilled");
 });
 
@@ -2158,7 +2202,7 @@ test("backfill writes the full analysis and the mapped status to Salesforce", as
   const entry = fields.Welcome_Call_Log__c;
   assert.match(
     entry,
-    /^── .* · rep-form call · Result: Verified - Exceptions · call_id=call_ced35ad380c4a0fff47c8de58f9$/m
+    /^── .* · rep-form call · Result: Verified - Exceptions · call_id=call_ced35ad380c4a0fff47c8de58f9 · call_at=\S+$/m
   );
   assert.match(entry, /^Call Summary: The agent called Geovanna Macedo to verify/m);
   assert.match(entry, /^Mismatched Items: Name and email provided by customer/m);
@@ -2199,30 +2243,32 @@ test("a backfilled entry is byte-identical in structure to a webhook-written one
         l
           .replace(/^(── ).*?( · )/, "$1<stamp>$2")
           .replace(/^(── <stamp> · ).*?( · Result)/, "$1<origin>$2")
+          .replace(/ · call_at=\S+$/, " · call_at=<call time>")
           .replace(/^(Recording: SUNDIAL\/[^/]+\/).*?(\.mp3)/, "$1<file>$2")
       );
   assert.deepEqual(shape(backfilled), shape(live));
 });
 
-test("a record already at a terminal status keeps it — the entry is still appended", async () => {
-  for (const terminal of ["Verified", "Verified - Exceptions", "Refused", "Failed - Max Attempts"]) {
+test("D-082 precedence: a result sets the status only when it outranks the current one — the entry is always appended", async () => {
+  // Geovanna's call maps to Verified - Exceptions (rank 6 of 0–7). Precedence replaced the
+  // old "terminal → never change" rule: Refused and Failed - Max Attempts rank BELOW it.
+  const cases = [
+    { current: "Verified", written: undefined, backfill: "backfilled_status_unchanged", origin: /rep-form call \(status kept: Verified\) · Result/ },
+    { current: "Verified - Exceptions", written: undefined, backfill: "backfilled_status_unchanged", origin: /rep-form call · Result/ },
+    { current: "Refused", written: "Verified - Exceptions", backfill: "backfilled", origin: /rep-form call · Result/ },
+    { current: "Failed - Max Attempts", written: "Verified - Exceptions", backfill: "backfilled", origin: /rep-form call · Result/ },
+  ];
+  for (const c of cases) {
     fresh();
-    ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: terminal })];
+    ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: c.current })];
     parkGeovanna();
     const res = await handler(matchGeovanna());
     assert.equal(res.statusCode, 200);
-    assert.equal(parse(res).backfill, "backfilled_status_unchanged");
-
+    assert.equal(parse(res).backfill, c.backfill, c.current);
     const fields = ctx.sfUpdates.at(-1).fields;
-    assert.equal(
-      fields.Welcome_Call_Status__c,
-      undefined,
-      `${terminal} must not be overwritten by a later rep-form call`
-    );
-    assert.match(
-      fields.Welcome_Call_Log__c,
-      /^── .* · rep-form call \(status unchanged, record already terminal\) · Result: Verified - Exceptions · /m
-    );
+    assert.equal(fields.Welcome_Call_Status__c, c.written, `${c.current} → ${c.written ?? "unchanged"}`);
+    assert.match(fields.Welcome_Call_Log__c, c.origin);
+    assert.match(fields.Welcome_Call_Log__c, /Result: Verified - Exceptions · /, "the entry states the call's own result");
   }
 });
 
@@ -2357,7 +2403,7 @@ test("a retry heals a run whose log append failed", async () => {
   assert.equal(second.backfill, "backfilled");
   assert.match(
     ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
-    /^── .* · rep-form call · Result: .* · call_id=call_abc123$/m
+    /^── .* · rep-form call · Result: .* · call_id=call_abc123 · call_at=\S+$/m
   );
 });
 
@@ -2655,7 +2701,7 @@ test("orphan backfill: the real ring-out lands as No Answer with the reason on t
   assert.equal(fields.Welcome_Call_Status__c, "No Answer");
   assert.match(
     fields.Welcome_Call_Log__c,
-    /^── .* · rep-form call · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01$/m
+    /^── .* · rep-form call · Result: No Answer \(not answered — dial_no_answer\) · call_id=call_ae983426baaab27c806cd37ec01 · call_at=\S+$/m
   );
   assert.doesNotMatch(fields.Welcome_Call_Log__c, /Verified - Exceptions/);
 });
@@ -2675,4 +2721,200 @@ test("orphan backfill: a ring-out at the ceiling is Failed - Max Attempts", asyn
     ctx.sfUpdates.at(-1).fields.Welcome_Call_Log__c,
     /Result: Failed - Max Attempts \(not answered — dial_no_answer\) · /
   );
+});
+
+// ===========================================================================
+// D-082 — one writer per record, status precedence, the log in call-time order
+// (Dora Tolle, a1P7y00000BOqojEAD, 2026-10-07: two rep-form calls swept in parallel;
+// the voicemail's write erased the Verified one.)
+// ===========================================================================
+
+const VOICEMAIL_ID = "call_ed9f93cf2772525f274dd174d17";
+const CONNECTED_ID = "call_85dddbbe46a420febc8c31ccaaf";
+// 10-06 evening in Phoenix: the voicemail at 8:00 pm, the connected call at 8:10 pm.
+const VOICEMAIL_AT = Date.parse("2026-10-07T03:00:00Z");
+const CONNECTED_AT = Date.parse("2026-10-07T03:10:00Z");
+
+function voicemailCall(start = VOICEMAIL_AT, id = VOICEMAIL_ID) {
+  return geovannaCall(
+    {
+      call_id: id,
+      start_timestamp: start,
+      end_timestamp: start + 21000,
+      duration_ms: 21000,
+      disconnection_reason: "voicemail_reached",
+      call_analysis: {
+        in_voicemail: true,
+        call_summary: "Reached voicemail; left a message.",
+        custom_analysis_data: { verification_result: "voicemail" },
+      },
+    }
+  );
+}
+function connectedCall(start = CONNECTED_AT, id = CONNECTED_ID) {
+  return geovannaCall({ call_id: id, start_timestamp: start, end_timestamp: start + 171651 }, { verification_result: "passed" });
+}
+function doraFresh({ calls = [voicemailCall(), connectedCall()], status = "Not Started", log = null } = {}) {
+  fresh();
+  ctx.stateful = true;
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: status, Welcome_Call_Log__c: log })];
+  ctx.retellGetCallById = Object.fromEntries(calls.map((c) => [c.call_id, c]));
+  for (const c of calls) parkOrphan(c.call_id, new Date(c.start_timestamp));
+}
+const match = (callId) => orphanMatchEvent({ call_id: callId, sf_record_id: baseCustomer().Id });
+const record = () => ctx.queryRows[0];
+const headerIndex = (log, callId) => log.split("\n").findIndex((l) => l.includes(`call_id=${callId}`) && l.includes("Result:"));
+
+test("D-082: two orphan-matches for one customer IN PARALLEL — both entries land, status Verified, the later call on top", async () => {
+  doraFresh();
+  const [a, b] = await Promise.all([handler(match(VOICEMAIL_ID)), handler(match(CONNECTED_ID))]);
+  assert.equal(a.statusCode, 200, a.body);
+  assert.equal(b.statusCode, 200, b.body);
+  const log = record().Welcome_Call_Log__c;
+  assert.equal(record().Welcome_Call_Status__c, "Verified", "the Verified write is not lost");
+  assert.ok(headerIndex(log, VOICEMAIL_ID) >= 0, "the voicemail entry is kept");
+  assert.ok(headerIndex(log, CONNECTED_ID) >= 0, "the connected entry is kept");
+  assert.ok(headerIndex(log, CONNECTED_ID) < headerIndex(log, VOICEMAIL_ID), "the most recent CALL heads the log");
+  // Both recordings are in the customer's folder.
+  for (const id of [VOICEMAIL_ID, CONNECTED_ID]) {
+    assert.ok([...ctx.s3Objects.keys()].some((k) => k.startsWith(`SUNDIAL/${baseCustomer().Id}/welcome-call-`) && k.endsWith(`-${id}.mp3`)), id);
+  }
+  // The writes were serialised on the record's lock, and the lock was released.
+  const acquires = ctx.lockOps.filter((o) => o.fn === "sundial_record_lock_acquire");
+  assert.ok(acquires.every((o) => o.key === "welcome-call:a1P7y00000AUo6T"));
+  assert.equal(ctx.locks.size, 0, "released");
+});
+
+test("D-082: voicemail processed AFTER the success — status stays Verified, the voicemail entry goes below", async () => {
+  doraFresh();
+  await handler(match(CONNECTED_ID));
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+  const res = await handler(match(VOICEMAIL_ID));
+  assert.equal(res.statusCode, 200);
+  assert.equal(parse(res).backfill, "backfilled_status_unchanged");
+  assert.equal(parse(res).welcomeCallStatus, "Verified");
+  const log = record().Welcome_Call_Log__c;
+  assert.equal(record().Welcome_Call_Status__c, "Verified", "a result never downgrades");
+  assert.ok(headerIndex(log, CONNECTED_ID) < headerIndex(log, VOICEMAIL_ID), "the earlier call sits below");
+  assert.match(log, new RegExp(`rep-form call \\(status kept: Verified\\) · Result: No Answer · call_id=${VOICEMAIL_ID}`));
+});
+
+test("D-082: success processed AFTER the voicemail — upgrades No Answer to Verified, success on top", async () => {
+  doraFresh();
+  await handler(match(VOICEMAIL_ID));
+  assert.equal(record().Welcome_Call_Status__c, "No Answer");
+  const res = await handler(match(CONNECTED_ID));
+  assert.equal(parse(res).backfill, "backfilled");
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+  const log = record().Welcome_Call_Log__c;
+  assert.ok(headerIndex(log, CONNECTED_ID) < headerIndex(log, VOICEMAIL_ID));
+});
+
+test("D-082: a LATER voicemail after a verification heads the log but cannot downgrade the status", async () => {
+  const later = voicemailCall(CONNECTED_AT + 3600000, "call_latervoicemail0000000000");
+  doraFresh({ calls: [connectedCall(), later] });
+  await handler(match(CONNECTED_ID));
+  await handler(match(later.call_id));
+  const log = record().Welcome_Call_Log__c;
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+  assert.ok(headerIndex(log, later.call_id) < headerIndex(log, CONNECTED_ID), "newest call on top");
+});
+
+test("D-082: lock not acquired → orphan-match answers 409, writes nothing, keeps the holding object", async () => {
+  doraFresh();
+  process.env.WELCOME_CALL_LOCK_WAIT_MS = "200";
+  ctx.lockHeldBy = "another-invocation";
+  const res = await handler(match(CONNECTED_ID));
+  assert.equal(res.statusCode, 409);
+  assert.equal(parse(res).code, "RECORD_LOCKED");
+  assert.equal(ctx.sfUpdates.length, 0, "no Salesforce write");
+  assert.equal(record().Welcome_Call_Status__c, "Not Started");
+  assert.ok(ctx.s3Objects.has(`SUNDIAL/_orphan-welcome-calls/${CONNECTED_ID}.mp3`), "the holding object survives for the retry");
+  // The retry, once the lock is free, completes the match.
+  ctx.lockHeldBy = null;
+  const retry = await handler(match(CONNECTED_ID));
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+});
+
+test("D-082: the webhook — two results for one customer IN PARALLEL both land, Verified wins; a held lock is a 503 with no write", async () => {
+  fresh();
+  ctx.stateful = true;
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "Calling", Welcome_Call_Log__c: null })];
+  const vm = analyzedPayload(
+    { call_id: "call_webhookvoicemail0000000", start_timestamp: VOICEMAIL_AT, metadata: { source: "sundial", sf_record_id: baseCustomer().Id, attempt_no: 1 } },
+    { verification_result: "voicemail" }
+  );
+  vm.call.call_analysis.in_voicemail = true;
+  const ok = analyzedPayload(
+    { call_id: "call_webhookpassed000000000", start_timestamp: CONNECTED_AT, metadata: { source: "sundial", sf_record_id: baseCustomer().Id, attempt_no: 2 } },
+    { verification_result: "passed" }
+  );
+  const [r1, r2] = await Promise.all([handler(signedWebhookEvent(ok)), handler(signedWebhookEvent(vm))]);
+  assert.equal(r1.statusCode, 200, r1.body);
+  assert.equal(r2.statusCode, 200, r2.body);
+  const log = record().Welcome_Call_Log__c;
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+  assert.ok(headerIndex(log, "call_webhookpassed000000000") >= 0 && headerIndex(log, "call_webhookvoicemail0000000") >= 0);
+  assert.ok(headerIndex(log, "call_webhookpassed000000000") < headerIndex(log, "call_webhookvoicemail0000000"));
+
+  // A held lock: nothing written, 503 so Retell redelivers.
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "Calling" })];
+  process.env.WELCOME_CALL_LOCK_WAIT_MS = "200";
+  ctx.lockHeldBy = "another-invocation";
+  const held = await handler(signedWebhookEvent(analyzedPayload()));
+  assert.equal(held.statusCode, 503);
+  assert.equal(parse(held).code, "RECORD_LOCKED");
+  assert.equal(ctx.sfUpdates.length, 0);
+});
+
+test("D-082 precedence table: rank order, never a downgrade, blank ranks lowest", () => {
+  assert.deepEqual(fmt.STATUS_PRECEDENCE, ["Not Started", "Queued", "Calling", "No Answer", "Failed - Max Attempts", "Refused", "Verified - Exceptions", "Verified"]);
+  const r = fmt.resolveStatusPrecedence;
+  assert.deepEqual(r("No Answer", "Verified"), { status: "Verified", changed: true });
+  assert.deepEqual(r("Verified", "No Answer"), { status: "Verified", changed: false });
+  assert.deepEqual(r("Verified - Exceptions", "Verified"), { status: "Verified", changed: true });
+  assert.deepEqual(r("Refused", "Verified - Exceptions"), { status: "Verified - Exceptions", changed: true });
+  assert.deepEqual(r("Verified", "Verified"), { status: "Verified", changed: false });
+  assert.deepEqual(r("", "No Answer"), { status: "No Answer", changed: true });
+  assert.deepEqual(r(null, "Calling"), { status: "Calling", changed: true });
+  assert.deepEqual(r("Something Odd", "Queued"), { status: "Queued", changed: true }, "an unknown value ranks below everything");
+  // The attempts ceiling still applies on the way in: a 5th No Answer maps to Failed - Max Attempts.
+  assert.equal(fmt.MAX_ATTEMPTS, 5);
+});
+
+test("D-082: the log is ordered by CALL time — out-of-order arrival lands each entry in place", () => {
+  const entry = (iso, id) => `── ${fmt.phoenixStamp(new Date(iso))} · rep-form call · Result: No Answer · call_id=${id} · call_at=${iso}\nCall Summary: none`;
+  const at = (iso) => Date.parse(iso);
+  let log = null;
+  // Arrival order: 10:00, then 08:00, then 09:00, then 11:00 (UTC) — call order is 8, 9, 10, 11.
+  log = wb.insertLogEntryByTime(log, entry("2026-10-07T10:00:00.000Z", "c10"), at("2026-10-07T10:00:00.000Z"));
+  log = wb.insertLogEntryByTime(log, entry("2026-10-07T08:00:00.000Z", "c08"), at("2026-10-07T08:00:00.000Z"));
+  log = wb.insertLogEntryByTime(log, entry("2026-10-07T09:00:00.000Z", "c09"), at("2026-10-07T09:00:00.000Z"));
+  log = wb.insertLogEntryByTime(log, entry("2026-10-07T11:00:00.000Z", "c11"), at("2026-10-07T11:00:00.000Z"));
+  const order = log.split("\n").filter((l) => l.startsWith("── ")).map((l) => /call_id=(\w+)/.exec(l)[1]);
+  assert.deepEqual(order, ["c11", "c10", "c09", "c08"]);
+  assert.equal((log.match(/Call Summary: none/g) || []).length, 4, "every entry keeps its body");
+
+  // An older format line (a stamp, no call_at — the dialer's "Call placed") is ordered by its stamp.
+  const placed = `${fmt.phoenixStamp(new Date("2026-10-07T09:30:00Z"))} · Attempt 1 · Call placed · call_id=c0930`;
+  const withPlaced = wb.insertLogEntryByTime(placed, entry("2026-10-07T09:31:00.000Z", "r0931"), at("2026-10-07T09:31:00.000Z"));
+  assert.ok(withPlaced.indexOf("r0931") < withPlaced.indexOf("Call placed"), "a result sits above its own placement line");
+  const older = wb.insertLogEntryByTime(placed, entry("2026-10-07T08:00:00.000Z", "r08"), at("2026-10-07T08:00:00.000Z"));
+  assert.ok(older.indexOf("Call placed") < older.indexOf("r08"), "an older call goes below it");
+
+  // No call time → the top, as before.
+  assert.ok(wb.insertLogEntryByTime(log, "── note", NaN).startsWith("── note"));
+
+  // Capacity: the oldest entries are dropped whole, the new one never; the cut is marked.
+  const small = wb.insertLogEntryByTime(log, entry("2026-10-07T07:00:00.000Z", "c07"), at("2026-10-07T07:00:00.000Z"), log.length);
+  assert.ok(small.includes("call_id=c07"), "the new entry is kept even when it is the oldest");
+  assert.ok(small.endsWith("… older entries trimmed …"));
+  assert.ok(small.length <= log.length);
+});
+
+test("D-082: the lock key is the 15-character id, so both spellings of a record share it", () => {
+  assert.equal(wb.welcomeCallLockKey("a1P7y00000BOqojEAD"), "welcome-call:a1P7y00000BOqoj");
+  assert.equal(wb.welcomeCallLockKey("a1P7y00000BOqoj"), "welcome-call:a1P7y00000BOqoj");
 });

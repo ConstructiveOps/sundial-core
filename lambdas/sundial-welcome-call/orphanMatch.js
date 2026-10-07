@@ -33,7 +33,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
-import { phoenixDate, phoenixStamp, TERMINAL_STATUSES } from "./format.js";
+import { phoenixDate, phoenixStamp, resolveStatusPrecedence } from "./format.js";
 import { getConfig } from "./config.js";
 import { getCall } from "./retell.js";
 import {
@@ -53,9 +53,33 @@ import {
   matchedRecordingKey,
   registerRecordingMetadata,
 } from "./recording.js";
-import { applyWelcomeCallUpdate, prependLogEntry, CUSTOMER_SF_OBJECT } from "./writeback.js";
+import {
+  lockedWelcomeCallUpdate,
+  prependLogEntry,
+  insertLogEntryByTime,
+  RecordLockTimeout,
+  CUSTOMER_SF_OBJECT,
+} from "./writeback.js";
 
 export const ZAP_SECRET_HEADER = "x-sundial-zap-secret";
+
+/**
+ * The fresh read every write below makes INSIDE the record lock (D-082). The record read
+ * at the top of handleOrphanMatch proves the target exists and names its tenant; it is
+ * never what a write merges into — that read may be seconds old, and another invocation
+ * for the same customer may have written since.
+ */
+function freshReader(schema, recordId) {
+  const soql =
+    `SELECT ${schema.selectFields.join(", ")} FROM ${CUSTOMER_SF_OBJECT} ` +
+    `WHERE Id = '${soqlEscapeString(recordId)}' LIMIT 1`;
+  return async () => (await sfQuery(soql))?.[0] ?? null;
+}
+
+/** A best-effort writer swallows Salesforce failures — but never a lock timeout (→ 409). */
+function rethrowLock(e) {
+  if (e instanceof RecordLockTimeout) throw e;
+}
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 
@@ -102,21 +126,27 @@ async function appendMatchNote({ record, schema, callId, now }) {
   const logApi = schema.apiName("welcomeCallLog");
   if (!logApi) return "no_log_field";
 
-  const existing = record[logApi];
   const text = matchLogText(callId);
-  if (typeof existing === "string" && existing.includes(text)) return "already_present";
-
-  const nextLog = prependLogEntry(existing, `${phoenixStamp(now)} · ${text}`);
   try {
-    await applyWelcomeCallUpdate({
+    const done = await lockedWelcomeCallUpdate({
       recordId: record.Id,
-      tenantId: schema.reader(record)("client") ?? null,
-      sfFields: { [logApi]: nextLog },
-      cacheValues: { welcome_call_log: nextLog },
-      broadcastPayload: { reason: "orphan_recording_matched", call_id: callId },
+      read: freshReader(schema, record.Id),
+      plan: (fresh) => {
+        const existing = fresh[logApi];
+        if (typeof existing === "string" && existing.includes(text)) return { skip: true, outcome: { result: "already_present" } };
+        const nextLog = prependLogEntry(existing, `${phoenixStamp(now)} · ${text}`, schema.fieldLength("welcomeCallLog"));
+        return {
+          tenantId: schema.reader(fresh)("client") ?? null,
+          sfFields: { [logApi]: nextLog },
+          cacheValues: { welcome_call_log: nextLog },
+          broadcastPayload: { reason: "orphan_recording_matched", call_id: callId },
+          outcome: { result: "appended" },
+        };
+      },
     });
-    return "appended";
+    return done.outcome.result;
   } catch (e) {
+    rethrowLock(e);
     console.error(
       `welcome-call orphan-match: log append failed for ${record.Id} (call_id=${callId}):`,
       e?.message || String(e)
@@ -164,9 +194,6 @@ async function appendRecordingCorrection({ record, schema, callId, key, now }) {
   const logApi = schema.apiName("welcomeCallLog");
   if (!logApi) return "no_log_field";
 
-  const existing = record[logApi];
-  if (typeof existing === "string" && existing.includes(key)) return "already_correct";
-
   // Deliberately carries NO "Result:" segment — `alreadyProcessed` matches on a line
   // holding both the call_id and that marker, and a correction must not be mistaken
   // for the result entry it is correcting.
@@ -174,22 +201,31 @@ async function appendRecordingCorrection({ record, schema, callId, key, now }) {
     `${ENTRY_MARKER}${phoenixStamp(now)} · recording recovered · ` +
     `call_id=${callId}
 Recording: ${key}`;
-  const nextLog = prependLogEntry(existing, entry, schema.fieldLength("welcomeCallLog"));
 
   try {
-    await applyWelcomeCallUpdate({
+    const done = await lockedWelcomeCallUpdate({
       recordId: record.Id,
-      tenantId: schema.reader(record)("client") ?? null,
-      sfFields: { [logApi]: nextLog },
-      cacheValues: { welcome_call_log: nextLog },
-      broadcastPayload: {
-        reason: "welcome_call_recording_recovered",
-        call_id: callId,
-        recording_key: key,
+      read: freshReader(schema, record.Id),
+      plan: (fresh) => {
+        const existing = fresh[logApi];
+        if (typeof existing === "string" && existing.includes(key)) return { skip: true, outcome: { result: "already_correct" } };
+        const nextLog = prependLogEntry(existing, entry, schema.fieldLength("welcomeCallLog"));
+        return {
+          tenantId: schema.reader(fresh)("client") ?? null,
+          sfFields: { [logApi]: nextLog },
+          cacheValues: { welcome_call_log: nextLog },
+          broadcastPayload: {
+            reason: "welcome_call_recording_recovered",
+            call_id: callId,
+            recording_key: key,
+          },
+          outcome: { result: "appended" },
+        };
       },
     });
-    return "appended";
+    return done.outcome.result;
   } catch (e) {
+    rethrowLock(e);
     console.error(
       `welcome-call orphan-match: recording correction failed for ${record.Id} ` +
         `(call_id=${callId}):`,
@@ -215,11 +251,17 @@ Recording: ${key}`;
  * which is what lets both paths share `mapOutcomeToStatus` and `buildResultLogEntry`
  * and produce byte-identical entries.
  *
- * STATUS RULES:
- *   - A record already at a TERMINAL status keeps it. A rep-form call is a SECOND
- *     conversation with a customer whose verification may already be settled, and a
- *     sweep running days later must not reopen it. The entry is still appended, marked
- *     so a reader knows why the status doesn't match the result on that line.
+ * STATUS RULES (D-082 — precedence replaced "terminal → never change"):
+ *   - The call's result sets the status only if it OUTRANKS the record's current status
+ *     (format.js STATUS_PRECEDENCE: Verified > Verified - Exceptions > Refused >
+ *     Failed - Max Attempts > No Answer > Calling > Queued > Not Started). It never
+ *     downgrades, so the order the sweep processes a customer's calls in cannot change
+ *     the outcome. The entry is always written, stating the call's own result, and marked
+ *     "(status kept: …)" when the record kept a higher one.
+ *   - The merge runs under the record's lock, into a FRESH read (lockedWelcomeCallUpdate):
+ *     two sweep iterations for one customer can run at the same time (Dora Tolle,
+ *     2026-10-07), and each must see what the other wrote.
+ *   - The entry goes at its CALL-TIME position in the log, newest call on top.
  *   - `Welcome_Call_Attempts__c` is NEVER incremented. That counter drives the retry
  *     ceiling for Salesforce-initiated dials; a rep-form call is not one of those, and
  *     counting it would silently consume a customer's retry budget.
@@ -261,56 +303,64 @@ async function backfillCallResult({
   const call = extractCall(fetched.call);
   const analysis = call?.call_analysis?.custom_analysis_data ?? {};
 
-  // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
-  // written back. Passing it keeps the mapping identical to the webhook's.
-  const attempts = Number(schema.reader(record)("welcomeCallAttempts")) || 0;
-  // Same decision as the webhook, connection check included — a rep-form call that
-  // rang out must not backfill as Verified - Exceptions (call_ae983426…, 2026-09-15).
-  const { status: mappedStatus } = resolveCallStatus(call, { attempts });
-
-  const currentStatus = statusApi ? String(record[statusApi] ?? "").trim() : "";
-  const isTerminal = TERMINAL_STATUSES.has(currentStatus);
-
-  const entry = buildResultLogEntry({
-    stamp: phoenixStamp(now),
-    origin: isTerminal
-      ? "rep-form call (status unchanged, record already terminal)"
-      : "rep-form call",
-    // The entry always states the call's OWN result, even when the record keeps its
-    // existing status — otherwise the line would misreport what the call found.
-    status: mappedStatus,
-    analysis,
-    call,
-    recordingKey,
-  });
-
-  const nextLog = prependLogEntry(existingLog, entry, schema.fieldLength("welcomeCallLog"));
-  const sfFields = { [logApi]: nextLog };
-  const cacheValues = { welcome_call_log: nextLog };
-  if (!isTerminal && statusApi) {
-    sfFields[statusApi] = mappedStatus;
-    cacheValues.welcome_call_status = mappedStatus;
-  }
+  const callAt = callRecordedAt(call, now);
 
   try {
-    await applyWelcomeCallUpdate({
+    const done = await lockedWelcomeCallUpdate({
       recordId: record.Id,
-      tenantId: schema.reader(record)("client") ?? null,
-      sfFields,
-      cacheValues,
-      broadcastPayload: {
-        reason: "rep_form_backfill",
-        call_id: callId,
-        status: isTerminal ? currentStatus : mappedStatus,
-        recording_key: recordingKey ?? null,
-        call_summary: call?.call_analysis?.call_summary ?? null,
+      read: freshReader(schema, record.Id),
+      plan: (fresh) => {
+        const existing = fresh[logApi];
+        // The idempotency check again, on what the record holds NOW — another invocation
+        // may have written this call between the first look and the lock.
+        if (alreadyProcessed(existing, callId)) return { skip: true, outcome: { result: "already_present" } };
+
+        // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
+        // written back. Passing it keeps the mapping identical to the webhook's.
+        const attempts = Number(schema.reader(fresh)("welcomeCallAttempts")) || 0;
+        // Same decision as the webhook, connection check included — a rep-form call that
+        // rang out must not backfill as Verified - Exceptions (call_ae983426…, 2026-09-15).
+        const { status: mappedStatus } = resolveCallStatus(call, { attempts });
+        const currentStatus = statusApi ? String(fresh[statusApi] ?? "").trim() : "";
+        const precedence = resolveStatusPrecedence(currentStatus, mappedStatus);
+        const kept = !precedence.changed && currentStatus !== "" && currentStatus !== mappedStatus;
+
+        const entry = buildResultLogEntry({
+          stamp: phoenixStamp(callAt),
+          origin: kept ? `rep-form call (status kept: ${currentStatus})` : "rep-form call",
+          // The entry always states the call's OWN result, even when the record keeps a
+          // higher status — otherwise the line would misreport what the call found.
+          status: mappedStatus,
+          analysis,
+          call,
+          recordingKey,
+          callAt,
+        });
+        const nextLog = insertLogEntryByTime(existing, entry, callAt.getTime(), schema.fieldLength("welcomeCallLog"));
+        const sfFields = { [logApi]: nextLog };
+        const cacheValues = { welcome_call_log: nextLog };
+        if (precedence.changed && statusApi) {
+          sfFields[statusApi] = mappedStatus;
+          cacheValues.welcome_call_status = mappedStatus;
+        }
+        return {
+          tenantId: schema.reader(fresh)("client") ?? null,
+          sfFields,
+          cacheValues,
+          broadcastPayload: {
+            reason: "rep_form_backfill",
+            call_id: callId,
+            status: precedence.status,
+            recording_key: recordingKey ?? null,
+            call_summary: call?.call_analysis?.call_summary ?? null,
+          },
+          outcome: { result: precedence.changed ? "backfilled" : "backfilled_status_unchanged", status: precedence.status },
+        };
       },
     });
-    return {
-      result: isTerminal ? "backfilled_status_unchanged" : "backfilled",
-      status: isTerminal ? currentStatus : mappedStatus,
-    };
+    return done.outcome;
   } catch (e) {
+    rethrowLock(e);
     console.error(
       `welcome-call orphan-match: backfill write failed for ${record.Id} ` +
         `(call_id=${callId}):`,
@@ -351,9 +401,32 @@ async function recordMatchOnSalesforce({
 /**
  * Promote one orphan recording onto a customer record.
  *
+ * A write that cannot get the record's lock within the wait (another invocation for the
+ * same customer is writing — D-082) answers 409 RECORD_LOCKED and writes nothing to the
+ * record; the holding object is kept, so the Zap's retry re-runs the whole match.
+ *
  * @returns {Promise<{ status: number, body: object }>}
  */
-export async function handleOrphanMatch(body, { now = new Date() } = {}) {
+export async function handleOrphanMatch(body, opts = {}) {
+  try {
+    return await promoteOrphan(body, opts);
+  } catch (e) {
+    if (!(e instanceof RecordLockTimeout)) throw e;
+    console.warn(`welcome-call orphan-match: ${e.message} — call_id=${body?.call_id ?? "?"}, answering 409 so the Zap retries.`);
+    return {
+      status: 409,
+      body: {
+        error: "record_locked",
+        code: "RECORD_LOCKED",
+        message: "Another Welcome Call write for this customer is in progress. Retry later; nothing was written.",
+        recordId: body?.sf_record_id ?? null,
+        callId: body?.call_id ?? null,
+      },
+    };
+  }
+}
+
+async function promoteOrphan(body, { now = new Date() } = {}) {
   const callId = typeof body?.call_id === "string" ? body.call_id.trim() : "";
   const sfRecordId =
     typeof body?.sf_record_id === "string" ? body.sf_record_id.trim() : "";

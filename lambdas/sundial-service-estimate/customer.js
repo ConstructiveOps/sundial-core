@@ -6,12 +6,19 @@
 // the I/O. Nothing here knows Harmon — the module tag ("Service") is passed in.
 
 import { soqlEscapeString } from "../../lib/salesforce.js";
+import { customerDisplayName } from "../../lib/customer-name.js";
 
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const PROJECT_TYPES_FIELD = "Requested_Project_Types__c";
 
-/** The fields the popup may set on a NEW customer. Anything else is refused. */
+/**
+ * The fields the popup may set on a NEW customer. Anything else is refused.
+ * isCompany / companyName (D-081, 2026-10-07): a company (SunRun, APS, a manufacturer) is a
+ * customer like any other so it can be a job's payer; its First / Last are its contact.
+ */
 export const NEW_CUSTOMER_FIELDS = Object.freeze({
+  isCompany: "Is_Company__c",
+  companyName: "Company_Name__c",
   firstName: "First_Name__c",
   lastName: "Last_Name__c",
   street: "Street__c",
@@ -60,7 +67,10 @@ export function normalizeZip(v) {
  */
 export function normalizeNewCustomer(input) {
   const src = input && typeof input === "object" ? input : {};
+  const isCompany = src.isCompany === true;
   const value = {
+    isCompany,
+    companyName: isCompany ? clean(src.companyName) : "",
     firstName: clean(src.firstName),
     lastName: clean(src.lastName),
     street: clean(src.street),
@@ -71,7 +81,10 @@ export function normalizeNewCustomer(input) {
     phone: clean(src.phone),
   };
   const missing = [];
-  if (!value.firstName && !value.lastName) missing.push("firstName|lastName");
+  // A company needs its company name (the contact's first / last are optional); a person
+  // needs a first or a last name, as before.
+  if (isCompany && !value.companyName) missing.push("companyName");
+  if (!isCompany && !value.firstName && !value.lastName) missing.push("firstName|lastName");
   if (!value.email && !value.phone) missing.push("email|phone");
   if (value.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.email)) missing.push("email(format)");
   return missing.length ? { ok: false, missing } : { ok: true, value };
@@ -136,7 +149,7 @@ export function matchCandidates(rows, c) {
     if (reasons.length) {
       out.push({
         id: r.Id,
-        name: r.Name,
+        name: customerDisplayName(r),
         email: r.Primary_Email__c ?? null,
         phone: r.Primary_Phone__c ?? null,
         address: [r.Street__c, r.City__c, r.State__c, r.Postal_Code__c].filter(Boolean).join(", "),
@@ -153,8 +166,11 @@ export function matchCandidates(rows, c) {
  * the caller from the verified token — never from input.
  */
 export function buildNewCustomerFields(c, { pickState } = {}) {
+  const person = [c.firstName, c.lastName].filter(Boolean).join(" ");
   const f = {
-    Name: [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || c.phone,
+    // A company's record name is its company name — the tech app and Salesforce read Name.
+    Name: (c.isCompany && c.companyName) || person || c.email || c.phone,
+    ...(c.isCompany ? { Is_Company__c: true, Company_Name__c: c.companyName } : {}),
     First_Name__c: c.firstName || null,
     Last_Name__c: c.lastName || null,
     Street__c: c.street || null,

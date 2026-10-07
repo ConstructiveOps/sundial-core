@@ -51,6 +51,7 @@ import {
   photoPrefix,
   DEFAULT_CHECKLIST,
   TECH_CALL_EXTRA,
+  customerToView,
 } from "./tech.js";
 import { DAY_SELECT, buildPayroll, dayFields, dayFromLog, lastLocations, parseDayLog, unionMs, weekBounds, weekMonday } from "./day.js";
 
@@ -1335,7 +1336,13 @@ test("tech SELECTs only name fields that exist in the object metadata", () => {
   }
   // The customer hub predates the service package (its metadata lives in the org, not
   // this folder) — pin the exact list instead, so a change here is a deliberate one.
-  assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate"); // Customer_Type__c: 2026-09-19, in salesforce/service-objects as a delta field
+  assert.equal(TECH_CUSTOMER_SELECT, "Id, Name, First_Name__c, Last_Name__c, Is_Company__c, Company_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c, CreatedDate"); // Customer_Type__c: 2026-09-19, in salesforce/service-objects as a delta field; Is_Company__c / Company_Name__c: D-081 Setup fields, describe-confirmed 2026-10-07
+});
+
+test("tech customer list: a company by its company name, a person by First + Last (D-081)", () => {
+  assert.equal(customerToView({ Id: "1", Name: "C-0042", Is_Company__c: true, Company_Name__c: "APS", First_Name__c: "Jane", Last_Name__c: "Doe" }).name, "APS");
+  assert.equal(customerToView({ Id: "2", Name: "Haughn Residence", First_Name__c: "Mark", Last_Name__c: "Haughn" }).name, "Mark Haughn");
+  assert.equal(customerToView({ Id: "3", Name: "Haughn Residence" }).name, "Haughn Residence");
 });
 
 // ---------------------------------------------------------------------------

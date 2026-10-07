@@ -2918,3 +2918,42 @@ test("D-082: the lock key is the 15-character id, so both spellings of a record 
   assert.equal(wb.welcomeCallLockKey("a1P7y00000BOqojEAD"), "welcome-call:a1P7y00000BOqoj");
   assert.equal(wb.welcomeCallLockKey("a1P7y00000BOqoj"), "welcome-call:a1P7y00000BOqoj");
 });
+
+test("D-082 repair, Dora's exact state: a pre-fix voicemail entry gets its call time, then the connected call lands ON TOP as Verified", async () => {
+  // As found 2026-10-07: one entry stamped with the SWEEP's time and no call_at, No Answer,
+  // both recordings already promoted (holding objects gone).
+  const legacy =
+    `── 2026-10-07 08:15 MST · rep-form call · Result: No Answer · call_id=${VOICEMAIL_ID}\n` +
+    "Call Summary: Reached voicemail; left a message.\n" +
+    `Recording: SUNDIAL/${baseCustomer().Id}/welcome-call-2026-10-06-${VOICEMAIL_ID}.mp3 · Duration: 0:21 · Voicemail: yes`;
+  fresh();
+  ctx.stateful = true;
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "No Answer", Welcome_Call_Log__c: legacy })];
+  ctx.retellGetCallById = { [VOICEMAIL_ID]: voicemailCall(), [CONNECTED_ID]: connectedCall() };
+  for (const id of [VOICEMAIL_ID, CONNECTED_ID]) {
+    ctx.s3Objects.set(`SUNDIAL/${baseCustomer().Id}/welcome-call-2026-10-06-${id}.mp3`, { body: Buffer.from("mp3"), size: 3, lastModified: new Date(), contentType: "audio/mpeg" });
+  }
+
+  // 1. The voicemail: already logged → its header gains call_at, nothing else changes.
+  const vm = await handler(match(VOICEMAIL_ID));
+  assert.equal(vm.statusCode, 200, vm.body);
+  assert.equal(parse(vm).already_matched, true);
+  let log = record().Welcome_Call_Log__c;
+  assert.equal(log, legacy.replace(`call_id=${VOICEMAIL_ID}`, `call_id=${VOICEMAIL_ID} · call_at=${new Date(VOICEMAIL_AT).toISOString()}`), "only the token is added");
+  assert.equal(record().Welcome_Call_Status__c, "No Answer");
+  // Running it again changes nothing.
+  const before = ctx.sfUpdates.length;
+  await handler(match(VOICEMAIL_ID));
+  assert.equal(ctx.sfUpdates.length, before, "idempotent");
+
+  // 2. The connected call: backfilled, Verified, on top; the voicemail entry is preserved below it.
+  const ok = await handler(match(CONNECTED_ID));
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(parse(ok).backfill, "backfilled");
+  log = record().Welcome_Call_Log__c;
+  assert.equal(record().Welcome_Call_Status__c, "Verified");
+  assert.ok(headerIndex(log, CONNECTED_ID) === 0, "the connected call heads the log");
+  assert.ok(headerIndex(log, VOICEMAIL_ID) > 0);
+  assert.ok(log.includes("Call Summary: Reached voicemail; left a message."), "the voicemail entry is preserved");
+  assert.match(log, new RegExp(`Recording: SUNDIAL/${baseCustomer().Id}/welcome-call-2026-10-06-${CONNECTED_ID}\.mp3`));
+});

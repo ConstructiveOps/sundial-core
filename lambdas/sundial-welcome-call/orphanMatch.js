@@ -76,6 +76,33 @@ function freshReader(schema, recordId) {
   return async () => (await sfQuery(soql))?.[0] ?? null;
 }
 
+/** The result header line for this call (whole-id match), or null. */
+function resultHeaderIndex(lines, callId) {
+  const needle = new RegExp(`call_id=${String(callId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`);
+  return lines.findIndex((l) => l.includes("Result:") && needle.test(l));
+}
+
+/** Does this call's result header already carry call_at= (written since D-082)? */
+export function resultHasCallAt(logText, callId) {
+  const lines = String(logText ?? "").split("\n");
+  const i = resultHeaderIndex(lines, callId);
+  return i >= 0 && /\bcall_at=\S/.test(lines[i]);
+}
+
+/**
+ * Append ` · call_at=<ISO>` to this call's result header — the ONLY edit ever made to an
+ * existing entry, and only to one written before D-082 that has none. Everything the
+ * entry said stays exactly as it was; the token just lets the log order later calls
+ * around it by call time.
+ */
+export function stampCallAt(logText, callId, callAt) {
+  const lines = String(logText ?? "").split("\n");
+  const i = resultHeaderIndex(lines, callId);
+  if (i < 0 || /\bcall_at=\S/.test(lines[i])) return logText;
+  lines[i] = `${lines[i]} · call_at=${callAt.toISOString()}`;
+  return lines.join("\n");
+}
+
 /** A best-effort writer swallows Salesforce failures — but never a lock timeout (→ 409). */
 function rethrowLock(e) {
   if (e instanceof RecordLockTimeout) throw e;
@@ -286,11 +313,16 @@ async function backfillCallResult({
 
   const existingLog = record[logApi];
   // Same guard the webhook uses: a full result entry for this call_id is already here.
-  if (alreadyProcessed(existingLog, callId)) return { result: "already_present" };
+  // An entry written before D-082 has no call_at=, so the log cannot place a later call
+  // around it — that one is re-read from Retell once to stamp its call time (below).
+  const present = alreadyProcessed(existingLog, callId);
+  if (present && resultHasCallAt(existingLog, callId)) return { result: "already_present" };
 
   // The repair path has already fetched this call (for the heal) and hands it over,
   // so the analysis is never read from Retell twice for one invocation.
   const fetched = prefetched ?? (await fetchCallForRepair(callId));
+  // Nothing to add to an entry that is already there if Retell cannot say when the call was.
+  if (present && (fetched.noApiKey || !fetched.ok)) return { result: "already_present" };
   if (fetched.noApiKey) return { result: "no_api_key" };
   if (!fetched.ok) {
     console.warn(
@@ -304,6 +336,8 @@ async function backfillCallResult({
   const analysis = call?.call_analysis?.custom_analysis_data ?? {};
 
   const callAt = callRecordedAt(call, now);
+  // Only Retell's own timestamp may be stamped onto an existing entry — never `now`.
+  const knownCallAt = Number(call?.start_timestamp) > 0 || Number(call?.end_timestamp) > 0;
 
   try {
     const done = await lockedWelcomeCallUpdate({
@@ -313,7 +347,19 @@ async function backfillCallResult({
         const existing = fresh[logApi];
         // The idempotency check again, on what the record holds NOW — another invocation
         // may have written this call between the first look and the lock.
-        if (alreadyProcessed(existing, callId)) return { skip: true, outcome: { result: "already_present" } };
+        if (alreadyProcessed(existing, callId)) {
+          // A pre-D-082 entry: give its header the call's time (one appended token — the
+          // entry itself is not rewritten), so later calls can be ordered around it.
+          const annotated = knownCallAt && !resultHasCallAt(existing, callId) ? stampCallAt(existing, callId, callAt) : null;
+          if (!annotated || annotated === existing) return { skip: true, outcome: { result: "already_present" } };
+          return {
+            tenantId: schema.reader(fresh)("client") ?? null,
+            sfFields: { [logApi]: annotated },
+            cacheValues: { welcome_call_log: annotated },
+            broadcastPayload: { reason: "welcome_call_log_call_time", call_id: callId },
+            outcome: { result: "already_present", callAtStamped: true },
+          };
+        }
 
         // attempts is read ONLY to resolve the No Answer ceiling correctly; it is never
         // written back. Passing it keeps the mapping identical to the webhook's.

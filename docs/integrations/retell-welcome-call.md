@@ -747,7 +747,11 @@ time** (Retell's `start_timestamp`), not at the top because it was processed las
 sweep backfills calls hours or days later, in any order, and the most recent call must
 head the log. Every result header ends `call_at=<ISO time>`; older lines without it are
 placed by their stamp (Phoenix time). Every call keeps its entry; idempotency stays keyed
-on `call_id`. Placement lines, skip notes, match notes and recording corrections still go
+on `call_id`. **Entries written before D-082** have no `call_at` (their stamp is when the
+sweep ran, not when the call happened); an orphan-match run for such a call — already
+logged — re-reads it from Retell and appends ` · call_at=<ISO>` to that header, nothing
+else, so later calls order around it. Repairing a customer whose log predates the fix:
+run orphan-match for the already-logged call FIRST, then for the missing one. Placement lines, skip notes, match notes and recording corrections still go
 on top (they describe now). The field is read by a human in a Salesforce field viewer that
 shows the first few lines, and the last thing that happened is what they need. It also
 means truncation at the 32,768-char cap discards the **oldest** history, which is the

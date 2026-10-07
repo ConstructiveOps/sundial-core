@@ -19,13 +19,10 @@
 export const NOT_PROVIDED = "not provided";
 
 /**
- * Statuses that mean the call is FINISHED and its result is settled.
- *
- * Distinct from the set below, which also contains `Calling` — "a call is in flight"
- * is a reason not to dial again, but it is NOT a settled result. The rep-form backfill
- * needs the settled meaning: it must not overwrite a status a completed call already
- * established, but it SHOULD replace `Calling` or `No Answer` with what actually
- * happened.
+ * Statuses that mean the call is FINISHED and its result is settled — used only by the
+ * dialer's eligibility guard below ("do not place another call"). Writing a RESULT is
+ * decided by STATUS_PRECEDENCE instead (D-082), which subsumes the old "terminal → never
+ * change" rule.
  */
 export const TERMINAL_STATUSES = new Set([
   "Verified",
@@ -36,6 +33,43 @@ export const TERMINAL_STATUSES = new Set([
 
 /** Salesforce picklist values that mean "do not place another call". */
 export const TERMINAL_OR_IN_FLIGHT_STATUSES = new Set(["Calling", ...TERMINAL_STATUSES]);
+
+/**
+ * STATUS PRECEDENCE (D-082, 2026-10-07) — lowest first. A call RESULT (the webhook's or
+ * the rep-form backfill's) sets Welcome_Call_Status__c only when it ranks HIGHER than
+ * what the record holds; it can never downgrade. So the order results are processed in
+ * stops mattering: voicemail-then-success and success-then-voicemail both end Verified.
+ * A blank or unknown current value ranks below everything.
+ *
+ * Only RESULTS obey it. Placing a call (placeCall.js → "Calling") is not a result: a retry
+ * after No Answer must move the record to Calling, and the dialer's eligibility guard
+ * (TERMINAL_OR_IN_FLIGHT_STATUSES) is what keeps it from dialing a settled customer.
+ */
+export const STATUS_PRECEDENCE = Object.freeze([
+  "Not Started",
+  "Queued",
+  "Calling",
+  "No Answer",
+  "Failed - Max Attempts",
+  "Refused",
+  "Verified - Exceptions",
+  "Verified",
+]);
+
+/** Rank of a status in STATUS_PRECEDENCE; -1 for blank / unknown. */
+export function statusRank(status) {
+  return STATUS_PRECEDENCE.indexOf(String(status ?? "").trim());
+}
+
+/**
+ * The status a record should hold after a call result: the result's when it outranks the
+ * current one, else the current one. `changed` says whether to write it.
+ */
+export function resolveStatusPrecedence(current, next) {
+  const cur = String(current ?? "").trim();
+  if (statusRank(next) > statusRank(cur)) return { status: next, changed: true };
+  return { status: cur || null, changed: false };
+}
 
 /** "2:51" from a duration in milliseconds. Empty when absent or nonsense. */
 export function durationMmSs(ms) {

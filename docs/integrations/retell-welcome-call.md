@@ -435,6 +435,11 @@ same id, so the very first legitimate result would be discarded as a duplicate. 
 | 200 | processed, duplicate, ack-only event, no `sf_record_id`, record deleted, schema incomplete | done |
 | 401 | missing/invalid signature, or no secret configured | — |
 | **500** | **Salesforce writeback failed** | **deliberate** — Retell retries; the ledger already has the call and the idempotency guard makes redelivery safe |
+| **503** `RECORD_LOCKED` | another write for the same customer held the record's lock for the whole 30 s wait (D-082) | **deliberate** — nothing was written; Retell retries (a 5xx, like the 500) |
+
+The orphan-match endpoint answers **409 `RECORD_LOCKED`** in the same situation: nothing
+is written to the record, the holding recording is kept, and the Zap's next sweep retries
+the row.
 
 ---
 
@@ -578,17 +583,33 @@ by Zapier. Same data, same authority the webhook used — which is what lets bot
 share `resolveCallStatus` (connection check, then `mapOutcomeToStatus`) and
 `buildResultLogEntry` and emit identical entries.
 
-**Status rules:**
+**Status rules: precedence (D-082, 2026-10-07 — replaces "terminal → never change").**
+Both result paths — this backfill and the webhook — set `Welcome_Call_Status__c` only
+when the call's result **outranks** the record's current status. A result never
+downgrades, so the order calls are processed in cannot change the outcome:
+voicemail-then-success and success-then-voicemail both end `Verified`.
 
-| Current `Welcome_Call_Status__c` | What the backfill does |
+| Rank | Status |
 |---|---|
-| `Verified`, `Verified - Exceptions`, `Refused`, `Failed - Max Attempts` | **Status untouched.** The entry is still appended, with the origin `rep-form call (status unchanged, record already terminal)` so a reader can see why the status doesn't match the result on that line. |
-| Anything else (`Not Started`, `Queued`, `Calling`, `No Answer`, blank) | Status set to the mapped outcome. |
+| 7 (highest) | `Verified` |
+| 6 | `Verified - Exceptions` |
+| 5 | `Refused` |
+| 4 | `Failed - Max Attempts` |
+| 3 | `No Answer` |
+| 2 | `Calling` |
+| 1 | `Queued` |
+| 0 | `Not Started` |
+| −1 | blank / any other value |
 
-A rep-form call is a *second* conversation with a customer whose verification may
-already be settled, and a sweep running days later must not reopen it. Note `Calling`
-is treated as non-terminal — it means a call is in flight, not that a result is
-settled.
+The entry is **always** written and states the call's **own** result; when the record
+kept a higher status the origin reads `rep-form call (status kept: <current>)` (webhook:
+`Attempt <n> (status kept: <current>)`). The attempts ceiling is unchanged: a
+`No Answer` at ≥ 5 attempts maps to `Failed - Max Attempts` before precedence is applied.
+Precedence applies to RESULTS only — placing a call still moves `No Answer` → `Calling`
+(the eligibility guard is what keeps a settled customer from being dialed).
+
+**Concurrency (D-082).** Every read → merge → write of the status / log runs under the
+record's lock — see [Concurrency](#concurrency--one-writer-per-record-d-082) below.
 
 **`Welcome_Call_Attempts__c` is never incremented.** That counter drives the retry
 ceiling for Salesforce-initiated dials; a rep-form call is not one, and counting it
@@ -721,7 +742,17 @@ epair-out.json"
 
 ## Log format — `Welcome_Call_Log__c`
 
-**Newest line first.** The field is read by a human in a Salesforce field viewer that
+**Newest CALL first (D-082, 2026-10-07).** A result entry is inserted at its **call
+time** (Retell's `start_timestamp`), not at the top because it was processed last — the
+sweep backfills calls hours or days later, in any order, and the most recent call must
+head the log. Every result header ends `call_at=<ISO time>`; older lines without it are
+placed by their stamp (Phoenix time). Every call keeps its entry; idempotency stays keyed
+on `call_id`. **Entries written before D-082** have no `call_at` (their stamp is when the
+sweep ran, not when the call happened); an orphan-match run for such a call — already
+logged — re-reads it from Retell and appends ` · call_at=<ISO>` to that header, nothing
+else, so later calls order around it. Repairing a customer whose log predates the fix:
+run orphan-match for the already-logged call FIRST, then for the missing one. Placement lines, skip notes, match notes and recording corrections still go
+on top (they describe now). The field is read by a human in a Salesforce field viewer that
 shows the first few lines, and the last thing that happened is what they need. It also
 means truncation at the 32,768-char cap discards the **oldest** history, which is the
 half you can afford to lose. Truncation trims to a line boundary, so the log never
@@ -744,14 +775,14 @@ Recording: SUNDIAL/a1P…/welcome-call-2026-08-18-call_ced35….mp3 · Duration:
 
 | Kind | Shape |
 |---|---|
-| **Result** | `── <stamp> · <origin> · Result: <status> · call_id=<id>` then one line each for Call Summary / Mismatched Items / Unconfirmed Items / Follow Up / Confirmations / Recording |
+| **Result** | `── <call stamp> · <origin> · Result: <status> · call_id=<id> · call_at=<ISO>` then one line each for Call Summary / Mismatched Items / Unconfirmed Items / Follow Up / Confirmations / Recording |
 | Placed | `<stamp> · Attempt <n> · Call placed · call_id=<id>` |
 | Matched (no analysis) | `<stamp> · rep-form call <call_id> matched, recording attached` |
 | Skip | `<stamp> · Skipped · unmappable financing partner: <value>` |
 
 `<origin>` is `Attempt <n>` for a Salesforce-initiated call, `rep-form call` for a
-backfill, or `rep-form call (status unchanged, record already terminal)` when the
-backfill deliberately left the status alone.
+backfill, with ` (status kept: <current>)` appended when precedence left a higher status
+in place (D-082). The stamp is the CALL's time.
 
 **NOTHING IS TRUNCATED (2026-08-19).** Segments used to be clipped at 200/300/400
 chars. This field is merged into email alerts and read by a human deciding what went
@@ -828,6 +859,12 @@ would lose the status update as well.
 `No Answer` is the **only** non-terminal outcome — it is what makes the retry Flow
 meaningful, and the attempt ceiling is what makes it terminate.
 
+**Results follow the precedence table** (see the backfill section): a result moves the
+status only upward — `Verified` > `Verified - Exceptions` > `Refused` >
+`Failed - Max Attempts` > `No Answer` > `Calling` > `Queued` > `Not Started`. The
+terminal boxes above are where the dialer stops; precedence is what a later result may
+still do to them (a later `Verified` lifts a `Refused`; nothing lowers a `Verified`).
+
 **The connection check runs before any of those arrows.** A call that never connected
 (dial-failure `disconnection_reason`, `call_status: not_connected`, or no transcript with
 ~zero connected time) can only land in `No Answer` or `Failed - Max Attempts`, whatever
@@ -859,6 +896,50 @@ semantics ([`caching-architecture.md`](../caching-architecture.md) → "Write Pa
 
 The cache columns are optional. If `sundial_customer_cache` doesn't have them, the
 row is still flagged stale and the next read refreshes it from Salesforce.
+
+## Concurrency — one writer per record (D-082)
+
+**The incident.** Dora Tolle (`a1P7y00000BOqojEAD`) had two rep-form calls the night of
+2026-10-06: a voicemail (`call_ed9f93cf2772525f274dd174d17`) and a connected,
+verified call (`call_85dddbbe46a420febc8c31ccaaf`). The 08:15 sweep on 10-07 sent
+orphan-match for both; CloudWatch shows the two invocations in separate containers,
+overlapping almost entirely (`e1909751…` 15:15:17.230 → 22.396 UTC, `ccd211a7…`
+15:15:17.605 → 22.300). Each read the record, merged its own call into the log and
+status, and wrote the whole field; the voicemail's write landed last and erased the
+Verified one. Zapier loop iterations have no ordering or non-overlap guarantee, and Retell
+can deliver two results seconds apart, so the Lambda serialises its own writes.
+
+**The rule.** Every read → merge → write of `Welcome_Call_Status__c` /
+`Welcome_Call_Log__c` — the webhook's result, the backfill, the match note, the recording
+correction, the dialer's "Call placed" and skip notes — runs through
+`lockedWelcomeCallUpdate` (`writeback.js`):
+
+1. take the record's lock (`lib/record-lock.js`, key `welcome-call:<15-char id>`);
+2. **read the record again** — never merge into a read taken before the lock;
+3. merge (precedence for the status, call-time position for the entry), write
+   Salesforce → cache → Realtime as before;
+4. release.
+
+Slow work stays OUTSIDE the lock: the Zapier forward, the recording download / copy, the
+Retell re-read. The lock covers a Salesforce read and one PATCH — a few seconds.
+
+**The primitive.** A lock row in Supabase, `public.sundial_record_locks`, taken by
+`sundial_record_lock_acquire(key, holder, ttl)` — one atomic
+`INSERT … ON CONFLICT DO UPDATE … WHERE expired` — and released by
+`sundial_record_lock_release(key, holder)`, which only removes the caller's own row
+(`sql/2026-10-07_record_locks.sql`, service role only). Not a Postgres advisory lock:
+PostgREST's pooled connections would leak a session lock or drop a transaction one before
+the Salesforce write. TTL **90 s** (longer than the Lambda's 60 s timeout, so an expired
+lock means its holder died).
+
+**Waiting.** Up to **30 s** with backoff (`WELCOME_CALL_LOCK_WAIT_MS` overrides it), then
+the request fails without writing: orphan-match **409 `RECORD_LOCKED`** (holding
+recording kept; the Zap retries the row on the next sweep), webhook **503
+`RECORD_LOCKED`** (Retell redelivers), dialer: the relay's retry. **Fails closed:** if the
+lock cannot be asked for at all (the SQL not applied, Supabase down), nothing is written.
+
+**Log lines to look for:** `{"recordLock":"acquired_after_wait",…}` (contention handled),
+`{"recordLock":"timeout",…}` (a 409 / 503 followed).
 
 ---
 

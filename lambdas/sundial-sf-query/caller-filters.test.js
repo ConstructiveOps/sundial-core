@@ -236,7 +236,7 @@ test("SOQL: a value that is not a valid literal for the field is a 400, not a SO
 
 test("D-081: the Customer header sorts by display_name_sort (company name for a company), once the column exists", () => {
   const withCol = new Set([...COLS, "display_name_sort"]);
-  assert.deepEqual(parseSort({ sort: "display_name_sort:asc" }, "customer", withCol).sort, { column: "display_name_sort", ascending: true });
+  assert.deepEqual(parseSort({ sort: "display_name_sort:asc" }, "customer", withCol).sort, { column: "display_name_sort", columns: ["display_name_sort"], ascending: true });
   // Before the SQL file runs the column is not in the cache → a 400, never a broken query.
   assert.equal(parseSort({ sort: "display_name_sort" }, "customer", COLS).ok, false);
 });

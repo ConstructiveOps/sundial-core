@@ -10,6 +10,8 @@
 - `sundial-service-board/tech.js`: `TECH_CUSTOMER_SELECT` + `Is_Company__c`, `Company_Name__c`; `customerToView` names by `customerDisplayName` (was `Name` first — a person whose record Name is "Haughn Residence" now reads "Mark Haughn", the one rule); the tech search also matches `Company_Name__c`.
 - Docs: `docs/api-endpoints.md` customer block; the fixtures / `customer-name.js` pointers now name harmon-crm `src/lib/customer-name.ts` (which runs a copy of the fixtures).
 
+- `sundial-sf-update/access.test.js` +2: a company created with `Customer_Type__c: null` gets no type (the portal's "New company…" payer: no Service tag, stage or alert, and not the Solar default); a create naming no type still defaults to Solar. No code change — the behaviour existed; the portal now depends on it.
+
 **Tests.** estimate Lambda 58 (+3: company normalize, company field map, candidate name; the intake handler test asserts `Warranty_Notes__c`), board 30 (+1 `customerToView`; the pinned `TECH_CUSTOMER_SELECT` updated). **Deploy:** `.deploy.ps1 sundial-service-estimate`, `.deploy.ps1 sundial-service-board` — BEFORE the portal branch merges (until then a company from a Service popup is refused with "needs a name").
 
 ## 2026-10-07 — The payer is a Customer record, and the invoice looks like Harmon's HCP invoice (D-081)

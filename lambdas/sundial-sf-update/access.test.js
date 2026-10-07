@@ -115,6 +115,11 @@ const DESCRIBE_FIELDS = [
   { name: "Bill_To_Customer__c", updateable: true, createable: true },
   { name: "Bill_To_Name__c", updateable: true, createable: true },
   { name: "Priority__c", updateable: true, createable: true },
+  // The Sales create default (Solar) and a company payer made from the Bill To picker (D-081).
+  { name: "Customer_Type__c", updateable: true, createable: true, picklistValues: [{ value: "Solar", active: true }, { value: "Service", active: true }] },
+  { name: "Is_Company__c", updateable: true, createable: true },
+  { name: "Company_Name__c", updateable: true, createable: true },
+  { name: "Name", updateable: true, createable: true },
 ];
 
 globalThis.fetch = async (url, init) => {
@@ -615,4 +620,24 @@ test("D-081: a customer PATCH is untouched by the job rule", async () => {
   const res = await handler(patchEvent("customer", CUST_1, { Bill_To_Name__c: "x" }));
   assert.equal(res.statusCode, 200);
   assert.deepEqual(ctx.writes[0].body, { Bill_To_Name__c: "x" });
+});
+
+// D-081 amendment 2 (2026-10-07): "New company…" under the Bill To picker creates a PLAIN
+// company through POST /sf/customer — no Service tag (so no stage, no unassigned alert) and,
+// because the portal sends Customer_Type__c: null, not the Sales popup's Solar default either.
+test("a company payer created with Customer_Type__c null gets no type at all — not Solar, not Service", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null }); // the office, on the job page
+  const res = await handler(postEvent("customer", { Is_Company__c: true, Company_Name__c: "SunRun", Name: "SunRun", Customer_Type__c: null }));
+  assert.equal(res.statusCode, 201);
+  const sent = ctx.writes.find((w) => w.method === "POST").body;
+  assert.equal(sent.Customer_Type__c, null, "the explicit blank wins over the Solar default");
+  assert.equal(sent.Company_Name__c, "SunRun");
+  assert.equal("Service_Stage__c" in sent, false);
+});
+
+test("a customer create that names no type still defaults to Solar (the Sales popup, unchanged)", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(postEvent("customer", { First_Name__c: "New" }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes.find((w) => w.method === "POST").body.Customer_Type__c, "Solar");
 });

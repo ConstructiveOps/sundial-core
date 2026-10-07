@@ -100,6 +100,12 @@
 
 ### 2.2 Customer + partner records in Acumatica
 
+> **Built so far (D-081, 2026-10-07) — readiness only, no integration.** A partner (SunRun,
+> APS, a manufacturer) is a `Sundial_Customer__c` with `Is_Company__c` ticked, and a job's
+> payer is that record (`Bill_To_Customer__c`). **The invoice's `Bill_To_Customer__c` points
+> at the record whose `Acumatica_Customer_ID__c` the future invoice push will use** — the
+> homeowner's for a customer-pay job, the partner's otherwise. The push itself is not built.
+
 - How do Acumatica customer accounts map to service customers — one per homeowner,
   or generic cash-sale customer(s)? Customer class for service: ______
 - Partners (SunRun etc.): each a real Acumatica customer account? 📎 List of

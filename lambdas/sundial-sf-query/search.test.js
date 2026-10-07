@@ -26,3 +26,9 @@ test("searchOrExpr: every column ILIKE the term; phone columns also ILIKE the di
   // a phone column the cache does not have is skipped
   assert.equal(searchOrExpr(["name"], "6025550100", ["primary_phone"]), 'name.ilike."%6025550100%"');
 });
+
+test("D-081: customer search reaches the company name (the Bill To picker finds SunRun)", async () => {
+  const { SEARCH_FIELDS } = await import("./index.js");
+  assert.ok(SEARCH_FIELDS.customer.cache.includes("company_name"));
+  assert.ok(SEARCH_FIELDS.customer.sf.includes("Company_Name__c"));
+});

@@ -121,6 +121,8 @@ import {
   EVENTS as ACTIVITY_EVENTS,
   diffFields,
 } from "../../lib/service-activity.js";
+// D-081: who pays a job — the type + the paying customer, the name derived.
+import { resolveBillTo, billToCustomerLoader, keyOf } from "../../lib/bill-to.js";
 
 /**
  * For a service object, read the CURRENT values of the fields about to change plus the
@@ -142,6 +144,43 @@ async function readBeforeForActivity(objectKey, entry, recordId, tenantId, field
     console.error("activity pre-read failed:", e?.message || String(e));
     return null;
   }
+}
+
+/**
+ * D-081 — a job's Bill To on the generic write path (the job page's edits). Mutates `clean`:
+ * Bill_To_Name__c is always removed (derived, logged once), and when the PATCH touches
+ * Bill_To_Type__c or Bill_To_Customer__c the trio is replaced by lib/bill-to.js's answer,
+ * judged against the job as it is now (`recordId` null on create = nothing yet).
+ * Returns { ok: true } or resolveBillTo's refusal (400 BILL_TO_CUSTOMER_REQUIRED, …).
+ */
+async function deriveJobBillTo({ entry, clean, recordId, tenantId }) {
+  const nameKey = keyOf(clean, "Bill_To_Name__c");
+  if (nameKey) {
+    delete clean[nameKey];
+    console.warn(JSON.stringify({ ignoredField: "Bill_To_Name__c", reason: "derived from Bill_To_Customer__c (D-081)", recordId }));
+  }
+  const typeKey = keyOf(clean, "Bill_To_Type__c");
+  const custKey = keyOf(clean, "Bill_To_Customer__c");
+  if (!typeKey && !custKey) return { ok: true };
+  let before = null;
+  if (recordId) {
+    const rows = await sfQuery(
+      `SELECT Id, Bill_To_Type__c, Bill_To_Customer__c FROM ${entry.sfObject} WHERE Id = '${soqlEscapeString(recordId)}' ` +
+        `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+    );
+    before = rows?.[0] ?? null;
+  }
+  const r = await resolveBillTo({
+    type: typeKey ? clean[typeKey] ?? "" : undefined,
+    customerId: custKey ? clean[custKey] ?? null : undefined,
+    before,
+    loadCustomer: billToCustomerLoader({ sfQuery, soqlEscapeString, tenantId }),
+  });
+  if (!r.ok) return r;
+  if (typeKey) delete clean[typeKey];
+  if (custKey) delete clean[custKey];
+  Object.assign(clean, r.fields);
+  return { ok: true };
 }
 
 function activityRefs(objectKey, record, recordId) {
@@ -772,6 +811,14 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
     clean[dealerKey] = derived.dealerId;
   }
 
+  // 4a) D-081: a job's Bill To. The type and the paying customer are checked together
+  //     against what the job holds now, and Bill_To_Name__c is DERIVED — same shape as
+  //     the dealer-follows-the-rep rule above: the derived value is never an input.
+  if (objectKey === "job") {
+    const billTo = await deriveJobBillTo({ entry, clean, recordId, tenantId });
+    if (!billTo.ok) return jsonResponse(billTo.status, cors, { error: billTo.code.toLowerCase(), code: billTo.code, field: "Bill_To_Customer__c", message: billTo.message });
+  }
+
   // 4b) Service objects: capture the values about to change, for the activity row.
   const before = await readBeforeForActivity(objectKey, entry, recordId, tenantId, Object.keys(clean));
   // 4c) A customer's Assigned To / Archived edit: what it was, for the intake alerts (2026-10-02).
@@ -871,6 +918,14 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
   // another tenant. (Client__c can never arrive via the body; the blocklist
   // rejects it above, so this assignment is authoritative and un-overridable.)
   const payload = { ...clean, Client__c: tenantId };
+
+  // D-081: a job created through the generic route obeys the same Bill To rule as the
+  // estimate Lambda's New Job (the portal does not create jobs here today; this keeps it so).
+  if (objectKey === "job") {
+    const billTo = await deriveJobBillTo({ entry, clean: payload, recordId: null, tenantId });
+    if (!billTo.ok) return jsonResponse(billTo.status, cors, { error: billTo.code.toLowerCase(), code: billTo.code, field: "Bill_To_Customer__c", message: billTo.message });
+    for (const k of Object.keys(payload)) if (payload[k] === null) delete payload[k];
+  }
 
   // Customer_Type__c default (2026-09-19): a customer made from the Sales module's New
   // Customer popup is a Solar customer unless the body says otherwise. The Service module's

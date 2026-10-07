@@ -277,11 +277,12 @@ const SEARCH_CAP = 200;
 // Phone / email / address columns joined the search on 2026-09-29 (Harmon: "we can only
 // find people by name"). Phone columns are matched on DIGITS when the term looks like a
 // number (see phonePattern) so "602-555-0100" finds "(602) 555-0100".
-const SEARCH_FIELDS = {
+export const SEARCH_FIELDS = {
   customer: {
-    cache: ["first_name", "last_name", "name", "customer_name", "primary_email", "primary_phone", "alternate_contact_phone", "street", "city", "postal_code"],
+    // company_name (D-081, 2026-10-07): the Bill To picker finds "SunRun" by its company name.
+    cache: ["first_name", "last_name", "name", "customer_name", "company_name", "primary_email", "primary_phone", "alternate_contact_phone", "street", "city", "postal_code"],
     phone: ["primary_phone", "alternate_contact_phone"],
-    sf: ["First_Name__c", "Last_Name__c", "Name", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Street__c"],
+    sf: ["First_Name__c", "Last_Name__c", "Name", "Company_Name__c", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Street__c"],
   },
   solar: {
     cache: ["project_name", "customer_name_at_creation"],
@@ -353,6 +354,8 @@ export const LIST_PROJECTION = {
     "status", "stage", "customer_type", "requested_project_types", "lead_source", "call_attempts",
     "sales_rep_sf_id", "sales_rep_name",
     "service_stage", "service_request_type", "assigned_to_sf_id", "next_follow_up_date", "last_contact_date", "archived",
+    // D-081: customerDisplayName (a company prints its company name) and the Bill To picker.
+    "is_company", "company_name",
   ],
   // DashboardPage (sums, Recent sort on last_synced_at) + SolarProjectsPage table/board/filters.
   solar: [
@@ -373,6 +376,7 @@ export const LIST_PROJECTION = {
     ...LIST_META,
     "name", "status", "archived", "customer_name_at_creation", "address_at_creation", "priority",
     "estimate_status", "estimate_total", "bill_to_type", "report_sent_at", "intake_date",
+    "bill_to_customer_sf_id", // D-081: who pays, as a record
   ],
   // ServiceEstimatesPage (incl. the Templates view).
   estimate: [
@@ -385,6 +389,7 @@ export const LIST_PROJECTION = {
     ...LIST_META,
     "name", "status", "service_job_sf_id", "issued_at", "due_date", "acumatica_entered_at",
     "bill_to_type", "bill_to_name", "billing_reference", "total", "paid_amount", "balance",
+    "bill_to_customer_sf_id", "bill_to_address", // D-081: the payer snapshot at issue
   ],
 };
 

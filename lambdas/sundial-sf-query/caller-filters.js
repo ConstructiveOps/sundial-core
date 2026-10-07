@@ -59,6 +59,12 @@ export const SORT_ALLOWLIST = {
   customer: [
     "created_date", "name", "last_name", "status", "stage", "sales_rep_name", "lead_source", "call_attempts",
     "street", "primary_phone", "requested_project_types",
+    // D-081 (2026-10-07): the Customer header — a company sorts by its company name, a person
+    // by "first last", else the record name. display_name_sort is a GENERATED column
+    // (sql/2026-10-07_company_customers.sql) because PostgREST cannot order by an
+    // expression. It is not a Salesforce field, so the cold-cache SOQL path falls back to
+    // the default order for it (columnToField finds nothing), like an unsortable type.
+    "display_name_sort",
   ],
 };
 

@@ -41,6 +41,7 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { ensureStripeCustomer, fromCents, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
 import { createSolarFactsClient, solarFactsConfigFor, splitName } from "../../lib/solarfacts.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
+import { customerDisplayName } from "../../lib/customer-name.js";
 import { candidateSoql, matchCandidates, normalizeNewCustomer, CANDIDATE_SELECT, CUSTOMER_SF_OBJECT } from "./customer.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 import { ITEM_SELECT, ITEM_SF_OBJECT } from "./pricebook.js";
@@ -369,7 +370,7 @@ export function createClubHandlers(d, h) {
     return { customer, membership, plan };
   }
   const snapshot = (c) => ({
-    Customer_Name_at_Creation__c: c.Name ?? [c.First_Name__c, c.Last_Name__c].filter(Boolean).join(" ") ?? null,
+    Customer_Name_at_Creation__c: customerDisplayName(c), // D-081
     Address_at_Creation__c: [c.Street__c, c.City__c, c.State__c, c.Postal_Code__c].filter(Boolean).join(", ") || null,
     Primary_Phone_at_Creation__c: c.Primary_Phone__c ?? null,
     Primary_Email_at_Creation__c: c.Primary_Email__c ?? null,

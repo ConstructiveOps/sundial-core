@@ -933,7 +933,7 @@ test("renderEstimateDocument: escapes, hides markup, shows discount/tax/deposit 
   assert.ok(!html.includes("Gone"), "removed lines are not printed");
   assert.ok(!/markup/i.test(html), "markup is never printed");
   assert.ok(html.includes("Service plan discount"));
-  assert.ok(html.includes("Tax (Phoenix)"));
+  assert.ok(html.includes("Total tax") && html.includes("Phoenix"), "D-081: the jurisdiction sits under Total tax");
   assert.ok(html.includes("Deposit due to schedule"));
   assert.ok(html.includes("PREVIEW"));
   assert.ok(html.includes("1.50 Hour"));
@@ -1294,8 +1294,8 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   // Preview reads as an invoice, not an estimate.
   const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
   assert.equal(pv.status, 200);
-  assert.ok(pv.body.html.includes("<div>Invoice</div>"));
-  assert.ok(pv.body.html.includes("Bill to"));
+  assert.ok(pv.body.html.includes('<span class="k">Invoice</span>'), "the meta box names the document");
+  assert.ok(pv.body.html.includes("Payment terms"), "D-081: the HCP-style meta box (the bill-to block has no label)");
   assert.ok(pv.body.html.includes("Balance due"));
   assert.ok(pv.body.html.includes("$283.60"));
 
@@ -2778,4 +2778,97 @@ test("D-078: the PRIMARY tenant's links are built from the Lambda's own address 
   assert.equal(s.body.publicUrl, "https://portal.example.com/estimate/TOKEN123");
   assert.ok(fake.emails[0].html.includes("https://portal.example.com/estimate/TOKEN123"));
   assert.ok(!fake.emails[0].html.includes("ignored.example.com"));
+});
+
+// ---------------------------------------------------------------------------
+// D-081 — the payer is a Customer record: required for a partner type, the name derived,
+// snapshotted onto the invoice at issue (and re-snapshotted on the -2 reissue)
+// ---------------------------------------------------------------------------
+test("D-081: New Job with a partner Bill To needs the paying customer — refused BEFORE the customer / estimate exist", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  const r = await call(h, "POST", "/service/jobs", {
+    customer: { new: { firstName: "Mark", lastName: "Haughn", email: "mark@example.com", phone: "623-555-0142" } },
+    job: { billToType: "Leasing Partner" },
+  });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "BILL_TO_CUSTOMER_REQUIRED");
+  assert.equal(r.body.field, "Bill_To_Customer__c");
+  assert.equal(fake.store.Sundial_Customer__c.length, 0, "no customer was created");
+  assert.equal(fake.store.Sundial_Estimate__c.length, 0, "no estimate was created");
+  assert.equal(fake.store.Sundial_Service_Job__c.length, 0);
+  // Another tenant's company is not a payer here.
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: "a1W000000OTHERTENA", Is_Company__c: true, Company_Name__c: "SunRun" });
+  const other = fake.store.Sundial_Customer__c[0].Id;
+  const r2 = await call(h, "POST", "/service/jobs", { customer: { new: { firstName: "Mark", lastName: "Haughn", email: "mark@example.com" } }, job: { billToType: "Leasing Partner", billToCustomerId: other } });
+  assert.equal(r2.body.code, "BILL_TO_CUSTOMER_NOT_FOUND");
+  assert.equal(fake.store.Sundial_Estimate__c.length, 0);
+});
+
+test("D-081: the job's Bill To name is derived from the paying company; billToName is ignored; issue snapshots the payer; the -2 reissue re-snapshots", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Mark Haughn", First_Name__c: "Mark", Last_Name__c: "Haughn", Primary_Email__c: "mark@example.com", Street__c: "25825 N 134th Drive", City__c: "Peoria", State__c: "AZ", Postal_Code__c: "85383" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "SunRun", Is_Company__c: true, Company_Name__c: "SunRun", First_Name__c: "Dana", Last_Name__c: "Ruiz", Mailing_Street__c: "Po Box 53940", Mailing_City__c: "Phoenix", Mailing_State__c: "AZ", Mailing_Postal_Code__c: "85072" });
+  const [home, sunrun] = fake.store.Sundial_Customer__c;
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", {
+    customer: { id: home.Id },
+    job: { billToType: "Leasing Partner", billToCustomerId: sunrun.Id, billToName: "Typed By Hand", billingReference: "SR-77120" },
+    lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }],
+  });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal(job.Bill_To_Type__c, "Leasing Partner");
+  assert.equal(job.Bill_To_Customer__c, sunrun.Id);
+  assert.equal(job.Bill_To_Name__c, "SunRun", "derived, not the typed name");
+  assert.equal(job.Customer_Name_at_Creation__c, "Mark Haughn");
+  assert.ok(j.body.rejectedFields.includes("billToName"), "the caller is told the field was not taken");
+
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Bill_To_Customer__c, sunrun.Id);
+  assert.equal(inv.Bill_To_Name__c, "SunRun");
+  assert.equal(inv.Bill_To_Address__c, "Po Box 53940, Phoenix, AZ 85072", "the mailing address when the payer has no site address");
+  const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.ok(pv.body.html.includes("Attn: Dana Ruiz"));
+  assert.ok(pv.body.html.includes("Ref SR-77120"));
+  assert.ok(pv.body.html.includes('<span class="k">Service address</span><div>Mark Haughn</div>'));
+
+  // The company renames itself: the issued invoice keeps what it was issued with; a void
+  // never rewrites; the -2 reissue takes the payer as it is now.
+  sunrun.Company_Name__c = "SunRun Inc.";
+  const v = await call(h, "POST", `/service/invoices/${inv.Id}/void`, { reason: "Wrong payer name" });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.equal(inv.Bill_To_Name__c, "SunRun", "a void never rewrites the snapshot");
+  const again = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(again.status, 201, JSON.stringify(again.body));
+  const inv2 = fake.store.Sundial_Service_Invoice__c[1];
+  assert.match(inv2.Name, /-2$/);
+  assert.equal(inv2.Bill_To_Name__c, "SunRun Inc.");
+});
+
+test("D-081: a customer-pay job's invoice snapshots the homeowner as the payer; a pre-D-081 partner job still issues, with a warning", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy Lane", First_Name__c: "Ivy", Last_Name__c: "Lane", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 100 }] });
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal(job.Bill_To_Customer__c, undefined, "type Customer: no second record");
+  await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Bill_To_Customer__c, job.Sundial_Customer__c);
+  assert.equal(inv.Bill_To_Name__c, "Ivy Lane");
+  assert.equal(inv.Bill_To_Address__c, "5 Fir, Mesa, AZ 85201");
+
+  // An HCP-imported partner job from before D-081: a name, no record.
+  await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 100 }] });
+  const legacy = fake.store.Sundial_Service_Job__c[1];
+  Object.assign(legacy, { Bill_To_Type__c: "Leasing Partner", Bill_To_Name__c: "SunRun" });
+  const iss = await call(h, "POST", `/service/jobs/${legacy.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv2 = fake.store.Sundial_Service_Invoice__c.at(-1);
+  assert.equal(inv2.Bill_To_Name__c, "SunRun");
+  assert.equal(inv2.Bill_To_Customer__c, undefined);
+  assert.ok(iss.body.warnings.some((w) => /names no paying customer record/.test(w)));
 });

@@ -34,12 +34,16 @@ import { EVENTS } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord } from "./totals.js";
 import { LINE_SF_OBJECT } from "./pricebook.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
+import { billToCustomerLoader, BILL_TO_SELF } from "../../lib/bill-to.js";
+import { customerDisplayName, customerAddressLine } from "../../lib/customer-name.js";
 
 export const INVOICE_SF_OBJECT = "Sundial_Service_Invoice__c";
 export const PAYMENT_SF_OBJECT = "Sundial_Service_Payment__c";
 
+// D-081: Bill_To_Customer__c / Bill_To_Address__c are the PAYER snapshot taken at issue —
+// who was billed and where, as they stood then.
 export const INVOICE_SELECT =
-  "Id, Name, Service_Job__c, Client__c, Status__c, Bill_To_Type__c, Bill_To_Name__c, Billing_Reference__c, " +
+  "Id, Name, Service_Job__c, Client__c, Status__c, Bill_To_Type__c, Bill_To_Name__c, Bill_To_Customer__c, Bill_To_Address__c, Billing_Reference__c, " +
   "Subtotal__c, Discount_Amount__c, Tax_Rate__c, Tax_Amount__c, Total__c, Paid_Amount__c, Issued_At__c, Sent_At__c, " +
   "Due_Date__c, Paid_At__c, PDF_S3_Key__c, Acumatica_Ref__c, Acumatica_Entered_At__c, Voided_At__c, Void_Reason__c, CreatedDate";
 export const PAYMENT_SELECT =
@@ -47,8 +51,8 @@ export const PAYMENT_SELECT =
   "Reference__c, Recorded_By__c, Notes__c, Stripe_Payment_Intent_Id__c, Stripe_Charge_Id__c, Stripe_Refund_Id__c, Failure_Reason__c, CreatedDate";
 export const INVOICE_JOB_SELECT =
   "Id, Name, Sundial_Customer__c, Estimate__c, Client__c, Status__c, Payment_Status__c, Bill_To_Type__c, Bill_To_Name__c, " +
-  "Billing_Reference__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
-  "Primary_Email_at_Creation__c, Customer_Summary__c, Customer_Card_on_File__c";
+  "Bill_To_Customer__c, Billing_Reference__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
+  "Primary_Email_at_Creation__c, Customer_Summary__c, Customer_Card_on_File__c, First_Scheduled_Start__c";
 
 export const PAYMENT_TYPES = ["Deposit", "Payment", "Refund", "Adjustment"];
 export const PAYMENT_METHODS = ["Card", "Check", "ACH", "Partner Remittance", "Other"];
@@ -298,10 +302,78 @@ export function createMoneyCore(d, h) {
   return { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice, customerLinkFor };
 }
 
+/**
+ * D-081 — the payer an invoice is issued to, and the snapshot fields it freezes.
+ * The payer is the job's Bill_To_Customer__c, or the job's own customer when Bill To is
+ * Customer. A partner job imported before D-081 may name a payer with no record yet
+ * (Bill_To_Name__c only, until scripts/backfill-bill-to-customers.mjs runs): it still
+ * issues, under that name, with no address, and says so in `warning`.
+ */
+/**
+ * An instant → its calendar day in the tenant's timezone (YYYY-MM-DD), so a call finished
+ * at 6 pm in Phoenix is not printed as the next day (it is already tomorrow in UTC).
+ */
+export function localDay(instant, timeZone = "America/Phoenix") {
+  if (!instant) return null;
+  const t = new Date(instant);
+  if (Number.isNaN(t.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: timeZone || "America/Phoenix", year: "numeric", month: "2-digit", day: "2-digit" }).format(t);
+}
+
+export function payerIdFor(job) {
+  const partner = job?.Bill_To_Type__c && job.Bill_To_Type__c !== BILL_TO_SELF;
+  return partner ? job.Bill_To_Customer__c || null : job?.Sundial_Customer__c || null;
+}
+export function payerSnapshot(job, payer) {
+  const partner = job?.Bill_To_Type__c && job.Bill_To_Type__c !== BILL_TO_SELF;
+  if (!payer) {
+    return {
+      fields: { Bill_To_Customer__c: null, Bill_To_Name__c: job?.Bill_To_Name__c || (partner ? null : job?.Customer_Name_at_Creation__c) || null, Bill_To_Address__c: null },
+      warning: partner ? `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c} but names no paying customer record — the invoice carries the name only. Pick the company on the job and reissue if it needs the address.` : null,
+    };
+  }
+  return {
+    fields: {
+      Bill_To_Customer__c: payer.Id,
+      Bill_To_Name__c: (customerDisplayName(payer) || job?.Bill_To_Name__c || "").slice(0, 255) || null,
+      Bill_To_Address__c: (customerAddressLine(payer) || "").slice(0, 255) || null,
+    },
+    warning: null,
+  };
+}
+
 export function createInvoiceHandlers(d, h) {
   const { jsonResponse, bad, notFound, sfError, CACHE } = h;
   const money = h.money || createMoneyCore(d, h);
   const { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney } = money;
+
+  /**
+   * What the invoice DOCUMENT needs beyond the records (D-081): the payer record (only for
+   * the live "Attn:" contact line — the name and address print from the invoice's own
+   * snapshot) and the service date (the job's latest Complete call, else its first
+   * scheduled start). Best-effort: a failed read prints the document without them.
+   */
+  async function documentExtras({ invoice, job, tenantId }) {
+    let payer = null;
+    let serviceDate = null;
+    try {
+      if (invoice?.Bill_To_Customer__c) payer = await billToCustomerLoader({ sfQuery: d.sfQuery, soqlEscapeString, tenantId })(invoice.Bill_To_Customer__c);
+    } catch (e) {
+      console.error("invoice payer read:", e?.message || e);
+    }
+    try {
+      if (job?.Id) {
+        const rows = await d.sfQuery(
+          `SELECT Id, Actual_End__c, Actual_Start__c FROM Sundial_Service_Call__c WHERE Sundial_Service_Job__c = '${soqlEscapeString(job.Id)}' ` +
+            `AND Client__c = '${soqlEscapeString(tenantId)}' AND Status__c = 'Complete' ORDER BY Actual_End__c DESC NULLS LAST LIMIT 1`
+        );
+        serviceDate = rows?.[0]?.Actual_End__c || rows?.[0]?.Actual_Start__c || null;
+      }
+    } catch (e) {
+      console.error("invoice service date read:", e?.message || e);
+    }
+    return { payer, serviceDate: localDay(serviceDate || job?.First_Scheduled_Start__c || null, d.env?.SERVICE_TIMEZONE) };
+  }
 
   /** Render + store the PDF for an invoice (best-effort; returns { key, bytes } or nulls). */
   /** The "Pay this invoice" link: the customer's page, only while the customer owes money (amendment 11). */
@@ -318,7 +390,8 @@ export function createInvoiceHandlers(d, h) {
   async function renderAndStorePdf({ invoice, job, est, lines, payments, ctx, tenantId }) {
     try {
       const payUrl = await payUrlFor({ invoice, job, tenantId, ctx });
-      const model = buildInvoiceModel({ invoice, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
+      const extras = await documentExtras({ invoice, job, tenantId });
+      const model = buildInvoiceModel({ invoice, job, estimate: est, lines, payments, ...extras, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
       const bytes = await d.renderPdf(model);
       const key = invoicePdfKey(job.Id, invoice.Name);
       await d.putObject({ key, body: bytes, contentType: "application/pdf" });
@@ -416,7 +489,8 @@ export function createInvoiceHandlers(d, h) {
           const lines = (await h.loadLines(est.Id, tenantId)).filter((l) => l.Stage__c !== "Removed");
           const payments = (await loadJobPayments(job.Id, tenantId)).filter((p) => p.Invoice__c === inv.Id);
           const payUrl = await payUrlFor({ invoice: inv, job, tenantId, ctx });
-          const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
+          const extras = await documentExtras({ invoice: inv, job, tenantId });
+          const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, ...extras, brand: h.brandFor(ctx), options: { mode: "pdf", payUrl } });
           const bytes = await d.renderPdf(model);
           const stamp = d.now().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
           const key = buildKey(job.Id, `${String(inv.Name).replace(/[^A-Za-z0-9._-]+/g, "-")}-before-edit-${stamp}.pdf`);
@@ -465,6 +539,9 @@ export function createInvoiceHandlers(d, h) {
      * [from, to] (inclusive dates, the tenant's timezone), void ones included and marked, with
      * the job's number, customer, address and the bill-to, as rows the portal turns into a CSV.
      * A stop-gap until the Acumatica integration carries invoices across. Read-only.
+     *
+     * Acumatica readiness (D-081): the invoice's Bill_To_Customer__c points at the record
+     * whose Acumatica_Customer_ID__c the future invoice push will use. Not built yet.
      */
     async invoiceReport({ ctx, query }) {
       const { tenantId, cors } = ctx;
@@ -523,6 +600,8 @@ export function createInvoiceHandlers(d, h) {
           serviceType: j.Service_Type__c ?? null,
           billToType: r.Bill_To_Type__c ?? null,
           billToName: r.Bill_To_Name__c ?? null,
+          billToCustomerId: r.Bill_To_Customer__c ?? null,
+          billToAddress: r.Bill_To_Address__c ?? null,
           billingReference: r.Billing_Reference__c ?? null,
           subtotal: num(r.Subtotal__c),
           discount: num(r.Discount_Amount__c),
@@ -566,13 +645,23 @@ export function createInvoiceHandlers(d, h) {
       } else if (Number(body?.netDays) > 0) {
         dueDate = new Date(now.getTime() + Number(body.netDays) * 86400000).toISOString().slice(0, 10);
       }
+      // D-081: freeze WHO is billed and WHERE — re-snapshotted on a reissue (-2), never
+      // rewritten on a void. A failed payer read issues with the job's name only.
+      let payer = null;
+      try {
+        const pid = payerIdFor(job);
+        if (pid) payer = await billToCustomerLoader({ sfQuery: d.sfQuery, soqlEscapeString, tenantId })(pid);
+      } catch (e) {
+        console.error("invoice issue: payer read failed:", e?.message || e);
+      }
+      const billTo = payerSnapshot(job, payer);
       const fields = {
         Name: nextInvoiceName(job.Name, invoices.length),
         Service_Job__c: job.Id,
         Client__c: tenantId,
         Status__c: "Issued",
         Bill_To_Type__c: job.Bill_To_Type__c || "Customer",
-        Bill_To_Name__c: job.Bill_To_Name__c || null,
+        ...billTo.fields,
         Billing_Reference__c: job.Billing_Reference__c || null,
         Subtotal__c: totals.subtotal,
         Discount_Amount__c: totals.discountAmount,
@@ -632,6 +721,7 @@ export function createInvoiceHandlers(d, h) {
         warnings: [
           proposed ? `${proposed} line${proposed === 1 ? "" : "s"} the customer never approved ${proposed === 1 ? "is" : "are"} on this invoice.` : null,
           pdf.error ? "The PDF could not be generated (the invoice is issued; try Send again later)." : null,
+          billTo.warning,
           charge && !charge.ok ? `The card on file was not charged: ${charge.message}` : null,
         ].filter(Boolean),
       });
@@ -654,7 +744,8 @@ export function createInvoiceHandlers(d, h) {
       const est = job?.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
       const lines = est ? await h.loadLines(est.Id, tenantId) : [];
       const payments = (await loadJobPayments(inv.Service_Job__c, tenantId)).filter((p) => p.Invoice__c === inv.Id);
-      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, brand: h.brandFor(ctx), options: { mode: "preview", payUrl: await payUrlFor({ invoice: inv, job, tenantId, ctx }) } });
+      const extras = await documentExtras({ invoice: inv, job, tenantId });
+      const model = buildInvoiceModel({ invoice: inv, job, estimate: est, lines, payments, ...extras, brand: h.brandFor(ctx), options: { mode: "preview", payUrl: await payUrlFor({ invoice: inv, job, tenantId, ctx }) } });
       const { html, title } = renderEstimateDocument({ model });
       return jsonResponse(200, cors, { html, title, number: inv.Name, status: inv.Status__c, total: inv.Total__c, balance: balanceOf(inv) });
     },

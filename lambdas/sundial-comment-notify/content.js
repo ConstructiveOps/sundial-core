@@ -20,6 +20,17 @@ export const RECORD_PATHS = {
 };
 
 /**
+ * Where the comment was written decides which VIEW of the record the link opens
+ * (2026-10-07, Harmon). A Customer's thread is shared by the Sales page and the Service
+ * page; `comments.context` (sql/2026-10-07_comment_context.sql) says which one the
+ * author was on. Only the customer has two views today; any other object, or no
+ * context, falls through to RECORD_PATHS.
+ */
+export const CONTEXT_PATHS = {
+  customer: { service: (id) => `/service/customers/${id}` },
+};
+
+/**
  * Where an unrecognized object key sends the reader.
  *
  * NEVER GUESS A PATH. A link built from an unknown key would 404, and a 404 from a
@@ -36,11 +47,13 @@ export const FALLBACK_PATH = "/dashboard";
  * @param {string} baseUrl - PORTAL_BASE_URL, already trailing-slash-trimmed
  * @param {string} objectKey - comments.record_object
  * @param {string} recordId - comments.record_id
+ * @param {string|null} context - comments.context (the module the composer was on)
  * @returns {{ url: string, known: boolean }} `known:false` means the caller should warn
  */
-export function recordLink(baseUrl, objectKey, recordId) {
+export function recordLink(baseUrl, objectKey, recordId, context = null) {
   const key = String(objectKey ?? "").trim().toLowerCase();
-  const build = RECORD_PATHS[key];
+  const ctx = String(context ?? "").trim().toLowerCase();
+  const build = CONTEXT_PATHS[key]?.[ctx] ?? RECORD_PATHS[key];
   if (!build || !recordId) {
     return { url: `${baseUrl}${FALLBACK_PATH}`, known: false };
   }

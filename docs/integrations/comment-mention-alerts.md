@@ -277,6 +277,23 @@ tenants are known **and** differ; a missing profile (a user who has never hit
 
 ---
 
+## Where the link goes: `comments.context` (2026-10-07)
+
+A Customer's comment thread is ONE thread shared by the Sales page (`/customers/{id}`)
+and the Service page (`/service/customers/{id}`), so the comment row alone could not say
+which page it was written on, and every customer mention linked to Sales — Harmon's
+cross-department people (procurement, …) tagged from Service landed on a view with none
+of the service details. `sql/2026-10-07_comment_context.sql` adds `comments.context`
+(`sales | service | solar | roofing`, nullable), set by the portal's composer from the
+page it is on (`CommentsPanel context=…`, the job's Communications panel is `service`).
+`content.js recordLink(base, object, id, context)` consults `CONTEXT_PATHS` first — today
+only `customer` + `service` → `/service/customers/{id}` — and falls through to
+`RECORD_PATHS` otherwise. **The link follows the comment's origin, never the reader's
+department.** The portal's Mentions feed applies the same rule; a reader without the
+Service module is sent by the Service customer page to the Sales view with
+`?from=service` (a banner says why), so no link dead-ends. The two intake alerts
+(`lib/service-intake-alerts.js`) link to the Service view outright (`recordPath("servicecustomer")`).
+
 ## Email content
 
 **Subject:** `{author} mentioned you on {record label}`

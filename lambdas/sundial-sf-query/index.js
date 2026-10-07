@@ -279,17 +279,21 @@ const SEARCH_CAP = 200;
 // number (see phonePattern) so "602-555-0100" finds "(602) 555-0100".
 const SEARCH_FIELDS = {
   customer: {
-    cache: ["first_name", "last_name", "name", "customer_name", "primary_email", "primary_phone", "alternate_contact_phone", "street", "city", "postal_code"],
+    cache: ["first_name", "last_name", "name", "primary_email", "primary_phone", "alternate_contact_phone", "alternate_contact_email", "street", "city", "postal_code"],
     phone: ["primary_phone", "alternate_contact_phone"],
-    sf: ["First_Name__c", "Last_Name__c", "Name", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Street__c"],
+    sf: ["First_Name__c", "Last_Name__c", "Name", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Alternate_Contact_Email__c", "Street__c", "City__c", "Postal_Code__c"],
   },
+  // Solar / roofing search the address, phone and email snapshots too (2026-10-07 — the
+  // placeholder promised "Project, Customer, or Address"); a column the cache lacks is skipped.
   solar: {
-    cache: ["project_name", "customer_name_at_creation"],
-    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"],
+    cache: ["project_name", "customer_name_at_creation", "first_name", "last_name", "address_at_creation", "address", "primary_phone_at_creation", "primary_email_at_creation"],
+    phone: ["primary_phone_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
   },
   roofing: {
-    cache: ["project_name", "customer_name_at_creation"],
-    sf: ["Project_Name__c", "Customer_Name_at_Creation__c"], // rep path unused for roofing
+    cache: ["project_name", "customer_name_at_creation", "first_name", "last_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
+    phone: ["primary_phone_at_creation"],
+    sf: ["Project_Name__c", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"], // rep path unused for roofing
   },
   // Service (D-072). Jobs search by job number, customer snapshot, AND the partner's
   // work-order number - "SunRun calls with THEIR number" is a named requirement
@@ -311,8 +315,8 @@ const SEARCH_FIELDS = {
     sf: ["Name", "Item_Code__c", "Description__c"],
   },
   serviceinvoice: {
-    cache: ["name", "billing_reference"],
-    sf: ["Name", "Billing_Reference__c"],
+    cache: ["name", "billing_reference", "bill_to_name", "customer_name_at_creation"],
+    sf: ["Name", "Billing_Reference__c", "Bill_To_Name__c"],
   },
   servicepayment: {
     cache: ["name", "reference"],
@@ -450,12 +454,36 @@ export function phonePattern(term) {
   for (let i = 0; i < d.length; i += 3) chunks.push(d.slice(i, i + 3));
   return `%${chunks.join("%")}%`;
 }
-/** The OR-group for a search: every column ILIKE the term, and the phone columns ILIKE the digit pattern too. */
+/**
+ * The words of a search, each one to be matched on its own (2026-10-07, Harmon: "search
+ * misses customers / jobs for an address"). "123 Main St Phoenix" used to be matched as
+ * ONE substring, which no customer row holds (street and city are separate columns) and
+ * no job row holds either (its address snapshot has commas: "123 Main St, Phoenix, AZ").
+ * Now every word must appear in SOME searchable column: "123" in the street, "Phoenix"
+ * in the city. One-character words are noise ("N" in "123 N Main") and are dropped; at
+ * most 6 words count.
+ */
+export const SEARCH_MAX_WORDS = 6;
+export function searchWords(term) {
+  const words = String(term ?? "").split(" ").map((w) => w.trim()).filter((w) => w.length >= 2);
+  return (words.length ? words : [String(term ?? "").trim()].filter(Boolean)).slice(0, SEARCH_MAX_WORDS);
+}
+
+/**
+ * The PostgREST filter for a search: EVERY word ILIKE SOME column, OR (when the whole
+ * term reads as a phone number) a phone column ILIKE the digit pattern. One word is the
+ * flat OR-group it always was; the phone alternative sits beside the word group so
+ * "(602) 555-0100" — which splits into "602" and "555-0100" — still finds a number
+ * stored as "6025550100".
+ */
 export function searchOrExpr(cols, term, phoneCols = []) {
-  const parts = cols.map((c) => `${c}.ilike."%${term}%"`);
+  const words = searchWords(term);
+  const wordGroup = (w) => cols.map((c) => `${c}.ilike."%${w}%"`).join(",");
   const phone = phonePattern(term);
-  if (phone) for (const c of phoneCols) if (cols.includes(c)) parts.push(`${c}.ilike."${phone}"`);
-  return parts.join(",");
+  const phoneParts = phone ? phoneCols.filter((c) => cols.includes(c)).map((c) => `${c}.ilike."${phone}"`) : [];
+  if (words.length <= 1) return [wordGroup(words[0] ?? term), ...phoneParts].join(",");
+  const all = `and(${words.map((w) => `or(${wordGroup(w)})`).join(",")})`;
+  return [all, ...phoneParts].join(",");
 }
 
 // First non-empty source value for a record (the COALESCE), or null.
@@ -1884,11 +1912,13 @@ async function listColdCacheFallback(ctx) {
   // ?q= name search: OR of LIKE '%term%' across the object's SF name fields, ANDed
   // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.
   if (searchTerm && Array.isArray(searchSfFields) && searchSfFields.length) {
-    const t = soqlEscapeString(searchTerm);
-    const likes = searchSfFields.map((f) => `${f} LIKE '%${t}%'`);
+    // Every word in SOME field (2026-10-07, the same rule as the cache path), or the
+    // whole term as a phone number on the phone fields.
+    const wordGroups = searchWords(searchTerm).map((w) => `(${searchSfFields.map((f) => `${f} LIKE '%${soqlEscapeString(w)}%'`).join(" OR ")})`);
+    const alts = [wordGroups.length > 1 ? `(${wordGroups.join(" AND ")})` : wordGroups[0]];
     const phone = phonePattern(searchTerm);
-    if (phone) for (const f of searchSfFields) if (/Phone/.test(f)) likes.push(`${f} LIKE '${phone}'`);
-    where += ` AND (${likes.join(" OR ")})`;
+    if (phone) for (const f of searchSfFields) if (/Phone/.test(f)) alts.push(`${f} LIKE '${phone}'`);
+    where += ` AND (${alts.join(" OR ")})`;
   }
   // f[] / not[] (D-080) as SOQL, ANDed after everything above. The cache column is
   // mapped back to its Salesforce field through the describe; values are typed per field

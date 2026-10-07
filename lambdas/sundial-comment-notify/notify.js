@@ -248,7 +248,7 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   // --- 3) The comment ------------------------------------------------------
   const { data: comment, error: commentErr } = await supabase
     .from(COMMENTS_TABLE)
-    .select("id, tenant_id, record_id, record_object, author_id, author_name, body")
+    .select("id, tenant_id, record_id, record_object, author_id, author_name, body, context")
     .eq("id", mention.comment_id)
     .maybeSingle();
   if (commentErr) {
@@ -364,7 +364,7 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   const commentTenantId = comment.tenant_id ?? profile?.tenant_id ?? null;
   const record = await lookupRecord(supabase, comment.record_object, comment.record_id, commentTenantId);
   const portalBase = await portalBaseFor(supabase, commentTenantId, record.tenantSlug, cfg);
-  const link = recordLink(portalBase ?? "", comment.record_object, comment.record_id);
+  const link = recordLink(portalBase ?? "", comment.record_object, comment.record_id, comment.context);
   const known = link.known;
   const url = portalBase ? link.url : null;
   if (!portalBase) {
@@ -400,7 +400,7 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
     kind: "comment",
     title: `${comment.author_name || "Someone"} mentioned you on ${label}`,
     body: comment.body,
-    url: recordLink("", comment.record_object, comment.record_id).url,
+    url: recordLink("", comment.record_object, comment.record_id, comment.context).url,
     recordType: comment.record_object,
     recordSfId: comment.record_id,
     dedupeKey: `mention:${mention.id}`,

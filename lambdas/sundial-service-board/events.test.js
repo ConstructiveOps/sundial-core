@@ -38,3 +38,15 @@ test("problems: bad window, bad pattern, bad / early through date, nothing match
   assert.equal(eventOccurrences({ ...base, untilDate: "2027-01-08", repeat: "weekdays" }).occurrences.length, 65, "13 weeks of weekdays fits under the cap");
   assert.ok(65 <= MAX_OCCURRENCES);
 });
+
+// tech.js searchWhere (2026-10-07): the phone's lists search by every word, and by phone digits.
+import { searchWhere } from "./tech.js";
+test("searchWhere: every word in some field; a phone number also matches by digits; nothing without a term", () => {
+  const f = ["Name", "Street__c", "Primary_Phone__c"];
+  assert.equal(searchWhere("", f), null);
+  assert.equal(searchWhere("Ann", f), "((Name LIKE '%Ann%' OR Street__c LIKE '%Ann%' OR Primary_Phone__c LIKE '%Ann%'))");
+  assert.equal(searchWhere("123 Main", f), "(((Name LIKE '%123%' OR Street__c LIKE '%123%' OR Primary_Phone__c LIKE '%123%') AND (Name LIKE '%Main%' OR Street__c LIKE '%Main%' OR Primary_Phone__c LIKE '%Main%')))");
+  assert.ok(searchWhere("(602) 555-0100", f).endsWith(" OR Primary_Phone__c LIKE '%602%555%0100%')"));
+  assert.ok(searchWhere("6025550100", f).includes("Primary_Phone__c LIKE '%602%555%0100%'"));
+  assert.ok(!searchWhere("O'Brien % _", f).includes("%'%"), "SOQL-escaped, wildcards neutralised");
+});

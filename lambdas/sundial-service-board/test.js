@@ -123,9 +123,37 @@ function fakeWorld() {
   const s3Deleted = []; // keys removed from S3
   const fetches = [];
 
+  /** Split a clause on a top-level " AND " / " OR " (never inside parentheses or quotes). */
+  function splitTop(c, op) {
+    const parts = [];
+    let depth = 0;
+    let quoted = false;
+    let start = 0;
+    for (let i = 0; i < c.length; i++) {
+      const ch = c[i];
+      if (ch === "'" && c[i - 1] !== "\\") quoted = !quoted;
+      if (quoted) continue;
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (depth === 0 && c.startsWith(op, i)) {
+        parts.push(c.slice(start, i));
+        start = i + op.length;
+        i = start - 1;
+      }
+    }
+    parts.push(c.slice(start));
+    return parts;
+  }
   function cond(rec, c) {
     c = c.trim();
     let m;
+    // Nested logic (2026-10-07: the search clauses are (word1 OR …) AND (word2 OR …)).
+    const ands = splitTop(c, " AND ");
+    if (ands.length > 1) return ands.every((sub) => cond(rec, sub));
+    const ors = splitTop(c, " OR ");
+    if (ors.length > 1) return ors.some((sub) => cond(rec, sub));
+    if (c.startsWith("(") && c.endsWith(")") && splitTop(c.slice(1, -1), " AND ").length + splitTop(c.slice(1, -1), " OR ").length >= 2) return cond(rec, c.slice(1, -1));
+    if ((m = c.match(/^\((.*)\)$/)) && !/ (AND|OR) /.test(m[1])) return cond(rec, m[1]);
     if ((m = c.match(/^([\w.]+) = '(.*)'$/))) return String(rec[m[1]] ?? "") === m[2];
     if ((m = c.match(/^([\w.]+) != '(.*)'$/))) return String(rec[m[1]] ?? "") !== m[2];
     if ((m = c.match(/^(\w+) != null$/))) return rec[m[1]] !== null && rec[m[1]] !== undefined;
@@ -134,8 +162,18 @@ function fakeWorld() {
     if ((m = c.match(/^(\w+) NOT IN \((.*)\)$/))) return !m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) IN \((.*)\)$/))) return m[2].split(",").map((x) => x.trim().replace(/^'|'$/g, "")).includes(String(rec[m[1]] ?? ""));
     if ((m = c.match(/^(\w+) INCLUDES \('(.*)'\)$/))) return String(rec[m[1]] ?? "").split(";").includes(m[2]);
-    if ((m = c.match(/^\((.*)\)$/)) && m[1].includes(" OR ")) return m[1].split(" OR ").some((sub) => cond(rec, sub));
-    if ((m = c.match(/^([\w.]+) LIKE '%(.*)%'$/))) return String(rec[m[1]] ?? "").toLowerCase().includes(m[2].toLowerCase());
+    if ((m = c.match(/^([\w.]+) LIKE '(.*)'$/))) {
+      // '%a%b%' → every piece in order, like SQL's %
+      const pieces = m[2].split("%").filter(Boolean).map((x) => x.toLowerCase());
+      const hay = String(rec[m[1]] ?? "").toLowerCase();
+      let pos = 0;
+      return pieces.every((piece) => {
+        const i = hay.indexOf(piece, pos);
+        if (i < 0) return false;
+        pos = i + piece.length;
+        return true;
+      });
+    }
     if ((m = c.match(/^(\w+) (>=|<=|<) (\S+)$/))) {
       const v = Date.parse(rec[m[1]] ?? "");
       const lit = Date.parse(m[3]);
@@ -157,7 +195,7 @@ function fakeWorld() {
     calls.queries.push(soql);
     const obj = soql.match(/FROM (\w+)/)[1];
     let where = (soql.split(" WHERE ")[1] || "").replace(/\s+(ORDER BY|LIMIT).*$/, "").trim();
-    let rows = store[obj].filter((r) => (where ? where.split(" AND ").every((c) => cond(r, c)) : true));
+    let rows = store[obj].filter((r) => (where ? cond(r, where) : true));
     const order = soql.match(/ORDER BY (\w+)( DESC)?/);
     if (order) rows = [...rows].sort((a, b) => String(a[order[1]] ?? "").localeCompare(String(b[order[1]] ?? "")) * (order[2] ? -1 : 1));
     const lim = soql.match(/LIMIT (\d+)/);
@@ -1323,6 +1361,10 @@ test("job photos: grouped by call (office at the top), the office adds at the to
   assert.deepEqual(groups.map((g) => [g.callId, g.techName, g.photos.length]), [["SC0000000000000002", "Larry Ng", 1], ["SC0000000000000001", "Jake Dorsey", 2]]);
   assert.equal(groups[1].photos[0].fileName, "20260914-c.jpg"); // newest first inside a group
   assert.match(groups[0].label, /Larry Ng · Sep 20/);
+  // The HCP migration's folder (2026-10-05): its own group, labelled, after the calls.
+  const withHcp = groupJobPhotos([...w.photos.filter((p) => p.key.includes("/photos/")), { key: `SUNDIAL/${jobId}/photos/hcp/IMG_0001.jpeg`, fileName: "x", publicUrl: "u9", size: 1, lastModified: "2026-03-01T10:00:00.000Z" }], `SUNDIAL/${jobId}/photos/`, calls);
+  assert.deepEqual(withHcp.map((g) => [g.callId, g.label]), [["SC0000000000000002", "Larry Ng · Sep 20"], ["SC0000000000000001", "Jake Dorsey · Sep 14"], ["hcp", "Housecall Pro"]]);
+  assert.equal(withHcp[2].photos[0].fileName, "IMG_0001.jpeg");
 
   // The office's route.
   let r = await call(office, "GET", `/service/jobs/${jobId}/photos`);

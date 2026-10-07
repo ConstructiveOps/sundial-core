@@ -514,6 +514,8 @@ export function onMyWayText({ customerName, techFirstName, brandName, jobNumber 
   return `Hi ${first}, ${who} is on the way to you now.${jobNumber ? ` (Job ${jobNumber})` : ""} Reply to this text if anything changes.`;
 }
 
+/** The HCP migration's photo folder under a job (lib/hcp-media.js PHOTO_FOLDER). */
+export const HCP_PHOTO_FOLDER = "hcp";
 /** Photos live under the job, in a folder per call. */
 export const photoPrefix = (jobId, callId) => `${buildKey(jobId, "photos")}/${callId}/`;
 /** The job's whole photo folder — every call's, plus what the office dropped at the top. */
@@ -538,16 +540,19 @@ export function groupJobPhotos(photos, prefix, calls = []) {
   const groups = [...byCall.entries()].map(([key, list]) => {
     const c = key === "office" ? null : callInfo.get(key) ?? null;
     const tech = c?.Tech__r ? [c.Tech__r.First_Name__c, c.Tech__r.Last_Name__c].filter(Boolean).join(" ") : null;
+    // `photos/hcp/` is the migration's pseudo-call (2026-10-05, lib/hcp-media.js): the
+    // photos Harmon's techs took in Housecall Pro, shown as their own group, oldest.
+    const migrated = key === HCP_PHOTO_FOLDER;
     return {
       callId: key === "office" ? null : key,
       callNumber: c?.Name ?? null,
       techName: tech,
-      start: c?.Scheduled_Start__c ?? c?.Actual_Start__c ?? null,
-      label: key === "office" ? "Office" : [tech ?? "Visit", c?.Scheduled_Start__c ? new Date(c.Scheduled_Start__c).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null].filter(Boolean).join(" · "),
+      start: migrated ? "" : c?.Scheduled_Start__c ?? c?.Actual_Start__c ?? null,
+      label: key === "office" ? "Office" : migrated ? "Housecall Pro" : [tech ?? "Visit", c?.Scheduled_Start__c ? new Date(c.Scheduled_Start__c).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null].filter(Boolean).join(" · "),
       photos: list.sort((a, b) => String(b.lastModified).localeCompare(String(a.lastModified))),
     };
   });
-  // Newest group first; the office's folder at the top when it has anything.
+  // Newest group first; the office's folder at the top when it has anything; the HCP group last.
   groups.sort((a, b) => (a.callId === null ? -1 : b.callId === null ? 1 : String(b.start ?? "").localeCompare(String(a.start ?? ""))));
   return groups;
 }
@@ -557,6 +562,26 @@ export function likeFor(q) {
   const t = strOrNull(q);
   if (!t) return null;
   return `'%${soqlEscapeString(t).replace(/[%_]/g, " ")}%'`;
+}
+/**
+ * The search clause for the phone's lists (2026-10-07): every WORD of the box in some
+ * field, OR the whole box as a phone number on the phone fields ("6025550100" finds
+ * "(602) 555-0100"). Same rule as the office's cache search; null without a term.
+ */
+export function searchWhere(q, fields) {
+  const t = strOrNull(q);
+  if (!t || !fields?.length) return null;
+  const words = t.split(/\s+/).filter((w) => w.length >= 2).slice(0, 6);
+  const group = (w) => `(${fields.map((f) => `${f} LIKE ${likeFor(w)}`).join(" OR ")})`;
+  const alts = [words.length > 1 ? `(${words.map(group).join(" AND ")})` : group(words[0] ?? t)];
+  const digits = t.replace(/\D/g, "");
+  const letters = t.replace(/[^A-Za-z]/g, "");
+  if (digits.length >= 7 && letters.length <= 1) {
+    const d = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+    const pattern = d.length === 10 ? `%${d.slice(0, 3)}%${d.slice(3, 6)}%${d.slice(6)}%` : d.length === 7 ? `%${d.slice(0, 3)}%${d.slice(3)}%` : `%${d.match(/.{1,3}/g).join("%")}%`;
+    for (const f of fields) if (/Phone/.test(f)) alts.push(`${f} LIKE '${pattern}'`);
+  }
+  return `(${alts.join(" OR ")})`;
 }
 export function jobToView(j) {
   return {
@@ -1539,12 +1564,12 @@ export function createTechHandlers(d, h) {
     // --- read-only lists + records (service.tech.read) ----------------------------------
     async techJobs({ ctx, query }) {
       const { tenantId, cors } = ctx;
-      const like = likeFor(query?.q);
+      const like = searchWhere(query?.q, ["Name", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c", "Billing_Reference__c"]);
       const status = strOrNull(query?.status);
       const where =
         `Client__c = '${soqlEscapeString(tenantId)}'` +
         (status ? ` AND Status__c = '${soqlEscapeString(status)}'` : like ? "" : ` AND Status__c NOT IN (${CLOSED_JOB_STATUSES.map((x) => `'${x}'`).join(", ")})`) +
-        (like ? ` AND (Name LIKE ${like} OR Customer_Name_at_Creation__c LIKE ${like} OR Address_at_Creation__c LIKE ${like} OR Primary_Phone_at_Creation__c LIKE ${like})` : "");
+        (like ? ` AND ${like}` : "");
       const rows = await d.sfQuery(`SELECT ${TECH_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
       return jsonResponse(200, cors, { q: strOrNull(query?.q), status, jobs: (rows || []).map(jobToView) });
     },
@@ -1570,12 +1595,12 @@ export function createTechHandlers(d, h) {
     },
     async techEstimates({ ctx, query }) {
       const { tenantId, cors } = ctx;
-      const like = likeFor(query?.q);
+      const like = searchWhere(query?.q, ["Name", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"]);
       const status = strOrNull(query?.status);
       const where =
         `Client__c = '${soqlEscapeString(tenantId)}' AND Is_Template__c = false` +
         (status ? ` AND Status__c = '${soqlEscapeString(status)}'` : "") +
-        (like ? ` AND (Name LIKE ${like} OR Customer_Name_at_Creation__c LIKE ${like} OR Address_at_Creation__c LIKE ${like} OR Primary_Phone_at_Creation__c LIKE ${like})` : "");
+        (like ? ` AND ${like}` : "");
       const rows = await d.sfQuery(`SELECT ${TECH_ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
       return jsonResponse(200, cors, { q: strOrNull(query?.q), status, estimates: (rows || []).map(estimateToView) });
     },
@@ -1590,13 +1615,13 @@ export function createTechHandlers(d, h) {
     },
     async techCustomers({ ctx, query }) {
       const { tenantId, cors } = ctx;
-      const like = likeFor(query?.q);
+      const like = searchWhere(query?.q, ["Name", "First_Name__c", "Last_Name__c", "Street__c", "City__c", "Postal_Code__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Primary_Email__c"]);
       // ?type=Service narrows to customers whose Customer_Type__c (multi-select) includes it.
       const type = CUSTOMER_TYPES.find((t) => t.toLowerCase() === String(query?.type || "").trim().toLowerCase()) ?? null;
       const where =
         `Client__c = '${soqlEscapeString(tenantId)}'` +
         (type ? ` AND Customer_Type__c INCLUDES ('${type}')` : "") +
-        (like ? ` AND (Name LIKE ${like} OR Street__c LIKE ${like} OR Primary_Phone__c LIKE ${like} OR Primary_Email__c LIKE ${like})` : "");
+        (like ? ` AND ${like}` : "");
       // Without a search the hub is far too big to page through on a phone: the newest 50.
       const rows = await d.sfQuery(`SELECT ${TECH_CUSTOMER_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE ${where} ORDER BY CreatedDate DESC LIMIT ${LIST_LIMIT}`);
       return jsonResponse(200, cors, { q: strOrNull(query?.q), type, customers: (rows || []).map(customerToView) });

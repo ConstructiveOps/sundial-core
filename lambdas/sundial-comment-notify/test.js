@@ -268,6 +268,27 @@ test("the three known object keys build the documented paths", () => {
   assert.equal(content.recordLink(base, "Customer", "a1P").known, true);
 });
 
+test("the comment's context picks the VIEW (2026-10-07): a customer comment from Service links to the Service page; sales / null / anything else stays Sales; jobs are unaffected", () => {
+  const base = "https://sundial.harmonelectric.net";
+  assert.equal(content.recordLink(base, "customer", "a1P", "service").url, `${base}/service/customers/a1P`);
+  assert.equal(content.recordLink(base, "customer", "a1P", "Service").url, `${base}/service/customers/a1P`);
+  assert.equal(content.recordLink(base, "customer", "a1P", "sales").url, `${base}/customers/a1P`);
+  assert.equal(content.recordLink(base, "customer", "a1P", null).url, `${base}/customers/a1P`);
+  assert.equal(content.recordLink(base, "customer", "a1P", "solar").url, `${base}/customers/a1P`, "a context that is not a view of this object changes nothing");
+  assert.equal(content.recordLink(base, "job", "a1S", "service").url, `${base}/service/jobs/a1S`);
+  assert.equal(content.recordLink(base, "customer", "a1P", "service").known, true);
+});
+
+test("end to end: a comment posted on the Service customer page links the email and the bell to the Service view", async () => {
+  fresh();
+  ctx.rows.comments = [baseComment({ context: "service" })];
+  const res = await handler(hookEvent());
+  assert.equal(res.statusCode, 200);
+  assert.equal(ctx.sent.length, 1);
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/service/customers/${RECORD_ID}`), ctx.sent[0].text);
+  assert.equal(ctx.bells[0].url, `/service/customers/${RECORD_ID}`);
+});
+
 test("an unknown or missing object key falls back to /dashboard, never a 404 link", () => {
   const base = "https://sundial.harmonelectric.net";
   for (const key of ["service", "commercial", "", null, undefined, "../admin"]) {

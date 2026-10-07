@@ -25,7 +25,9 @@ export const NEW_CUSTOMER_FIELDS = Object.freeze({
 /** The columns the duplicate matcher reads back. */
 export const CANDIDATE_SELECT =
   "Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, " +
-  "Primary_Email__c, Primary_Phone__c, Requested_Project_Types__c, Customer_Type__c";
+  "Primary_Email__c, Primary_Phone__c, Alternate_Contact_Phone__c, Alternate_Contact_Email__c, Requested_Project_Types__c, Customer_Type__c";
+/** The sweep's row cap (2026-10-07: was 25 with no ORDER BY — a real twin could fall off the end). */
+export const CANDIDATE_LIMIT = 200;
 
 const clean = (v) => (v == null ? "" : String(v).trim());
 
@@ -79,9 +81,17 @@ export function normalizeNewCustomer(input) {
  */
 export function candidateSoql(tenantId, c) {
   const ors = [];
-  if (c.email) ors.push(`Primary_Email__c = '${soqlEscapeString(c.email)}'`);
+  const email = normalizeEmail(c.email);
+  if (email) ors.push(`Primary_Email__c = '${soqlEscapeString(email)}'`, `Alternate_Contact_Email__c = '${soqlEscapeString(email)}'`);
   const phone = normalizePhone(c.phone);
-  if (phone.length >= 7) ors.push(`Primary_Phone__c LIKE '%${soqlEscapeString(phone.slice(-4))}'`);
+  // The LAST SEVEN digits (2026-10-07; was four — every number ending in the same four
+  // digits was a candidate and the real twin could fall outside the row cap), on both
+  // phone fields: the twin may have been entered under the other one.
+  if (phone.length >= 7) {
+    const tail = soqlEscapeString(phone.slice(-7));
+    const pattern = `%${tail.slice(0, 3)}%${tail.slice(3)}`;
+    ors.push(`Primary_Phone__c LIKE '${pattern}'`, `Alternate_Contact_Phone__c LIKE '${pattern}'`);
+  }
   const zip = normalizeZip(c.postalCode);
   const house = streetKey(c.street).split(" ")[0];
   if (zip && house) {
@@ -92,7 +102,7 @@ export function candidateSoql(tenantId, c) {
   if (!ors.length) return null;
   return (
     `SELECT ${CANDIDATE_SELECT} FROM ${CUSTOMER_SF_OBJECT} ` +
-    `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND (${ors.join(" OR ")}) LIMIT 25`
+    `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND (${ors.join(" OR ")}) ORDER BY CreatedDate DESC LIMIT ${CANDIDATE_LIMIT}`
   );
 }
 
@@ -107,12 +117,18 @@ export function matchCandidates(rows, c) {
   const zip = normalizeZip(c.postalCode);
   const street = streetKey(c.street);
   const out = [];
+  const house = street.split(" ")[0];
   for (const r of rows || []) {
     const reasons = [];
-    if (email && normalizeEmail(r.Primary_Email__c) === email) reasons.push("email");
-    if (phone.length === 10 && normalizePhone(r.Primary_Phone__c) === phone) reasons.push("phone");
-    if (zip && street && normalizeZip(r.Postal_Code__c) === zip && streetKey(r.Street__c) === street) {
-      reasons.push("address");
+    if (email && [r.Primary_Email__c, r.Alternate_Contact_Email__c].some((e) => normalizeEmail(e) === email)) reasons.push("email");
+    if (phone.length === 10 && [r.Primary_Phone__c, r.Alternate_Contact_Phone__c].some((p) => normalizePhone(p) === phone)) reasons.push("phone");
+    if (zip && street && normalizeZip(r.Postal_Code__c) === zip) {
+      // The same house number in the same zip is a duplicate even when the street was
+      // typed differently ("123 N Main" vs "123 Main St", 2026-10-07) — the office
+      // confirms; a wrong "possible duplicate" costs one click, a missed one costs a
+      // second customer record.
+      const rk = streetKey(r.Street__c);
+      if (rk === street || (house && /^\d+$/.test(house) && rk.split(" ")[0] === house)) reasons.push("address");
     }
     if (reasons.length) {
       out.push({

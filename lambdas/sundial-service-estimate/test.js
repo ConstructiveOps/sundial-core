@@ -108,16 +108,22 @@ test("candidateSoql is tenant-scoped and escapes input; matchCandidates matches 
   const soql = candidateSoql(TENANT, c);
   assert.ok(soql.includes(`Client__c = '${TENANT}'`));
   assert.ok(soql.includes("o\\'brien@x.com"));
-  assert.ok(soql.includes("LIKE '%1234'"));
+  assert.ok(soql.includes("Primary_Phone__c LIKE '%555%1234'"), "the last seven digits (2026-10-07), formatting-proof");
+  assert.ok(soql.includes("Alternate_Contact_Phone__c LIKE '%555%1234'"));
+  assert.ok(soql.includes("Alternate_Contact_Email__c = 'o\\'brien@x.com'"));
   assert.ok(soql.includes("Postal_Code__c LIKE '85001%'"));
+  assert.ok(soql.endsWith("ORDER BY CreatedDate DESC LIMIT 200"));
   const rows = [
     { Id: "1", Name: "A", Primary_Email__c: "O'Brien@X.com" },                       // email (case-insensitive)
     { Id: "2", Name: "B", Primary_Phone__c: "602.555.1234" },                        // phone
     { Id: "3", Name: "C", Street__c: "123 N Main", Postal_Code__c: "85001" },        // address
     { Id: "4", Name: "D", Primary_Phone__c: "480-555-1234", Street__c: "999 Main", Postal_Code__c: "85001" }, // tail-only
+    { Id: "5", Name: "E", Alternate_Contact_Phone__c: "602 555 1234" },              // the twin under the other phone field
+    { Id: "6", Name: "F", Street__c: "123 Main Street", Postal_Code__c: "85001" },   // same house number, street typed differently
+    { Id: "7", Name: "G", Street__c: "1234 N Main", Postal_Code__c: "85001" },       // a different house number
   ];
   const m = matchCandidates(rows, c);
-  assert.deepEqual(m.map((x) => [x.id, x.reasons]), [["1", ["email"]], ["2", ["phone"]], ["3", ["address"]]]);
+  assert.deepEqual(m.map((x) => [x.id, x.reasons]), [["1", ["email"]], ["2", ["phone"]], ["3", ["address"]], ["5", ["phone"]], ["6", ["address"]]]);
 });
 
 test("unionProjectTypes adds once and returns null when nothing changes", () => {
@@ -224,11 +230,11 @@ function fakeSalesforce() {
       return wanted.includes(String(rec[m[1]] ?? "").toLowerCase());
     }
     if ((m = cond.match(/^(\w+) LIKE '(.*)'$/))) {
+      // SQL's % as a regex, anchored like SQL (no leading % = starts with; no trailing % = ends with)
       const v = String(rec[m[1]] ?? "").toLowerCase();
       const pat = m[2].toLowerCase();
-      if (pat.startsWith("%")) return v.endsWith(pat.slice(1));
-      if (pat.endsWith("%")) return v.startsWith(pat.slice(0, -1));
-      return v === pat;
+      const re = new RegExp(`^${pat.split("%").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+      return re.test(v);
     }
     // datetime bounds (the invoice report, 2026-10-01)
     if ((m = cond.match(/^(\w+) (>=|<) (\d{4}-\d{2}-\d{2}T[\d:.]+Z)$/))) {
@@ -584,7 +590,7 @@ test("POST /service/customers (D-075): a NEW customer is tagged Service and open
   assert.equal(fake.notes[0].kind, "customer_unassigned");
   assert.deepEqual(fake.notes[0].userSfIds, [larry.Id], "Larry only: Paige did it, Sam is Sales, Gone is inactive, Jake is a tech");
   assert.match(fake.notes[0].title, /New Service customer — nobody assigned/);
-  assert.equal(fake.notes[0].url, `/customers/${ivy.Id}`);
+  assert.equal(fake.notes[0].url, `/service/customers/${ivy.Id}`, "the Service view (2026-10-07)");
   // an unknown picklist value is a warning, never a refusal
   const warned = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Wal", lastName: "Warn", phone: "602-555-0198" } }, intake: { inverterManufacturer: "Acme" } });
   assert.equal(warned.status, 201);

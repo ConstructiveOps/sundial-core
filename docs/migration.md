@@ -68,23 +68,57 @@ and `/invoices/{id}` are 404s; `/jobs/{id}/line_items`, `/jobs/{id}/appointments
 A child endpoint that answers 404 / 403 twenty times in a row is marked "not offered" and
 skipped for the rest of the run rather than costing 5,000 wasted calls.
 
-### The attachments gap
+### The attachments gap — closed 2026-10-05 (`lib/hcp-media.js`, `sundial-hcp-media`)
 
 HCP's public API lets an integration *add* a photo or document to a job; it does not list or
-serve the ones already there. Two routes, in order of preference:
+serve the ones already there. The route taken is the signed-in web app (Tim, 2026-10-05: HCP
+support was not asked). **What the reconnaissance found** (Claude-in-Chrome on Ben's
+session, read-only): the job page lists a job's files with
 
-1. **Ask HCP support for a bulk attachment export.** Accounts that leave are sometimes given
-   their media as a download; the request goes from Ben's admin login. Worth one email while
-   the API pull runs.
-2. **The signed-in web app.** Everything the HCP web app shows is fetched from HCP's own
-   (undocumented) endpoints with the browser's session. A one-time migration script can call
-   the same endpoints for each job id from the API pull and download the files into
-   `migration\hcp\files\<job_id>\…`. It is written *after* a short reconnaissance with the
-   Claude-in-Chrome extension on Ben's session: open one job's photos, read the network
-   calls the page makes (URL shape, how the file URLs are served, whether they are signed and
-   expiring), then build the script against that. Undocumented endpoints change without
-   notice, so the script lives only as long as the migration, and Harmon should be
-   comfortable with it (it is their data, on their login, read-only).
+    GET https://pro.housecallpro.com/api/customers/{cus_id}/attachments
+        ?attachable_uuid={job_id}&attachable_type=Job&page=1&page_size=100
+
+— nothing but the login cookie (no API key, no CSRF on a GET) — and each row carries a
+**1-hour signed S3 URL** for the original (`attachment_file_url`, bucket
+`housecall-web-request-attachments-production-us-west-2`, fetchable with no cookie at all).
+A tech's job photos are ordinary attachments (`IMG_0349.jpeg`, `source_attachment_type:
+RequestAttachment`, up to 6 MB each); "Photo reports" (`/api/jobs/{id}/attachment_reports`)
+were empty on every job sampled. 40 random jobs → 24 with files, 551 files, 1.6 GB, max 59 on
+a job, so ≈ **31,000 files / ≈ 90 GB** across the 2,265 imported jobs (jpeg 97%, a few PDFs
+and mp4s). The customer-wide listing returned only `Job`-type attachments on every sampled
+customer; estimates and customer-level files are out of scope (Tim's call).
+
+**How it moves.** `lib/hcp-media.js` lists a job, plans one deterministic S3 key per file,
+reads the signed URL and writes the object into OUR bucket, and registers the
+`sundial_file_metadata` row the Files tab reads:
+
+| HCP file | S3 key | Shows as |
+|---|---|---|
+| image/*, video/* | `SUNDIAL/{sfJobId}/photos/hcp/{name}` | the job page's Photos card, group **"Housecall Pro"** (last); the tech app's photos |
+| anything else | `SUNDIAL/{sfJobId}/{name}` | the job's Files card, category "Migrated from Housecall Pro", uploader "Housecall Pro migration" |
+
+A duplicate name on one job gets the attachment id's tail (`IMG_0001-bbbb.jpeg`). Idempotent:
+an object already there at the same size is skipped, a metadata row is never inserted twice.
+The copying runs in the **`sundial-hcp-media` Lambda** (bytes S3 → S3 inside AWS; memory
+2048 MB, timeout 15 min, stops taking jobs 90 s before the end and reports `remaining`), fed
+by `scripts/hcp-media-pull.mjs` on Tim's PowerShell, which keeps the ledger
+(`migration\hcp\media\ledger.jsonl`, one line per job per run) and resumes:
+
+    node scripts/hcp-media-pull.mjs --tenant harmon                      # dry run: list + plan
+    node scripts/hcp-media-pull.mjs --tenant harmon --apply --limit 3    # canary
+    node scripts/hcp-media-pull.mjs --tenant harmon --apply              # everything, resumable
+    node scripts/hcp-media-pull.mjs --tenant harmon --apply --retry-failed
+
+`--via local` does the same work on the PC (for a few jobs, or before the Lambda exists).
+
+**The cookie.** HCP's session cookie is HttpOnly, so Tim copies it: Chrome on
+pro.housecallpro.com → F12 → Network → any `api/...` request → Headers → Request Headers →
+the whole `cookie:` value → Secrets Manager `sundial/hcp` → a new key **`webCookie`**. The
+Lambda and the script read it through `getSecret`, send it on the list calls only (the S3
+URLs need none), and never log it. When HCP logs Ben out the run stops with
+`SESSION_EXPIRED` and resumes after a fresh copy. Undocumented endpoints change without
+notice: this lives only as long as the migration — remove `webCookie` from the secret when
+it is done.
 
 ### The import into Sundial — `scripts/hcp-import.mjs`
 

@@ -4,7 +4,7 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## Welcome Call writes: one writer per record, status precedence, call-time log order (D-082) — production bug, 2026-10-07 (branch `feature/welcome-call-concurrency`)
+## Welcome Call writes: one writer per record, status precedence, call-time log order (D-082) — DEPLOYED 2026-10-07, merged to `master`
 
 Dora Tolle (`a1P7y00000BOqojEAD`): two rep-form calls swept in parallel; the voicemail's write erased the Verified one. Confirmed in CloudWatch (two containers, 15:15:17 → 15:15:22 UTC, overlapping).
 
@@ -12,10 +12,11 @@ Dora Tolle (`a1P7y00000BOqojEAD`): two rep-form calls swept in parallel; the voi
 - [x] Status precedence replaces terminal-protection, on both result paths; attempts ceiling kept.
 - [x] Log entries in call-time order (`call_at=`), every call kept, idempotency on `call_id` (whole-id match).
 - [x] Tests (welcome-call 141, lock 6, SQL 4; the two parallel-race tests fail with the lock switched off); suite 1466. Runbook, DECISIONS (D-082), CLAUDE.md.
-- [ ] **(1) Supabase → SQL editor**: open and **Run** `sql/2026-10-07_record_locks.sql`. Its last query must print **false, false, false, false**. (Claude cannot run this — its Supabase connection is read-only.) Must happen BEFORE step 2: the new Lambda fails closed without the lock table, so every Welcome Call write would answer 409 / 503 until the SQL is in.
-- [ ] **(2)** `.\deploy.ps1 sundial-welcome-call`
-- [ ] **(3) Repair Dora** — one orphan-match run for `call_85dddbbe46a420febc8c31ccaaf`; confirm Verified, both entries (connected on top), both recordings in her Files.
-- [ ] **(4)** Merge `feature/welcome-call-concurrency` into `master` and push, in the same pass as the deploy.
+- [x] **(1)** *(done 2026-10-07, the check printed false ×4)* Supabase → SQL editor: `sql/2026-10-07_record_locks.sql`. Its last query must print **false, false, false, false**. (Claude cannot run this — its Supabase connection is read-only.) Must happen BEFORE step 2: the new Lambda fails closed without the lock table, so every Welcome Call write would answer 409 / 503 until the SQL is in.
+- [x] **(2)** `.\deploy.ps1 sundial-welcome-call` — 17:04 UTC; post-deploy CloudWatch clean.
+- [x] **(3) Dora repaired** — orphan-match for the voicemail (its header gained `call_at`), then for `call_85dddbbe46a420febc8c31ccaaf`: Verified, connected entry on top, voicemail entry preserved, both recordings in her Files.
+- [x] **(4)** Merged into `master` and pushed in the same pass as the deploy.
+- [ ] Watch: `{"recordLock":"timeout"…}` in `/aws/lambda/sundial-welcome-call` means a sweep row got a 409 and waits for the next sweep — expected to be rare; if frequent, look for a writer holding the lock too long.
 
 ## Deploy what is on `master` now: Solar pipeline (D-080 amendment 1) + company customers in the Service popups (D-081 amendment 1) — ON MASTER, NOT DEPLOYED (2026-10-07)
 

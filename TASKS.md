@@ -93,8 +93,8 @@ Found while building `docs/portal-feature-inventory.md`. None blocks Harmon; eac
 
 - [x] `docs/portal-feature-inventory.md` + the new-client checklist rewritten as built + the CLAUDE.md standing rule + D-025 amendment 1.
 - [ ] **harmon-crm: port `conops-demo`'s tenant lock** (`src/lib/tenant-lock.ts` + `AuthContext`): sign out a login whose `/auth/me` `tenant.slug` is not `clientConfig.tenantId`. One shared Supabase project means a login works at any tenant's URL today.
-- [ ] **harmon-crm: one `Brand.tsx`** instead of 14 direct imports of `harmon-logo.png` / `harmon-mark.png` (`conops-demo` § 1 has it).
-- [ ] **harmon-crm: make `client-config.ts` read** — most keys are unread; adopt `conops-demo`'s shape (`hiddenSections`, `hiddenFields`, `picklists`, integration switches). Drop `VITE_TENANT_ID` from `.env.example` (nothing reads it).
+- [ ] **harmon-crm: one `Brand.tsx`** instead of 13 direct imports of `harmon-logo.png` / `harmon-mark.png` (`conops-demo` § 1 has it).
+- [ ] **harmon-crm: make `client-config.ts` honest before the first fork** — delete or wire every setting (harmon-crm's check, 2026-10-09: only `tenantId`, `clientName` and `serviceClub` are read), fix the colours (`branding` still says red / yellow; the live theme in `index.css` is navy / green), read or remove `VITE_TENANT_ID` (documented, read by nothing). `conops-demo`'s shape (`hiddenSections`, `hiddenFields`, `picklists`, integration switches) is the model.
 - [ ] **sundial-core: per-tenant `SERVICE_TIMEZONE`, `SERVICE_SHOP_LATLNG` / geofence radius, `REMINDER_HOUR`, `EMAIL_REPLY_TO`** — today one value per Lambda, i.e. Harmon's for every tenant. Move them to the `sundial/brand` block or `Sundial_Tenant__c` (through `lib/tenant-settings.js`, primary tenant unchanged).
 - [ ] **sundial-core: one CORS allowlist** instead of six copies (already tech debt) — every new portal origin is a six-file edit + redeploy.
 - [ ] **`conops-demo`: port the rows after its copy commit `7647e2e`** (inventory rows dated 2026-09-30 evening onward), then re-check its `CLIENT_DIVERGENCE.md`.

@@ -264,7 +264,7 @@ every tenant. Know the consequences:
 2. **`src/config/client-config.ts`** — `tenantId` = the slug, names, and the switches the
    fork reads. harmon-crm's copy is mostly unread; `conops-demo` rewrote it so every key is
    read — prefer that shape.
-3. **Branding** — the logo / mark PNGs and their 14 import sites, `index.html` title,
+3. **Branding** — the logo / mark PNGs and their 13 import sites, `index.html` title,
    `public/icons/*`, `public/sw.js` `VERSION` [BRAND-ASSETS].
 4. **Remove what step 0 said no to** — PRIMARY-ONLY integrations always (Acumatica budget
    push / attribute sync / customer push, Send to Aurora, the "Not in Acumatica" invoice

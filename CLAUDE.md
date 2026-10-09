@@ -133,6 +133,8 @@ Sundial is designed from the start for multiple clients, even though Harmon is t
 
 The Harmon repo (`harmon-crm`) evolves into the canonical `sundial-template` as the platform matures. New clients fork from the template, customize via `client-config.ts`, and only fork code when configuration cannot express what's needed.
 
+**As built (D-025 amendment 1, 2026-10-09): `harmon-crm` IS the template** — there is no `sundial-template` repo. A fork is a copy of harmon-crm at a recorded commit; what it must contain is `docs/portal-feature-inventory.md`; what it does differently is its own `CLIENT_DIVERGENCE.md` (the `conops-demo` repo's is the model). The new-client checklist in `docs/multi-client-deployment.md` describes the code as built (one `Sundial_Tenant__c`, per-slug secret blocks, the portal origin in the CORS allowlist + Supabase Auth + the S3 bucket's CORS, a forked repo + Vercel project).
+
 Target scale: under 10 clients in the first two years. If the count grows past that, we revisit toward a true multi-tenant single-frontend architecture.
 
 Every Salesforce record carries a `Client__c` lookup. Every Lambda query enforces tenant filtering. This is a hard architectural rule. The tenant anchor is the dedicated `Sundial_Tenant__c` object (its `Name` holds the tenant slug, e.g. `harmon`); `Client__c` targets `Sundial_Tenant__c`.
@@ -585,6 +587,7 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 - `docs/caching-architecture.md` — Supabase cache layer, read/write paths, invalidation, Platform Events, always-fresh operations
 - `docs/file-storage.md` — S3 bucket structure, file metadata, Lambda functions, portal UI, XFiles Pro integration, Dropbox sync
 - `docs/multi-client-deployment.md` — Multi-client deployment pattern, what's shared vs forked, new client checklist, config-driven customization
+- `docs/portal-feature-inventory.md` — **The manifest of what the portal platform includes** (D-025 amendment 1): one row per user-facing capability — harmon-crm commit + files, the sundial-core dependency, Platform / Config / Code, the new-client step. A new client's fork is checked against it
 - `docs/acumatica-integration.md` — API endpoints, payloads, queue config (create when Acumatica work starts)
 - `docs/service-workflows.md` — Service ticket lifecycle, intake patterns, dispatch logic
 - `docs/migration.md` — Sunbase, HCP, and Dropbox migration plans
@@ -595,6 +598,8 @@ sundial-core is the self-contained backend base copied to stand up new tenants, 
 2. Check off the task in TASKS.md
 3. Update affected docs/ files
 4. If an architectural decision was made or changed, update this repo's `DECISIONS.md` (backend-canonical) and this CLAUDE.md
+
+**Standing rule — the portal feature inventory (D-025 amendment 1, 2026-10-09):** any PROGRESS entry — in this repo or in harmon-crm — that adds a **platform-level portal feature** (something a user of any client's portal would see or do, not a Harmon-only tweak or a backend-only change) must add its row to `docs/portal-feature-inventory.md` **in the same change**: feature · harmon-crm commit + files · the sundial-core dependency (route → Lambda, SQL file, Secrets Manager block, EventBridge rule, S3 CORS, or "client-side only") · Platform / Config / Code · the step a new client must repeat. A change that alters an existing row's dependency or new-client step updates that row. **The inventory is the manifest a new fork is checked against:** every row is present and working in the fork, or named in the fork's `CLIENT_DIVERGENCE.md`; anything else is a missing improvement. A setup step a feature needs that is not on the new-client checklist (`docs/multi-client-deployment.md`) goes on the checklist in the same change.
 
 ---
 

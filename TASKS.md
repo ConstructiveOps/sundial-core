@@ -87,6 +87,19 @@ The "before" numbers are in PROGRESS.md (2026-10-05). **Order matters: the backe
 - [ ] Watch for a week: CloudWatch Logs Insights on `/aws/lambda/sundial-sf-query` — `filter ispresent(freshness) | stats count(*) by freshness, object` — any `ttl` means that object's schedule is not landing.
 - [ ] Optional later: add `CACHE_TTL_MS` / `CACHE_SYNC_HEALTHY_MS` on `sundial-sf-query` only if the defaults (10 min / 15 min) need tuning.
 
+## Template debt before the next client (D-025 amendment 1, 2026-10-09)
+
+Found while building `docs/portal-feature-inventory.md`. None blocks Harmon; each is something a second real client would hit.
+
+- [x] `docs/portal-feature-inventory.md` + the new-client checklist rewritten as built + the CLAUDE.md standing rule + D-025 amendment 1.
+- [ ] **harmon-crm: port `conops-demo`'s tenant lock** (`src/lib/tenant-lock.ts` + `AuthContext`): sign out a login whose `/auth/me` `tenant.slug` is not `clientConfig.tenantId`. One shared Supabase project means a login works at any tenant's URL today.
+- [ ] **harmon-crm: one `Brand.tsx`** instead of 14 direct imports of `harmon-logo.png` / `harmon-mark.png` (`conops-demo` § 1 has it).
+- [ ] **harmon-crm: make `client-config.ts` read** — most keys are unread; adopt `conops-demo`'s shape (`hiddenSections`, `hiddenFields`, `picklists`, integration switches). Drop `VITE_TENANT_ID` from `.env.example` (nothing reads it).
+- [ ] **sundial-core: per-tenant `SERVICE_TIMEZONE`, `SERVICE_SHOP_LATLNG` / geofence radius, `REMINDER_HOUR`, `EMAIL_REPLY_TO`** — today one value per Lambda, i.e. Harmon's for every tenant. Move them to the `sundial/brand` block or `Sundial_Tenant__c` (through `lib/tenant-settings.js`, primary tenant unchanged).
+- [ ] **sundial-core: one CORS allowlist** instead of six copies (already tech debt) — every new portal origin is a six-file edit + redeploy.
+- [ ] **`conops-demo`: port the rows after its copy commit `7647e2e`** (inventory rows dated 2026-09-30 evening onward), then re-check its `CLIENT_DIVERGENCE.md`.
+- [ ] **harmon-crm: generalise the Harmon text in code** — `INTAKE_FIELDS` ("Did Harmon install…"), default state `AZ`, Phoenix map centre, "Harmon Job #" labels in the generated configs.
+
 ## Demo tenant `conops-demo` (Constructive Operations marketing demo) — TOOLING BUILT, NOTHING SEEDED (2026-09-30)
 
 Portal: the `conops-demo` repo (scrubbed copy of harmon-crm; its own README / CLIENT_DIVERGENCE.md). Backend: the shared Lambdas, after the D-078 guards below are deployed. Runbook: `docs/demo-tenant-seed.md`.

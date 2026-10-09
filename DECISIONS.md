@@ -501,7 +501,7 @@ Total: $95,000 across three phases.
 ## D-025: Multi-Client Deployment Architecture (Shared Backend, Forked Frontend)
 
 **Date:** 2026-06
-**Status:** Decided (the `Client__c` tenant-isolation anchor is refined by D-034, which gives the tenant a dedicated `Sundial_Tenant__c` object as its target; the shared-backend/forked-frontend pattern itself is unchanged)
+**Status:** Decided (the `Client__c` tenant-isolation anchor is refined by D-034, which gives the tenant a dedicated `Sundial_Tenant__c` object as its target; the shared-backend/forked-frontend pattern itself is unchanged). **Amended 2026-10-09** (Amendment 1, below): harmon-crm is the template; forks are checked against `docs/portal-feature-inventory.md` + their `CLIENT_DIVERGENCE.md`. As built, the Lambdas and the Supabase project are shared too (D-078).
 
 **Context:** Sundial is being built first for Harmon but is intended as a platform that can serve multiple clients over time. Need a deployment architecture that supports scaling to additional clients without rebuilding the platform per client.
 
@@ -525,6 +525,19 @@ The Harmon repo evolves into a canonical `sundial-template` repo. New clients fo
 - New client onboarding follows a documented checklist (1-2 days target).
 
 Full pattern documented in `docs/multi-client-deployment.md`.
+
+**Amendment 1 (2026-10-09): the feature inventory and `CLIENT_DIVERGENCE.md` are how a fork is kept whole.**
+
+*Context.* Four weeks of Service-module work (2026-09-10 → 10-07: ~50 harmon-crm commits — the office screens, the tech app, the dispatch board and events, card on file, the hosted pages, the Service Club, notifications and push, the server-side lists, company customers, the photo viewer) landed in harmon-crm and nowhere else. The one fork that exists, `conops-demo`, was copied on 2026-09-30 and already lacks everything after that commit; nothing said so. Several features also carry a setup step nobody had written down — the clearest is **Download all as zip**, which is client-side code but `fetch()`es every photo from S3, so it works only while the `sfsolproj` bucket's own CORS allows the portal origin. And the "Spinning Up a New Client" checklist still described the D-025 design (a Supabase project, Lambdas and an S3 prefix per client, a `sundial-template` repo), not what D-078 built.
+
+*Decision.*
+1. **harmon-crm is the template.** There is no `sundial-template` repo; a new client's portal is a copy of harmon-crm at a recorded commit.
+2. **`docs/portal-feature-inventory.md` (this repo) is the manifest of what the portal platform includes** — one row per user-facing capability: the harmon-crm commit and files, the sundial-core dependency it needs (route → Lambda, SQL file, Secrets Manager block, EventBridge rule, S3 CORS — or client-side only), whether it is Platform, Config or Harmon-specific Code, and the step a new client repeats. Rows carry the commit they arrived in, so a fork's gap is "every row after its copy commit".
+3. **Each fork's `CLIENT_DIVERGENCE.md` (repo root) lists every deliberate difference** — what was removed, re-labelled, hidden or overridden, and the upstream commit it was copied from (`conops-demo`'s is the model). **A fork is checked by walking the inventory: every row is present and working, or named in `CLIENT_DIVERGENCE.md`.** Anything else is a missing improvement.
+4. **The inventory is maintained in the same change as the feature:** a PROGRESS entry (here or in harmon-crm) that adds a platform-level portal feature adds its row. Standing rule in CLAUDE.md → Documentation Requirements.
+5. **The new-client checklist describes the code as built** (`docs/multi-client-deployment.md`, rewritten 2026-10-09): a `Sundial_Tenant__c` record, per-slug blocks in `sundial/brand` / `twilio` / `stripe` / `service-club`, the portal origin in the six-file CORS allowlist + Supabase Auth's redirect list + the bucket's CORS, a forked repo and Vercel project — and nothing per client in Salesforce sharing, Lambdas, Supabase or S3.
+
+*Consequences.* Porting an improvement to a fork is now an explicit list, not archaeology. The inventory surfaced template debt to clear before the next client: harmon-crm lacks the tenant lock `conops-demo` added (a login works at any tenant's URL on the shared Supabase project); its `client-config.ts` is mostly unread; 14 files import Harmon's logo directly; `SERVICE_TIMEZONE`, `SERVICE_SHOP_LATLNG`, `REMINDER_HOUR` and `EMAIL_REPLY_TO` are one value per Lambda and therefore Harmon's for every tenant. Recorded, not fixed here (TASKS.md). Documentation only — no code, no deploy.
 
 ---
 

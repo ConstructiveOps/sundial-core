@@ -24,6 +24,7 @@ import {
   soqlDateTime,
   UNSCHEDULED_JOB_STATUSES,
   CALL_SELECT,
+  snapToSlot,
 } from "./index.js";
 import {
   groupJobPhotos,
@@ -182,14 +183,20 @@ function fakeWorld() {
     }
     throw new Error(`fake SOQL cannot evaluate: ${c}`);
   }
+  // job → its customer's email, the way Salesforce nests Sundial_Customer__r (null when no lookup).
+  const withCustomer = (j) => {
+    const cu = store.Sundial_Customer__c.find((x) => x.Id === j.Sundial_Customer__c);
+    return { ...j, Sundial_Customer__r: cu ? { Primary_Email__c: cu.Primary_Email__c ?? null } : null };
+  };
   const join = (obj, r) => {
     const out = { ...r };
     if (obj === "Sundial_Service_Call__c") {
       const t = store.Sundial_User__c.find((u) => u.Id === r.Tech__c);
       out.Tech__r = t ? { First_Name__c: t.First_Name__c, Last_Name__c: t.Last_Name__c } : null;
       const j = store.Sundial_Service_Job__c.find((x) => x.Id === r.Sundial_Service_Job__c);
-      out.Sundial_Service_Job__r = j ? { ...j } : null;
+      out.Sundial_Service_Job__r = j ? withCustomer(j) : null;
     }
+    if (obj === "Sundial_Service_Job__c") return withCustomer(out);
     return out;
   };
   const sfQuery = async (soql) => {
@@ -350,6 +357,65 @@ test("GET /service/board: calls in the window only, the tray in priority/age ord
   assert.equal(bad.body.code, "WINDOW_TOO_WIDE");
   const bad2 = await call(h, "GET", "/service/board", null, { from: "nope" });
   assert.equal(bad2.body.code, "WINDOW_INVALID");
+});
+
+test("GET /service/board: customerEmail on tray jobs, calls and unscheduled calls — the job's snapshot, else the customer's", async () => {
+  const w = fakeWorld();
+  // Cy's customer row gets an email; job SVC-00003 has no snapshot, so the call falls back to it.
+  w.store.Sundial_Customer__c.find((c) => c.Id === "CUS000000000000003").Primary_Email__c = "cy@example.com";
+  // An unscheduled call on SVC-00001 (snapshot ann@ wins over anything on the customer).
+  w.store.Sundial_Service_Call__c.push({ Id: "SC0000000000000077", Client__c: TENANT, Name: "SC-00077", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000001", Status__c: "Unscheduled", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" });
+  const h = makeHandler(w);
+  const r = await call(h, "GET", "/service/board", null, { from: "2026-09-14T07:00:00.000Z", to: "2026-09-15T07:00:00.000Z" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.calls[0].customerEmail, "cy@example.com");
+  assert.deepEqual(r.body.unscheduledCalls.map((c) => [c.number, c.customerEmail]), [["SC-00077", "ann@example.com"]]);
+  // SVC-00001 is now its call's card, so the tray holds SVC-00002: no snapshot → the customer's email.
+  assert.deepEqual(r.body.unscheduled.map((j) => [j.jobNumber, j.customerEmail]), [["SVC-00002", "bo@example.com"]]);
+  assert.ok(w.calls.queries.some((q) => q.includes("Sundial_Service_Job__r.Sundial_Customer__r.Primary_Email__c")));
+  assert.ok(w.calls.queries.some((q) => q.includes("FROM Sundial_Service_Job__c") && q.includes("Sundial_Customer__r.Primary_Email__c")));
+  // No email anywhere → null, never undefined; an event has none.
+  assert.equal(callToBoard({ Id: "X", Sundial_Service_Job__r: { Sundial_Customer__r: null } }).customerEmail, null);
+  assert.equal(callToBoard({ Id: "X", Visit_Type__c: "Event", Event_Name__c: "Training" }).customerEmail, null);
+});
+
+test("PATCH /service/calls/{id}: `end` alone resizes (start + tech untouched); end <= start is a 400; times snap to 15 minutes", async () => {
+  const w = fakeWorld();
+  const h = makeHandler(w);
+  const id = "SC0000000000000001"; // 16:00–18:00Z, Jake
+
+  // The board's drag-to-resize: end + baseModstamp, nothing else.
+  const resized = await call(h, "PATCH", `/service/calls/${id}`, { end: "2026-09-14T19:00:00.000Z", baseModstamp: "2026-09-12T10:00:00Z" });
+  assert.equal(resized.status, 200, JSON.stringify(resized.body));
+  assert.deepEqual(w.calls.updates.at(-1).fields, { Scheduled_End__c: "2026-09-14T19:00:00.000Z" });
+  assert.equal(resized.body.call.start, "2026-09-14T16:00:00.000Z");
+  assert.equal(resized.body.call.techId, "USR000000000000001");
+
+  // end <= start: a named 400, nothing written.
+  const n = w.calls.updates.length;
+  const before = await call(h, "PATCH", `/service/calls/${id}`, { end: "2026-09-14T15:00:00.000Z" });
+  assert.equal(before.status, 400);
+  assert.equal(before.body.code, "WINDOW_INVALID");
+  const same = await call(h, "PATCH", `/service/calls/${id}`, { end: "2026-09-14T16:00:00.000Z" });
+  assert.equal(same.body.code, "WINDOW_INVALID");
+  // 16:05 rounds to 16:00 = the start: refused after rounding, not written as a zero-length call.
+  const rounded = await call(h, "PATCH", `/service/calls/${id}`, { end: "2026-09-14T16:05:00.000Z" });
+  assert.equal(rounded.body.code, "WINDOW_INVALID");
+  assert.equal(w.calls.updates.length, n);
+
+  // Off-grid times round to the NEAREST quarter hour: :07 → :00, :08 → :15.
+  await call(h, "PATCH", `/service/calls/${id}`, { end: "2026-09-14T20:07:00Z" });
+  assert.deepEqual(w.calls.updates.at(-1).fields, { Scheduled_End__c: "2026-09-14T20:00:00.000Z" });
+  await call(h, "PATCH", `/service/calls/${id}`, { start: "2026-09-14T16:08:00Z" });
+  assert.deepEqual(w.calls.updates.at(-1).fields, { Scheduled_Start__c: "2026-09-14T16:15:00.000Z" });
+
+  // Scheduling from the tray snaps too; the default length runs from the snapped start.
+  const made = await call(h, "POST", "/service/jobs/SVC000000000000001/calls", { techId: "USR000000000000001", start: "2026-09-15T16:07:00Z" });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  assert.equal(w.calls.creates.at(-1).fields.Scheduled_Start__c, "2026-09-15T16:00:00.000Z");
+  assert.equal(w.calls.creates.at(-1).fields.Scheduled_End__c, "2026-09-15T18:00:00.000Z");
+  assert.equal(snapToSlot("2026-09-15T16:52:30.000Z"), "2026-09-15T17:00:00.000Z"); // the half-way point rounds up
+  assert.equal(snapToSlot(null), null);
 });
 
 test("POST /service/jobs/{id}/calls: schedules, moves the job to Scheduled, logs, stales, broadcasts, emails the customer", async () => {

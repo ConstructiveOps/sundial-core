@@ -1,5 +1,15 @@
 # Sundial — Progress Log
 
+## 2026-10-09 — Dispatch board: `customerEmail` on every card, `end`-only resize confirmed, times snap to 15 minutes
+
+For the portal's tray search and drag-to-resize (`sundial-service-board`).
+
+- **`customerEmail`** on every `TrayJob` (`unscheduled`) and every `BoardCall` (`calls`, `unscheduledCalls`, broadcasts): the job's `Primary_Email_at_Creation__c`, else the customer's current `Primary_Email__c` (`jobEmail()`), else `null`; `null` on an event. Read in the same queries (`Sundial_Service_Job__r.Sundial_Customer__r.Primary_Email__c` in `CALL_SELECT`, `Sundial_Customer__r.Primary_Email__c` in `JOB_SELECT`) — no extra Salesforce call. `Sundial_Service_Job__r.Primary_Email_at_Creation__c` moved from the tech app's `TECH_CALL_EXTRA` into `CALL_SELECT` (Salesforce refuses a field named twice — the 2026-09-25 tech-day 500; the duplicate test still guards it).
+- **`PATCH /service/calls/{id}` with `end` alone** already worked (start and tech kept); now pinned by a test. `end <= start` is `400 WINDOW_INVALID` (the existing code, so the portal's handling is unchanged), nothing written.
+- **Quarter-hour snap on the server** (`snapToSlot`): `start` / `end` on `POST /service/jobs/{id}/calls`, `PATCH /service/calls/{id}` and `POST /service/events` are rounded to the NEAREST 15 minutes before the write (`:07` → `:00`, `:08` → `:15`); the `end > start` check runs after rounding. Only times sent are snapped — a stored value is never rewritten.
+
+Tests: 2 new in `lambdas/sundial-service-board/test.js` (the fake Salesforce now nests `Sundial_Customer__r` under the job). Full suite 1,473 pass. Docs: `docs/api-endpoints.md` (BoardCall / TrayJob shapes, the snap, the resize). Deploy: `.\deploy.ps1 sundial-service-board`. Backend-only — the portal side's inventory row comes with the harmon-crm change.
+
 ## 2026-10-09 — The feature inventory corrected from harmon-crm's check
 
 harmon-crm checked `docs/portal-feature-inventory.md` against `main` @ `a9abd1e` (its PROGRESS.md, 2026-10-09: all 115 rows present, all 44 hashes exist) and sent corrections, applied here. **Fixed:** the logo import count is 13, not 14 (inventory, `multi-client-deployment.md`, D-025 amendment 1, TASKS); S29 names `ListView.tsx` for `SortableHead` / `ViewToggle` / `StatusBoard`; S36 names the week picker; T6 / L7's Customer Type "chips" are a filter. **Added:** S49, the desktop price-book picker's live-Salesforce fallback + load errors (`7079e9c`); and *Baseline features named individually* B1–B12 — change password, header search, active-users-only dropdowns, per-Status Sales columns, `visibleWhen`, the Solar mirror tabs on the customer, the top scrollbar, the partial-load banner, the section rail, the ranked mention picker, the Coming-soon pages, the Dashboard page (dated to its creation `e1782ac` 06-30; harmon-crm cited the shell commit `9973554`). **TASKS:** "make `client-config.ts` honest before the first fork" replaces the earlier client-config item. Documentation only.

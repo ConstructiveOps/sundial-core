@@ -105,6 +105,9 @@ export const CALL_SELECT =
   "Sundial_Service_Job__r.Name, Sundial_Service_Job__r.Status__c, Sundial_Service_Job__r.Priority__c, " +
   "Sundial_Service_Job__r.Service_Type__c, Sundial_Service_Job__r.Customer_Name_at_Creation__c, " +
   "Sundial_Service_Job__r.Address_at_Creation__c, Sundial_Service_Job__r.Primary_Phone_at_Creation__c, " +
+  // The tray / board search matches on email too (2026-10-09): the job's snapshot, else the
+  // customer's current one. (Was in the tech app's TECH_CALL_EXTRA; moved here, never twice.)
+  "Sundial_Service_Job__r.Primary_Email_at_Creation__c, Sundial_Service_Job__r.Sundial_Customer__r.Primary_Email__c, " +
   "Sundial_Service_Job__r.Bill_To_Type__c, Sundial_Service_Job__r.Sundial_Customer__c, " +
   // The hover card + the invoice border on the dispatch board (2026-09-23).
   "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Payment_Status__c";
@@ -128,7 +131,8 @@ export function invoiceStateFor({ jobStatus, paymentStatus, invoiceStatus }) {
 export const JOB_SELECT =
   "Id, Name, Client__c, Status__c, Priority__c, Service_Type__c, Customer_Name_at_Creation__c, Address_at_Creation__c, " +
   "Primary_Phone_at_Creation__c, Primary_Email_at_Creation__c, Issue_Description__c, Sundial_Customer__c, Estimate__c, " +
-  "Estimate_Total__c, Bill_To_Type__c, Customer_Summary__c, Geocode_Lat__c, Geocode_Lon__c, Geocode_Status__c, CreatedDate, SystemModstamp";
+  "Estimate_Total__c, Bill_To_Type__c, Customer_Summary__c, Geocode_Lat__c, Geocode_Lon__c, Geocode_Status__c, CreatedDate, SystemModstamp, " +
+  "Sundial_Customer__r.Primary_Email__c";
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
@@ -146,6 +150,16 @@ const isoOrNull = (v) => {
   const t = Date.parse(s);
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
+/**
+ * The board's grid is 15 minutes (2026-10-09). A start / end that is not on a quarter hour —
+ * a hand-typed 10:07 through the API — is rounded to the NEAREST quarter hour (10:07 → 10:00,
+ * 10:08 → 10:15) before it reaches Salesforce. The portal never sends one. Every UTC quarter
+ * hour is a Phoenix quarter hour, so rounding in UTC is rounding on the wall clock.
+ */
+export const SLOT_MS = 15 * 60000;
+export const snapToSlot = (iso) => (iso ? new Date(Math.round(Date.parse(iso) / SLOT_MS) * SLOT_MS).toISOString() : iso);
+/** The email a card can be searched by: the job's snapshot, else the customer's current one. */
+export const jobEmail = (job) => strOrNull(job?.Primary_Email_at_Creation__c) ?? strOrNull(job?.Sundial_Customer__r?.Primary_Email__c);
 /** SOQL datetime literal: unquoted, no fractional seconds (Salesforce rejects millis). */
 export const soqlDateTime = (iso) => new Date(iso).toISOString().replace(/\.\d{3}Z$/, "Z");
 const techName = (r) => [r?.First_Name__c, r?.Last_Name__c].filter(Boolean).join(" ").trim() || r?.Email__c || r?.Id || null;
@@ -179,6 +193,7 @@ export function callToBoard(c, invoiceByJob = null) {
     customerName: event ? c.Event_Name__c ?? null : job.Customer_Name_at_Creation__c ?? null,
     address: job.Address_at_Creation__c ?? null,
     phone: job.Primary_Phone_at_Creation__c ?? null,
+    customerEmail: event ? null : jobEmail(job),
     issueDescription: event ? c.Event_Details__c ?? null : job.Issue_Description__c ?? null,
     paymentStatus: job.Payment_Status__c ?? null,
     invoiceStatus,
@@ -239,6 +254,7 @@ export function jobToTray(j, now) {
     customerName: j.Customer_Name_at_Creation__c ?? null,
     address: j.Address_at_Creation__c ?? null,
     phone: j.Primary_Phone_at_Creation__c ?? null,
+    customerEmail: jobEmail(j),
     issue: j.Issue_Description__c ?? null,
     estimateTotal: j.Estimate_Total__c ?? null,
     ageDays: Number.isFinite(created) ? Math.max(0, Math.floor((now.getTime() - created) / 86400000)) : null,
@@ -740,8 +756,8 @@ export function createHandler(deps = {}) {
         return jsonResponse(409, cors, { error: "job_closed", code: "JOB_CLOSED", status: job.Status__c, message: "This job is billed or closed; reopen it before scheduling." });
       }
       const techId = strOrNull(body?.techId);
-      const start = isoOrNull(body?.start);
-      const end = isoOrNull(body?.end) ?? (start ? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString() : null);
+      const start = snapToSlot(isoOrNull(body?.start));
+      const end = snapToSlot(isoOrNull(body?.end)) ?? (start ? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString() : null);
       // `unscheduled: true` (or simply no start) creates the call without a window: it
       // goes to the dispatch tray and is scheduled from there. A tech is optional then.
       const unscheduled = body?.unscheduled === true || !start;
@@ -802,9 +818,9 @@ export function createHandler(deps = {}) {
       const name = strOrNull(body?.name);
       if (!name) return bad(cors, "NAME_REQUIRED", "Give the event a name (it is what the techs and the payroll report see).");
       const details = strOrNull(body?.details);
-      const start = isoOrNull(body?.start);
+      const start = snapToSlot(isoOrNull(body?.start));
       if (!start) return bad(cors, "START_REQUIRED", "start must be an ISO datetime.");
-      const end = isoOrNull(body?.end) ?? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString();
+      const end = snapToSlot(isoOrNull(body?.end)) ?? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString();
       if (Date.parse(end) <= Date.parse(start)) return bad(cors, "WINDOW_INVALID", "end must be after start.");
       // A range (2026-10-05): `untilDate` + `repeat` → the same window on each matching day.
       const expanded = eventOccurrences({ start, end, repeat: strOrNull(body?.repeat), untilDate: strOrNull(body?.untilDate), timeZone: DEFAULTS.timeZone });
@@ -891,9 +907,12 @@ export function createHandler(deps = {}) {
       }
       const wasUnscheduled = call.Status__c === "Unscheduled";
       if (has("start") || has("end")) {
-        const start = has("start") ? isoOrNull(body.start) : call.Scheduled_Start__c;
+        // `end` alone is a resize (the board's drag-to-resize): the start and the tech stay.
+        // Only what was SENT is snapped to the quarter hour — a stored value is never
+        // rewritten as a side effect.
+        const start = has("start") ? snapToSlot(isoOrNull(body.start)) : call.Scheduled_Start__c;
         // An unscheduled call being given a start gets the default length unless told.
-        const end = has("end") ? isoOrNull(body.end) : call.Scheduled_End__c ?? (start ? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString() : null);
+        const end = has("end") ? snapToSlot(isoOrNull(body.end)) : call.Scheduled_End__c ?? (start ? new Date(Date.parse(start) + DEFAULTS.callMinutes * 60000).toISOString() : null);
         if (!start || !end) return bad(cors, "WINDOW_INVALID", "start and end must be ISO datetimes.");
         if (Date.parse(end) <= Date.parse(start)) return bad(cors, "WINDOW_INVALID", "end must be after start.");
         if (start !== call.Scheduled_Start__c) { fields.Scheduled_Start__c = start; changes.Scheduled_Start__c = { from: call.Scheduled_Start__c, to: start }; }

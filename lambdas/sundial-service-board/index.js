@@ -57,6 +57,7 @@ import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realDeleteObject, realListPhotos, realPresignPut } from "./tech.js";
 import { createDayHandlers } from "./day.js";
+import { createPayrollAdjustments } from "../../lib/payroll-adjustments.js";
 import { eventOccurrences, MAX_OCCURRENCES, REPEATS } from "./events.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
@@ -351,6 +352,11 @@ const ROUTES = [
   // The techs' last clocked spots for the dispatch map, and the Admin payroll report (day.js, D-076).
   ["GET", /^\/service\/techs\/locations\/?$/, "techLocations"],
   ["GET", /^\/service\/payroll\/?$/, "payroll"],
+  // The office's weekly Time Outside Calls, typed with a reason (2026-10-12).
+  ["PUT", /^\/service\/payroll\/outside\/?$/, "payrollOutsideSet"],
+  ["DELETE", /^\/service\/payroll\/outside\/?$/, "payrollOutsideClear"],
+  // One call as the board sees it (2026-10-12): the Payroll tab's Fix time opens the clock editor from here.
+  ["GET", /^\/service\/calls\/([^/]+)\/?$/, "callGet"],
   // The technician app (tech.js). Order matters: "photos/confirm" before "photos", "day/start" before "day".
   ["POST", /^\/service\/tech\/day\/start\/?$/, "techDayStart"],
   ["POST", /^\/service\/tech\/day\/end\/?$/, "techDayEnd"],
@@ -408,6 +414,9 @@ const ACTION_FOR = Object.freeze({
   techSchedule: "service.tech.read",
   techLocations: "service.board.read",
   payroll: "service.payroll.read", // Admin / Executive only (lib/access.js ACTION_LEVELS)
+  payrollOutsideSet: "service.payroll.write", // Admin / Executive only
+  payrollOutsideClear: "service.payroll.write",
+  callGet: "service.board.read",
   techPriceBook: "service.tech.self",
   techCall: "service.tech.self",
   techStatus: "service.tech.self",
@@ -486,6 +495,8 @@ export function createHandler(deps = {}) {
     ...deps,
     sfQuery: guardedSfQuery,
   };
+  // The office's weekly Time Outside Calls (2026-10-12): Supabase rows through the service role.
+  if (!d.payrollAdjustments) d.payrollAdjustments = createPayrollAdjustments({ getSupabaseClient: d.getSupabaseClient });
   // The tech's "on my way" text goes through the same sender as the office's panel.
   const sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, broadcast: d.broadcast, now: d.now, env: d.env, ...(d.sendSms ? { sendSms: d.sendSms } : {}) });
   // Notifications (D-074): the tech's bell / phone when the office changes their board.
@@ -1128,6 +1139,12 @@ export function createHandler(deps = {}) {
   // clock-in can start the day and GET /service/tech/day can report it.
   const days = createDayHandlers(d, { CALL_SF_OBJECT, CALL_SELECT, DEFAULTS, loadTech, loadTechs, techName, soqlDateTime, jsonResponse, bad, sfError });
   Object.assign(H, days.handlers);
+  // One call, as the board sees it (2026-10-12) — the Payroll tab's Fix time starts here.
+  H.callGet = async ({ ctx, params }) => {
+    const row = await loadCall(params[0], ctx.tenantId);
+    if (!row) return notFound(ctx.cors);
+    return jsonResponse(200, ctx.cors, { call: callToBoard(row) });
+  };
   Object.assign(
     H,
     createTechHandlers(d, {

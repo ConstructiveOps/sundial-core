@@ -37,6 +37,10 @@
 
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { dayBounds, gpsFrom, liveIntervals, localDate, openIntervalIndex, parseIntervals, resolveEventAt } from "./tech.js";
+import { adjustmentView, parseAdjustmentInput } from "../../lib/payroll-adjustments.js";
+
+/** A live interval still on the clock (no out). */
+const isLiveOpen = (i) => liveIntervals([i]).length === 1 && !i.out;
 
 export const DAY_SF_OBJECT = "Sundial_Tech_Day__c";
 export const DAY_SELECT =
@@ -211,7 +215,12 @@ export function callSubject(c) {
   return { key: c?.Sundial_Service_Job__c ?? "__none", jobId: c?.Sundial_Service_Job__c ?? null, jobNumber: j.Name ?? null, customer: j.Customer_Name_at_Creation__c ?? null, address: j.Address_at_Creation__c ?? null };
 }
 
-export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
+/**
+ * `adjustments` (2026-10-12): Map techId → sundial_payroll_adjustments row — the office's
+ * weekly Time Outside Calls, typed with a reason. When one exists it IS the tech's outside
+ * number (totals, the grand total, the CSV); the arithmetic stays on `outside.computedMinutes`.
+ */
+export function buildPayroll({ techs, days, calls, week, timeZone, now, adjustments = new Map() }) {
   const nowMs = Date.parse(now);
   const today = localDate(new Date(nowMs), timeZone);
   const weekFrom = Date.parse(week.from);
@@ -249,11 +258,21 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
         const subject = callSubject(c);
         const jobId = subject.key;
         if (!jobs.has(jobId)) {
-          jobs.set(jobId, { jobId: subject.jobId, jobNumber: subject.jobNumber, customer: subject.customer, address: subject.address, ms: 0, calls: new Set() });
+          jobs.set(jobId, { jobId: subject.jobId, jobNumber: subject.jobNumber, customer: subject.customer, address: subject.address, ms: 0, calls: new Set(), callDetails: [] });
         }
         const jr = jobs.get(jobId);
         jr.ms += ms;
         jr.calls.add(c.Id);
+      }
+      // The call itself, for the Payroll tab's "Fix time" (2026-10-12): its clock in the week,
+      // so the office can pick the right one when a job had several.
+      if (spans.length) {
+        const subject = callSubject(c);
+        const jr = jobs.get(subject.key);
+        const first = spans.reduce((m, [a]) => Math.min(m, a), Infinity);
+        const last = spans.reduce((m, [, b]) => Math.max(m, b), 0);
+        const open = intervals.some((i) => isLiveOpen(i));
+        jr.callDetails.push({ id: c.Id, number: c.Name ?? null, date: localDate(new Date(first), timeZone), in: new Date(first).toISOString(), out: open ? null : new Date(last).toISOString(), open, status: c.Status__c ?? null, minutes: toMinutes(spans.reduce((n, [a, b]) => n + (b - a), 0)), corrected: intervals.some((i) => Array.isArray(i.corrections) && i.corrections.length > 0) });
       }
     }
 
@@ -305,15 +324,18 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
       }
     }
     const jobRows = [...jobs.values()]
-      .map((j) => ({ jobId: j.jobId, jobNumber: j.jobNumber, customer: j.customer, address: j.address, minutes: toMinutes(j.ms), hours: hoursOf(toMinutes(j.ms)), calls: j.calls.size }))
+      .map((j) => ({ jobId: j.jobId, jobNumber: j.jobNumber, customer: j.customer, address: j.address, minutes: toMinutes(j.ms), hours: hoursOf(toMinutes(j.ms)), calls: j.calls.size, callDetails: j.callDetails.sort((a, b) => a.in.localeCompare(b.in)) }))
       .sort((a, b) => b.minutes - a.minutes);
     const callMinutes = toMinutes(callMs);
-    const outsideMinutes = toMinutes(outsideMs);
+    const computedOutsideMinutes = toMinutes(outsideMs);
+    const adjustment = adjustmentView(adjustments.get(tech.id) ?? null);
+    const outsideMinutes = adjustment ? adjustment.minutes : computedOutsideMinutes;
     rows.push({
       tech: { id: tech.id, name: tech.name },
       jobs: jobRows,
       days: dayRows,
-      totals: { callMinutes, outsideMinutes, totalMinutes: callMinutes + outsideMinutes, callHours: hoursOf(callMinutes), outsideHours: hoursOf(outsideMinutes), totalHours: hoursOf(callMinutes + outsideMinutes) },
+      totals: { callMinutes, outsideMinutes, totalMinutes: callMinutes + outsideMinutes, callHours: hoursOf(callMinutes), outsideHours: hoursOf(outsideMinutes), totalHours: hoursOf(callMinutes + outsideMinutes), computedOutsideMinutes, computedOutsideHours: hoursOf(computedOutsideMinutes) },
+      outside: { computedMinutes: computedOutsideMinutes, computedHours: hoursOf(computedOutsideMinutes), adjusted: !!adjustment, adjustment },
       notes: dayRows.filter((r) => r.note).map((r) => ({ date: r.date, note: r.note })),
     });
   }
@@ -626,8 +648,49 @@ export function createDayHandlers(d, h) {
         loadDays(tenantId, `Work_Date__c >= ${week.monday} AND Work_Date__c <= ${week.sunday}${techWhere}`),
       ]);
       const wanted = techFilter ? techs.filter((t) => t.id === techFilter) : techs;
-      const report = buildPayroll({ techs: wanted, days, calls, week, timeZone: tz(), now: now.toISOString() });
+      const adjustments = d.payrollAdjustments ? await d.payrollAdjustments.forWeek({ tenantId, weekMonday: week.monday }) : new Map();
+      const report = buildPayroll({ techs: wanted, days, calls, week, timeZone: tz(), now: now.toISOString(), adjustments });
       return jsonResponse(200, cors, report);
+    },
+
+    // --- Admin: the week's Time Outside Calls, typed (2026-10-12) --------------------------
+    /**
+     * PUT /service/payroll/outside { techId, week, hours | minutes, reason } — the number the
+     * week shows for this tech, with the arithmetic kept beside it. DELETE …?techId=&week=
+     * brings the arithmetic back. Both `service.payroll.write` (Admin / Executive).
+     */
+    async payrollOutsideSet({ ctx, body }) {
+      const { tenantId, cors } = ctx;
+      if (!d.payrollAdjustments) return jsonResponse(503, cors, { error: "not_configured", code: "ADJUSTMENTS_UNAVAILABLE", message: "Payroll adjustments are not set up (sql/2026-10-12_payroll_adjustments.sql)." });
+      const techId = strOrNull(body?.techId);
+      if (!techId || !SF_ID_RE.test(techId)) return bad(cors, "TECH_INVALID", "techId must be a Salesforce id.");
+      const monday = weekMonday(strOrNull(body?.week) ?? "");
+      if (!monday) return bad(cors, "WEEK_INVALID", "week must be YYYY-MM-DD.");
+      const parsed = parseAdjustmentInput(body);
+      if (!parsed.ok) return bad(cors, parsed.code, parsed.message);
+      const tech = await h.loadTech(techId, tenantId);
+      if (!tech) return jsonResponse(404, cors, { error: "not_found", code: "TECH_NOT_FOUND", message: "That technician is not in this tenant." });
+      // The arithmetic at the moment of the change, kept on the row for the "was 5.2 h" note.
+      const week = weekBounds(monday, tz());
+      const now = d.now();
+      const me = `Tech__c = '${soqlEscapeString(tech.Id)}'`;
+      const [calls, days] = await Promise.all([
+        loadCalls(tenantId, `${me} AND Actual_Start__c >= ${h.soqlDateTime(new Date(Date.parse(week.from) - 86400000).toISOString())} AND Actual_Start__c < ${h.soqlDateTime(new Date(Date.parse(week.to) + 86400000).toISOString())}`),
+        loadDays(tenantId, `${me} AND Work_Date__c >= ${week.monday} AND Work_Date__c <= ${week.sunday}`),
+      ]);
+      const computed = buildPayroll({ techs: [{ id: tech.Id, name: h.techName ? h.techName(tech) : tech.Id }], days, calls, week, timeZone: tz(), now: now.toISOString() }).techs[0].outside.computedMinutes;
+      const row = await d.payrollAdjustments.set({ tenantId, techId: tech.Id, weekMonday: monday, minutes: parsed.minutes, computedMinutes: computed, reason: parsed.reason, actor: ctx.actor, now: now.toISOString() });
+      return jsonResponse(200, cors, { success: true, techId: tech.Id, week: monday, adjustment: adjustmentView(row) });
+    },
+    async payrollOutsideClear({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      if (!d.payrollAdjustments) return jsonResponse(503, cors, { error: "not_configured", code: "ADJUSTMENTS_UNAVAILABLE", message: "Payroll adjustments are not set up (sql/2026-10-12_payroll_adjustments.sql)." });
+      const techId = strOrNull(query?.techId);
+      if (!techId || !SF_ID_RE.test(techId)) return bad(cors, "TECH_INVALID", "techId must be a Salesforce id.");
+      const monday = weekMonday(strOrNull(query?.week) ?? "");
+      if (!monday) return bad(cors, "WEEK_INVALID", "week must be YYYY-MM-DD.");
+      await d.payrollAdjustments.clear({ tenantId, techId, weekMonday: monday });
+      return jsonResponse(200, cors, { success: true, techId, week: monday, adjustment: null });
     },
   };
   return { handlers, ops };

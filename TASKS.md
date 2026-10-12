@@ -4,6 +4,11 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Payroll tab fixes: Fix time on job rows, the week's Time Outside Calls typed (2026-10-12, Harmon)
+
+- [x] `lib/payroll-adjustments.js` (+ test), `sql/2026-10-12_payroll_adjustments.sql`, `day.js` (`callDetails` per job row, `outside` + adjusted totals, `payrollOutsideSet` / `payrollOutsideClear`), `index.js` (`GET /service/calls/{id}` → `callGet`, routes, `d.payrollAdjustments`), `lib/access.js` `service.payroll.write`, `scripts/wire-payroll-fix-routes.ps1`, `docs/api-endpoints.md`, inventory row S50. Board tests 32.
+- [ ] **TIM: deploy 2026-10-12 (payroll fixes)** — (1) Supabase → SQL editor → run `sql/2026-10-12_payroll_adjustments.sql` (the last query prints false, false). (2) `.\deploy.ps1 sundial-service-board`. (3) `.\scripts\wire-payroll-fix-routes.ps1` (answer y). (4) Merge + push harmon-crm `main` (Vercel). Then on the Payroll tab, as an Admin: a job row's **Fix time** opens the clock editor; the Time Outside Calls row's **Fix outside time** takes hours + a reason and the row says "adjusted (computed …)".
+
 ## Welcome Call writes: one writer per record, status precedence, call-time log order (D-082) — DEPLOYED 2026-10-07, merged to `master`
 
 Dora Tolle (`a1P7y00000BOqojEAD`): two rep-form calls swept in parallel; the voicemail's write erased the Verified one. Confirmed in CloudWatch (two containers, 15:15:17 → 15:15:22 UTC, overlapping).

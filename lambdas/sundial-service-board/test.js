@@ -55,6 +55,7 @@ import {
   customerToView,
 } from "./tech.js";
 import { DAY_SELECT, buildPayroll, dayFields, dayFromLog, lastLocations, parseDayLog, unionMs, weekBounds, weekMonday } from "./day.js";
+import { createMemoryPayrollAdjustments } from "../../lib/payroll-adjustments.js";
 
 const TENANT = "a1W7y000007AszBEAS";
 const OTHER = "a1W7y000007OTHERAS";
@@ -264,6 +265,7 @@ function fakeWorld() {
       presignPut: async ({ key, contentType }) => `https://s3.example/${key}?ct=${encodeURIComponent(contentType)}`,
       listPhotos: async (prefix) => photos.filter((p) => p.key.startsWith(prefix)),
       deleteObject: async (key) => { s3Deleted.push(key); const i = photos.findIndex((p) => p.key === key); if (i >= 0) photos.splice(i, 1); },
+      payrollAdjustments: createMemoryPayrollAdjustments(), // the office's weekly outside-time number (2026-10-12)
     },
   };
   return world;
@@ -1695,10 +1697,51 @@ test("the day clock on the phone: a call clock-in starts the day; clocking out f
   assert.equal(row.days[1].date, "2026-09-15");
   assert.equal(row.days[1].open, true);
   assert.equal(row.totals.callHours, 1.5);
+  // the job row names its calls, so the Payroll tab's Fix time can open the right one (2026-10-12)
+  assert.equal(row.jobs[0].callDetails.length, 1);
+  assert.deepEqual([row.jobs[0].callDetails[0].id, row.jobs[0].callDetails[0].number, row.jobs[0].callDetails[0].date, row.jobs[0].callDetails[0].minutes, row.jobs[0].callDetails[0].open], [id, "SC-00001", "2026-09-14", 90, false]);
+  assert.equal(row.outside.adjusted, false);
+  assert.equal(row.outside.computedMinutes, row.totals.outsideMinutes);
+  // GET /service/calls/{id}: the board's view of one call (the Fix time editor's input)
+  r = await call(office, "GET", `/service/calls/${id}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.call.id, id);
+  assert.equal(r.body.call.jobNumber, "SVC-00003");
+  assert.equal((await call(office, "GET", "/service/calls/SC0000000000000099")).status, 404);
   const manager = makeHandler(w, { user: { id: "USR000000000000002", firstName: "Larry", lastName: "Ng" }, access: { scope: "tenant", level: "Manager", tenantId: TENANT, userId: "USR000000000000002" } });
   assert.equal((await call(manager, "GET", "/service/payroll")).status, 403);
   assert.equal((await call(h, "GET", "/service/payroll")).status, 403);
   assert.equal((await call(office, "GET", "/service/payroll", null, { week: "soon" })).body.code, "WEEK_INVALID");
+
+  // The office types the week's Time Outside Calls (2026-10-12): the number replaces the
+  // arithmetic on the report, the arithmetic stays beside it, who / when / why are kept,
+  // a Manager may not, and clearing brings the arithmetic back.
+  const computedBefore = row.totals.outsideMinutes;
+  r = await call(office, "PUT", "/service/payroll/outside", { techId: "USR000000000000001", week: "2026-09-16", hours: 3.25 });
+  assert.equal(r.body.code, "REASON_REQUIRED");
+  r = await call(office, "PUT", "/service/payroll/outside", { techId: "USR000000000000001", week: "2026-09-16", hours: "lots", reason: "x" });
+  assert.equal(r.body.code, "HOURS_INVALID");
+  r = await call(office, "PUT", "/service/payroll/outside", { techId: "USR000000000000001", week: "2026-09-16", hours: 3.25, reason: "Lunch was not clocked; shop time confirmed with Jake" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.week, "2026-09-14");
+  assert.equal(r.body.adjustment.minutes, 195);
+  assert.equal(r.body.adjustment.computedMinutes, computedBefore);
+  assert.equal(r.body.adjustment.setByName, "Beth Office");
+  r = await call(office, "GET", "/service/payroll", null, { week: "2026-09-16" });
+  const adj = r.body.techs.find((t) => t.tech.id === "USR000000000000001");
+  assert.equal(adj.totals.outsideMinutes, 195);
+  assert.equal(adj.totals.outsideHours, 3.25);
+  assert.equal(adj.totals.computedOutsideMinutes, computedBefore);
+  assert.equal(adj.totals.totalMinutes, adj.totals.callMinutes + 195);
+  assert.equal(adj.outside.adjusted, true);
+  assert.equal(adj.outside.adjustment.reason, "Lunch was not clocked; shop time confirmed with Jake");
+  assert.equal(r.body.totals.outsideMinutes, r.body.techs.reduce((n, t) => n + t.totals.outsideMinutes, 0), "the grand total uses the adjusted number");
+  assert.equal((await call(manager, "PUT", "/service/payroll/outside", { techId: "USR000000000000001", week: "2026-09-16", hours: 1, reason: "no" })).status, 403);
+  assert.equal((await call(office, "PUT", "/service/payroll/outside", { techId: "USR000000000000009", week: "2026-09-16", hours: 1, reason: "no" })).status, 404);
+  r = await call(office, "DELETE", "/service/payroll/outside", null, { techId: "USR000000000000001", week: "2026-09-16" });
+  assert.equal(r.status, 200);
+  r = await call(office, "GET", "/service/payroll", null, { week: "2026-09-16" });
+  assert.equal(r.body.techs.find((t) => t.tech.id === "USR000000000000001").totals.outsideMinutes, computedBefore);
 });
 
 test("the phone's Schedule and Timecard (2026-09-29): every tech's day read-only; my own week's clock lines, never editable", async () => {

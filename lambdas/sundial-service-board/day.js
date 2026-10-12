@@ -37,8 +37,6 @@
 
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { dayBounds, gpsFrom, liveIntervals, localDate, openIntervalIndex, parseIntervals, resolveEventAt } from "./tech.js";
-import { adjustmentView, parseAdjustmentInput } from "../../lib/payroll-adjustments.js";
-
 /** A live interval still on the clock (no out). */
 const isLiveOpen = (i) => liveIntervals([i]).length === 1 && !i.out;
 
@@ -55,6 +53,12 @@ const strOrNull = (v) => {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
   return s === "" ? null : s;
+};
+const isoOrNull = (v) => {
+  const s = strOrNull(v);
+  if (!s) return null;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 
 // ---------------------------------------------------------------------------
@@ -78,18 +82,30 @@ export function parseDayLog(json) {
 }
 export const hasDayEvent = (log, eventId) => !!eventId && log.some((e) => e.eventId === eventId);
 
-/** What the log says: the first start, the last end after it, the latest note. */
+/**
+ * What the log says: the first start, the last end after it, the latest note — and the
+ * office's corrections (2026-10-12): a `correction` entry sets the day's start and end
+ * outright (`to.start` / `to.end`, the phone's taps kept in the log untouched, `from` what
+ * they were), stamped who / when / why. Entries apply in log order, so a tap after a
+ * correction still counts. `correction` is the latest one.
+ */
 export function dayFromLog(log) {
   let start = null;
   let end = null;
   let note = null;
+  let correction = null;
   for (const e of log) {
     if (e.kind === "start" && !start) start = e;
     else if (e.kind === "end") end = e; // the last end wins; a re-start after an end reopens (below)
     else if (e.kind === "note") note = e;
+    else if (e.kind === "correction" && e.to && typeof e.to === "object") {
+      correction = e;
+      start = e.to.start ? { kind: "start", at: e.to.start, gps: start?.gps ?? null, corrected: true } : null;
+      end = e.to.end ? { kind: "end", at: e.to.end, gps: null, corrected: true } : null;
+    }
     if (e.kind === "start" && start && end && e.at > end.at) end = null; // reopened
   }
-  return { start, end, note };
+  return { start, end, note, correction };
 }
 
 /** Salesforce fields that follow from a log. */
@@ -133,6 +149,7 @@ export function dayView(row, now = null) {
     startCallId: row.Start_Call__c ?? null,
     note: row.House_Notes__c ?? null,
     minutes,
+    corrected: !!dayFromLog(parseDayLog(row.Day_Log__c)).correction,
   };
 }
 
@@ -215,12 +232,7 @@ export function callSubject(c) {
   return { key: c?.Sundial_Service_Job__c ?? "__none", jobId: c?.Sundial_Service_Job__c ?? null, jobNumber: j.Name ?? null, customer: j.Customer_Name_at_Creation__c ?? null, address: j.Address_at_Creation__c ?? null };
 }
 
-/**
- * `adjustments` (2026-10-12): Map techId → sundial_payroll_adjustments row — the office's
- * weekly Time Outside Calls, typed with a reason. When one exists it IS the tech's outside
- * number (totals, the grand total, the CSV); the arithmetic stays on `outside.computedMinutes`.
- */
-export function buildPayroll({ techs, days, calls, week, timeZone, now, adjustments = new Map() }) {
+export function buildPayroll({ techs, days, calls, week, timeZone, now }) {
   const nowMs = Date.parse(now);
   const today = localDate(new Date(nowMs), timeZone);
   const weekFrom = Date.parse(week.from);
@@ -309,6 +321,7 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now, adjustme
       }
       outsideMs += dayOutsideMs;
       if (row || dayCallMs > 0) {
+        const corr = row ? dayFromLog(parseDayLog(row.Day_Log__c)).correction : null;
         dayRows.push({
           date,
           start,
@@ -317,6 +330,8 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now, adjustme
           startKind: row?.Start_Kind__c ?? null,
           note: row?.House_Notes__c ?? null,
           flag,
+          corrected: !!corr,
+          correction: corr ? { at: corr.at, by: corr.by ?? null, reason: corr.reason ?? null, from: corr.from ?? null } : null,
           callMinutes: toMinutes(dayCallMs),
           outsideMinutes: toMinutes(dayOutsideMs),
           spanMinutes: toMinutes(spanMs),
@@ -327,15 +342,12 @@ export function buildPayroll({ techs, days, calls, week, timeZone, now, adjustme
       .map((j) => ({ jobId: j.jobId, jobNumber: j.jobNumber, customer: j.customer, address: j.address, minutes: toMinutes(j.ms), hours: hoursOf(toMinutes(j.ms)), calls: j.calls.size, callDetails: j.callDetails.sort((a, b) => a.in.localeCompare(b.in)) }))
       .sort((a, b) => b.minutes - a.minutes);
     const callMinutes = toMinutes(callMs);
-    const computedOutsideMinutes = toMinutes(outsideMs);
-    const adjustment = adjustmentView(adjustments.get(tech.id) ?? null);
-    const outsideMinutes = adjustment ? adjustment.minutes : computedOutsideMinutes;
+    const outsideMinutes = toMinutes(outsideMs);
     rows.push({
       tech: { id: tech.id, name: tech.name },
       jobs: jobRows,
       days: dayRows,
-      totals: { callMinutes, outsideMinutes, totalMinutes: callMinutes + outsideMinutes, callHours: hoursOf(callMinutes), outsideHours: hoursOf(outsideMinutes), totalHours: hoursOf(callMinutes + outsideMinutes), computedOutsideMinutes, computedOutsideHours: hoursOf(computedOutsideMinutes) },
-      outside: { computedMinutes: computedOutsideMinutes, computedHours: hoursOf(computedOutsideMinutes), adjusted: !!adjustment, adjustment },
+      totals: { callMinutes, outsideMinutes, totalMinutes: callMinutes + outsideMinutes, callHours: hoursOf(callMinutes), outsideHours: hoursOf(outsideMinutes), totalHours: hoursOf(callMinutes + outsideMinutes) },
       notes: dayRows.filter((r) => r.note).map((r) => ({ date: r.date, note: r.note })),
     });
   }
@@ -648,49 +660,60 @@ export function createDayHandlers(d, h) {
         loadDays(tenantId, `Work_Date__c >= ${week.monday} AND Work_Date__c <= ${week.sunday}${techWhere}`),
       ]);
       const wanted = techFilter ? techs.filter((t) => t.id === techFilter) : techs;
-      const adjustments = d.payrollAdjustments ? await d.payrollAdjustments.forWeek({ tenantId, weekMonday: week.monday }) : new Map();
-      const report = buildPayroll({ techs: wanted, days, calls, week, timeZone: tz(), now: now.toISOString(), adjustments });
+      const report = buildPayroll({ techs: wanted, days, calls, week, timeZone: tz(), now: now.toISOString() });
       return jsonResponse(200, cors, report);
     },
 
-    // --- Admin: the week's Time Outside Calls, typed (2026-10-12) --------------------------
+    // --- Admin: fix a tech's day clock (2026-10-12, Harmon) ----------------------------------
     /**
-     * PUT /service/payroll/outside { techId, week, hours | minutes, reason } — the number the
-     * week shows for this tech, with the arithmetic kept beside it. DELETE …?techId=&week=
-     * brings the arithmetic back. Both `service.payroll.write` (Admin / Executive).
+     * POST /service/payroll/day { techId, date, start, end, reason } — the office sets the day's
+     * clock-in and clock-out (a forgotten clock-out, a day started at the wrong moment, a day
+     * the tech never started: the row is created). A `correction` entry goes on the day's
+     * append-only log with who / when / why and what it was; Day_Start / Day_End follow it, and
+     * Time Outside Calls recomputes from the corrected span on every report — the report is
+     * right BY DAY, not patched at the week (Harmon's call, replacing the weekly number).
+     * `service.payroll.write` (Admin / Executive). `end` may be null only for today (the tech is
+     * still working); a past day must end.
      */
-    async payrollOutsideSet({ ctx, body }) {
+    async payrollDayCorrect({ ctx, body }) {
       const { tenantId, cors } = ctx;
-      if (!d.payrollAdjustments) return jsonResponse(503, cors, { error: "not_configured", code: "ADJUSTMENTS_UNAVAILABLE", message: "Payroll adjustments are not set up (sql/2026-10-12_payroll_adjustments.sql)." });
       const techId = strOrNull(body?.techId);
       if (!techId || !SF_ID_RE.test(techId)) return bad(cors, "TECH_INVALID", "techId must be a Salesforce id.");
-      const monday = weekMonday(strOrNull(body?.week) ?? "");
-      if (!monday) return bad(cors, "WEEK_INVALID", "week must be YYYY-MM-DD.");
-      const parsed = parseAdjustmentInput(body);
-      if (!parsed.ok) return bad(cors, parsed.code, parsed.message);
+      const date = strOrNull(body?.date);
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !weekMonday(date)) return bad(cors, "DATE_INVALID", "date must be YYYY-MM-DD.");
+      const reason = strOrNull(body?.reason)?.slice(0, 255) ?? null;
+      if (!reason) return bad(cors, "REASON_REQUIRED", "Say why the day is being changed — it is kept on the day's log.");
+      const now = d.now();
+      const today = localDate(now, tz());
+      if (date > today) return bad(cors, "DATE_FUTURE", "That day has not happened yet.");
+      const start = isoOrNull(body?.start);
+      const end = isoOrNull(body?.end);
+      if (!start) return bad(cors, "START_REQUIRED", "The day needs a clock-in time.");
+      if (localDate(new Date(start), tz()) !== date) return bad(cors, "START_NOT_ON_DAY", `The clock-in must fall on ${date}.`);
+      if (!end && date !== today) return bad(cors, "END_REQUIRED", "A past day needs a clock-out time.");
+      if (end && Date.parse(end) <= Date.parse(start)) return bad(cors, "END_BEFORE_START", "The clock-out must be after the clock-in.");
+      if (end && Date.parse(end) - Date.parse(start) > 24 * 3600000) return bad(cors, "DAY_TOO_LONG", "A day cannot run more than 24 hours.");
+      if (end && Date.parse(end) > now.getTime()) return bad(cors, "END_FUTURE", "The clock-out cannot be in the future.");
       const tech = await h.loadTech(techId, tenantId);
       if (!tech) return jsonResponse(404, cors, { error: "not_found", code: "TECH_NOT_FOUND", message: "That technician is not in this tenant." });
-      // The arithmetic at the moment of the change, kept on the row for the "was 5.2 h" note.
-      const week = weekBounds(monday, tz());
-      const now = d.now();
-      const me = `Tech__c = '${soqlEscapeString(tech.Id)}'`;
-      const [calls, days] = await Promise.all([
-        loadCalls(tenantId, `${me} AND Actual_Start__c >= ${h.soqlDateTime(new Date(Date.parse(week.from) - 86400000).toISOString())} AND Actual_Start__c < ${h.soqlDateTime(new Date(Date.parse(week.to) + 86400000).toISOString())}`),
-        loadDays(tenantId, `${me} AND Work_Date__c >= ${week.monday} AND Work_Date__c <= ${week.sunday}`),
-      ]);
-      const computed = buildPayroll({ techs: [{ id: tech.Id, name: h.techName ? h.techName(tech) : tech.Id }], days, calls, week, timeZone: tz(), now: now.toISOString() }).techs[0].outside.computedMinutes;
-      const row = await d.payrollAdjustments.set({ tenantId, techId: tech.Id, weekMonday: monday, minutes: parsed.minutes, computedMinutes: computed, reason: parsed.reason, actor: ctx.actor, now: now.toISOString() });
-      return jsonResponse(200, cors, { success: true, techId: tech.Id, week: monday, adjustment: adjustmentView(row) });
-    },
-    async payrollOutsideClear({ ctx, query }) {
-      const { tenantId, cors } = ctx;
-      if (!d.payrollAdjustments) return jsonResponse(503, cors, { error: "not_configured", code: "ADJUSTMENTS_UNAVAILABLE", message: "Payroll adjustments are not set up (sql/2026-10-12_payroll_adjustments.sql)." });
-      const techId = strOrNull(query?.techId);
-      if (!techId || !SF_ID_RE.test(techId)) return bad(cors, "TECH_INVALID", "techId must be a Salesforce id.");
-      const monday = weekMonday(strOrNull(query?.week) ?? "");
-      if (!monday) return bad(cors, "WEEK_INVALID", "week must be YYYY-MM-DD.");
-      await d.payrollAdjustments.clear({ tenantId, techId, weekMonday: monday });
-      return jsonResponse(200, cors, { success: true, techId, week: monday, adjustment: null });
+      const existing = await loadDay(tech.Id, date, tenantId);
+      const log = parseDayLog(existing?.Day_Log__c);
+      const before = dayFromLog(log);
+      const from = { start: before.start?.at ?? null, end: before.end?.at ?? null };
+      if (from.start === start && from.end === end) return jsonResponse(200, cors, { success: true, unchanged: true, day: dayView(existing, now.toISOString()) });
+      log.push({ kind: "correction", at: now.toISOString(), by: { id: ctx.actor?.id ?? null, name: ctx.actor?.name ?? null }, reason, from, to: { start, end } });
+      const extra = existing ? {} : { Start_Kind__c: "Other" };
+      if (end) {
+        const outside = await outsideMinutesFor(tenantId, tech, date, start, end).catch(() => null);
+        if (outside != null) extra.Outside_Minutes__c = outside;
+      }
+      let row;
+      try {
+        row = await saveDay(ctx, tech, date, existing, log, extra);
+      } catch (e) {
+        return sfError(cors, e, "day correction");
+      }
+      return jsonResponse(200, cors, { success: true, unchanged: false, techId: tech.Id, date, from, to: { start, end }, day: dayView(row, now.toISOString()) });
     },
   };
   return { handlers, ops };

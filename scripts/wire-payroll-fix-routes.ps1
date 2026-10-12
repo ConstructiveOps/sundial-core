@@ -2,15 +2,14 @@
 .SYNOPSIS
     Wires the Payroll tab's fix routes on the Sundial REST API (2026-10-12):
 
-      PUT    /service/payroll/outside   set a tech's Time Outside Calls for the week (Admin / Executive)
-      DELETE /service/payroll/outside   clear it (the arithmetic is back)
+      POST   /service/payroll/day       fix a tech's day clock-in / clock-out (Admin / Executive; 2026-10-12 pm —
+                                        replaces the weekly PUT/DELETE /service/payroll/outside, which stays wired
+                                        but now answers 404 ROUTE_NOT_FOUND)
       GET    /service/calls/{id}        one call as the board sees it (the Fix time editor's input)
 
-    All three -> sundial-service-board (AWS_PROXY). Run AFTER:
-      1. sql/2026-10-12_payroll_adjustments.sql in the Supabase SQL editor
-      2. .\deploy.ps1 sundial-service-board
-    (and lib/access.js gained service.payroll.write — /auth/me advertises it; the portal shows
-    the buttons only to Admin / Executive).
+    Both -> sundial-service-board (AWS_PROXY). Run AFTER .\deploy.ps1 sundial-service-board
+    (and .\deploy.ps1 sundial-auth-proxy — lib/access.js's service.payroll.write must be
+    advertised by /auth/me, or the portal hides the buttons). Idempotent: re-run freely.
 
 .EXAMPLE
     .\scripts\wire-payroll-fix-routes.ps1
@@ -53,10 +52,10 @@ $root = (Get-Resources | Where-Object { $_.path -eq "/" }).id
 if (-not $root) { throw "Could not find root resource." }
 $service = Ensure-Resource $root "service"
 
-Write-Host "==> /service/payroll/outside : PUT, DELETE, OPTIONS -> $Board" -ForegroundColor Cyan
-$pay     = Ensure-Resource $service "payroll"
-$outside = Ensure-Resource $pay "outside"
-foreach ($m in @("PUT", "DELETE", "OPTIONS")) { Wire-Method $outside $m $Board }
+Write-Host "==> /service/payroll/day : POST, OPTIONS -> $Board" -ForegroundColor Cyan
+$pay = Ensure-Resource $service "payroll"
+$day = Ensure-Resource $pay "day"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $day $m $Board }
 
 Write-Host "==> /service/calls/{id} : GET (PATCH + OPTIONS already there) -> $Board" -ForegroundColor Cyan
 $calls  = Ensure-Resource $service "calls"
@@ -75,6 +74,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Add payroll outside-time + GET call routes -> $Board" --output json | Out-Null
+    --description "Add payroll day-fix + GET call routes -> $Board" --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
 Write-Host "SUCCESS. Payroll fix routes are live." -ForegroundColor Green

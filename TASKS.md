@@ -7,7 +7,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 ## Job report send: photos shrunk for the PDF (hotfix 2026-10-12 evening)
 
 - [x] `lib/image-resize.js` (+ test), `report.js` `reportImages()` + the S3 cache + the time budget, `index.js` `resizeImage`, `jpeg-js` dependency. Estimate tests 59.
-- [ ] **TIM: deploy (report hotfix)** — (1) `npm install` in sundial-core (adds jpeg-js; commit the `package-lock.json` change this once). (2) `.\deploy.ps1 sundial-service-estimate`. (3) Lambda console → `sundial-service-estimate` → Configuration → General configuration → Edit: **Memory 1769 MB, Timeout 29 s** → Save. (4) Harmon re-sends the report on `a1c7y00000SPocwAAD`. If it still fails, the log line to look at: `aws logs tail /aws/lambda/sundial-service-estimate --since 2h --region us-west-1 --filter-pattern report`.
+- [x] Round 2 (hotfix41): `POST /service/jobs/{id}/report/prepare` (rounds of ≤ 21 s, `{ total, ready, pending, done }`), `reportImage()` shared step, `scripts/wire-service-estimate-routes.ps1` (+ `/report/prepare`); portal `JobReportCard` prepares until done ("Preparing photos n of N…") then sends.
+- [ ] **TIM: deploy (report hotfix, round 2)** — (1) `npm install` in sundial-core if not done (adds jpeg-js; commit `package-lock.json` this once). (2) `.\deploy.ps1 sundial-service-estimate`. (3) `.\scripts\wire-service-estimate-routes.ps1` (re-run; idempotent — adds `/report/prepare`; answer y). (4) Lambda console → `sundial-service-estimate` → Configuration → General configuration → Edit: **Memory 1769 MB, Timeout 29 s** → Save. (5) Merge + push harmon-crm `main`. (6) Harmon re-sends the 11-photo report on `a1c7y00000SPocwAAD` — every photo in the PDF. If it still fails, the log line to look at: `aws logs tail /aws/lambda/sundial-service-estimate --since 2h --region us-west-1 --filter-pattern report`.
 
 ## Payroll tab fixes: Fix time on job rows, Fix day on day rows (2026-10-12, Harmon)
 

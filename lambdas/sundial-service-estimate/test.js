@@ -2970,3 +2970,39 @@ test("the report PDF shrinks big photos and caches the shrunk copy (2026-10-12):
   assert.ok(fake2.puts.some((p) => p.contentType === "application/pdf"), "the PDF was still made (placeholders for the photos)");
 });
 
+test("POST /report/prepare warms the photo cache in rounds (2026-10-12 evening): a slow shrink leaves photos pending, the next round finishes them, the send then reads only the cache", async () => {
+  const fake = fakeSalesforce();
+  const BIG = new Uint8Array(4 * 1024 * 1024).fill(0xff);
+  BIG[0] = 0xff; BIG[1] = 0xd8; BIG[2] = 0xff;
+  fake.photoBytes = BIG;
+  // every shrink "takes" 22 s: with a 21 s budget each round fits one photo
+  let clock = 0;
+  const realNow = Date.now;
+  Date.now = () => realNow() + clock;
+  try {
+    fake.resizeImage = () => {
+      clock += 22000;
+      return { bytes: JPG_1x1, contentType: "image/jpeg", width: 1, height: 1, resized: true };
+    };
+    const h = makeHandler(fake);
+    const job = await seedReportJob(fake, h);
+    clock = 0;
+    let r = await call(h, "POST", `/service/jobs/${job.Id}/report/prepare`, {});
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.total, r.body.ready, r.body.pending, r.body.done], [2, 1, 1, false]);
+    clock = 0;
+    r = await call(h, "POST", `/service/jobs/${job.Id}/report/prepare`, {});
+    assert.deepEqual([r.body.total, r.body.ready, r.body.pending, r.body.done, r.body.shrunk], [2, 2, 0, true, 1]);
+    clock = 0;
+    r = await call(h, "POST", `/service/jobs/${job.Id}/report/prepare`, {});
+    assert.deepEqual([r.body.ready, r.body.shrunk], [2, 0], "a third round finds everything cached");
+    const getsBefore = (fake.gets || []).length;
+    r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(fake.gets.length, getsBefore, "the send read nothing but the cache");
+    assert.equal(fake.emails.at(-1).attachments.length, 1);
+  } finally {
+    Date.now = realNow;
+  }
+});
+

@@ -398,6 +398,7 @@ const ROUTES = [
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/?$/, "getReport"], // the customer's job report (report.js, D-072 am. 10)
   ["PUT", /^\/service\/jobs\/([^/]+)\/report\/?$/, "saveReport"],
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/report\/prepare\/?$/, "prepareReport"], // warm the PDF's photo cache before a send (2026-10-12)
   ["POST", /^\/service\/jobs\/([^/]+)\/report\/send\/?$/, "sendReport"],
   ["POST", /^\/service\/estimates\/([^/]+)\/unlock\/?$/, "unlockEstimate"], // reopen an invoiced estimate (2026-09-30)
   ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
@@ -1921,7 +1922,7 @@ export function createHandler(deps = {}) {
     jobCharge: "service.card.charge", // Admin / Executive (lib/access.js ACTION_LEVELS)
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     getCosting: "service.costing.read", setDefaultCostRate: "service.costing.write", listRates: "service.costing.read",
-    getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", sendReport: "service.estimate.send",
+    getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", prepareReport: "service.estimate.send", sendReport: "service.estimate.send",
     techAddLines: "service.tech.self",
     // Service Club (D-073): reads for anyone in the office, writes their own key.
     clubPlansOffice: "service.club.read", clubMemberships: "service.club.read", clubReport: "service.club.read", clubCustomer: ["service.club.read", "service.estimate.write"],

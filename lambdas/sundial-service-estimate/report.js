@@ -40,6 +40,8 @@ export const EMAIL_ATTACH_MAX_BYTES = 8 * 1024 * 1024; // SES tops out at 10 MB 
 // past the budget is embedded as it is when it is small enough, else left to the hosted page.
 export const REPORT_IMAGE_CACHE_PREFIX = "SUNDIAL/_cache/report-images"; // outside every record's folder: not a job file, not an XFiles path
 export const RESIZE_BUDGET_MS = 16000;
+/** `POST …/report/prepare` shrinks as many photos as fit in this; the portal calls it until nothing is pending. */
+export const PREPARE_BUDGET_MS = 21000;
 export const EMBED_ORIGINAL_MAX_BYTES = 3 * 1024 * 1024;
 /** Where the shrunk copy of a job's photo lives. */
 export function reportImageCacheKey(jobId, photoKey) {
@@ -108,37 +110,52 @@ export function createReportHandlers(d, h) {
   }
 
   /**
-   * The bytes the PDF embeds, one photo at a time (2026-10-12): the shrunk copy from the
-   * cache when it exists, else the original shrunk now (and cached), else — past the time
-   * budget, or not a JPEG — the original when it is small enough. A photo that fails is
-   * left out; the painter draws its placeholder and the hosted page still shows it.
+   * One photo for the PDF (2026-10-12): the shrunk copy from the cache when it exists, else
+   * the original shrunk now (and cached) while the time budget lasts, else — past the budget,
+   * or not a JPEG — the original when it is small enough, else nothing (the painter draws a
+   * placeholder; the hosted page still shows it). `wantBytes: false` (the prepare step) only
+   * makes sure the cache is warm. Returns { status: cached | resized | original | pending |
+   * skipped | failed, image? }.
    */
+  async function reportImage({ jobId, key, startedAt, budgetMs, wantBytes = true }) {
+    const cacheKey = reportImageCacheKey(jobId, key);
+    try {
+      const cached = await d.getObject({ key: cacheKey }).catch(() => null);
+      if (cached?.bytes?.length) return { status: "cached", image: { bytes: cached.bytes, contentType: "image/jpeg" } };
+      if (Date.now() - startedAt >= budgetMs) {
+        if (!wantBytes) return { status: "pending" };
+      } else {
+        const obj = await d.getObject({ key });
+        if (!obj?.bytes) return { status: "failed" };
+        const r = d.resizeImage ? d.resizeImage(obj.bytes, { contentType: obj.contentType }) : null;
+        if (r?.resized) {
+          await d.putObject({ key: cacheKey, body: r.bytes, contentType: "image/jpeg" }).catch((e) => console.error("report: image cache write failed:", cacheKey, e?.message || e));
+          return { status: "resized", image: { bytes: r.bytes, contentType: "image/jpeg" } };
+        }
+        // small already, or not a JPEG: nothing to cache — embed it when it fits
+        if (obj.bytes.length <= EMBED_ORIGINAL_MAX_BYTES) return { status: "original", image: obj };
+        console.error(`report: photo left to the hosted page (${obj.bytes.length} bytes, could not be shrunk):`, key);
+        return { status: "skipped" };
+      }
+      // past the budget and the bytes are needed now (a send): the original when it is small enough
+      const obj = await d.getObject({ key });
+      if (obj?.bytes && obj.bytes.length <= EMBED_ORIGINAL_MAX_BYTES) return { status: "original", image: obj };
+      console.error(`report: photo left to the hosted page (past the time budget):`, key);
+      return { status: "pending" };
+    } catch (e) {
+      console.error("report: photo fetch failed:", key, e?.message || e);
+      return { status: "failed" };
+    }
+  }
+
+  const photoKeysOf = (sections) => [...new Set(sections.filter((s) => s.photoKey).map((s) => s.photoKey))];
+
+  /** The bytes the PDF embeds, keyed by photoKey. */
   async function reportImages({ jobId, sections, startedAt }) {
     const images = new Map();
-    const keys = [...new Set(sections.filter((s) => s.photoKey).map((s) => s.photoKey))];
-    for (const key of keys) {
-      const cacheKey = reportImageCacheKey(jobId, key);
-      try {
-        const cached = await d.getObject({ key: cacheKey }).catch(() => null);
-        if (cached?.bytes?.length) {
-          images.set(key, { bytes: cached.bytes, contentType: "image/jpeg" });
-          continue;
-        }
-        const obj = await d.getObject({ key });
-        if (!obj?.bytes) continue;
-        const withinBudget = Date.now() - startedAt < RESIZE_BUDGET_MS;
-        const r = withinBudget && d.resizeImage ? d.resizeImage(obj.bytes, { contentType: obj.contentType }) : null;
-        if (r?.resized) {
-          images.set(key, { bytes: r.bytes, contentType: "image/jpeg" });
-          d.putObject({ key: cacheKey, body: r.bytes, contentType: "image/jpeg" }).catch((e) => console.error("report: image cache write failed:", cacheKey, e?.message || e));
-        } else if (obj.bytes.length <= EMBED_ORIGINAL_MAX_BYTES) {
-          images.set(key, obj);
-        } else {
-          console.error(`report: photo left to the hosted page (${obj.bytes.length} bytes, ${withinBudget ? "could not be shrunk" : "past the time budget"}):`, key);
-        }
-      } catch (e) {
-        console.error("report: photo fetch failed:", key, e?.message || e);
-      }
+    for (const key of photoKeysOf(sections)) {
+      const r = await reportImage({ jobId, key, startedAt, budgetMs: RESIZE_BUDGET_MS, wantBytes: true });
+      if (r.image) images.set(key, r.image);
     }
     return images;
   }
@@ -235,6 +252,37 @@ export function createReportHandlers(d, h) {
       const { model } = await modelFor(job, report, ctx, tenantId, { mode: "preview", pdfUrl: job.Report_PDF_S3_Key__c ? publicUrlForKey(job.Report_PDF_S3_Key__c) : null });
       const { html, title } = renderJobReportDocument({ model });
       return jsonResponse(200, cors, { html, title, sections: model.sections.length, receipt: !!model.receipt });
+    },
+
+    /**
+     * POST /service/jobs/{id}/report/prepare (2026-10-12 evening) — warm the PDF's photo cache
+     * ahead of a send: shrink as many of the report's photos as fit in PREPARE_BUDGET_MS and
+     * say how many are still pending. The portal calls it until `pending` is 0, then sends —
+     * so a 20-photo report is three short requests and one quick send, never one request
+     * that outlives API Gateway (Harmon's 11-photo report lost its last five to the send's
+     * own budget). Idempotent; a photo that cannot be shrunk counts as ready (the send will
+     * embed or placeholder it).
+     */
+    async prepareReport({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const startedAt = Date.now();
+      const job = await loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const norm = normalizeReportSections(job.Report_Sections__c);
+      if (!norm.ok) return bad(cors, "REPORT_INVALID", norm.error);
+      const keys = photoKeysOf(norm.value.sections);
+      let ready = 0;
+      let pending = 0;
+      let shrunk = 0;
+      for (const key of keys) {
+        const r = await reportImage({ jobId: job.Id, key, startedAt, budgetMs: PREPARE_BUDGET_MS, wantBytes: false });
+        if (r.status === "pending") pending++;
+        else {
+          ready++;
+          if (r.status === "resized") shrunk++;
+        }
+      }
+      return jsonResponse(200, cors, { total: keys.length, ready, pending, shrunk, done: pending === 0 });
     },
 
     async sendReport({ ctx, params, body }) {

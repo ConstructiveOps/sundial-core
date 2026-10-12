@@ -17,6 +17,7 @@
       GET    /service/jobs/{id}/card                                   (the card on file, 2026-09-28)
       POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
       GET    /service/jobs/{id}/costing                                (job costing, 2026-10-05)
+      POST   /service/jobs/{id}/report/prepare                         (the PDF's photos, shrunk in rounds, 2026-10-12)
       POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
       GET    /service/labor/rates                                       (the rate sheet, 2026-10-05)
       GET    /service/invoices/report | /service/invoices/{id} | /service/invoices/{id}/preview
@@ -126,6 +127,9 @@ $jobRepPv = Ensure-Resource $jobRep "preview"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobRepPv $m }
 $jobRepSend = Ensure-Resource $jobRep "send"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepSend $m }
+# Shrink the report's photos for the PDF ahead of a send, in rounds (2026-10-12 evening).
+$jobRepPrep = Ensure-Resource $jobRep "prepare"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepPrep $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }

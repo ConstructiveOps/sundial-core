@@ -4,6 +4,11 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Job report send: photos shrunk for the PDF (hotfix 2026-10-12 evening)
+
+- [x] `lib/image-resize.js` (+ test), `report.js` `reportImages()` + the S3 cache + the time budget, `index.js` `resizeImage`, `jpeg-js` dependency. Estimate tests 59.
+- [ ] **TIM: deploy (report hotfix)** — (1) `npm install` in sundial-core (adds jpeg-js; commit the `package-lock.json` change this once). (2) `.\deploy.ps1 sundial-service-estimate`. (3) Lambda console → `sundial-service-estimate` → Configuration → General configuration → Edit: **Memory 1769 MB, Timeout 29 s** → Save. (4) Harmon re-sends the report on `a1c7y00000SPocwAAD`. If it still fails, the log line to look at: `aws logs tail /aws/lambda/sundial-service-estimate --since 2h --region us-west-1 --filter-pattern report`.
+
 ## Payroll tab fixes: Fix time on job rows, Fix day on day rows (2026-10-12, Harmon)
 
 - [x] `day.js`: `callDetails` per job row; `dayFromLog` applies `correction` entries (start / end set outright, the taps kept), `corrected` + `correction` on the report's day rows and `dayView`; `payrollDayCorrect` (`POST /service/payroll/day`). `index.js`: `GET /service/calls/{id}` → `callGet`. `lib/access.js` `service.payroll.write`. `scripts/wire-payroll-fix-routes.ps1`, `docs/api-endpoints.md`, inventory row S50. Board tests 32. **The morning's weekly Time Outside Calls override (`sundial_payroll_adjustments`, `PUT/DELETE /service/payroll/outside`, `lib/payroll-adjustments.js`) is removed** — Harmon wanted each day right, not the week patched; `sql/2026-10-12_payroll_adjustments_drop.sql` drops the table.

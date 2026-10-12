@@ -443,6 +443,7 @@ function makeHandler(fake, identityOverrides = {}) {
   };
   return createHandler({
     ...fake.deps,
+    ...(fake.resizeImage !== undefined ? { resizeImage: fake.resizeImage } : {}), // the report photo shrink (2026-10-12); null = none
     resolveIdentity: async () => identity,
     now: () => new Date("2026-09-10T12:00:00Z"),
     randomToken: () => "TOKEN123",
@@ -456,7 +457,7 @@ function makeHandler(fake, identityOverrides = {}) {
     // The PDF is rendered for real (pdf-lib) — only the S3 put is recorded.
     putObject: async ({ key, body, contentType }) => {
       if (fake.putFails) throw new Error("s3 down");
-      fake.puts.push({ key, bytes: body.byteLength, contentType });
+      fake.puts.push({ key, bytes: body.byteLength, contentType, body: key.startsWith("SUNDIAL/_cache/") ? body : undefined });
     },
     deleteObject: async ({ key }) => {
       (fake.deletes = fake.deletes || []).push(key);
@@ -464,9 +465,15 @@ function makeHandler(fake, identityOverrides = {}) {
     // The job report (D-072 am. 10): the job's S3 folder and the photo bytes for the PDF.
     listFiles: async (recordId) => (fake.files || []).filter((f) => f.key.startsWith(`SUNDIAL/${recordId}/`)),
     getObject: async ({ key }) => {
+      // The report's shrunk-photo cache (2026-10-12): served from what this run put there, else "no such key".
+      if (key.startsWith("SUNDIAL/_cache/")) {
+        const hit = (fake.puts || []).find((p) => p.key === key);
+        if (!hit) throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
+        return { bytes: hit.body ?? JPG_1x1, contentType: "image/jpeg" };
+      }
       (fake.gets = fake.gets || []).push(key);
       if (fake.getFails) throw new Error("s3 read failed");
-      return { bytes: JPG_1x1, contentType: "image/jpeg" };
+      return { bytes: fake.photoBytes ?? JPG_1x1, contentType: "image/jpeg" };
     },
     sms: fake.sms ?? null,
     getSecret: async (name) => {
@@ -2909,3 +2916,57 @@ test("D-081: a customer-pay job's invoice snapshots the homeowner as the payer; 
   assert.equal(inv2.Bill_To_Customer__c, undefined);
   assert.ok(iss.body.warnings.some((w) => /names no paying customer record/.test(w)));
 });
+
+/** A job with a summary, one complete call and two photos on it, two photo sections saved — ready to send. */
+async function seedReportJob(fake, h) {
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c.at(-1).Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c.at(-1);
+  job.Customer_Summary__c = "Replaced the failed breaker.";
+  if (!fake.store.Sundial_User__c.some((u) => u.Id === USER)) fake.store.Sundial_User__c.push({ Id: USER, Client__c: TENANT, First_Name__c: "Paige", Last_Name__c: "King" });
+  await fake.deps.sfCreateRecord("Sundial_Service_Call__c", { Client__c: TENANT, Sundial_Service_Job__c: job.Id, Name: "SC-00001", Status__c: "Complete", Scheduled_Start__c: "2026-09-08T16:00:00Z", Tech__c: USER });
+  const callId = fake.store.Sundial_Service_Call__c.at(-1).Id;
+  fake.files = [
+    { key: `SUNDIAL/${job.Id}/photos/${callId}/before.jpg`, publicUrl: "https://s3/before.jpg", size: 4194304, lastModified: "2026-09-08T17:00:00Z" },
+    { key: `SUNDIAL/${job.Id}/photos/${callId}/after.jpg`, publicUrl: "https://s3/after.jpg", size: 4194304, lastModified: "2026-09-08T18:00:00Z" },
+  ];
+  const r = await call(h, "PUT", `/service/jobs/${job.Id}/report`, { sections: [{ id: "a", photoKey: fake.files[0].key, caption: "Before." }, { id: "b", photoKey: fake.files[1].key, caption: "After." }] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return job;
+}
+
+test("the report PDF shrinks big photos and caches the shrunk copy (2026-10-12): the first send resizes + writes the cache, the second reads it; past the budget a small original is embedded, a huge one is left to the hosted page", async () => {
+  const fake = fakeSalesforce();
+  const BIG = new Uint8Array(4 * 1024 * 1024).fill(0xff); // "a 4 MB photo"
+  BIG[0] = 0xff; BIG[1] = 0xd8; BIG[2] = 0xff;
+  fake.photoBytes = BIG;
+  const resizes = [];
+  fake.resizeImage = (bytes) => (resizes.push(bytes.length), { bytes: JPG_1x1, contentType: "image/jpeg", width: 1, height: 1, resized: true });
+  const h = makeHandler(fake);
+  const job = await seedReportJob(fake, h);
+  let r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(resizes.length, 2, "both photos were shrunk");
+  const cachePuts = fake.puts.filter((p) => p.key.startsWith(`SUNDIAL/_cache/report-images/${job.Id}/`));
+  assert.equal(cachePuts.length, 2, "the shrunk copies were cached, outside the job's folder");
+  assert.ok(cachePuts.every((p) => p.contentType === "image/jpeg" && p.key.endsWith("-1600.jpg")));
+  assert.ok(fake.emails.at(-1).attachments.length === 1, "a small PDF is attached");
+  // second send: served from the cache, nothing shrunk again, the originals not even read
+  const getsBefore = fake.gets.length;
+  r = await call(h, "POST", `/service/jobs/${job.Id}/report/send`, {});
+  assert.equal(r.status, 200);
+  assert.equal(resizes.length, 2);
+  assert.equal(fake.gets.length, getsBefore, "the originals were not read again");
+  // no resizer (or past the budget): a 3 MB original is embedded, a 4 MB one is left out — the send still succeeds
+  const fake2 = fakeSalesforce();
+  fake2.photoBytes = BIG;
+  fake2.resizeImage = null;
+  const h2 = makeHandler(fake2);
+  const job2 = await seedReportJob(fake2, h2);
+  r = await call(h2, "POST", `/service/jobs/${job2.Id}/report/send`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(fake2.puts.filter((p) => p.key.startsWith("SUNDIAL/_cache/")).length, 0);
+  assert.ok(fake2.puts.some((p) => p.contentType === "application/pdf"), "the PDF was still made (placeholders for the photos)");
+});
+

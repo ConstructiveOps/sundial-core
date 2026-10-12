@@ -25,12 +25,26 @@ import { buildKey, publicUrlForKey, registerFileMetadata } from "../../lib/file-
 import { buildJobReportModel, normalizeReportSections, renderJobReportDocument, reportPhotoChoices } from "../../lib/job-report-document.js";
 import { INVOICE_JOB_SELECT } from "./invoice.js";
 import { JOB_SF_OBJECT } from "./fields.js";
+import { createHash } from "node:crypto";
+import { REPORT_MAX_EDGE } from "../../lib/image-resize.js";
 
 export const REPORT_JOB_SELECT =
   INVOICE_JOB_SELECT +
   ", Service_Type__c, Report_Sections__c, Report_Public_Token__c, Report_Token_Expires_At__c, Report_Updated_At__c, Report_Sent_At__c, Report_Sent_Count__c, Report_PDF_S3_Key__c";
 export const REPORT_TOKEN_DAYS = 365; // a report is kept, not acted on; the link lives a year and is renewed on every send
 export const EMAIL_ATTACH_MAX_BYTES = 8 * 1024 * 1024; // SES tops out at 10 MB per message; over this the email links the PDF instead
+// The PDF's photos (2026-10-12, Harmon's "internal server error" / "timeout" on a photo report):
+// each section's photo is shrunk for the page (lib/image-resize.js) and the shrunk copy kept in
+// S3 so a re-send never shrinks it twice. Shrinking is ~2 s per phone photo on one vCPU, so a
+// send spends at most RESIZE_BUDGET_MS on it (API Gateway cuts the request at 29 s); a photo
+// past the budget is embedded as it is when it is small enough, else left to the hosted page.
+export const REPORT_IMAGE_CACHE_PREFIX = "SUNDIAL/_cache/report-images"; // outside every record's folder: not a job file, not an XFiles path
+export const RESIZE_BUDGET_MS = 16000;
+export const EMBED_ORIGINAL_MAX_BYTES = 3 * 1024 * 1024;
+/** Where the shrunk copy of a job's photo lives. */
+export function reportImageCacheKey(jobId, photoKey) {
+  return `${REPORT_IMAGE_CACHE_PREFIX}/${jobId}/${createHash("sha1").update(photoKey).digest("hex").slice(0, 16)}-${REPORT_MAX_EDGE}.jpg`;
+}
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 const MAX_TEXT_CHARS = 320;
 
@@ -91,6 +105,42 @@ export function createReportHandlers(d, h) {
     if (!SF_ID_RE.test(id || "")) return null;
     const rows = await d.sfQuery(`SELECT ${REPORT_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0] ?? null;
+  }
+
+  /**
+   * The bytes the PDF embeds, one photo at a time (2026-10-12): the shrunk copy from the
+   * cache when it exists, else the original shrunk now (and cached), else — past the time
+   * budget, or not a JPEG — the original when it is small enough. A photo that fails is
+   * left out; the painter draws its placeholder and the hosted page still shows it.
+   */
+  async function reportImages({ jobId, sections, startedAt }) {
+    const images = new Map();
+    const keys = [...new Set(sections.filter((s) => s.photoKey).map((s) => s.photoKey))];
+    for (const key of keys) {
+      const cacheKey = reportImageCacheKey(jobId, key);
+      try {
+        const cached = await d.getObject({ key: cacheKey }).catch(() => null);
+        if (cached?.bytes?.length) {
+          images.set(key, { bytes: cached.bytes, contentType: "image/jpeg" });
+          continue;
+        }
+        const obj = await d.getObject({ key });
+        if (!obj?.bytes) continue;
+        const withinBudget = Date.now() - startedAt < RESIZE_BUDGET_MS;
+        const r = withinBudget && d.resizeImage ? d.resizeImage(obj.bytes, { contentType: obj.contentType }) : null;
+        if (r?.resized) {
+          images.set(key, { bytes: r.bytes, contentType: "image/jpeg" });
+          d.putObject({ key: cacheKey, body: r.bytes, contentType: "image/jpeg" }).catch((e) => console.error("report: image cache write failed:", cacheKey, e?.message || e));
+        } else if (obj.bytes.length <= EMBED_ORIGINAL_MAX_BYTES) {
+          images.set(key, obj);
+        } else {
+          console.error(`report: photo left to the hosted page (${obj.bytes.length} bytes, ${withinBudget ? "could not be shrunk" : "past the time budget"}):`, key);
+        }
+      } catch (e) {
+        console.error("report: photo fetch failed:", key, e?.message || e);
+      }
+    }
+    return images;
   }
 
   /** Everything the document needs, loaded once: photos, the live invoice + its lines + payments. */
@@ -189,6 +239,7 @@ export function createReportHandlers(d, h) {
 
     async sendReport({ ctx, params, body }) {
       const { tenantId, cors } = ctx;
+      const startedAt = Date.now(); // the photo-shrink budget counts from the request, not from the first photo
       const job = await loadJob(params[0], tenantId);
       if (!job) return notFound(cors);
       const norm = normalizeReportSections(job.Report_Sections__c);
@@ -211,19 +262,7 @@ export function createReportHandlers(d, h) {
       let pdfBytes = null;
       let pdfError = null;
       try {
-        const images = new Map();
-        await Promise.all(
-          model.sections
-            .filter((s) => s.photoKey)
-            .map(async (s) => {
-              try {
-                const obj = await d.getObject({ key: s.photoKey });
-                if (obj?.bytes) images.set(s.photoKey, obj);
-              } catch (e) {
-                console.error("report: photo fetch failed:", s.photoKey, e?.message || e);
-              }
-            })
-        );
+        const images = await reportImages({ jobId: job.Id, sections: model.sections, startedAt });
         pdfBytes = await d.renderReportPdf(model, images);
         await d.putObject({ key: pdfKey, body: pdfBytes, contentType: "application/pdf" });
         try {

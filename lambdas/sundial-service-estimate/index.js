@@ -93,6 +93,7 @@ import { canAction } from "../../lib/access.js";
 import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
+import { resizeJpegForReport as realResizeJpegForReport } from "../../lib/image-resize.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
 import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake-alerts.js";
@@ -489,6 +490,7 @@ export function createHandler(deps = {}) {
     brandName: BRAND_NAME,
     renderPdf: realRenderEstimatePdf,
     renderReportPdf: realRenderJobReportPdf,
+    resizeImage: realResizeJpegForReport, // the report PDF's photos, shrunk for the page (2026-10-12)
     putObject: async ({ key, body, contentType }) =>
       s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType })),
     // The job report reads the job's photos back out of S3 for the PDF, and lists the job's folder for the picker.

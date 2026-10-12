@@ -1,5 +1,9 @@
 # Sundial — Progress Log
 
+## 2026-10-12 — Hotfix: the office's card charge was refused by Stripe (`off_session` on the create)
+
+**Harmon's first live charge** (job page → Card on file → Charge card) failed with Stripe's `The parameter 'off_session' cannot be passed when creating a PaymentIntent unless 'confirm' is set to true.` `chargeCard()` creates the PaymentIntent unconfirmed on purpose (the Pending row is written BEFORE any money moves — D-072 amendment 11) and was passing `off_session: true, confirm: false` on that create; Stripe only accepts `off_session` together with `confirm: true`. **Fix:** `off_session` dropped from the create; it stays on the separate `/confirm` call, which is where the off-session charge of the stored card actually happens. No row was written for the failed attempts (the create itself was refused, before the Pending row). Tests pinned both ways (create carries no `off_session`; confirm carries `off_session=true`); estimate suite 58. **Deploy:** `.\deploy.ps1 sundial-service-estimate`.
+
 ## 2026-10-09 — Dispatch board: `customerEmail` on every card, `end`-only resize confirmed, times snap to 15 minutes
 
 For the portal's tray search and drag-to-resize (`sundial-service-board`).

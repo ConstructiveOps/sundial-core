@@ -436,11 +436,15 @@ export function createStripeHandlers(d, h) {
     const description = `${invoice ? invoice.Name : `${job.Name} deposit`} — ${brandName}`.slice(0, 200);
     const email = customer.Primary_Email__c || job.Primary_Email_at_Creation__c || null;
     const type = invoice ? "Payment" : "Deposit";
+    // Created UNCONFIRMED so the Pending row exists before any money moves. Stripe accepts
+    // `off_session` only together with `confirm: true` (Harmon's first live charge, 2026-10-12:
+    // "The parameter 'off_session' cannot be passed when creating a PaymentIntent unless
+    // 'confirm' is set to true"), so it goes on the confirm call below, never on the create.
     let pi;
     try {
       pi = await stripe.client.post(
         "payment_intents",
-        { amount: toCents(wanted), currency: "usd", customer: customer.Stripe_Customer_Id__c, payment_method: pm, off_session: true, confirm: false, description, metadata, ...(email ? { receipt_email: email } : {}) },
+        { amount: toCents(wanted), currency: "usd", customer: customer.Stripe_Customer_Id__c, payment_method: pm, confirm: false, description, metadata, ...(email ? { receipt_email: email } : {}) },
         { idempotencyKey: `charge:${invoice?.Id || job.Id}:${toCents(wanted)}:${d.now().toISOString().slice(0, 16)}` }
       );
     } catch (e) {

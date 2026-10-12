@@ -1835,8 +1835,10 @@ test("stripe webhook: signature is the gate (bad / tampered / unknown tenant / n
   const piCreate = new URLSearchParams(stripeCalls.find((c) => c.url.endsWith("/payment_intents") && c.init.method === "POST" && c.init.body.includes("17500")).init.body);
   assert.equal(piCreate.get("customer"), "cus_1");
   assert.equal(piCreate.get("payment_method"), "pm_card");
-  assert.equal(piCreate.get("off_session"), "true");
+  assert.equal(piCreate.get("off_session"), null, "never on the create — Stripe refuses off_session without confirm (2026-10-12)");
   assert.equal(piCreate.get("confirm"), "false");
+  const piConfirm = new URLSearchParams(stripeCalls.find((c) => c.url.endsWith(`/payment_intents/${created.pi}/confirm`)).init.body);
+  assert.equal(piConfirm.get("off_session"), "true", "the stored card is charged off-session on the confirm call");
   assert.equal(piCreate.get("metadata[kind]"), "charge");
   assert.equal(piCreate.get("metadata[invoiceId]"), inv.Id);
   assert.equal(piCreate.get("receipt_email"), "ivy@example.com");
@@ -2018,7 +2020,7 @@ test("stripe (amendment 11): the office's card on file — status from Stripe, t
   assert.equal(job.Payment_Status__c, "Deposit Paid");
   const piCall = stripeCalls.find((c) => c.url.endsWith("/payment_intents") && c.method === "POST");
   assert.equal(piCall.params.get("amount"), "10000");
-  assert.equal(piCall.params.get("off_session"), "true");
+  assert.equal(piCall.params.get("off_session"), null, "off_session rides on the confirm call, not the create");
   assert.equal(piCall.params.get("metadata[kind]"), "deposit");
   // More than what is left ($200) is refused; a Manager is refused outright (the level gate).
   r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 250 });

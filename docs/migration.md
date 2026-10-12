@@ -120,6 +120,60 @@ URLs need none), and never log it. When HCP logs Ben out the run stops with
 notice: this lives only as long as the migration — remove `webCookie` from the secret when
 it is done.
 
+**Where it stood on 2026-10-07.** The code is on `master` (2026-10-05 late); the function has
+not been created, the cookie has not been copied, and nothing has been copied yet — the only
+run was a dry run from the device VM, which has no AWS credentials, so it listed 0 jobs
+(`migration\hcp\media\SUMMARY.txt`, no `ledger.jsonl`). The whole run is still Tim's TASKS
+step, below under "The run".
+
+### Address Notes → `Warranty_Notes__c` (`scripts/hcp-address-notes.mjs`, 2026-10-07)
+
+HCP keeps **two** notes on a customer. The customer-level Notes (the Notes tab) came through
+the public API (`customer.notes`, 8,664 of 9,524 customers) and the import put it in
+`Sundial_Customer__c.Description__c`. **"Address Notes"** is a different field, one per
+*address* (the Edit Address dialog: Street / Unit / City / State / Zip / **Address Notes** /
+Set as billing), and the public API never returns it — every `customer.addresses[]` row in
+the pull has exactly `id, type, street, street_line_2, city, state, zip, country, latitude,
+longitude`. So the import had nothing to map; the field was never captured.
+
+The web app returns it: `GET /api/customers/{cus_id}/addresses` → `{ object: "list", data:
+[…] }`, each row with `notes` (reconnaissance on Ben's session, read-only; the customer *list*
+endpoint does NOT carry it, so it is one call per customer). In a 40-customer sample 4 had
+one, 23–78 characters — gate codes and access instructions. Harmon wants them in the
+Customer's **Warranty Notes** (`Warranty_Notes__c`, D-081: the Service customer header's
+highlight and an Intake question).
+
+`lib/hcp-media.js` → `listCustomerAddresses` (the same cookie, the same `SESSION_EXPIRED`
+rule), `lib/hcp-address-notes.js` (pure): one noted address → its notes as typed; several →
+one line per address headed by the street; the write is **set** when the field is blank,
+**append** (kept text, a blank line, the HCP text) when the office already typed something,
+**skip** when the text is already there (a re-run) or HCP has none. Never a re-import.
+
+    node scripts/hcp-address-notes.mjs --tenant harmon                    # dry run: pull + plan.csv, Salesforce untouched
+    node scripts/hcp-address-notes.mjs --tenant harmon --apply --limit 3  # canary
+    node scripts/hcp-address-notes.mjs --tenant harmon --apply            # everything, resumable
+
+Three steps, each resumable: **pull** (≈ 9,430 GETs at ~200 ms, 45–60 min the first time;
+every answer kept in `migration\hcp\address-notes\pull.jsonl`, so a stop resumes and a re-run
+asks HCP nothing it already knows — `--refresh` to re-ask), **plan**
+(`migration\hcp\address-notes\plan.csv`: one row per noted customer, action, from → to) and
+**apply** (canary first — one customer alone, re-read, abort if `Name` / `Description__c` /
+`Service_Stage__c` / `Archived__c` / `Status__c` / `Outreach_Notes__c` moved — then batches
+of 200). Runs on Tim's PowerShell (it reads the cookie and the connected app from Secrets
+Manager itself; no Lambda involved). Nothing writes HCP.
+
+### The run (Tim, in this order)
+
+1. **Lambda** — console → Create function `sundial-hcp-media` (Node.js 22, x86_64, the
+   execution role `sundial-service-board` uses, memory 2048 MB, timeout 15 min), then
+   `.\deploy.ps1 sundial-hcp-media`.
+2. **Cookie** — the paragraph above → Secrets Manager `sundial/hcp` → `webCookie`.
+3. **Photos and documents** — `hcp-media-pull.mjs`: dry run → `--apply --limit 3` (open those
+   three jobs in Sundial: Photos card → "Housecall Pro" group, Files card) → `--apply`.
+4. **Address notes** — `hcp-address-notes.mjs`: dry run (read `plan.csv`) → `--apply --limit 3`
+   (open those three customers in the Service module: the Warranty Notes highlight) → `--apply`.
+5. When both summaries show 0 failed: remove `webCookie` from the secret.
+
 ### The import into Sundial — `scripts/hcp-import.mjs`
 
 Upsert-only, on `HCP_Id__c`, re-runnable: the go-live delta is "pull again, import again".

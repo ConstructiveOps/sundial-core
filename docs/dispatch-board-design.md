@@ -71,6 +71,13 @@ domain, D-006), no customer-facing booking (Phase 3).
   needing a return visit, sorted by priority then age. Tray cards are FullCalendar
   external draggables; dropping one opens the confirm modal (tech, window, duration
   default, notify toggle) and creates a visit.
+  **As built (2026-10-14, Harmon):** the tray shows ONLY calls that exist but are
+  not yet scheduled (`unscheduledCalls` — "Schedule later" calls). Jobs with no call
+  (`unscheduled`) are left out: Harmon read a job card as a phantom call. A call is
+  made from the job's page (Schedule → Schedule later puts it in the tray). The
+  job-card path (drag a job to create its call) stays in the portal behind
+  `TRAY_SHOWS_JOBS = false` in `DispatchBoardPage.tsx`; `GET /service/board` still
+  returns `unscheduled`, unchanged.
 - **Multi-tech placement:** alt-drag (or "add tech" on the event menu) clones the
   block to another tech row as a sibling visit on the same ticket — windows may
   differ (techs arrive/leave independently).

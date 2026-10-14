@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-10-14 — HCP lead customers get their notes back (`scripts/hcp-restore-lead-notes.mjs`)
+
+**Why.** Harmon (Ben): some customers "migrated without the historical notes". The import's leads phase (`leadFields`, `lib/hcp-import.js`) wrote the lead block (`HCP lead #… · status`, tags, job type, + the archive line) into `Sundial_Customer__c.Description__c` and replaced the customer's own HCP notes, which the customers phase had just written there.
+
+**Fixed in the import.** `leadBlock()` / `leadJobTypeName()` / `customerNotesText()` are pulled out, and `leadDescription(notes, block, disposition)` gives notes ⏎⏎ block ⏎ archive line. The leads phase passes the customer's notes on a record the import created; a linked record gets none. The HCP lead object has no notes field of its own (checked against the pull), so only the customer's notes exist.
+
+**The repair.** `lib/hcp-lead-notes.js` (pure) plans it: a customer the import created (`id-map.json` `created: true`, by `HCP_Id__c`; customers carry no migration marker in a notes field), whose `Description__c` is still exactly one of its leads' blocks (+ the archive line), with non-blank HCP notes not already in it, gets the notes prepended. Anything else is left alone: a hand edit is listed in `lead-notes-edited.csv` and never written. The script is a dry run by default (counts, a sample of 10, three CSVs). `--apply` writes `Description__c` only: canary first (abort if a watched field moved), then batches of 200, with each batch re-read just before its write.
+
+**Dry run (2026-10-14, Harmon, 9,443 customers with `HCP_Id__c`):** **206 to restore**, 0 edited by a person, 0 too long, 348 lead customers with blank HCP notes, 8,680 not a lead block, **209 linked Sales records** whose `Description__c` the lead block also replaced. The pull can't restore those (it was Sales's text), and `Description__c` has no field history. They're listed in `lead-notes-linked.csv`, with a TASKS item. Apply count: pending, Tim runs `--apply`.
+
+**Tests.** `lib/hcp-lead-notes.test.js` 10 (the fixed `leadFields`, exact-match rule incl. CRLF, prepend keeps block + archive line, hand edit listed, idempotent, blank notes, linked, shared household, notes only on the lead's embedded customer, too long). Docs: `docs/migration.md` "Lead customers' notes — the 2026-10-14 restore".
+
 ## 2026-10-14 — Cache sync writes nulls: a field cleared in Salesforce now clears in the portal
 
 **Why.** Harmon removed a customer's Next Follow-Up Date and the overdue flag stayed. The cause was platform-level: every copy of `mapSfRecordToCacheRow` (`lib/cache-row.js`, `sundial-cache-sync`, `sundial-sf-query`) did `if (val === undefined || val === null) continue;`, so a value Salesforce returned as null never reached the upsert and the cache kept the old one until a full resync (and a bulk upsert cleared it only by accident, when a sibling row in the batch had a value for that column).

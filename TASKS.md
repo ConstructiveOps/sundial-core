@@ -4,6 +4,13 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## HCP lead customers' notes restored (2026-10-14, Harmon — Ben: "migrated without the historical notes")
+
+- [x] `lib/hcp-import.js`: `leadBlock` / `leadJobTypeName` / `customerNotesText` / `leadDescription` — the leads phase keeps the customer's HCP notes above the lead block on a customer the import created (the go-live re-run writes it right).
+- [x] `scripts/hcp-restore-lead-notes.mjs` + `lib/hcp-lead-notes.js` (tests 10): created-by-import customers whose `Description__c` is still exactly a lead block (+ archive line) get their HCP notes prepended; a hand edit is listed, never written. Dry run 2026-10-14: **206 to restore, 0 hand-edited**, 348 with blank notes, 209 linked (left alone).
+- [ ] **TIM: apply** — `node scripts/hcp-restore-lead-notes.mjs --tenant harmon` (dry run; glance at `migration/hcp/import/lead-notes-plan.csv`), then `--apply` (canary first, then batches), then Lambda → `sundial-cache-sync` → Test → `{"object":"customer","mode":"full"}`. Record the written count in PROGRESS.md.
+- [ ] **DECIDE: the 209 linked records** (`lead-notes-linked.csv`) — the leads phase replaced their Sales `Description__c` with the lead block; the pull cannot restore it and field history does not track it. Recover from a Salesforce data export / Sunbase data if any had text worth keeping. And stop the import writing `Description__c` on a linked record (append the block instead?) before the go-live re-run, or it happens again.
+
 ## Cache sync writes nulls: a field cleared in Salesforce clears in the portal (2026-10-14, Harmon) — DEPLOYED 2026-10-14
 
 - [x] `mapSfRecordToCacheRow` writes every field Salesforce returned, null included; only an absent (not-SELECTed) field leaves its column alone — all three copies (`lib/cache-row.js`, `sundial-cache-sync`, `sundial-sf-query`). `sundial-sf-update` checked: it PATCHes the null to Salesforce and flags the row stale, so the read-refresh clears it through the fixed mapper.

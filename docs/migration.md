@@ -307,6 +307,43 @@ default (`bill-to-review.csv`, `backfill-plan.csv` in `migration/hcp/import/`); 
 canary-first and batched. Idempotent. Needs the pull in `migration/hcp/raw/` and AWS credentials
 (Tim's PowerShell, not the device VM).
 
+### Lead customers' notes — the 2026-10-14 restore (`scripts/hcp-restore-lead-notes.mjs`)
+
+**What went wrong.** For a customer with an HCP lead, the import's leads phase wrote the lead
+block (`HCP lead #… · status`, tags, job type, + the archive line) into `Description__c` and
+**replaced** the customer's own HCP notes, which the customers phase had just put there (Harmon,
+Ben: "migrated without the historical notes"). The HCP **lead** object carries no notes field of
+its own (the 2026-10-04 pull's lead keys: id, number, customer, address, lead_source, status,
+pipeline_status, tags, total_amount, assigned_employee, conversions, lost_at, job_fields,
+company_*), so the customer's notes are the only notes there are.
+
+**The import is fixed** (`lib/hcp-import.js` `leadDescription`): on a customer the import
+created, `Description__c` is now `<HCP notes>`, a blank line, the lead block, the archive line —
+so the go-live re-run writes the right thing.
+
+**The repair** (`lib/hcp-lead-notes.js`, pure, tested) touches a customer only when the import
+CREATED it (`id-map.json` `created: true`, matched on `HCP_Id__c` — a customer carries no
+migration marker in a notes field, unlike estimates and jobs), its `Description__c` is still
+exactly one of its leads' blocks (+ the import's archive line), and its HCP notes are non-blank
+and not already in it. It prepends the notes; the block and archive line stay as they are. A
+description a person changed is listed in `lead-notes-edited.csv` and never written; a mid-run
+edit is caught by re-reading each batch just before it is written. Writes `Description__c` only,
+canary first, batches of 200. Idempotent.
+
+    node scripts/hcp-restore-lead-notes.mjs --tenant harmon            # dry run: counts, a sample of 10, the CSVs
+    node scripts/hcp-restore-lead-notes.mjs --tenant harmon --apply    # writes; then cache-sync { "object": "customer", "mode": "full" }
+
+**Dry run, 2026-10-14** (9,443 Harmon customers with `HCP_Id__c`): **206 to restore**; 348 lead
+customers whose HCP notes are blank (nothing to restore); 8,680 not a lead block; **0 edited by
+a person**; 0 too long. *(Apply counts: see PROGRESS.md once it has run.)*
+
+**Not repairable from the pull: 209 linked records.** The leads phase also wrote the lead block
+over `Description__c` on customers the import LINKED to an existing Sales record — text that was
+Sales's (from Sunbase or typed), not HCP's. The pull cannot give it back and the object's field
+history does not track `Description__c`. They are listed in `lead-notes-linked.csv`; the source
+to recover from is a Salesforce data export or the Sunbase data. Until the import stops writing
+`Description__c` on linked records, a re-run repeats it (TASKS.md).
+
 ## Sunbase → Sundial Sales (Phase 1 / Phase 3 commercial)
 
 Not yet written here.

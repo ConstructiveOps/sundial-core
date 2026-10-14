@@ -34,7 +34,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sfQuery, sfUpsertMany, describeObject, soqlEscapeString } from "../lib/salesforce.js";
 import {
-  HCP_ID_FIELD, writable, callKey, indexExisting, decideCustomer, customerFields, leadFields, lineFields, estimateFields, jobEstimateFields,
+  HCP_ID_FIELD, writable, callKey, indexExisting, decideCustomer, customerFields, leadFields, leadJobTypeName, customerNotesText, lineFields, estimateFields, jobEstimateFields,
   invoiceState, jobFields, callFields, callStatusFor, invoiceFields, paymentFields, pickOption, estimateStatus, techResolver, personName, normalizeEmail, addressLine,
 } from "../lib/hcp-import.js";
 import { matchPicklist, unionProjectTypes } from "../lambdas/sundial-service-estimate/customer.js";
@@ -414,10 +414,13 @@ if (PHASES.includes("leads")) {
     const assigned = l.assigned_employee?.id ? resolveTech(l.assigned_employee.id).sfId : null;
     // a won lead resolves on the day its job / estimate was made in HCP
     const conv = leadConversions(l).map((x) => (x.type === "job" ? jobsById.get(x.id)?.created_at : estimatesById.get(x.id)?.created_at)).filter(Boolean).sort()[0] || null;
-    const jobTypeName = jobTypes.get(s(l.job_fields?.job_type_uuid ?? l.job_fields?.job_type?.id)) || s(l.job_fields?.job_type?.name);
+    const jobTypeName = leadJobTypeName(l, jobTypes);
     // the archive line on Description__c only where the customers phase wrote the flag (created / refreshed, never a linked record)
     const disposition = existingRec && linkedNotCreated ? null : dispositionFor(customerPool.get(cid) || l.customer || { id: cid });
-    const f = leadFields(l, { assignedToId: assigned, leadSources, stages: stageValues, resolutions: resolutionValues, requestTypes: requestTypeValues, jobTypeName, convertedAt: conv, onGap, disposition });
+    // the customer's own HCP notes stay above the lead block on a record the import created
+    // (2026-10-14 — they used to be replaced); a linked record's Description__c is Sales's text
+    const customerNotes = linkedNotCreated ? "" : customerNotesText(customerPool.get(cid) || l.customer);
+    const f = leadFields(l, { assignedToId: assigned, leadSources, stages: stageValues, resolutions: resolutionValues, requestTypes: requestTypeValues, jobTypeName, convertedAt: conv, onGap, disposition, customerNotes });
     // A linked customer is Sales's: a stage set there stays (unless it is the import's own
     // "New"), and the outcome fields go with it. A customer the import created takes HCP's
     // state on every run — that is how the 09-28 run's "Estimate Created" on a won lead becomes

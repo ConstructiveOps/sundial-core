@@ -4,6 +4,15 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Welcome Call: Callback Requested / Call Answered - Incomplete (D-082 amendment 1, 2026-10-14)
+
+- [x] Both picklist values verified by live describe (active; restricted picklist).
+- [x] Mapping + incomplete safety net + describe-guard fallback + retryable/ceiling + precedence + log headers (`format.js`, `fields.js`, `webhook.js`, `orphanMatch.js`).
+- [x] Tests: 12 new, welcome-call 153, suite 1,491. Runbook, DECISIONS, CLAUDE.md, PROGRESS.
+- [x] `.\deploy.ps1 sundial-welcome-call`; merged to `master` and pushed in the same pass.
+- [ ] **TIM (Salesforce): the retry Flow** — change its filter from `Welcome_Call_Status__c = 'No Answer'` to IN (`No Answer`, `Callback Requested`, `Call Answered - Incomplete`), keeping `Welcome_Call_Attempts__c < 5`. Until then those customers sit without a redial.
+- [ ] **TIM (Retell):** `incomplete` in the `verification_result` selector (the safety net covers calls the LLM still labels partial / failed).
+
 ## Job report send: photos shrunk for the PDF (hotfix 2026-10-12 evening)
 
 - [x] `lib/image-resize.js` (+ test), `report.js` `reportImages()` + the S3 cache + the time budget, `index.js` `resizeImage`, `jpeg-js` dependency. Estimate tests 59.

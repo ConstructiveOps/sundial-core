@@ -281,7 +281,8 @@ Recording: ${key}`;
  * STATUS RULES (D-082 — precedence replaced "terminal → never change"):
  *   - The call's result sets the status only if it OUTRANKS the record's current status
  *     (format.js STATUS_PRECEDENCE: Verified > Verified - Exceptions > Refused >
- *     Failed - Max Attempts > No Answer > Calling > Queued > Not Started). It never
+ *     Failed - Max Attempts > Callback Requested > Call Answered - Incomplete >
+ *     No Answer > Calling > Queued > Not Started). It never
  *     downgrades, so the order the sweep processes a customer's calls in cannot change
  *     the outcome. The entry is always written, stating the call's own result, and marked
  *     "(status kept: …)" when the record kept a higher one.
@@ -366,7 +367,10 @@ async function backfillCallResult({
         const attempts = Number(schema.reader(fresh)("welcomeCallAttempts")) || 0;
         // Same decision as the webhook, connection check included — a rep-form call that
         // rang out must not backfill as Verified - Exceptions (call_ae983426…, 2026-09-15).
-        const { status: mappedStatus } = resolveCallStatus(call, { attempts });
+        const { status: mappedStatus } = resolveCallStatus(call, {
+          attempts,
+          statusAvailable: (v) => schema.hasPicklistValue("welcomeCallStatus", v),
+        });
         const currentStatus = statusApi ? String(fresh[statusApi] ?? "").trim() : "";
         const precedence = resolveStatusPrecedence(currentStatus, mappedStatus);
         const kept = !precedence.changed && currentStatus !== "" && currentStatus !== mappedStatus;

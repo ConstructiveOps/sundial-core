@@ -35,6 +35,19 @@ export const TERMINAL_STATUSES = new Set([
 export const TERMINAL_OR_IN_FLIGHT_STATUSES = new Set(["Calling", ...TERMINAL_STATUSES]);
 
 /**
+ * Results that leave the customer to be dialed again — and therefore the only ones the
+ * attempt ceiling rewrites to "Failed - Max Attempts". None is in TERMINAL_STATUSES, so
+ * the eligibility guard lets the next call through. "Callback Requested" and
+ * "Call Answered - Incomplete" joined No Answer on 2026-10-14: both used to be parked as
+ * the terminal "Verified - Exceptions", which told sales a verification had happened.
+ */
+export const RETRYABLE_STATUSES = new Set([
+  "No Answer",
+  "Callback Requested",
+  "Call Answered - Incomplete",
+]);
+
+/**
  * STATUS PRECEDENCE (D-082, 2026-10-07) — lowest first. A call RESULT (the webhook's or
  * the rep-form backfill's) sets Welcome_Call_Status__c only when it ranks HIGHER than
  * what the record holds; it can never downgrade. So the order results are processed in
@@ -50,6 +63,10 @@ export const STATUS_PRECEDENCE = Object.freeze([
   "Queued",
   "Calling",
   "No Answer",
+  // Someone picked up but the call settled nothing (2026-10-14). Both outrank No Answer —
+  // a human was reached — and Callback outranks Incomplete because it carries a request.
+  "Call Answered - Incomplete",
+  "Callback Requested",
   "Failed - Max Attempts",
   "Refused",
   "Verified - Exceptions",

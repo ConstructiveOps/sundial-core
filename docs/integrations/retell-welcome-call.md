@@ -114,7 +114,7 @@ logs and returns; it never throws and never retries.
 
 | # | Condition | Why dialing would be wrong |
 |---|---|---|
-| 1 | `Welcome_Call_Status__c` ∈ {`Calling`, `Verified`, `Verified - Exceptions`, `Refused`, `Failed - Max Attempts`} | `Calling` = a call is already in flight (double-dial). The rest are settled outcomes; re-calling a `Refused` customer is a complaint. |
+| 1 | `Welcome_Call_Status__c` ∈ {`Calling`, `Verified`, `Verified - Exceptions`, `Refused`, `Failed - Max Attempts`} | `Calling` = a call is already in flight (double-dial). The rest are settled outcomes; re-calling a `Refused` customer is a complaint. `Callback Requested` and `Call Answered - Incomplete` are deliberately NOT here — they are retried like `No Answer`. |
 | 2 | `Welcome_Call_Attempts__c` ≥ **5** | The harassment ceiling. |
 | 3 | No parseable US phone in `Primary_Phone__c` | We would dial a stranger and read them someone else's contract. |
 | 4 | Current time outside **08:00–20:00 America/Phoenix** | Calling-hours compliance. End is exclusive; Phoenix has no DST. |
@@ -396,7 +396,9 @@ count as never-connected only through the evidence rule.
 | `verification_result` | `Welcome_Call_Status__c` |
 |---|---|
 | `passed` | `Verified` |
-| `partial` / `failed` / `callback_requested` | `Verified - Exceptions` |
+| `partial` / `failed` | `Verified - Exceptions` — **except** the incomplete safety net below |
+| `callback_requested` | `Callback Requested` — **`Failed - Max Attempts`** when attempts ≥ 5 (2026-10-14) |
+| `incomplete` | `Call Answered - Incomplete` — **`Failed - Max Attempts`** when attempts ≥ 5 (2026-10-14) |
 | `refusal` | `Refused` |
 | `wrong_person` / `voicemail` / `no answer` | `No Answer` — **`Failed - Max Attempts`** when `Welcome_Call_Attempts__c` ≥ 5 |
 | unrecognized (connected calls only) | `Verified - Exceptions` (see below) |
@@ -404,9 +406,21 @@ count as never-connected only through the evidence rule.
 Values are normalized (lowercase, spaces and hyphens → `_`), so `no answer`,
 `no-answer` and `no_answer` are the same thing.
 
-- **The attempt ceiling rewrites only the No Answer bucket**, because it is the only
-  one that would otherwise be retried. A `Verified` or `Refused` call is finished no
-  matter how many attempts it took.
+- **The attempt ceiling rewrites only the retryable bucket** — `No Answer`,
+  `Callback Requested`, `Call Answered - Incomplete` (`RETRYABLE_STATUSES` in `format.js`) —
+  because those are the only ones that would otherwise be retried. A `Verified` or
+  `Refused` call is finished no matter how many attempts it took.
+- **The incomplete safety net (2026-10-14).** The analysis LLM may still label a call that
+  settled nothing `partial` / `failed`. A **connected** call whose result is `partial` or
+  `failed`, with **every** confirmation flag false **and** `mismatched_items` empty (absent,
+  `[]`, or a spelled-out `none`), maps to `Call Answered - Incomplete`. One confirmation or
+  one mismatch keeps `Verified - Exceptions` — that is a real exception. Evidence:
+  `call_f0d27ed3b7b17f5701bcaad22dc` on `a1P7y00000BWpPFEA1` (17 s, hung up before a name),
+  which was logged `Verified - Exceptions` on 2026-10-13.
+- **Describe-guarded.** `Welcome_Call_Status__c` is a restricted picklist, so both new
+  values are checked against the live describe (`fields.js` `hasPicklistValue`). An org
+  without one records `Verified - Exceptions` instead (the pre-2026-10-14 mapping, still
+  terminal) with a WARN naming the missing value.
 - **An unrecognized outcome goes to `Verified - Exceptions`, not `No Answer`.** That is
   the fail-safe direction: Exceptions parks the record for a human, while No Answer
   would silently queue another call on a result we did not understand. The one
@@ -591,10 +605,12 @@ voicemail-then-success and success-then-voicemail both end `Verified`.
 
 | Rank | Status |
 |---|---|
-| 7 (highest) | `Verified` |
-| 6 | `Verified - Exceptions` |
-| 5 | `Refused` |
-| 4 | `Failed - Max Attempts` |
+| 9 (highest) | `Verified` |
+| 8 | `Verified - Exceptions` |
+| 7 | `Refused` |
+| 6 | `Failed - Max Attempts` |
+| 5 | `Callback Requested` (2026-10-14) |
+| 4 | `Call Answered - Incomplete` (2026-10-14) |
 | 3 | `No Answer` |
 | 2 | `Calling` |
 | 1 | `Queued` |
@@ -604,7 +620,8 @@ voicemail-then-success and success-then-voicemail both end `Verified`.
 The entry is **always** written and states the call's **own** result; when the record
 kept a higher status the origin reads `rep-form call (status kept: <current>)` (webhook:
 `Attempt <n> (status kept: <current>)`). The attempts ceiling is unchanged: a
-`No Answer` at ≥ 5 attempts maps to `Failed - Max Attempts` before precedence is applied.
+`No Answer` / `Callback Requested` / `Call Answered - Incomplete` at ≥ 5 attempts maps to
+`Failed - Max Attempts` before precedence is applied.
 Precedence applies to RESULTS only — placing a call still moves `No Answer` → `Calling`
 (the eligibility guard is what keeps a settled customer from being dialed).
 
@@ -835,9 +852,10 @@ would lose the status update as well.
 ## Status state machine
 
 ```
-                    ┌──────────────────────────────────────────┐
-                    │  Not Started / Queued / No Answer        │  ← eligible
-                    └───────────────────┬──────────────────────┘
+         ┌────────────────────────────────────────────────────────────────┐
+         │  Not Started / Queued / No Answer / Callback Requested /       │  ← eligible
+         │  Call Answered - Incomplete                                    │
+         └──────────────────────────────┬─────────────────────────────────┘
                                         │ place call (attempts +1)
                                         ▼
                                     ┌─────────┐
@@ -845,23 +863,35 @@ would lose the status update as well.
                                     └────┬────┘
                                          │ call_analyzed
                                          │ 1. connected? no ──► No Answer / Failed - Max Attempts
-                                         │ 2. yes ──► map verification_result:
-             ┌───────────────┬───────────┼─────────────┬─────────────────┐
-             ▼               ▼           ▼             ▼                 ▼
-        ┌──────────┐  ┌──────────────┐ ┌─────────┐ ┌───────────┐ ┌────────────────────┐
-        │ Verified │  │  Verified -  │ │ Refused │ │ No Answer │ │ Failed - Max       │
-        │          │  │  Exceptions  │ │         │ │ (retry)   │ │ Attempts (≥5)      │
-        └──────────┘  └──────────────┘ └─────────┘ └─────┬─────┘ └────────────────────┘
-          terminal        terminal       terminal        │              terminal
-                                                         └──► back to eligible
+                                         │ 2. yes ──► map verification_result
+                                         │    (+ incomplete safety net, describe guard):
+       ┌─────────────┬─────────────┬─────┴───────┬──────────────────────┬─────────────────┐
+       ▼             ▼             ▼             ▼                      ▼                 ▼
+  ┌──────────┐ ┌────────────┐ ┌─────────┐ ┌──────────────┐ ┌──────────────────────┐ ┌──────────────┐
+  │ Verified │ │ Verified - │ │ Refused │ │ No Answer    │ │ Callback Requested / │ │ Failed - Max │
+  │          │ │ Exceptions │ │         │ │ (retry)      │ │ Call Answered -      │ │ Attempts     │
+  │          │ │            │ │         │ │              │ │ Incomplete (retry)   │ │ (≥5)         │
+  └──────────┘ └────────────┘ └─────────┘ └──────┬───────┘ └──────────┬───────────┘ └──────────────┘
+    terminal     terminal       terminal         └──► back to eligible ◄┘                terminal
 ```
 
-`No Answer` is the **only** non-terminal outcome — it is what makes the retry Flow
-meaningful, and the attempt ceiling is what makes it terminate.
+The three **retryable** results — `No Answer`, `Callback Requested`,
+`Call Answered - Incomplete` (`RETRYABLE_STATUSES`) — are the only non-terminal outcomes.
+They are what make the retry Flow meaningful, and the attempt ceiling (≥ 5 →
+`Failed - Max Attempts`) is what makes it terminate. Before 2026-10-14 the two answered
+ones were parked as the terminal `Verified - Exceptions`, which told sales a verification
+had happened and ended the retries.
+
+**Log headers for the two answered statuses.** `Result: Callback Requested — customer
+asked for after 5 PM` when `follow_up_notes` names a time / day (`callbackWhen()` in
+`webhook.js`; plain `Result: Callback Requested` otherwise), and `Result: Call Answered -
+Incomplete (connected 0:17, verification not completed)`. Both keep `Result:` and
+`call_id=` on the header, so idempotency is unchanged.
 
 **Results follow the precedence table** (see the backfill section): a result moves the
 status only upward — `Verified` > `Verified - Exceptions` > `Refused` >
-`Failed - Max Attempts` > `No Answer` > `Calling` > `Queued` > `Not Started`. The
+`Failed - Max Attempts` > `Callback Requested` > `Call Answered - Incomplete` >
+`No Answer` > `Calling` > `Queued` > `Not Started`. The
 terminal boxes above are where the dialer stops; precedence is what a later result may
 still do to them (a later `Verified` lifts a `Refused`; nothing lowers a `Verified`).
 
@@ -963,7 +993,9 @@ log there is nowhere to explain a skip. Every other field degrades to `not provi
 
 All three exist in the live org today, with this `Welcome_Call_Status__c` picklist:
 `Not Started`, `Queued`, `Calling`, `No Answer`, `Verified`, `Verified - Exceptions`,
-`Contact Info Mismatch`, `Contract Values Mismatch`, `Refused`, `Failed - Max Attempts`.
+`Contact Info Mismatch`, `Contract Values Mismatch`, `Refused`, `Failed - Max Attempts`,
+`Callback Requested`, `Call Answered - Incomplete` (the last two confirmed by describe
+2026-10-14; restricted picklist).
 
 ---
 
@@ -1036,8 +1068,10 @@ One event, two publishers (D-054):
   `Stage__c` change that means "sold". Publishes the event with
   `Customer_Id__c = {!$Record.Id}`.
 - **Retry Flow** — scheduled, selects customers with
-  `Welcome_Call_Status__c = 'No Answer'` and `Welcome_Call_Attempts__c < 5`, publishes
-  the same event.
+  `Welcome_Call_Status__c` IN (`No Answer`, `Callback Requested`,
+  `Call Answered - Incomplete`) and `Welcome_Call_Attempts__c < 5`, publishes the same
+  event. ⚠️ The two new statuses were added 2026-10-14; the Flow's filter must name them
+  or those customers are never redialed (the Lambda will accept the call either way).
 
 Neither Flow needs any guard logic of its own. The Lambda's eligibility guard is the
 single authority on whether a call happens, so a Flow that fires too eagerly is

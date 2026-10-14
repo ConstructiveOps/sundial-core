@@ -867,7 +867,7 @@ test("every blocking status stops the call", () => {
 });
 
 test("non-blocking statuses still allow a call", () => {
-  for (const status of ["Not Started", "Queued", "No Answer", null]) {
+  for (const status of ["Not Started", "Queued", "No Answer", "Callback Requested", "Call Answered - Incomplete", null]) {
     const v = place.evaluateEligibility(
       readerFor(baseCustomer({ Welcome_Call_Status__c: status })),
       IN_WINDOW
@@ -1379,8 +1379,9 @@ test("verification_result maps to the documented statuses", () => {
   assert.equal(m("passed"), "Verified");
   assert.equal(m("partial"), "Verified - Exceptions");
   assert.equal(m("failed"), "Verified - Exceptions");
-  assert.equal(m("callback_requested"), "Verified - Exceptions");
-  assert.equal(m("callback requested"), "Verified - Exceptions"); // space form
+  assert.equal(m("callback_requested"), "Callback Requested");
+  assert.equal(m("callback requested"), "Callback Requested"); // space form
+  assert.equal(m("incomplete"), "Call Answered - Incomplete");
   assert.equal(m("refusal"), "Refused");
   assert.equal(m("wrong_person"), "No Answer");
   assert.equal(m("voicemail"), "No Answer");
@@ -2870,7 +2871,7 @@ test("D-082: the webhook — two results for one customer IN PARALLEL both land,
 });
 
 test("D-082 precedence table: rank order, never a downgrade, blank ranks lowest", () => {
-  assert.deepEqual(fmt.STATUS_PRECEDENCE, ["Not Started", "Queued", "Calling", "No Answer", "Failed - Max Attempts", "Refused", "Verified - Exceptions", "Verified"]);
+  assert.deepEqual(fmt.STATUS_PRECEDENCE, ["Not Started", "Queued", "Calling", "No Answer", "Call Answered - Incomplete", "Callback Requested", "Failed - Max Attempts", "Refused", "Verified - Exceptions", "Verified"]);
   const r = fmt.resolveStatusPrecedence;
   assert.deepEqual(r("No Answer", "Verified"), { status: "Verified", changed: true });
   assert.deepEqual(r("Verified", "No Answer"), { status: "Verified", changed: false });
@@ -2956,4 +2957,212 @@ test("D-082 repair, Dora's exact state: a pre-fix voicemail entry gets its call 
   assert.ok(headerIndex(log, VOICEMAIL_ID) > 0);
   assert.ok(log.includes("Call Summary: Reached voicemail; left a message."), "the voicemail entry is preserved");
   assert.match(log, new RegExp(`Recording: SUNDIAL/${baseCustomer().Id}/welcome-call-2026-10-06-${CONNECTED_ID}\.mp3`));
+});
+
+// ===========================================================================
+// Callback Requested / Call Answered - Incomplete (2026-10-14)
+// ===========================================================================
+//
+// Both used to land in Verified - Exceptions. Evidence on a1P7y00000BWpPFEA1:
+// call_c4c6d67630a941afdaf67ae11e1 answered, "bad time", asked for a callback;
+// call_f0d27ed3b7b17f5701bcaad22dc answered for 17 s and hung up before a name.
+
+const NO_CONFIRMATIONS = {
+  identity_confirmed: false,
+  email_confirmed: false,
+  system_details_confirmed: false,
+  financial_terms_confirmed: false,
+  utility_bill_understood: false,
+  usage_change_understood: false,
+  mismatched_items: [],
+};
+
+/** A connected call (17 s on the line, a transcript) with the given analysis. */
+function answeredCall(analysisOverrides = {}, callOverrides = {}) {
+  return {
+    ...analyzedPayload({}, analysisOverrides).call,
+    transcript: "Agent: Hi, this is Harmon Solar... User: (hangs up)",
+    start_timestamp: 1792000000000,
+    end_timestamp: 1792000017000,
+    duration_ms: 17000,
+    ...callOverrides,
+  };
+}
+
+/** Silence the describe-guard WARN for one block and return what it said. */
+function captureWarns(fn) {
+  const seen = [];
+  const m = mock.method(console, "warn", (...args) => seen.push(args.join(" ")));
+  try {
+    return { result: fn(), seen };
+  } finally {
+    m.mock.restore();
+  }
+}
+
+test("callback_requested and incomplete map to their own statuses on a connected call", () => {
+  const cb = hook.resolveCallStatus(answeredCall({ verification_result: "callback_requested", ...NO_CONFIRMATIONS }));
+  assert.equal(cb.status, "Callback Requested");
+  const inc = hook.resolveCallStatus(answeredCall({ verification_result: "incomplete", ...NO_CONFIRMATIONS }));
+  assert.equal(inc.status, "Call Answered - Incomplete");
+});
+
+test("safety net: connected + partial/failed + zero confirmations + no mismatches → Call Answered - Incomplete", () => {
+  for (const vr of ["partial", "failed"]) {
+    assert.equal(hook.resolveCallStatus(answeredCall({ verification_result: vr, ...NO_CONFIRMATIONS })).status, "Call Answered - Incomplete", vr);
+  }
+  // A spelled-out "none" from the LLM is still no mismatch.
+  assert.equal(
+    hook.resolveCallStatus(answeredCall({ verification_result: "partial", ...NO_CONFIRMATIONS, mismatched_items: "none" })).status,
+    "Call Answered - Incomplete"
+  );
+});
+
+test("safety net: one confirmation, or one mismatch, keeps the normal Exceptions mapping", () => {
+  const oneConfirmed = answeredCall({ verification_result: "partial", ...NO_CONFIRMATIONS, identity_confirmed: true });
+  assert.equal(hook.resolveCallStatus(oneConfirmed).status, "Verified - Exceptions");
+  const oneMismatch = answeredCall({ verification_result: "failed", ...NO_CONFIRMATIONS, mismatched_items: ["email differs"] });
+  assert.equal(hook.resolveCallStatus(oneMismatch).status, "Verified - Exceptions");
+  // An unrecognized result is not "partial/failed" — the fail-safe still parks it.
+  assert.equal(hook.resolveCallStatus(answeredCall({ verification_result: "something_new", ...NO_CONFIRMATIONS })).status, "Verified - Exceptions");
+  // And a call that never connected is No Answer, whatever the analysis says.
+  const dead = lauraRingOutCall();
+  dead.call_analysis.custom_analysis_data = { verification_result: "partial", ...NO_CONFIRMATIONS };
+  assert.equal(hook.resolveCallStatus(dead).status, "No Answer");
+});
+
+test("both new statuses hit the attempts ceiling → Failed - Max Attempts", () => {
+  const cb = answeredCall({ verification_result: "callback_requested", ...NO_CONFIRMATIONS });
+  const inc = answeredCall({ verification_result: "incomplete", ...NO_CONFIRMATIONS });
+  const net = answeredCall({ verification_result: "partial", ...NO_CONFIRMATIONS });
+  for (const c of [cb, inc, net]) {
+    assert.equal(hook.resolveCallStatus(c, { attempts: 5 }).status, "Failed - Max Attempts");
+    assert.notEqual(hook.resolveCallStatus(c, { attempts: 4 }).status, "Failed - Max Attempts");
+  }
+  assert.equal(hook.mapOutcomeToStatus("callback_requested", { attempts: 5 }).status, "Failed - Max Attempts");
+  assert.equal(hook.mapOutcomeToStatus("incomplete", { attempts: 6 }).status, "Failed - Max Attempts");
+  // Exceptions is still terminal and untouched by the ceiling.
+  assert.equal(hook.mapOutcomeToStatus("partial", { attempts: 5 }).status, "Verified - Exceptions");
+});
+
+test("both are retry-eligible, below the attempts ceiling only", () => {
+  for (const status of ["Callback Requested", "Call Answered - Incomplete"]) {
+    assert.equal(fmt.TERMINAL_OR_IN_FLIGHT_STATUSES.has(status), false);
+    assert.equal(fmt.RETRYABLE_STATUSES.has(status), true);
+    const atCeiling = place.evaluateEligibility(readerFor(baseCustomer({ Welcome_Call_Status__c: status, Welcome_Call_Attempts__c: 5 })), IN_WINDOW);
+    assert.deepEqual([atCeiling.eligible, atCeiling.reason], [false, "max_attempts"]);
+  }
+});
+
+test("precedence: neither downgrades Verified / Exceptions, both lift No Answer, Callback outranks Incomplete", () => {
+  const r = fmt.resolveStatusPrecedence;
+  for (const s of ["Callback Requested", "Call Answered - Incomplete"]) {
+    assert.deepEqual(r("Verified", s), { status: "Verified", changed: false });
+    assert.deepEqual(r("Verified - Exceptions", s), { status: "Verified - Exceptions", changed: false });
+    assert.deepEqual(r("Refused", s), { status: "Refused", changed: false });
+    assert.deepEqual(r("Failed - Max Attempts", s), { status: "Failed - Max Attempts", changed: false });
+    assert.deepEqual(r("No Answer", s), { status: s, changed: true });
+    assert.deepEqual(r("Calling", s), { status: s, changed: true });
+    assert.deepEqual(r(s, "No Answer"), { status: s, changed: false }, "a later voicemail does not erase that someone answered");
+  }
+  assert.deepEqual(r("Call Answered - Incomplete", "Callback Requested"), { status: "Callback Requested", changed: true });
+  assert.deepEqual(r("Callback Requested", "Call Answered - Incomplete"), { status: "Callback Requested", changed: false });
+  assert.deepEqual(r("Callback Requested", "Verified"), { status: "Verified", changed: true });
+});
+
+test("describe guard: an org without either value falls back to Verified - Exceptions with a WARN", () => {
+  for (const [vr, missing] of [["callback_requested", "Callback Requested"], ["incomplete", "Call Answered - Incomplete"], ["partial", "Call Answered - Incomplete"]]) {
+    const { result, seen } = captureWarns(() =>
+      hook.resolveCallStatus(answeredCall({ verification_result: vr, ...NO_CONFIRMATIONS }), { statusAvailable: (v) => v !== missing })
+    );
+    assert.equal(result.status, "Verified - Exceptions", vr);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], new RegExp(`no active "${missing}" value`));
+    // The fallback is terminal, as before: no ceiling rewrite.
+    const atCeiling = captureWarns(() =>
+      hook.resolveCallStatus(answeredCall({ verification_result: vr, ...NO_CONFIRMATIONS }), { attempts: 5, statusAvailable: () => false })
+    ).result;
+    assert.equal(atCeiling.status, "Verified - Exceptions");
+  }
+});
+
+test("describe guard reads the org's picklist: active values only; no list means nothing to restrict", () => {
+  const withValues = (values) =>
+    fieldsMod.resolveCustomerFields({
+      fields: describeWithLogLength().map((f) =>
+        f.name === "Welcome_Call_Status__c" ? { ...f, picklistValues: values } : f
+      ),
+    });
+  const live = withValues([
+    { value: "No Answer", active: true },
+    { value: "Callback Requested", active: true },
+    { value: "Call Answered - Incomplete", active: false },
+  ]);
+  assert.equal(live.hasPicklistValue("welcomeCallStatus", "Callback Requested"), true);
+  assert.equal(live.hasPicklistValue("welcomeCallStatus", "Call Answered - Incomplete"), false, "inactive = absent");
+  assert.equal(withValues([]).hasPicklistValue("welcomeCallStatus", "Callback Requested"), true);
+});
+
+test("webhook end to end: an org lacking Callback Requested writes Verified - Exceptions", async () => {
+  fresh();
+  ctx.describeFields = describeWithLogLength().map((f) =>
+    f.name === "Welcome_Call_Status__c"
+      ? { ...f, picklistValues: ["Calling", "No Answer", "Verified - Exceptions", "Call Answered - Incomplete"].map((value) => ({ value, active: true })) }
+      : f
+  );
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "Calling" })];
+  const m = mock.method(console, "warn", () => {});
+  try {
+    const res = await handler(signedWebhookEvent(analyzedPayload({}, { verification_result: "callback_requested", ...NO_CONFIRMATIONS })));
+    assert.equal(res.statusCode, 200, res.body);
+  } finally {
+    m.mock.restore();
+  }
+  assert.equal(ctx.sfUpdates[0].fields.Welcome_Call_Status__c, "Verified - Exceptions");
+});
+
+test("webhook end to end: Callback Requested lifts No Answer; on a Verified record it is logged and the status kept", async () => {
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "No Answer" })];
+  const payload = analyzedPayload({}, { verification_result: "callback_requested", ...NO_CONFIRMATIONS, follow_up_notes: "Bad time; asked to be called back after 5pm." });
+  await handler(signedWebhookEvent(payload));
+  assert.equal(ctx.sfUpdates[0].fields.Welcome_Call_Status__c, "Callback Requested");
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /Result: Callback Requested — customer asked for after 5 PM · call_id=call_abc123/);
+
+  fresh();
+  ctx.queryRows = [baseCustomer({ Welcome_Call_Status__c: "Verified" })];
+  await handler(signedWebhookEvent(payload));
+  assert.equal("Welcome_Call_Status__c" in ctx.sfUpdates[0].fields, false, "Verified is never downgraded");
+  assert.match(ctx.sfUpdates[0].fields.Welcome_Call_Log__c, /\(status kept: Verified\) · Result: Callback Requested/);
+});
+
+test("log header: Callback Requested carries the requested time when the notes give one", () => {
+  assert.equal(hook.callbackWhen("Customer said it was a bad time and asked for a callback after 5 PM."), "after 5 PM");
+  assert.equal(hook.callbackWhen("Call back tomorrow after 5pm please"), "tomorrow after 5 PM");
+  assert.equal(hook.callbackWhen("Prefers Thursday morning, between 9 and 11am."), "Thursday morning, between 9 and 11 AM");
+  assert.equal(hook.callbackWhen("asked for a callback this evening"), "this evening");
+  assert.equal(hook.callbackWhen("Asked for a callback."), null);
+  assert.equal(hook.callbackWhen("Hung up after 30 seconds."), null, "a duration is not a requested time");
+  assert.equal(hook.callbackWhen(""), null);
+
+  const entry = (analysis, call = answeredCall(analysis)) =>
+    hook.buildResultLogEntry({ stamp: "2026-10-13 10:00 MST", origin: "Attempt 1", status: "Callback Requested", analysis, call }).split("\n")[0];
+  assert.match(entry({ follow_up_notes: "Bad time — call back after 5 PM." }), /Result: Callback Requested — customer asked for after 5 PM · call_id=/);
+  assert.match(entry({ follow_up_notes: "Asked for a callback." }), /Result: Callback Requested · call_id=/);
+});
+
+test("log header: Call Answered - Incomplete says how long the line was open", () => {
+  const analysis = { verification_result: "partial", ...NO_CONFIRMATIONS };
+  const header = hook
+    .buildResultLogEntry({ stamp: "2026-10-13 10:05 MST", origin: "Attempt 2", status: "Call Answered - Incomplete", analysis, call: answeredCall(analysis) })
+    .split("\n")[0];
+  assert.match(header, /Result: Call Answered - Incomplete \(connected 0:17, verification not completed\) · call_id=call_abc123/);
+  // Still found by the idempotency check.
+  assert.equal(hook.alreadyProcessed(header, "call_abc123"), true);
+  // No duration evidence at all → no invented 0:00.
+  const noDuration = { ...answeredCall(analysis), duration_ms: undefined, start_timestamp: undefined, end_timestamp: undefined };
+  assert.match(
+    hook.buildResultLogEntry({ stamp: "s", origin: "o", status: "Call Answered - Incomplete", analysis, call: noDuration }).split("\n")[0],
+    /Result: Call Answered - Incomplete \(connected, verification not completed\)/
+  );
 });

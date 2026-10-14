@@ -1,5 +1,15 @@
 # Sundial — Progress Log
 
+## 2026-10-14 — Welcome Call: "Callback Requested" and "Call Answered - Incomplete" (D-082 amendment 1)
+
+**Why.** On `a1P7y00000BWpPFEA1` (2026-10-13) a customer who answered and asked for a callback (`call_c4c6d67630a941afdaf67ae11e1`) and one who hung up after 17 s before giving a name (`call_f0d27ed3b7b17f5701bcaad22dc`) were both logged `Verified - Exceptions` — sales read that as a verification, and the terminal status stopped the retries. Tim added both values to the restricted `Welcome_Call_Status__c` picklist; a live describe confirmed both, active.
+
+**Built (`sundial-welcome-call`).** `callback_requested` → `Callback Requested`, the new analysis value `incomplete` → `Call Answered - Incomplete`. Safety net in `resolveCallStatus`: a connected call labelled `partial` / `failed` with zero confirmations and no mismatches is `Call Answered - Incomplete`; one confirmation or one mismatch stays Exceptions. Both are retryable (`RETRYABLE_STATUSES` in `format.js`, with No Answer): the guard dials from them, ≥ 5 attempts → `Failed - Max Attempts`. Precedence slots them between Failed - Max Attempts and No Answer, Callback above Incomplete. Describe guard (`fields.js` `hasPicklistValue`): an org without a value falls back to `Verified - Exceptions` with a WARN. Log headers: `Result: Callback Requested — customer asked for after 5 PM` (time/day lifted from `follow_up_notes` by `callbackWhen()`), `Result: Call Answered - Incomplete (connected 0:17, verification not completed)`. Both result paths (webhook, rep-form backfill) share it.
+
+**Tests.** 12 new (mappings, safety net both ways, ceiling, eligibility, precedence, describe guard unit + end to end, Verified kept, headers); welcome-call 153, full suite 1,491 pass. Docs: runbook mapping table, precedence table, state machine, eligibility note, picklist list, retry Flow; DECISIONS D-082 amendment 1; CLAUDE.md.
+
+**Not repaired:** `a1P7y00000BWpPFEA1` is already `Verified` (precedence held it); its two earlier `Result: Verified - Exceptions` lines predate the new statuses and are left as written.
+
 ## 2026-10-12 (evening) — Hotfix: the job report's photos are shrunk for the PDF (Harmon's "internal server error" / "timeout" on send)
 
 **What Harmon saw.** Two sends of the photo report on job `a1c7y00000SPocwAAD` failed — once "internal server error", once a timeout. CloudWatch was not reachable from this session (no AWS credentials on the device VM); the send path says why on its own: `sendReport` read every section's photo from S3 and embedded the bytes untouched (pdf-lib's `embedJpg` stores the JPEG as-is). A tech's phone photo — and every HCP-migrated one — is 3–7 MB and 12 megapixels, so a report with a handful of them was ~50 MB read into the Lambda, a ~50 MB PDF built in memory and written back, and no attachment (over the 8 MB cap). Memory → a crash (the 500); time → API Gateway's 29-second ceiling (the timeout). The hosted page was never affected (it shows the photos by URL).

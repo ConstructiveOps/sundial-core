@@ -85,6 +85,7 @@ export function resolveCustomerFields(describe) {
 
   const resolved = new Map(); // logical -> canonical API name
   const lengths = new Map(); // logical -> declared field length (text/textarea)
+  const picklists = new Map(); // logical -> active picklist values, when the describe lists any
   const missingLogical = [];
 
   for (const [logical, candidates] of Object.entries(FIELD_CANDIDATES)) {
@@ -97,6 +98,8 @@ export function resolveCustomerFields(describe) {
       // resized once already; a hardcoded ceiling would mean either wasting the new
       // headroom or, after a shrink, a PATCH Salesforce rejects outright.
       if (Number.isFinite(hit.length) && hit.length > 0) lengths.set(logical, hit.length);
+      const values = (hit.picklistValues || []).filter((p) => p.active !== false).map((p) => p.value);
+      if (values.length) picklists.set(logical, new Set(values));
     } else missingLogical.push(logical);
   }
 
@@ -107,6 +110,17 @@ export function resolveCustomerFields(describe) {
     apiName: (logical) => resolved.get(logical) ?? null,
     /** Declared capacity of a field, or null when the describe didn't report one. */
     fieldLength: (logical) => lengths.get(logical) ?? null,
+    /**
+     * Can this value be written to the field? Welcome_Call_Status__c is a RESTRICTED
+     * picklist, so a value the org lacks fails the whole PATCH — the log entry with it.
+     * True when the describe lists the value as active, and also when it lists no values
+     * at all (not a picklist, nothing to restrict); false for an unresolved field.
+     */
+    hasPicklistValue: (logical, value) => {
+      if (!resolved.has(logical)) return false;
+      const values = picklists.get(logical);
+      return values ? values.has(value) : true;
+    },
     selectFields,
     missingLogical,
     missingRequired: REQUIRED_LOGICAL_FIELDS.filter((l) => !resolved.has(l)),

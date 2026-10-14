@@ -28,7 +28,7 @@ import crypto from "node:crypto";
 import { constantTimeEquals } from "../../lib/secure-compare.js";
 import { sfQuery, soqlEscapeString, describeObject } from "../../lib/salesforce.js";
 import { resolveCustomerFields } from "./fields.js";
-import { MAX_ATTEMPTS, durationMmSs, phoenixStamp, resolveStatusPrecedence } from "./format.js";
+import { MAX_ATTEMPTS, RETRYABLE_STATUSES, durationMmSs, phoenixStamp, resolveStatusPrecedence } from "./format.js";
 import { archiveRecording, callRecordedAt } from "./recording.js";
 import { lockedWelcomeCallUpdate, insertLogEntryByTime, RecordLockTimeout, CUSTOMER_SF_OBJECT } from "./writeback.js";
 
@@ -274,23 +274,37 @@ export function normalizeOutcome(v) {
     .replace(/[\s-]+/g, "_");
 }
 
+export const STATUS_CALLBACK = "Callback Requested";
+export const STATUS_INCOMPLETE = "Call Answered - Incomplete";
+const STATUS_EXCEPTIONS = "Verified - Exceptions";
+
 const OUTCOME_STATUS = new Map([
   ["passed", "Verified"],
-  ["partial", "Verified - Exceptions"],
-  ["failed", "Verified - Exceptions"],
-  ["callback_requested", "Verified - Exceptions"],
+  ["partial", STATUS_EXCEPTIONS],
+  ["failed", STATUS_EXCEPTIONS],
+  // Both used to land in Verified - Exceptions, which told sales a verification had
+  // happened when the customer had only said "bad time" or hung up (2026-10-14,
+  // a1P7y00000BWpPFEA1). `incomplete` is the analysis value added to the Retell selector.
+  ["callback_requested", STATUS_CALLBACK],
+  ["incomplete", STATUS_INCOMPLETE],
   ["refusal", "Refused"],
   ["wrong_person", "No Answer"],
   ["voicemail", "No Answer"],
   ["no_answer", "No Answer"],
 ]);
 
+/** Retryable results at or past the attempt ceiling become Failed - Max Attempts. */
+function applyAttemptCeiling(status, attempts) {
+  return RETRYABLE_STATUSES.has(status) && attempts >= MAX_ATTEMPTS ? "Failed - Max Attempts" : status;
+}
+
 /**
  * Map an analysis outcome to a Salesforce status.
  *
- * The "No Answer" bucket is the only one the attempt ceiling applies to, because it
- * is the only one that would otherwise be retried. A Verified or Refused call is
- * finished regardless of how many attempts it took.
+ * The retryable bucket (No Answer, Callback Requested, Call Answered - Incomplete) is the
+ * only one the attempt ceiling applies to, because it is the only one that would
+ * otherwise be retried. A Verified or Refused call is finished regardless of how many
+ * attempts it took.
  *
  * An UNRECOGNIZED outcome resolves to "Verified - Exceptions", not "No Answer".
  * That is the fail-safe direction: Exceptions parks the record for a human to read,
@@ -308,14 +322,30 @@ export function mapOutcomeToStatus(verificationResult, { attempts = 0, inVoicema
   let recognized = status != null;
 
   if (!recognized) {
-    status = inVoicemail && outcome === "" ? "No Answer" : "Verified - Exceptions";
+    status = inVoicemail && outcome === "" ? "No Answer" : STATUS_EXCEPTIONS;
   }
 
-  if (status === "No Answer" && attempts >= MAX_ATTEMPTS) {
-    status = "Failed - Max Attempts";
-  }
+  return { status: applyAttemptCeiling(status, attempts), outcome: outcome || (inVoicemail ? "voicemail" : "unknown"), recognized };
+}
 
-  return { status, outcome: outcome || (inVoicemail ? "voicemail" : "unknown"), recognized };
+/** A list field the analysis LLM left empty — absent, [], "", or a spelled-out "none". */
+function isEmptyList(v) {
+  const text = full(listToText(v));
+  return text === "" || /^(none|n\/a|null|\[\])$/i.test(text);
+}
+
+/**
+ * THE INCOMPLETE SAFETY NET (2026-10-14). The analysis LLM may still label a call that
+ * connected and settled nothing "partial" or "failed" — call_f0d27ed3b7b17f5701bcaad22dc
+ * was 17 s, hung up before giving a name. With not one confirmation and not one mismatch
+ * there is no exception to report, only an unfinished call. Any confirmation or any
+ * mismatch keeps the normal mapping: that is a real Exceptions case.
+ * Only ever asked about a CONNECTED call (resolveCallStatus checks connection first).
+ */
+export function isAnsweredButIncomplete(outcome, analysis) {
+  if (outcome !== "partial" && outcome !== "failed") return false;
+  if (CONFIRMATION_FLAGS.some(([key]) => analysis?.[key] === true)) return false;
+  return isEmptyList(analysis?.mismatched_items);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,25 +438,36 @@ export function assessConnection(call) {
  *
  * Connection first: a never-connected call is "No Answer" (→ "Failed - Max Attempts"
  * at the ceiling) no matter what call_analysis says. Only a connected call reaches
- * mapOutcomeToStatus, where the unrecognized → Verified - Exceptions fail-safe stands.
+ * mapOutcomeToStatus, where the unrecognized → Verified - Exceptions fail-safe stands,
+ * then the incomplete safety net above.
+ *
+ * DESCRIBE-GUARDED: Welcome_Call_Status__c is a restricted picklist, so a status the org
+ * lacks would fail the whole write. `statusAvailable` (fields.js hasPicklistValue) says
+ * whether the org has Callback Requested / Call Answered - Incomplete; one it lacks falls
+ * back to Verified - Exceptions (what both meant before 2026-10-14) with a WARN. The
+ * fallback is applied before the ceiling, so it stays terminal like it always was.
  *
  * @returns {{ status: string, outcome: string, recognized: boolean,
  *             connection: { connected: boolean, reason: string|null } }}
  */
-export function resolveCallStatus(call, { attempts = 0 } = {}) {
+export function resolveCallStatus(call, { attempts = 0, statusAvailable = () => true } = {}) {
   const connection = assessConnection(call);
   if (!connection.connected) {
-    const status = attempts >= MAX_ATTEMPTS ? "Failed - Max Attempts" : "No Answer";
-    return { status, outcome: "not_connected", recognized: true, connection };
+    return { status: applyAttemptCeiling("No Answer", attempts), outcome: "not_connected", recognized: true, connection };
   }
   const analysis = call?.call_analysis?.custom_analysis_data ?? {};
-  return {
-    ...mapOutcomeToStatus(analysis?.verification_result, {
-      attempts,
-      inVoicemail: inVoicemail(call),
-    }),
-    connection,
-  };
+  const mapped = mapOutcomeToStatus(analysis?.verification_result, { inVoicemail: inVoicemail(call) });
+
+  let status = mapped.status;
+  if (status === STATUS_EXCEPTIONS && isAnsweredButIncomplete(mapped.outcome, analysis)) status = STATUS_INCOMPLETE;
+  if ((status === STATUS_CALLBACK || status === STATUS_INCOMPLETE) && !statusAvailable(status)) {
+    console.warn(
+      `welcome-call: Welcome_Call_Status__c has no active "${status}" value in this org — ` +
+        `recording "${STATUS_EXCEPTIONS}" instead (call_id=${call?.call_id ?? "unknown"}).`
+    );
+    status = STATUS_EXCEPTIONS;
+  }
+  return { ...mapped, status: applyAttemptCeiling(status, attempts), connection };
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +541,70 @@ function inVoicemail(call) {
  */
 export const RECORDING_UNAVAILABLE = "unavailable — see ledger/CloudWatch";
 
+// ---------------------------------------------------------------------------
+// The header's Result: text for a call that connected
+// ---------------------------------------------------------------------------
+
+const TIME = String.raw`(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)|noon|midnight)`;
+// A bare hour after a preposition ("after 5") — but never a duration ("after 30 seconds").
+const HOUR = String.raw`(?:\d{1,2}(?::\d{2})?(?:\s*o'?clock)?(?!\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|%|\d)))`;
+const DAY_NAME = "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?";
+const PART = "(?:morning|afternoon|evening|night)s?";
+const CALLBACK_WHEN = new RegExp(
+  [
+    String.raw`between\s+(?:${TIME}|${HOUR})\s+and\s+(?:${TIME}|${HOUR})`,
+    String.raw`(?:after|before|around|at|by|until|past|from)\s+(?:${TIME}|${HOUR})(?:\s*(?:-|–|to)\s*(?:${TIME}|${HOUR}))?`,
+    TIME,
+    String.raw`(?:later\s+today|today|tonight|tomorrow|end\s+of\s+(?:the\s+)?(?:day|week)|weekdays?|weekends?)`,
+    String.raw`(?:(?:next|this|on)\s+)?(?:${DAY_NAME}|week)`,
+    String.raw`(?:(?:this|in\s+the)\s+)?${PART}`,
+  ]
+    .map((p) => String.raw`\b${p}`)
+    .join("|"),
+  "gi"
+);
+
+/**
+ * When the customer asked to be called back, as written in follow_up_notes — or null.
+ * "Asked for a callback after 5pm tomorrow." → "after 5 PM tomorrow".
+ *
+ * Lifted onto the log header so sales sees it without opening the block. The matched
+ * pieces are read as ONE span of the notes when they sit close together (keeps "tomorrow
+ * after 5 PM" in the customer's order), else joined. Best-effort: the full notes are on
+ * the Follow Up line regardless.
+ */
+export function callbackWhen(notes) {
+  const text = full(notes);
+  if (!text) return null;
+  const hits = [...text.matchAll(CALLBACK_WHEN)];
+  if (!hits.length) return null;
+  const start = hits[0].index;
+  const end = hits.at(-1).index + hits.at(-1)[0].length;
+  const phrase = end - start <= 60 ? text.slice(start, end) : hits.map((h) => h[0]).join(", ");
+  return phrase
+    .replace(/(\d)\s*a\.?m\.?(?![a-z])/gi, "$1 AM")
+    .replace(/(\d)\s*p\.?m\.?(?![a-z])/gi, "$1 PM")
+    .replace(/[\s,.;:]+$/, "");
+}
+
+/**
+ * The Result: text for a CONNECTED call. Callback Requested carries the requested time
+ * when the notes give one; Call Answered - Incomplete says how long the line was open,
+ * so "answered" never reads like "verified". Every other status is itself.
+ */
+function answeredResultText(status, analysis, call) {
+  if (status === STATUS_CALLBACK) {
+    const when = callbackWhen(analysis?.follow_up_notes);
+    return when ? `${status} — customer asked for ${when}` : status;
+  }
+  if (status === STATUS_INCOMPLETE) {
+    const ms = connectedDurationMs(call);
+    const connected = ms == null ? "" : durationMmSs(ms);
+    return `${status} (connected${connected ? ` ${connected}` : ""}, verification not completed)`;
+  }
+  return status;
+}
+
 /**
  * Build one result log ENTRY — a multi-line block, newest-first in the field.
  *
@@ -548,7 +653,7 @@ export function buildResultLogEntry({
   // all "none" and N, which alone reads like a conversation that went badly.
   const connection = assessConnection(call);
   const result = connection.connected
-    ? status
+    ? answeredResultText(status, analysis, call)
     : `${status} (not answered — ${connection.reason})`;
   const at = callAt instanceof Date && Number.isFinite(callAt.getTime()) ? ` · call_at=${callAt.toISOString()}` : "";
   const header =
@@ -755,7 +860,10 @@ export async function processCallAnalyzed(payload, rawBody, cfg, { now = new Dat
 
         const attempts = Number(freshGet("welcomeCallAttempts")) || 0;
         // Connection is checked inside, before the verification_result mapping.
-        const { status, outcome, connection } = resolveCallStatus(call, { attempts });
+        const { status, outcome, connection } = resolveCallStatus(call, {
+          attempts,
+          statusAvailable: (v) => schema.hasPicklistValue("welcomeCallStatus", v),
+        });
         const current = statusApi ? String(fresh[statusApi] ?? "").trim() : "";
         const precedence = resolveStatusPrecedence(current, status);
 

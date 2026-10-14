@@ -34,7 +34,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { sfQuery, sfUpsertMany, describeObject, soqlEscapeString } from "../lib/salesforce.js";
 import {
-  HCP_ID_FIELD, writable, callKey, indexExisting, decideCustomer, customerFields, leadFields, leadJobTypeName, customerNotesText, lineFields, estimateFields, jobEstimateFields,
+  HCP_ID_FIELD, writable, callKey, indexExisting, decideCustomer, customerFields, leadFields, leadJobTypeName, customerNotesText, leadBlock, appendLeadBlock, lineFields, estimateFields, jobEstimateFields,
   invoiceState, jobFields, callFields, callStatusFor, invoiceFields, paymentFields, pickOption, estimateStatus, techResolver, personName, normalizeEmail, addressLine,
 } from "../lib/hcp-import.js";
 import { matchPicklist, unionProjectTypes } from "../lambdas/sundial-service-estimate/customer.js";
@@ -164,7 +164,7 @@ for (const sfObject of [OBJ.customer, OBJ.estimate, OBJ.job]) {
     process.exit(2);
   }
 }
-const CUSTOMER_SELECT = `Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Customer_Type__c, Requested_Project_Types__c, Status__c, Service_Stage__c, Lead_Source__c, ${HCP_ID_FIELD}`;
+const CUSTOMER_SELECT = `Id, Name, First_Name__c, Last_Name__c, Street__c, City__c, State__c, Postal_Code__c, Primary_Email__c, Primary_Phone__c, Customer_Type__c, Requested_Project_Types__c, Status__c, Service_Stage__c, Lead_Source__c, Description__c, ${HCP_ID_FIELD}`;
 const existing = await sfQuery(`SELECT ${CUSTOMER_SELECT} FROM ${OBJ.customer} WHERE Client__c = '${tenantId}'`);
 const existingById = new Map(existing.map((r) => [r.Id, r]));
 const index = indexExisting(existing);
@@ -401,6 +401,15 @@ if (PHASES.includes("leads")) {
   const leadRecords = [];
   let list = leadsHcp;
   if (LIMIT) list = list.filter((l) => limitedCustomerIds.has(s(l.customer?.id)));
+  // every lead number / id that lands on each Sundial customer (a shared household's too) —
+  // how appendLeadBlock knows an earlier run's block from text a person typed
+  const leadKeysBySf = new Map();
+  for (const l of leadsHcp) {
+    const id = sfCustomerFor(l.customer?.id);
+    if (!id) continue;
+    if (!leadKeysBySf.has(id)) leadKeysBySf.set(id, []);
+    leadKeysBySf.get(id).push(s(l.number) || s(l.id));
+  }
   for (const l of list) {
     const cid = s(l.customer?.id);
     const sfId = sfCustomerFor(cid);
@@ -421,6 +430,12 @@ if (PHASES.includes("leads")) {
     // (2026-10-14 — they used to be replaced); a linked record's Description__c is Sales's text
     const customerNotes = linkedNotCreated ? "" : customerNotesText(customerPool.get(cid) || l.customer);
     const f = leadFields(l, { assignedToId: assigned, leadSources, stages: stageValues, resolutions: resolutionValues, requestTypes: requestTypeValues, jobTypeName, convertedAt: conv, onGap, disposition, customerNotes });
+    // A linked record keeps Sales's text: the lead block goes BELOW it (2026-10-14 — it used
+    // to replace the field); an earlier run's block at the end is swapped, never stacked
+    if (linkedNotCreated) {
+      f.Description__c = appendLeadBlock(existingRec.Description__c, leadBlock(l, jobTypeName), leadKeysBySf.get(sfId) || []);
+      bump("leads:linked-block-below-sales-text");
+    }
     // A linked customer is Sales's: a stage set there stays (unless it is the import's own
     // "New"), and the outcome fields go with it. A customer the import created takes HCP's
     // state on every run — that is how the 09-28 run's "Estimate Created" on a won lead becomes

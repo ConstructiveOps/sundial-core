@@ -10,7 +10,9 @@
 
 **Dry run (2026-10-14, Harmon, 9,443 customers with `HCP_Id__c`):** **206 to restore**, 0 edited by a person, 0 too long, 348 lead customers with blank HCP notes, 8,680 not a lead block, **209 linked Sales records** whose `Description__c` the lead block also replaced. The pull can't restore those (it was Sales's text), and `Description__c` has no field history. They're listed in `lead-notes-linked.csv`, with a TASKS item. Apply count: pending, Tim runs `--apply`.
 
-**Tests.** `lib/hcp-lead-notes.test.js` 10 (the fixed `leadFields`, exact-match rule incl. CRLF, prepend keeps block + archive line, hand edit listed, idempotent, blank notes, linked, shared household, notes only on the lead's embedded customer, too long). Docs: `docs/migration.md` "Lead customers' notes — the 2026-10-14 restore".
+**Linked records, fixed for re-runs (same day, Tim).** On a customer the import linked to a Sales record, the leads phase now keeps Sales's text and adds the lead block below it after a blank line (`appendLeadBlock`; the import's customer read now selects `Description__c`). A block left at the end by an earlier run is swapped for the current one, never stacked. It's recognised as starting a line, naming one of this customer's leads, and running to the end with no blank line inside. Text typed after a block means the new block is appended, so nothing typed is lost. The restore script is unchanged: it never writes a linked record.
+
+**Tests.** `lib/hcp-lead-notes.test.js` 13 (+3 for `appendLeadBlock`: kept + below, re-run swaps without stacking incl. CRLF, typed text / another customer's block / an inline mention kept). Full suite 1,510. Originally 10 (the fixed `leadFields`, exact-match rule incl. CRLF, prepend keeps block + archive line, hand edit listed, idempotent, blank notes, linked, shared household, notes only on the lead's embedded customer, too long). Docs: `docs/migration.md` "Lead customers' notes — the 2026-10-14 restore".
 
 ## 2026-10-14 — Cache sync writes nulls: a field cleared in Salesforce now clears in the portal
 

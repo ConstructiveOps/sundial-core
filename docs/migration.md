@@ -341,8 +341,15 @@ a person**; 0 too long. *(Apply counts: see PROGRESS.md once it has run.)*
 over `Description__c` on customers the import LINKED to an existing Sales record — text that was
 Sales's (from Sunbase or typed), not HCP's. The pull cannot give it back and the object's field
 history does not track `Description__c`. They are listed in `lead-notes-linked.csv`; the source
-to recover from is a Salesforce data export or the Sunbase data. Until the import stops writing
-`Description__c` on linked records, a re-run repeats it (TASKS.md).
+to recover from is a Salesforce data export or the Sunbase data.
+
+**Fixed for re-runs (2026-10-14, Tim):** on a linked record the leads phase now keeps Sales's
+text and puts the lead block **below** it after a blank line (`appendLeadBlock`). A block an
+earlier run left at the end of the text is swapped for the current one instead of stacked:
+it must start a line (at the top or after a blank line), name one of this customer's leads,
+and run to the end with no blank line inside. Anything typed after it breaks that shape, so the
+new block is appended and nothing typed is lost. The 209 records whose whole field is an old
+block get the current block alone (the Sales text is already gone).
 
 ## Sunbase → Sundial Sales (Phase 1 / Phase 3 commercial)
 

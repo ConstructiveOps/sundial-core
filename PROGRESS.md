@@ -1,5 +1,15 @@
 # Sundial — Progress Log
 
+## 2026-10-14 — Cache sync writes nulls: a field cleared in Salesforce now clears in the portal
+
+**Why.** Harmon removed a customer's Next Follow-Up Date and the overdue flag stayed. The cause was platform-level: every copy of `mapSfRecordToCacheRow` (`lib/cache-row.js`, `sundial-cache-sync`, `sundial-sf-query`) did `if (val === undefined || val === null) continue;`, so a value Salesforce returned as null never reached the upsert and the cache kept the old one until a full resync (and a bulk upsert cleared it only by accident, when a sibling row in the batch had a value for that column).
+
+**Fix.** Salesforce is authoritative when it is the source: every field it returned is written, null included. The one exception is now explicit — a field absent from the record (`undefined`: not in the SELECT) leaves its column alone. The nested-relationship skip now excludes null (`typeof null === "object"`). `sundial-sf-update` needed no change: it sends the null to Salesforce and flags the row stale, so the next read refreshes it through the fixed mapper. cache-sync's copy is now exported and joins the drift test. The list response still omits null keys (payload), unchanged.
+
+**Tests.** `lib/cache-row.test.js` 10 (+6: per copy, a cleared date syncs to null; an un-SELECTed column is left alone; the three copies map the fixture identically). Full suite 1,497 pass. Docs: `docs/caching-architecture.md` "A null from Salesforce is a value".
+
+**Deploy (Tim):** `sundial-cache-sync`, `sundial-sf-query`, `sundial-lead-intake`; then one full resync of `customer` and `job` (TASKS.md) to clear values that went stale before today.
+
 ## 2026-10-14 — Welcome Call: "Callback Requested" and "Call Answered - Incomplete" (D-082 amendment 1)
 
 **Why.** On `a1P7y00000BWpPFEA1` (2026-10-13) a customer who answered and asked for a callback (`call_c4c6d67630a941afdaf67ae11e1`) and one who hung up after 17 s before giving a name (`call_f0d27ed3b7b17f5701bcaad22dc`) were both logged `Verified - Exceptions` — sales read that as a verification, and the terminal status stopped the retries. Tim added both values to the restricted `Welcome_Call_Status__c` picklist; a live describe confirmed both, active.

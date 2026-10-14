@@ -857,8 +857,14 @@ export function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
   for (const f of fields) {
     if (f.name === "Id") continue; // -> sf_id (control column below)
     const val = record[f.name];
-    if (val === undefined || val === null) continue;
-    if (typeof val === "object") continue; // skip nested relationship objects
+    // Salesforce is the source here, so every field it returned is written —
+    // null INCLUDED. A field cleared in Salesforce comes back as null and must clear
+    // the cache column; skipping it left the old value in the portal until a full
+    // resync (2026-10-14, Harmon's Next_Follow_Up_Date__c / overdue flag).
+    // The ONE exception: a field the SELECT did not fetch is absent (undefined), and
+    // its column is left alone — "not fetched" is not "empty".
+    if (val === undefined) continue;
+    if (val !== null && typeof val === "object") continue; // nested relationship objects
     const col = sfFieldToColumn(f);
     if (columnSet.has(col)) row[col] = val;
   }
@@ -911,11 +917,11 @@ async function getExistingCacheVersion(supabase, table, sfId, tenantId) {
 //    limit=5000: 6.14 MB payload (413) -> 4.04 MB. Dropping long text ALONE lands
 //    at 6.02 MB, still over the 6.00 MB cap, so it does not fix this on its own.
 //
-// Omitting nulls is safe because it is ALREADY the shape callers receive: rows
-// refreshed from Salesforce come from mapSfRecordToCacheRow, which has always
-// skipped null/undefined values, so every `source: "cache+salesforce"` page has
-// been serving null-omitted rows. An absent key and a null key behave identically
-// under `??`, `||` and optional chaining.
+// Omitting nulls is safe because an absent key and a null key behave identically
+// under `??`, `||` and optional chaining. (Until 2026-10-14 mapSfRecordToCacheRow
+// also skipped nulls — which is why a field cleared in Salesforce never cleared in
+// the cache. It now writes them; this projection still drops them from the RESPONSE
+// only, never from what is written to the cache.)
 //
 // The projection is applied ONLY when building the response array — never to the
 // rows the freshness partition reads, and never to what is written back to the

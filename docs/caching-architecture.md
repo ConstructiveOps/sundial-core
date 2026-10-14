@@ -70,6 +70,12 @@ If the Salesforce write fails, the cache is not updated and the user sees the er
 
 The portal's `POST /sf/customer` writes no cache row (a known limitation in `sundial-sf-update`), so a new record normally reaches the cache through `sundial-cache-sync` or the list read's cold-cache fallback. `sundial-lead-intake` does better, because a TCD lead must be in Sales straight away. After the create it reads the record back (tenant-filtered) and upserts its row through `lib/cache-row.js`. That module is the SF-record → cache-row mapper moved out of `sundial-sf-query`. Only the intake uses it so far: sf-query and cache-sync keep their own copies until they are switched over (TASKS.md), and `lib/cache-row.test.js` fails if the lib and sf-query's copy ever map a record differently. The write is best-effort; a failure leaves the record to the sync.
 
+### A null from Salesforce is a value (2026-10-14)
+
+When a Salesforce record is the source of a cache row — `sundial-cache-sync` (incremental and full), `sundial-sf-query`'s read-time refresh / single read / cold-cache fill, and `lib/cache-row.js` — **every mapped column is written, null included**. A field cleared in Salesforce comes back as `null` and clears the column. Until 2026-10-14 all three copies of `mapSfRecordToCacheRow` skipped nulls, so a cleared field (Harmon: a removed `Next_Follow_Up_Date__c`, the overdue flag still lit) kept its old value until a full resync — and a bulk upsert only cleared it by accident when another row in the same batch had a value for that column.
+
+The one exception is explicit in the mapper: a field the SELECT did not fetch is absent from the record (`undefined`) and its column is left alone — "not fetched" is not "empty". A column with no field in the SELECT is never in the row at all. `sundial-sf-update` does not write the cache; it PATCHes Salesforce (a `null` in `fields` clears the field there) and flags the row `is_stale`, so the next read refreshes it through the same mapper and the cleared value arrives as null. The list response still drops null keys (`projectListRow`, the 6 MB cap) — that is the response only, never what is stored.
+
 ### Salesforce Platform Events for Out-of-Band Changes
 
 The cache stays in sync with Salesforce when changes happen outside the portal (via Salesforce Flow, admin edits, Zapier integrations, the Acumatica integration writing back). The mechanism:

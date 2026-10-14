@@ -269,13 +269,19 @@ function buildCacheSelect(fields, columnSet, createdDateSources) {
   };
 }
 
-function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
+export function mapSfRecordToCacheRow(record, fields, columnSet, ctx) {
   const row = {};
   for (const f of fields) {
     if (f.name === "Id") continue; // -> sf_id (control column below)
     const val = record[f.name];
-    if (val === undefined || val === null) continue;
-    if (typeof val === "object") continue; // skip nested relationship objects
+    // Salesforce is the source here, so every field it returned is written —
+    // null INCLUDED. A field cleared in Salesforce comes back as null and must clear
+    // the cache column; skipping it left the old value in the portal until a full
+    // resync (2026-10-14, Harmon's Next_Follow_Up_Date__c / overdue flag).
+    // The ONE exception: a field the SELECT did not fetch is absent (undefined), and
+    // its column is left alone — "not fetched" is not "empty".
+    if (val === undefined) continue;
+    if (val !== null && typeof val === "object") continue; // nested relationship objects
     const col = sfFieldToColumn(f);
     if (columnSet.has(col)) row[col] = val;
   }

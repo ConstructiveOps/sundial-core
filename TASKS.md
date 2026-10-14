@@ -4,6 +4,13 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Cache sync writes nulls: a field cleared in Salesforce clears in the portal (2026-10-14, Harmon)
+
+- [x] `mapSfRecordToCacheRow` writes every field Salesforce returned, null included; only an absent (not-SELECTed) field leaves its column alone — all three copies (`lib/cache-row.js`, `sundial-cache-sync`, `sundial-sf-query`). `sundial-sf-update` checked: it PATCHes the null to Salesforce and flags the row stale, so the read-refresh clears it through the fixed mapper.
+- [x] Tests: `lib/cache-row.test.js` — cache-sync's copy joins the drift test; a cleared date syncs to null and an un-SELECTed column is left alone, per copy. Suite 1,497 pass.
+- [ ] **TIM: deploy** — `.deploy.ps1 sundial-cache-sync`, `.deploy.ps1 sundial-sf-query`, `.deploy.ps1 sundial-lead-intake` (bundles `lib/cache-row.js`; only its new-lead row, so lowest priority).
+- [ ] **TIM: one-time full resync, AFTER the deploy** — the incremental sync only re-reads records modified since its watermark, so values cleared before today stay stale until a full pass. AWS console → Lambda → `sundial-cache-sync` → **Test** → event JSON `{"object":"customer","mode":"full"}` → Test; when it returns `status: "ok"`, again with `{"object":"job","mode":"full"}`. Then check a customer whose Next Follow-Up Date was removed: the overdue flag is gone.
+
 ## Welcome Call: Callback Requested / Call Answered - Incomplete (D-082 amendment 1, 2026-10-14)
 
 - [x] Both picklist values verified by live describe (active; restricted picklist).

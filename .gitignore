@@ -40,3 +40,6 @@ lambdas/*/template.generated.js
 # Migration pulls (HCP, Sunbase): customer data, never committed. scripts/hcp-pull.mjs
 # writes here by default (docs/migration.md).
 /migration/
+
+# Local delivery bundles and data pulls (Acumatica tax pull, cache dumps). Never committed.
+/_delivery/

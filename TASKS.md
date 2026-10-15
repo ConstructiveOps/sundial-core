@@ -34,7 +34,7 @@ Runbook: `docs/integrations/acumatica-tax.md`.
   1. In PowerShell from `sundial-core`, run `node scripts/seed-tax-zones.mjs`. This is a dry run; it should say `143 zones (78 retail), 151 taxes, 10 categories`.
   2. Run `node scripts/seed-tax-zones.mjs --pull --apply`. It pulls Acumatica fresh and writes, and should say `re-read: 78 retail zones`.
 - [ ] **(3b) Backfill the open jobs' zones.**
-  1. Run `node scripts/backfill-job-tax-zones.mjs` (a dry run). It prints how many open jobs match exactly (by zone) and lists the rest (job number, customer, city). The list is also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. The cache preview on 2026-10-15 said 864 of 892 match, and 28 are unincorporated places like Arizona City, Waddell, Wittmann and San Tan Valley.
+  1. Run `node scripts/backfill-job-tax-zones.mjs` (a dry run). It prints how many open jobs match exactly (by zone) and lists the rest (job number, customer, city). The list is also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. The cache preview on 2026-10-15 said 865 of 892 match, and 27 are unincorporated places like Arizona City, Waddell, Wittmann and San Tan Valley.
   2. Then run `node scripts/backfill-job-tax-zones.mjs --apply`. It writes one job first, checks nothing else moved, then writes the rest. **Don't pipe it through anything**: a failure must show. If it ends with failures, re-run it; it only picks up jobs still blank.
   3. Send the unmatched list to Julie. For each place, either the office picks the zone on the job, or she names the zone and Claude adds an alias like her first four.
 - [ ] **(4) Deploys:**

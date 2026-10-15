@@ -110,12 +110,11 @@ check the refresh logs. As of 2026-10-15:
 | `node scripts/seed-tax-zones.mjs [--pull] [--apply]` | The first load, using the refresh's own writer. A dry run unless `--apply`. |
 | `node scripts/backfill-job-tax-zones.mjs [--apply]` | For open jobs (not Closed / Cancelled / Paid) with a blank zone, resolves the service address's city with the same resolver. A dry run by default: the matched count by zone and the unmatched list (job, customer, city, reason), also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. `--apply` writes **exact matches only**, canary first. |
 
-**Backfill preview (2026-10-15, from the job cache).** Of 892 open jobs, **864 match exactly** and
-**28 do not**. The 28 are unincorporated places that are not an Acumatica zone: Arizona City (6),
-Waddell (4), Wittmann (4), San Tan Valley (3), New River (3), Morristown, Lake Havasu City, Gadsden,
-Lake Montezuma, Sun Lakes, and 3 with no city. Each is either picked by hand or given an alias, and
-**an alias is the CFO's call** (like her four). Note that "Lake Havasu City" is the real city name,
-while the map's key is "LAKE HAVASU".
+**Backfill preview (2026-10-15, from the job cache).** Of 892 open jobs, **865 match exactly** and
+**27 do not**, after "LAKE HAVASU CITY" was added to the map. The 27 are unincorporated places that
+are not an Acumatica zone: Arizona City (6), Waddell (4), Wittmann (4), San Tan Valley (3), New River
+(3), Morristown, Gadsden, Lake Montezuma, Sun Lakes, and 3 whose address has no city (ZIP 85301).
+Each is either picked by hand or given an alias, and **an alias is the CFO's call** (like her four).
 
 ## Routes (`sundial-service-estimate`, action `service.estimate.write`)
 

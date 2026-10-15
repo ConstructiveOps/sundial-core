@@ -144,3 +144,18 @@ const missing = [...mapCodes].filter((c) => !zoneCodes.has(c));
 console.log(`Codes in the map that are NOT an Acumatica zone (${missing.length}): ${missing.join(", ") || "none"}`);
 const mapNonRetail = [...mapCodes].filter((c) => zoneCodes.has(c) && !retail.some((z) => z.code === c));
 console.log(`Codes in the map that exist but are not classed retail: ${mapNonRetail.join(", ") || "none"}`);
+
+// --- DRIFT (D-083: copy Acumatica exactly; make what would surprise a reader visible) -----
+// The same check the daily refresh logs (lib/tax-zones.js taxDrift), so this report and the
+// refresh's CloudWatch line never disagree. Fix these IN ACUMATICA; the refresh brings it over.
+const { buildTaxTableRows } = await import("../lib/tax-zones.js");
+const built = buildTaxTableRows({ zones: data.TaxZone, taxes: data.Tax, categories: data.TaxCategory }, { tenant: "report", today });
+const drift = built.drift;
+console.log(`\n=== DRIFT — fix in Acumatica, the daily refresh carries it over ===`);
+console.log(`Retail zones whose city tax is in NO retail category (never charged on a retail line) (${drift.cityTaxNotRetail.length}):`);
+for (const x of drift.cityTaxNotRetail) console.log(`   ${x.zone.padEnd(12)} "${x.description}"  carries ${x.taxId} "${x.tax}"`);
+console.log(`Retail zones carrying a CONTRACTING tax (${drift.contractingTaxOnRetail.length}):`);
+for (const x of drift.contractingTaxOnRetail) console.log(`   ${x.zone.padEnd(12)} "${x.description}"  carries ${x.taxId} "${x.tax}"`);
+console.log(`Retail city zones no city in lib/acumatica-tax-zones.js points at (${drift.unmappedRetail.length}): ${drift.unmappedRetail.map((x) => x.zone).join(", ") || "none"}`);
+const upcoming = built.rates.flatMap((r) => r.schedule.filter((s) => s.start > today).map((s) => `${r.tax_id} ${s.rate}% from ${s.start}`));
+console.log(`Future-dated rates (${upcoming.length}): ${upcoming.join(" · ") || "none"}`);

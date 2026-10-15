@@ -15,12 +15,19 @@
 //      should bite).
 //   3. Markup is a percent of (subtotal - discount) or a flat amount. Hidden from the
 //      customer: it is folded into Total, never printed as a line.
-//   4. Tax = taxable line value, scaled by (net / subtotal) so a discount or markup is
-//      shared proportionally by taxable and non-taxable lines, times the rate.
-//      Tax_Rate__c is a Salesforce PERCENT (8.6 means 8.6%).
+//   4. Tax (D-083) = Σ over lines of (line total × its category's rate), scaled by
+//      (net / subtotal) so a discount or markup is shared proportionally by every line,
+//      rounded once. The category rate is Acumatica's rule (lib/tax-zones.js): the taxes in
+//      both the zone and the category, as of the date — passed in as est.categoryRates
+//      ({ RETAIL: 9.1, LABSERV: 0, … }). A line's category is effectiveTaxCategory (its
+//      Tax_Category__c, else the kind/taxable default; WARRANTY on a warranty-billed job).
+//      Without categoryRates (no tax context: an HCP import, an old caller) the pre-D-083
+//      rule applies: taxable lines × est.taxRate. Rates are PERCENTS (8.6 means 8.6%).
 //   5. Deposit is a percent of Total or a flat amount capped at Total; zero unless
 //      Deposit_Required__c.
 // Lines with Stage__c = Removed are ignored everywhere.
+
+import { effectiveTaxCategory } from "../../lib/tax-zones.js";
 
 export const KINDS = Object.freeze(["Labor", "Material", "Product", "Fee"]);
 
@@ -39,9 +46,10 @@ function num(v, fallback = 0) {
 
 /**
  * @param {Array<object>} lines  [{ kind, quantity, unitPrice, unitLaborPrice,
- *   unitMaterialPrice, taxable, stage }]
+ *   unitMaterialPrice, taxable, taxCategory, stage }]
  * @param {object} est  { discountScope, discountType, discountValue, markupType,
- *   markupValue, taxRate, depositRequired, depositType, depositValue }
+ *   markupValue, taxRate, depositRequired, depositType, depositValue,
+ *   categoryRates?, billToType? }   (categoryRates switches on the D-083 per-category tax)
  * @returns {object} every computed number, plus `fields` = the Salesforce field map
  *   to write on Sundial_Estimate__c.
  */
@@ -49,13 +57,22 @@ export function computeTotals(lines, est = {}) {
   const buckets = { labor: 0, material: 0, fee: 0, unsplit: 0 };
   let taxableValue = 0;
   const lineTotals = [];
+  const byCategory = est.categoryRates && typeof est.categoryRates === "object" ? est.categoryRates : null;
+  const taxBase = {}; // category → line value (D-083)
 
   for (const raw of lines || []) {
     if (!raw || raw.stage === "Removed") continue;
     const qty = num(raw.quantity, 1);
     const lineTotal = cents(qty * num(raw.unitPrice));
-    lineTotals.push({ id: raw.id ?? null, lineTotal });
-    if (raw.taxable === true) taxableValue += lineTotal;
+    if (byCategory) {
+      const category = effectiveTaxCategory(raw, { billToType: est.billToType ?? null });
+      lineTotals.push({ id: raw.id ?? null, lineTotal, taxCategory: category, taxRate: num(byCategory[category]) });
+      taxBase[category] = (taxBase[category] || 0) + lineTotal;
+      if (num(byCategory[category]) > 0) taxableValue += lineTotal;
+    } else {
+      lineTotals.push({ id: raw.id ?? null, lineTotal });
+      if (raw.taxable === true) taxableValue += lineTotal;
+    }
 
     switch (raw.kind) {
       case "Material":
@@ -119,7 +136,18 @@ export function computeTotals(lines, est = {}) {
   const net = cents(afterDiscount + markupAmount);
   const taxRate = num(est.taxRate); // percent, e.g. 8.6
   let taxAmount = 0;
-  if (taxRate > 0 && taxableValue > 0) {
+  const taxByCategory = {};
+  if (byCategory) {
+    let raw = 0;
+    for (const [category, value] of Object.entries(taxBase)) {
+      const rate = num(byCategory[category]);
+      const scaled = subtotal > 0 ? (cents(value) * net) / subtotal : 0;
+      const t = (scaled * rate) / 100;
+      taxByCategory[category] = { base: cents(value), rate, tax: cents(t) };
+      raw += t;
+    }
+    taxAmount = cents(raw);
+  } else if (taxRate > 0 && taxableValue > 0) {
     const scaled = subtotal > 0 ? (cents(taxableValue) * net) / subtotal : 0;
     taxAmount = cents((scaled * taxRate) / 100);
   }
@@ -149,6 +177,7 @@ export function computeTotals(lines, est = {}) {
     markupAmount,
     taxableValue: cents(taxableValue),
     taxAmount,
+    taxByCategory,
     total,
     depositAmount,
     lineTotals,
@@ -176,13 +205,19 @@ export function lineFromRecord(r) {
     unitLaborPrice: r.Unit_Labor_Price__c,
     unitMaterialPrice: r.Unit_Material_Price__c,
     taxable: r.Taxable__c === true,
+    taxCategory: r.Tax_Category__c ?? null,
     stage: r.Stage__c,
   };
 }
 
-/** Map a Sundial_Estimate__c record (API names) to the plain shape above. */
-export function estimateFromRecord(r) {
+/**
+ * Map a Sundial_Estimate__c record (API names) to the plain shape above. `tax` is the D-083
+ * context (lib/tax-zones.js estimateTaxContext): its categoryRates + billToType switch the
+ * per-category tax on. A matched context with no rates still taxes per category (at 0).
+ */
+export function estimateFromRecord(r, tax = null) {
   return {
+    ...(tax ? { categoryRates: tax.categoryRates || {}, billToType: tax.billToType ?? null } : {}),
     discountScope: r.Discount_Scope__c,
     discountType: r.Discount_Type__c,
     discountValue: r.Discount_Value__c,

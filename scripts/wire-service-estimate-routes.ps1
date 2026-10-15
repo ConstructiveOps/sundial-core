@@ -17,6 +17,8 @@
       GET    /service/jobs/{id}/card                                   (the card on file, 2026-09-28)
       POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
       GET    /service/jobs/{id}/costing                                (job costing, 2026-10-05)
+      POST   /service/jobs/{id}/tax-zone                               (set / correct the job's tax zone, D-083)
+      GET    /service/tax-zones                                        (the office's zone picker, D-083)
       POST   /service/jobs/{id}/report/prepare                         (the PDF's photos, shrunk in rounds, 2026-10-12)
       POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
       GET    /service/labor/rates                                       (the rate sheet, 2026-10-05)
@@ -133,6 +135,12 @@ foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepPrep $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }
+# The job's sales-tax zone (D-083): the "Tax zone needed" fix, and the picker it chooses from.
+Write-Host "==> /service/jobs/{id}/tax-zone : POST, OPTIONS ; /service/tax-zones : GET, OPTIONS" -ForegroundColor Cyan
+$jobTaxZone = Ensure-Resource $jobId "tax-zone"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobTaxZone $m }
+$taxZones = Ensure-Resource $service "tax-zones"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $taxZones $m }
 # Job costing (2026-10-05): cost vs. billed, Admin / Executive.
 Write-Host "==> /service/jobs/{id}/costing : GET, OPTIONS" -ForegroundColor Cyan
 $jobCosting = Ensure-Resource $jobId "costing"

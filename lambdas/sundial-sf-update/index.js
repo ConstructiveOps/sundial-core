@@ -183,6 +183,18 @@ async function deriveJobBillTo({ entry, clean, recordId, tenantId }) {
   return { ok: true };
 }
 
+/**
+ * D-083 — a job's tax zone has ONE write path: POST /service/jobs/{id}/tax-zone in the
+ * estimate Lambda, which checks the code against the Acumatica tables, derives the label and
+ * re-taxes the estimate. A generic PATCH naming either field is refused, never half-applied.
+ */
+export const JOB_TAX_ZONE_FIELDS = ["Tax_Zone_Code__c", "Tax_Zone_Label__c"];
+export function jobTaxZoneRefusal(clean) {
+  const hit = JOB_TAX_ZONE_FIELDS.find((f) => keyOf(clean, f));
+  if (!hit) return null;
+  return { status: 400, body: { error: "tax_zone_read_only", code: "TAX_ZONE_READ_ONLY", field: hit, message: "The tax zone is set with POST /service/jobs/{id}/tax-zone (the job page's zone picker), which checks it against Acumatica." } };
+}
+
 function activityRefs(objectKey, record, recordId) {
   const spec = SERVICE_ACTIVITY_KEYS[objectKey];
   const get = (path) => {
@@ -815,6 +827,8 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
   //     against what the job holds now, and Bill_To_Name__c is DERIVED — same shape as
   //     the dealer-follows-the-rep rule above: the derived value is never an input.
   if (objectKey === "job") {
+    const zoneRefused = jobTaxZoneRefusal(clean);
+    if (zoneRefused) return jsonResponse(zoneRefused.status, cors, zoneRefused.body);
     const billTo = await deriveJobBillTo({ entry, clean, recordId, tenantId });
     if (!billTo.ok) return jsonResponse(billTo.status, cors, { error: billTo.code.toLowerCase(), code: billTo.code, field: "Bill_To_Customer__c", message: billTo.message });
   }
@@ -922,6 +936,8 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
   // D-081: a job created through the generic route obeys the same Bill To rule as the
   // estimate Lambda's New Job (the portal does not create jobs here today; this keeps it so).
   if (objectKey === "job") {
+    const zoneRefused = jobTaxZoneRefusal(payload);
+    if (zoneRefused) return jsonResponse(zoneRefused.status, cors, zoneRefused.body);
     const billTo = await deriveJobBillTo({ entry, clean: payload, recordId: null, tenantId });
     if (!billTo.ok) return jsonResponse(billTo.status, cors, { error: billTo.code.toLowerCase(), code: billTo.code, field: "Bill_To_Customer__c", message: billTo.message });
     for (const k of Object.keys(payload)) if (payload[k] === null) delete payload[k];

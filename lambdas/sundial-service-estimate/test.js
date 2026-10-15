@@ -18,6 +18,7 @@ import { createHandler, matchRoute, PROJECT_TYPE_TAG } from "./index.js";
 import { paidSummary, invoiceStatusFor, jobPaymentStatusFor, nextInvoiceName, paymentFieldsFromBody, invoicePdfKey } from "./invoice.js";
 import { clockMinutes, roundUpQuarterHours, laborRow, parseLaborEntry } from "./labor.js";
 import { renderEstimateDocument } from "../../lib/estimate-document.js";
+import { tablesFromRows } from "../../lib/tax-zones.js";
 
 const TENANT = "a1W7y000007AszBEAS";
 const OTHER_TENANT = "a1W7y000007OTHER00";
@@ -431,6 +432,41 @@ function fakeSalesforce() {
   return { store, calls, stale, activity, stripeEvents, notes, flags, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
 }
 
+// The tax tables the tests run on (D-083) — Acumatica's shape, test numbers: Mesa's retail
+// rate is 8.6 (the rate these tests always used), Phoenix 9.1 rising to 9.6 on 2026-11-01.
+// Labor / Solar / Warranty carry a 0% tax each, as Acumatica's do.
+export const TEST_TAX_ROWS = {
+  zones: [
+    { zone_code: "08MESAR", description: "Mesa - Retail", city_key: "MESA", county: "Maricopa", is_retail: true, tax_ids: ["08MESRT", "08MCORT", "LABSERVE", "SOLAR", "WARRANTY"] },
+    { zone_code: "08PHOENIXR", description: "Phoenix - Retail", city_key: "PHOENIX", county: "Maricopa", is_retail: true, tax_ids: ["08PHXRT", "08MCORT", "LABSERVE", "SOLAR", "WARRANTY"] },
+    { zone_code: "08PEORIAR", description: "Peoria - Retail", city_key: "PEORIA", county: "Maricopa", is_retail: true, tax_ids: ["08PEORT", "08MCORT", "LABSERVE", "SOLAR", "WARRANTY"] },
+    { zone_code: "08TEMPER", description: "Tempe - Retail", city_key: "TEMPE", county: "Maricopa", is_retail: true, tax_ids: ["08TEMRT", "08MCORT", "LABSERVE", "SOLAR", "WARRANTY"] },
+    { zone_code: "08MARICOPR", description: "Maricopa County - Retail", city_key: null, county: "Maricopa", is_retail: true, tax_ids: ["08MCORT", "LABSERVE", "SOLAR", "WARRANTY"] },
+    { zone_code: "08PHOENIXC", description: "Phoenix - Contracting", city_key: null, county: "Maricopa", is_retail: false, tax_ids: ["08PHXCO"] },
+  ],
+  rates: [
+    { tax_id: "08MESRT", schedule: [{ start: "2021-01-01", rate: 2.3 }] },
+    { tax_id: "08PHXRT", schedule: [{ start: "2021-01-01", rate: 2.3 }, { start: "2025-07-01", rate: 2.8 }, { start: "2026-11-01", rate: 3.3 }] },
+    { tax_id: "08PEORT", schedule: [{ start: "2021-01-01", rate: 1.8 }] },
+    { tax_id: "08TEMRT", schedule: [{ start: "2021-01-01", rate: 1.8 }] },
+    { tax_id: "08MCORT", schedule: [{ start: "2021-01-01", rate: 6.3 }] },
+    { tax_id: "08PHXCO", schedule: [{ start: "2021-01-01", rate: 1.82 }] },
+    { tax_id: "LABSERVE", schedule: [{ start: "2021-01-01", rate: 0 }] },
+    { tax_id: "SOLAR", schedule: [{ start: "2021-01-01", rate: 0 }] },
+    { tax_id: "WARRANTY", schedule: [{ start: "2021-01-01", rate: 0 }] },
+  ],
+  categories: [
+    { category_id: "RETAIL", tax_ids: ["08MESRT", "08PHXRT", "08PEORT", "08TEMRT", "08MCORT"] },
+    { category_id: "LABSERV", tax_ids: ["LABSERVE"] },
+    { category_id: "SOLAR", tax_ids: ["SOLAR"] },
+    { category_id: "WARRANTY", tax_ids: ["WARRANTY"] },
+    { category_id: "RESALE", tax_ids: [] },
+    { category_id: "CONTRACTING", tax_ids: ["08PHXCO"] },
+  ],
+  aliases: [{ alias_key: "SUN CITY", zone_code: "08MARICOPR", note: "from CFO 2026-10-06" }, { alias_key: "LAVEEN", zone_code: "08PHOENIXR", note: "from CFO 2026-10-06" }],
+};
+const TEST_TAX_TABLES = tablesFromRows(TEST_TAX_ROWS);
+
 const JPG_1x1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==", "base64");
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -476,6 +512,7 @@ function makeHandler(fake, identityOverrides = {}) {
       return { bytes: fake.photoBytes ?? JPG_1x1, contentType: "image/jpeg" };
     },
     sms: fake.sms ?? null,
+    loadTaxTables: async (slug) => (fake.taxTables !== undefined ? fake.taxTables : slug === "harmon" ? TEST_TAX_TABLES : null),
     getSecret: async (name) => {
       if (name === "sundial/google-maps" && fake.googleKey) return { apiKey: fake.googleKey };
       if (name === "sundial/stripe" && fake.stripeSecret) return fake.stripeSecret;
@@ -754,7 +791,7 @@ test("cross-tenant customer id is a 404, never a create", async () => {
 
 test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versions + token, approve stages lines, create-job once", async () => {
   const fake = fakeSalesforce();
-  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cy", Primary_Phone__c: "602-555-0001" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cy", Primary_Phone__c: "602-555-0001", City__c: "Mesa" });
   await fake.deps.sfCreateRecord("Sundial_Price_Book_Item__c", { Client__c: TENANT, Name: "Disconnect", Item_Code__c: "MAT-DISC", Version__c: 1, Is_Active__c: true, Kind__c: "Material", Material_Price__c: 120, Material_Cost__c: 60, Taxable__c: true });
   const cust = fake.store.Sundial_Customer__c[0];
   const item = fake.store.Sundial_Price_Book_Item__c[0];
@@ -1327,7 +1364,7 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   assert.equal(inv.Status__c, "Partially Paid", "the invoice is not touched");
   assert.equal(job.Status__c, "Invoiced", "the job is not touched");
   assert.ok(fake.activity.some((a) => a.event === "estimate_updated" && a.details.unlocked && a.details.invoice === inv.Name));
-  const edit = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 9 });
+  const edit = await call(h, "PATCH", `/service/estimates/${est.Id}`, { scopeSummary: "Reopened to fix a line" });
   assert.equal(edit.status, 200, JSON.stringify(edit.body));
   assert.equal((await call(h, "POST", `/service/estimates/${est.Id}/unlock`, {})).body.unchanged, true);
   // put it back the way the rest of this test expects
@@ -1389,7 +1426,9 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   assert.equal(onVoid.status, 409);
 
   // Fix the estimate, reissue as -2; the money rides along.
-  const fix = await call(h, "PATCH", `/service/estimates/${est.Id}`, { taxRate: 0 });
+  // (D-083: the rate is the zone's, so the fix is the line's category — the breaker was a solar part.)
+  const breaker = fake.store.Sundial_Service_Line__c.find((l) => l.Description__c === "Breaker");
+  const fix = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${breaker.Id}`, { taxCategory: "SOLAR" });
   assert.equal(fix.status, 200);
   const re = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
   assert.equal(re.status, 201);
@@ -1438,12 +1477,12 @@ test("labor helpers: clock → quarter hours, row sources, entry validation", ()
 });
 
 const mgrOf = (fake) => makeHandler(fake, { access: { level: "Manager", scope: "tenant", userId: USER, tenantId: TENANT } });
-test("costing (2026-10-05): the tenant's default tax rate lands on a new estimate; a tech's cost rate × burden is the job's labor cost; margin = revenue − costs; Admin-only", async () => {
+test("costing (2026-10-05): the job zone's rate lands on the estimate (D-083); a tech's cost rate × burden is the job's labor cost; margin = revenue − costs; Admin-only", async () => {
   const fake = fakeSalesforce();
   fake.flags.tenantSettings = true;
   fake.flags.costRate = true;
   fake.store.Sundial_Tenant__c[0] = { Id: TENANT, Name: "harmon", Default_Tax_Rate__c: 8.6, Default_Tax_Jurisdiction__c: "Phoenix, AZ", Labor_Burden_Percent__c: 80 };
-  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cost" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cost", City__c: "Mesa" });
   await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, Active__c: true, Access_Level__c: "Technician", First_Name__c: "Jake", Last_Name__c: "Dorsey", Hourly_Bill_Rate__c: 120, Hourly_Cost_Rate__c: 40 });
   await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, Active__c: true, Access_Level__c: "Technician", First_Name__c: "New", Last_Name__c: "Guy", Hourly_Bill_Rate__c: 120 });
   const [jake, newGuy] = fake.store.Sundial_User__c;
@@ -1453,8 +1492,8 @@ test("costing (2026-10-05): the tenant's default tax rate lands on a new estimat
   assert.equal(j.status, 201, JSON.stringify(j.body));
   const est = fake.store.Sundial_Estimate__c[0];
   const jobId = fake.store.Sundial_Service_Job__c[0].Id;
-  assert.equal(est.Tax_Rate__c, 8.6, "the tenant's default rate, not null");
-  assert.equal(est.Tax_Jurisdiction__c, "Phoenix, AZ");
+  assert.equal(est.Tax_Rate__c, 8.6, "Mesa's rate from the tax tables (D-083), not the tenant default");
+  assert.equal(est.Tax_Jurisdiction__c, "Mesa");
   assert.equal(est.Tax_Amount__c, 8.6, "8.6% of the taxable 100");
   assert.equal(est.Total__c, 383.6);
   fake.store.Sundial_Service_Line__c[0].Unit_Labor_Cost__c = 50; // the book's internal cost of the flat-rate item
@@ -1525,7 +1564,7 @@ test("costing (2026-10-05): the tenant's default tax rate lands on a new estimat
   await bare.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Bare" });
   const hb = makeHandler(bare);
   await call(hb, "POST", "/service/jobs", { customer: { id: bare.store.Sundial_Customer__c[0].Id }, lines: [{ description: "x", kind: "Material", unitPrice: 10, taxable: true }] });
-  assert.equal(bare.store.Sundial_Estimate__c[0].Tax_Rate__c ?? null, null, "no tenant default → the old behaviour (no rate)");
+  assert.equal(bare.store.Sundial_Estimate__c[0].Tax_Rate__c ?? null, null, "no city, no zone → no rate (D-083 never guesses)");
   const cb = await call(hb, "GET", `/service/jobs/${bare.store.Sundial_Service_Job__c[0].Id}/costing`);
   assert.equal(cb.status, 200);
   assert.ok(cb.body.warnings.some((w) => w.includes("Hourly_Cost_Rate__c")));
@@ -1534,7 +1573,7 @@ test("costing (2026-10-05): the tenant's default tax rate lands on a new estimat
 
 test("labor billing: billable calls become Labor lines (Source Time), edits rewrite them, unbilling removes them, the invoice locks them", async () => {
   const fake = fakeSalesforce();
-  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Lab" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Lab", City__c: "Mesa" });
   await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "Jake", Last_Name__c: "Dorsey", Hourly_Bill_Rate__c: 120 });
   await fake.deps.sfCreateRecord("Sundial_User__c", { Client__c: TENANT, First_Name__c: "New", Last_Name__c: "Guy" });
   const [jake, newGuy] = fake.store.Sundial_User__c;
@@ -2273,7 +2312,9 @@ test("club: the public catalog, a join → Pending row + subscription Checkout, 
   assert.equal(est.Discount_Value__c, 10);
   assert.equal(est.Membership__c, m.Id);
   assert.equal(est.Discount_Amount__c, 20, "10% of the labor only");
-  assert.equal(est.Total__c, 280);
+  // D-083: the part is a Material line → RETAIL by default, taxed at Mesa's 8.6% on its share of the net (100 × 280/300).
+  assert.equal(est.Tax_Amount__c, 8.03);
+  assert.equal(est.Total__c, 288.03);
   r = await call(h, "POST", "/service/estimates", { customer: { id: cust.Id }, estimate: { discountValue: 25, discountScope: "Both" }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 100 }] });
   assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Value__c, 25);
   assert.equal(fake.store.Sundial_Estimate__c[1].Discount_Source__c, undefined);
@@ -3006,3 +3047,211 @@ test("POST /report/prepare warms the photo cache in rounds (2026-10-12 evening):
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// D-083 — sales tax from the Acumatica zone tables
+// ---------------------------------------------------------------------------
+test("D-083: a job whose city is no zone is stamped blank and says 'Tax zone needed'; issue refuses TAX_ZONE_REQUIRED until the office picks one", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Rural", Primary_Email__c: "r@example.com", City__c: "Nowhere Junction" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { taxRate: 8.6 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 200 }, { description: "Breaker", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  assert.equal(j.body.taxZone.needed, true);
+  assert.ok(j.body.warnings.some((w) => /Tax zone needed/.test(w) && /NOWHERE JUNCTION/.test(w)));
+  assert.ok(j.body.rejectedFields.includes("taxRate"), "a typed rate is no longer an input");
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(job.Tax_Zone_Code__c, undefined, "never a guess");
+  assert.equal(job.Tax_Zone_Label__c, undefined);
+  assert.equal(est.Tax_Rate__c, null);
+  assert.equal(est.Tax_Amount__c, 0, "no zone, no tax — not the old default");
+
+  const blocked = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(blocked.body.issueBlocker.code, "TAX_ZONE_REQUIRED");
+  const refused = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(refused.status, 400);
+  assert.equal(refused.body.code, "TAX_ZONE_REQUIRED");
+  assert.equal(fake.store.Sundial_Service_Invoice__c.length, 0);
+
+  // The picker: retail zones only, today's rates; ?city= says what the resolver would do.
+  const zones = await call(h, "GET", "/service/tax-zones", null, { city: "Sun City" });
+  assert.equal(zones.status, 200);
+  assert.ok(!zones.body.zones.some((z) => z.code === "08PHOENIXC"), "contracting zones are not offered");
+  assert.deepEqual(zones.body.zones.find((z) => z.code === "08MARICOPR"), { code: "08MARICOPR", label: "Maricopa County", county: "Maricopa", cityKey: null, countyOnly: true, rate: 6.3 });
+  assert.deepEqual(zones.body.resolved, { matched: true, code: "08MARICOPR", label: "Maricopa County", via: "alias" });
+
+  const bogus = await call(h, "POST", `/service/jobs/${job.Id}/tax-zone`, { zoneCode: "08PHOENIXC" });
+  assert.equal(bogus.status, 400);
+  assert.equal(bogus.body.code, "TAX_ZONE_UNKNOWN", "a contracting zone is not a Service zone");
+  const set = await call(h, "POST", `/service/jobs/${job.Id}/tax-zone`, { zoneCode: "08phoenixr", label: "ignored" });
+  assert.equal(set.status, 200, JSON.stringify(set.body));
+  assert.equal(job.Tax_Zone_Code__c, "08PHOENIXR");
+  assert.equal(job.Tax_Zone_Label__c, "Phoenix", "the label is derived, never typed");
+  assert.equal(est.Tax_Rate__c, 9.1, "the estimate is re-taxed by the job's zone");
+  assert.equal(est.Tax_Jurisdiction__c, "Phoenix");
+  assert.equal(est.Tax_Amount__c, 9.1);
+  assert.ok(fake.activity.some((a) => a.event === "job_updated" && a.details.via === "tax-zone"));
+
+  const inv = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(inv.status, 201, JSON.stringify(inv.body));
+  assert.equal(inv.body.invoice.Tax_Rate__c, 9.1);
+  assert.equal(inv.body.invoice.Tax_Amount__c, 9.1);
+  assert.equal(inv.body.invoice.Total__c, 309.1);
+  const doc = await call(h, "GET", `/service/invoices/${inv.body.id}/preview`);
+  assert.ok(doc.body.html.includes("Phoenix (9.1%)"), "the jurisdiction and rate print under Total tax");
+});
+
+test("D-083: a mixed estimate — a Phoenix job taxes only Retail lines; every material defaults to RETAIL; the price-book item's SOLAR default rides onto the line; taxable is read-only and derived; a bad category is refused", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Mix", Primary_Email__c: "m@example.com", City__c: "laveen" }); // the CFO's alias → Phoenix
+  await fake.deps.sfCreateRecord("Sundial_Price_Book_Item__c", { Client__c: TENANT, Name: "Optimizer", Item_Code__c: "OPT-1", Version__c: 1, Is_Active__c: true, Kind__c: "Material", Material_Price__c: 1000, Taxable__c: true, Tax_Category__c: "SOLAR" });
+  const item = fake.store.Sundial_Price_Book_Item__c[0];
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [
+    { description: "Diagnostic", kind: "Labor", unitPrice: 300 },
+    { description: "Breaker", kind: "Material", unitPrice: 200, taxable: false }, // the old checkbox is ignored: a material is RETAIL
+    { priceBookItemId: item.Id },
+    { description: "Disposal", kind: "Fee", unitPrice: 50 },
+  ] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  assert.deepEqual(j.body.taxZone, { matched: true, zoneCode: "08PHOENIXR", label: "Phoenix", needed: false, reason: null });
+  const est = fake.store.Sundial_Estimate__c[0];
+  const lines = fake.store.Sundial_Service_Line__c;
+  const opt = lines.find((l) => l.Price_Book_Item__c === item.Id);
+  assert.equal(opt.Tax_Category__c, "SOLAR", "the item's default is snapshotted");
+  assert.equal(opt.Taxable__c, false, "Taxable__c follows the category, not the item's old checkbox");
+  // 1550 subtotal; only the 200 breaker is Retail: 200 × 9.1% = 18.20
+  assert.equal(est.Subtotal__c, 1550);
+  assert.equal(est.Tax_Amount__c, 18.2);
+  assert.equal(est.Tax_Rate__c, 9.1);
+  assert.equal(est.Tax_Jurisdiction__c, "Phoenix");
+
+  const breaker = lines.find((l) => l.Description__c === "Breaker");
+  assert.equal(breaker.Tax_Category__c, undefined, "a default is not stored — blank means the kind's default");
+  assert.equal(breaker.Taxable__c, true, "derived: a material is RETAIL, so ticked");
+  assert.equal(lines.find((l) => l.Description__c === "Diagnostic").Taxable__c, false);
+
+  // The office marks the disposal fee Retail explicitly; clearing the choice sends it back to LABSERV.
+  const fee = lines.find((l) => l.Description__c === "Disposal");
+  const p1 = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${fee.Id}`, { taxCategory: "RETAIL" });
+  assert.equal(p1.status, 200, JSON.stringify(p1.body));
+  assert.equal(fee.Taxable__c, true);
+  assert.equal(p1.body.totals.Tax_Amount__c, 22.75, "250 × 9.1%");
+  const p2 = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${fee.Id}`, { taxCategory: null });
+  assert.equal(fee.Tax_Category__c, null);
+  assert.equal(fee.Taxable__c, false);
+  assert.equal(p2.body.totals.Tax_Amount__c, 18.2);
+  // No "untick to exempt": the taxable key is read-only. Exempting the breaker = choosing SOLAR.
+  const untick = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${breaker.Id}`, { taxable: false });
+  assert.equal(untick.status, 400, "taxable alone is nothing to update");
+  assert.deepEqual(untick.body.rejectedFields, ["taxable"]);
+  assert.equal(breaker.Tax_Category__c, undefined);
+  const exempt = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${breaker.Id}`, { taxCategory: "SOLAR" });
+  assert.equal(breaker.Taxable__c, false);
+  assert.equal(exempt.body.totals.Tax_Amount__c, 0);
+  await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${breaker.Id}`, { taxCategory: null });
+  const bad = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${fee.Id}`, { taxCategory: "CONTRACTING" });
+  assert.equal(bad.status, 400);
+
+  // The estimate read carries the zone; the preview prints it.
+  const g = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(g.body.taxZone.label, "Phoenix");
+  assert.equal(g.body.totals.taxByCategory.RETAIL.base, 200);
+  const pv = await call(h, "GET", `/service/estimates/${est.Id}/preview`);
+  assert.ok(pv.body.html.includes("Phoenix (9.1%)"));
+});
+
+test("D-083: an estimate with no job is taxed by the customer's city; Create Job stamps the zone; a template is never taxed", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Pre", Primary_Email__c: "p@example.com", City__c: "Tempe" });
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Part", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(c.status, 201);
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(est.Tax_Rate__c, 8.1);
+  assert.equal(est.Tax_Jurisdiction__c, "Tempe");
+  assert.equal(est.Tax_Amount__c, 8.1);
+  const cj = await call(h, "POST", `/service/estimates/${est.Id}/create-job`, {});
+  assert.equal(cj.status, 201, JSON.stringify(cj.body));
+  assert.equal(fake.store.Sundial_Service_Job__c[0].Tax_Zone_Code__c, "08TEMPER");
+  assert.equal(cj.body.taxZone.zoneCode, "08TEMPER");
+  const t = await call(h, "POST", "/service/estimates", { isTemplate: true, lines: [{ description: "Part", kind: "Material", unitPrice: 100, taxable: true }] });
+  const tpl = fake.store.Sundial_Estimate__c.find((e) => e.Id === t.body.id);
+  assert.equal(tpl.Tax_Amount__c, 0);
+  assert.equal(tpl.Tax_Rate__c, undefined, "a template's tax fields are never written");
+});
+
+test("D-083: no tax tables for the tenant (another tenant, a failed read) — nothing is guessed: no zone, no tax, issue refused", async () => {
+  const fake = fakeSalesforce();
+  fake.taxTables = null;
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", City__c: "Phoenix" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Part", kind: "Material", unitPrice: 100, taxable: true }] });
+  assert.equal(j.status, 201);
+  assert.equal(j.body.taxZone.reason, "NO_TABLE");
+  assert.equal(fake.store.Sundial_Estimate__c[0].Tax_Amount__c, 0);
+  const zones = await call(h, "GET", "/service/tax-zones");
+  assert.equal(zones.body.configured, false);
+  assert.equal((await call(h, "POST", `/service/jobs/${fake.store.Sundial_Service_Job__c[0].Id}/invoice`, {})).body.code, "TAX_ZONE_REQUIRED");
+});
+
+test("D-083: issue freezes each line's EFFECTIVE category (after the warranty rule) onto the line — a later Bill To change never re-taxes the issued invoice; a void restores the lines so the reissue follows the job", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Wren", Primary_Email__c: "w@example.com", City__c: "Mesa" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 200 }, { description: "Inverter part", kind: "Material", unitPrice: 100 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+  const part = fake.store.Sundial_Service_Line__c.find((l) => l.Description__c === "Inverter part");
+  const labor = fake.store.Sundial_Service_Line__c.find((l) => l.Description__c === "Labor");
+  assert.equal(est.Tax_Amount__c, 8.6, "a customer-pay job: the part is RETAIL at Mesa's 8.6%");
+
+  // The job turns out to be manufacturer warranty work before it is billed (as the job page's PATCH would leave it).
+  job.Bill_To_Type__c = "Manufacturer";
+  const issued = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(issued.status, 201, JSON.stringify(issued.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Tax_Amount__c, 0, "warranty work: every line WARRANTY");
+  assert.equal(inv.Total__c, 300);
+  assert.equal(part.Tax_Category__c, "WARRANTY", "the EFFECTIVE category is written onto the frozen line");
+  assert.equal(part.Taxable__c, false);
+  assert.equal(labor.Tax_Category__c, "WARRANTY");
+  const issuedRow = fake.activity.find((a) => a.event === "invoice_issued");
+  assert.deepEqual(issuedRow.details.frozenCategories.map((f) => [f.lineId, f.from, f.to]), [[labor.Id, null, "WARRANTY"], [part.Id, null, "WARRANTY"]]);
+
+  // Someone corrects the Bill To afterwards: the issued invoice is NOT re-taxed, anywhere.
+  job.Bill_To_Type__c = "Customer";
+  const read = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(read.body.totals.taxAmount, 0, "the invoiced estimate reads its frozen categories");
+  assert.deepEqual(read.body.totals.lineTotals.map((l) => l.taxCategory), ["WARRANTY", "WARRANTY"]);
+  const doc = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.equal(doc.body.total, 300);
+  await call(h, "POST", `/service/estimates/${est.Id}/recalculate`, {});
+  assert.equal(est.Tax_Amount__c, 0, "a recalculate on the invoiced estimate writes nothing");
+  assert.equal(inv.Tax_Amount__c, 0);
+
+  // The other way round: a customer-pay invoice stays taxed when the job later becomes warranty.
+  const fake2 = fakeSalesforce();
+  await fake2.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ott", Primary_Email__c: "o@example.com", City__c: "Mesa" });
+  const h2 = makeHandler(fake2);
+  await call(h2, "POST", "/service/jobs", { customer: { id: fake2.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Part", kind: "Material", unitPrice: 100 }] });
+  const job2 = fake2.store.Sundial_Service_Job__c[0];
+  assert.equal((await call(h2, "POST", `/service/jobs/${job2.Id}/invoice`, {})).status, 201);
+  assert.equal(fake2.store.Sundial_Service_Line__c[0].Tax_Category__c, "RETAIL", "the default, now frozen explicitly");
+  job2.Bill_To_Type__c = "Internal Warranty";
+  const read2 = await call(h2, "GET", `/service/estimates/${fake2.store.Sundial_Estimate__c[0].Id}`);
+  assert.equal(read2.body.totals.taxAmount, 8.6, "still taxed — the Bill To change does not reach an issued invoice");
+
+  // Void the warranty invoice: the lines get back what they held, and the reissue follows the corrected Bill To.
+  const v = await call(h, "POST", `/service/invoices/${inv.Id}/void`, { reason: "Billed to the wrong payer" });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.equal(v.body.categoriesRestored, 2);
+  assert.deepEqual(v.body.warnings, []);
+  assert.equal(part.Tax_Category__c, null, "back to blank = the kind's default");
+  assert.equal(part.Taxable__c, true, "a material's default is RETAIL");
+  const re = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(re.status, 201, JSON.stringify(re.body));
+  assert.equal(fake.store.Sundial_Service_Invoice__c[1].Tax_Amount__c, 8.6, "customer-pay now: the part is taxed");
+});

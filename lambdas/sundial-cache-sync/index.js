@@ -48,6 +48,9 @@
 import { getSalesforceToken, sfQuery } from "../../lib/salesforce.js";
 import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
 import { parentModstampPaths, incrementalWhere, readPath } from "../../lib/formula-parents.js";
+import { getAcumaticaEntity } from "../../lib/acumatica.js";
+import { pullAcumaticaTax, syncTaxTables } from "../../lib/tax-zones.js";
+import { primaryTenantSlug } from "../../lib/tenant-guard.js";
 
 // --- Object allowlist / map (mirrors sundial-sf-query) ---------------------
 export const OBJECT_ALLOWLIST = {
@@ -738,6 +741,39 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
   };
 }
 
+// --- The tax tables (D-083) ------------------------------------------------
+// Acumatica is a single-credential integration (D-078): the tables belong to the PRIMARY
+// tenant. Injectable for the test (deps.pull / deps.sync / deps.today).
+export async function runTaxZoneRefresh(supabase, event = {}, deps = {}) {
+  const startedAt = new Date().toISOString();
+  const tenant = primaryTenantSlug();
+  const intervalMinutes = Number(event?.intervalMinutes);
+  let result;
+  try {
+    const raw = await (deps.pull ?? (() => pullAcumaticaTax(getAcumaticaEntity)))();
+    result = await (deps.sync ?? syncTaxTables)({ supabase, tenant, raw, today: deps.today ?? startedAt.slice(0, 10) });
+    result.status = "ok";
+  } catch (e) {
+    result = { status: "error", error: e?.message || String(e) };
+    console.error("cache-sync taxzones failed:", result.error);
+  }
+  await recordRun(supabase, {
+    object: "taxzones",
+    mode: "full",
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    ok: result.status === "ok",
+    rows_upserted: result.status === "ok" ? (result.zones || 0) + (result.taxes || 0) + (result.categories || 0) : 0,
+    watermark: null,
+    error: result.status === "ok" ? null : String(result.error).slice(0, 500),
+    expected_interval_s: Number.isFinite(intervalMinutes) && intervalMinutes > 0 ? Math.round(intervalMinutes * 60) : null,
+  });
+  // Drift is a fact about Acumatica's setup (codes + descriptions only), logged every day so it stays visible.
+  if (result.drift) console.log("cache-sync taxzones drift:", JSON.stringify(result.drift));
+  console.log("cache-sync taxzones:", JSON.stringify({ tenant, ...result, drift: undefined }));
+  return { task: "taxzones", tenant, ...result };
+}
+
 // --- handler ---------------------------------------------------------------
 // Suitable for an empty/scheduled EventBridge event (no input required). The two
 // D-079 rules pass { "objects": [...], "intervalMinutes": 5 | 30 }. For manual
@@ -772,6 +808,13 @@ export const handler = async (event) => {
       detail: probe.error.message,
     };
   }
+
+  // THE TAX TABLES (D-083): { "task": "taxzones" } — its own EventBridge rule, once a day.
+  // Not a Salesforce object: Acumatica's tax zones / rates / categories are copied into the
+  // sundial_tax_* tables exactly as Acumatica holds them, so the rates the Service module
+  // charges can never drift from the ones Harmon remits. One cache_sync_runs row per run
+  // (object 'taxzones'); the drift report goes to the log, never record data.
+  if (event?.task === "taxzones") return runTaxZoneRefresh(supabase, event);
 
   // Which objects to sync? { "object": "customer" } for one, { "objects": [...] } for a
   // list (the two EventBridge rules pass their tier's list — D-079), else all.

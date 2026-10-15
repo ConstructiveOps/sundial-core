@@ -4,6 +4,71 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## Service sales tax from Acumatica (D-083, 2026-10-15) — ON `feature/tax-zones`, NOT DEPLOYED, awaiting review
+
+Runbook: `docs/integrations/acumatica-tax.md`.
+
+**Already done.**
+
+- [x] Part A: the Acumatica pull and its report (`scripts/acumatica-pull-tax.mjs`). Live tenant, 143 zones, 78 retail.
+- [x] Part B code: `lib/tax-zones.js`, the per-category tax, the job's zone, `TAX_ZONE_REQUIRED`, the picker routes, the daily refresh, the $0 tax line. Tests: `lib/tax-zones.test.js` 17, estimate +4, cache-sync +2, sf-update +1, invoice document +1. Full suite 1,535 pass.
+
+**What Tim does, in this order.** ⚠️ The Setup fields come first. The new estimate Lambda reads them, and deploying it before they exist breaks the Service module.
+
+- [ ] **(1) Salesforce Setup: four fields**, each visible + editable for the Sundial Integration User's permission set.
+  - **Sundial_Service_Job__c**
+    - *Tax Zone Code*: `Tax_Zone_Code__c`, Text(20), not required.
+    - *Tax Zone*: `Tax_Zone_Label__c`, Text(80), not required.
+  - **Tax Category picklist.** Simplest: a **Global Value Set** named `Sundial_Tax_Category`. Each value's **API name must be exactly** the code below; the label can be friendly. Tick "Restrict picklist to the values defined in the value set". No default value.
+    | API name | Label |
+    |---|---|
+    | `LABSERV` | Labor/Services - Exempt |
+    | `RETAIL` | Taxable Retail |
+    | `SOLAR` | Solar Materials - Exempt |
+    | `WARRANTY` | Warranty - Exempt |
+    | `RESALE` | Materials for resale |
+  - **Sundial_Service_Line__c** → *Tax Category*: `Tax_Category__c`, Picklist from that value set, not required.
+  - **Sundial_Price_Book_Item__c** → *Tax Category*: `Tax_Category__c`, the same picklist, not required. Set it to SOLAR on the solar parts.
+- [ ] **(2) Supabase → SQL editor:** run `sql/sundial_tax_zones.sql`. Its check query should list 78 retail zones after step 3, and 4 alias rows right away.
+- [ ] **(3) Seed.**
+  1. In PowerShell from `sundial-core`, run `node scripts/seed-tax-zones.mjs`. This is a dry run; it should say `143 zones (78 retail), 151 taxes, 10 categories`.
+  2. Run `node scripts/seed-tax-zones.mjs --pull --apply`. It pulls Acumatica fresh and writes, and should say `re-read: 78 retail zones`.
+- [ ] **(3b) Backfill the open jobs' zones.**
+  1. Run `node scripts/backfill-job-tax-zones.mjs` (a dry run). It prints how many open jobs match exactly (by zone) and lists the rest (job number, customer, city). The list is also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. The cache preview on 2026-10-15 said 864 of 892 match, and 28 are unincorporated places like Arizona City, Waddell, Wittmann and San Tan Valley.
+  2. Then run `node scripts/backfill-job-tax-zones.mjs --apply`. It writes one job first, checks nothing else moved, then writes the rest. **Don't pipe it through anything**: a failure must show. If it ends with failures, re-run it; it only picks up jobs still blank.
+  3. Send the unmatched list to Julie. For each place, either the office picks the zone on the job, or she names the zone and Claude adds an alias like her first four.
+- [ ] **(4) Deploys:**
+  - `.\deploy.ps1 sundial-service-estimate`
+  - `.\deploy.ps1 sundial-service-public`
+  - `.\deploy.ps1 sundial-sf-update`
+  - `.\deploy.ps1 sundial-cache-sync`
+  - `.\deploy.ps1 sundial-acumatica-push` (picks up the Yuma / Willcox map entries)
+  - Then `.\scripts\wire-service-estimate-routes.ps1` (answer y). It adds `GET /service/tax-zones` and `POST /service/jobs/{id}/tax-zone`.
+- [ ] **(5) The daily refresh.** Run `.\scripts\wire-tax-zone-refresh.ps1`. It runs the refresh once first and stops if that fails. If the error names the secret: AWS console → IAM → the `sundial-cache-sync` role → add `secretsmanager:GetSecretValue` on `sundial/acumatica/connected-app`, then re-run.
+- [ ] **(6) ZZ test**, on the designated test record only.
+  1. In the portal, make a New Job for *ZZ PORTAL TEST — DO NOT USE* (`a1P7y00000AmyXCEAZ`) with one Labor line and one taxable Material line.
+  2. On the job, `Tax_Zone_Code__c` / `Tax_Zone_Label__c` are filled if the test customer's city is a zone, or blank with "Tax zone needed" if it is not.
+  3. If blank: `POST /service/jobs/{id}/tax-zone {"zoneCode":"08PHOENIXR"}` sets it (until the portal picker exists, call it from the browser console or ask Claude).
+  4. The estimate shows "Phoenix (9.1%)" under Total tax, and only the Material line is taxed.
+  5. Issue the invoice: it carries 9.1%.
+  6. Void it and archive the job afterwards.
+- [ ] **(7) Merge `feature/tax-zones` → `master` and push** in the same pass as the deploy.
+
+**Still open.**
+
+- [ ] **Portal (harmon-crm).**
+  - The job page: a "Tax zone needed" badge when `Tax_Zone_Code__c` is blank, and a zone picker (`GET /service/tax-zones`, `POST /service/jobs/{id}/tax-zone`).
+  - A Tax Category selector on each estimate line (`taxCategory` on the line PATCH) and on the price-book item form.
+  - Remove the estimate's typed tax-rate box, which is now ignored (`rejectedFields`).
+  - Show the `TAX_ZONE_REQUIRED` issue blocker.
+  - Add the inventory row in the same change.
+- [ ] **DECIDE: open jobs created before D-083 have no zone.** Each one is picked by hand before invoicing (issue refuses until then). If that is too many, Claude can write a one-time backfill that runs the same resolver over open jobs. It would stamp only exact matches and list the rest.
+- [ ] **Harmon / Julie: fix the drift in Acumatica.**
+  - Sierra Vista, Tombstone, Coolidge and Dewey-Humboldt: the city retail tax is in no category, so it is never charged.
+  - GRIC and SRIC: the same.
+  - Apache Junction: carries Pinal County *Contracting* instead of Retail, so it charges 2.4% instead of 9.1%.
+  - The refresh picks each fix up the next morning, and `node scripts/acumatica-pull-tax.mjs` shows what is still open.
+
 ## HCP lead customers' notes restored (2026-10-14, Harmon — Ben: "migrated without the historical notes")
 
 - [x] `lib/hcp-import.js`: `leadBlock` / `leadJobTypeName` / `customerNotesText` / `leadDescription` — the leads phase keeps the customer's HCP notes above the lead block on a customer the import created (the go-live re-run writes it right).

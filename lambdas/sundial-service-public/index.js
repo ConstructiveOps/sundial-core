@@ -41,6 +41,7 @@ import { corsHeaders, normalizeHeaders, jsonResponse, parseJsonBody, httpMethod 
 import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord } from "../sundial-service-estimate/totals.js";
+import { estimateTaxContext, loadTaxTables as realLoadTaxTables } from "../../lib/tax-zones.js";
 import { LINE_SELECT, LINE_SF_OBJECT } from "../sundial-service-estimate/pricebook.js";
 import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate/fields.js";
 import { createNotifier } from "../../lib/notify.js";
@@ -176,6 +177,8 @@ export function createHandler(deps = {}) {
     now: () => new Date(),
     ...deps,
   };
+  // The tax tables (D-083): the page shows the same tax the office's estimate stored.
+  if (!d.loadTaxTables) d.loadTaxTables = (slug) => realLoadTaxTables(slug, { getSupabaseClient: d.getSupabaseClient });
   // Notifications (D-074): the office's bell when a customer approves / declines online.
   const notifier = d.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env });
   const stripeFor = (slug) => stripeForTenant(slug, { getSecret: d.getSecret, ...(d.fetchUrl ? { fetchUrl: d.fetchUrl } : {}) });
@@ -255,6 +258,23 @@ export function createHandler(deps = {}) {
     const rows = await d.sfQuery(`SELECT Id, Name FROM ${TENANT_SF_OBJECT} WHERE Id = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0]?.Name ?? null;
   }
+  /**
+   * The estimate's totals with the zone's tax (D-083) — the one rule the estimate Lambda
+   * uses (lib/tax-zones.js estimateTaxContext), so the page and the office never disagree.
+   * The printed jurisdiction / rate follow the zone unless the estimate is invoiced (frozen).
+   */
+  async function totalsFor(est, lines) {
+    let tax;
+    try {
+      tax = await estimateTaxContext({ est, tenantId: est.Client__c, tenantSlug: await tenantSlug(est.Client__c), now: d.now(), sfQuery: d.sfQuery, soqlEscapeString, loadTables: d.loadTaxTables });
+    } catch (e) {
+      // The page still renders: with the rate the office's last save stored on the estimate.
+      console.error("public: tax context failed, showing the stored rate:", e?.message || e);
+      return computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
+    }
+    if (est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: tax.label, Tax_Rate__c: tax.rate });
+    return computeTotals(lines.map(lineFromRecord), estimateFromRecord(est, tax));
+  }
   /** The tenant's Stripe (null = not set up), computed once per request. */
   async function stripeContext(est) {
     const slug = await tenantSlug(est.Client__c);
@@ -274,7 +294,7 @@ export function createHandler(deps = {}) {
       if (!est || est.Is_Template__c === true) return notFound(cors);
       if (expired(est)) return jsonResponse(410, cors, { error: "expired", code: "LINK_EXPIRED", message: "This estimate link has expired. Please contact us for a fresh one." });
       const lines = await loadLines(est);
-      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
+      const totals = await totalsFor(est, lines);
       // First open of a Sent estimate = Viewed. Best-effort; the page renders regardless.
       if (est.Status__c === "Sent" || !est.Last_Viewed_At__c) {
         try {
@@ -307,7 +327,7 @@ export function createHandler(deps = {}) {
       const name = String(body?.name ?? "").trim().slice(0, 120);
       if (!name) return jsonResponse(400, cors, { error: "bad_request", code: "NAME_REQUIRED", message: "Please type your name to approve." });
       const lines = await loadLines(est);
-      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
+      const totals = await totalsFor(est, lines);
       if (est.Status__c === "Approved") {
         return jsonResponse(200, cors, { success: true, alreadyApproved: true, ...publicSummary(est, totals) });
       }

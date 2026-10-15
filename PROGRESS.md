@@ -1,5 +1,40 @@
 # Sundial — Progress Log
 
+## 2026-10-15 — Service sales tax from Acumatica's own tables (D-083) — `feature/tax-zones`, awaiting review
+
+**Why.** The estimate's tax rate was a tenant-wide default or typed by hand, and a line was simply taxable or not. Arizona tax is per city, per county and per category, it changes on dates, and Harmon remits through Acumatica. Julie's exports never came, so we pulled the tables from Acumatica directly.
+
+**Part A — the pull** (`scripts/acumatica-pull-tax.mjs`, read-only, live tenant "Harmon Electric").
+- **Counts:** 143 zones (78 retail, 63 contracting, plus `20HCP` and `TEMP`), 151 taxes, 10 categories.
+- **Categories:** all are "only the listed taxes". The four used for Service are LABSERV, RETAIL, SOLAR and WARRANTY (plus RESALE).
+- **Rate changes:** ten rates change on 2026-11-01.
+- **Drift:**
+  - Six retail zones whose city tax is in no category (Sierra Vista, Tombstone, Coolidge, Dewey-Humboldt, GRIC, SRIC).
+  - Apache Junction carries Pinal County *Contracting*.
+  - Yuma and Willcox were missing from `lib/acumatica-tax-zones.js` (now added).
+
+**Part B — built.** Tim's decisions, same day:
+- **Copy Acumatica exactly; the refresh is the fix path.** `sql/sundial_tax_zones.sql` adds four tables, the CFO's four aliases and the cache columns. Each tax's full rate schedule is stored.
+- **The rule** (`lib/tax-zones.js`): Σ rates of the taxes in both the zone and the line's category, as of the date. `totals.js` taxes per category.
+- **The zone.** A job is stamped from the customer's city by the resolver. A city it can't match leaves the zone blank ("Tax zone needed"). Issue refuses with `400 TAX_ZONE_REQUIRED`. `POST /service/jobs/{id}/tax-zone` is the only write path; `sundial-sf-update` refuses the fields. `GET /service/tax-zones` is the picker.
+- **The estimate.** Its rate and jurisdiction are written from the zone, and the tenant default is retired.
+- **Line categories** with the kind defaults and the warranty rule. The price-book item's default is snapshotted, and `Taxable__c` follows the category.
+- **The daily refresh:** `sundial-cache-sync` `{ task: "taxzones" }` on its own rule, logging a `cache_sync_runs` row and the drift report.
+- **Documents** print "<Jurisdiction> (<rate>%)" even at $0.
+- **The public estimate page** uses the same tax context.
+
+**Tests.** `lib/tax-zones.test.js` 17, estimate Lambda +4 routes (60 → 64; three older tests moved from the typed rate to the zone), cache-sync +2, sf-update +1, invoice document +1, public page fixtures. Full suite **1,535 pass**. All four changed Lambdas bundle.
+
+**Docs.** D-083, `docs/integrations/acumatica-tax.md`, `docs/api-endpoints.md`, CLAUDE.md, the multi-client checklist, TASKS (Tim's steps).
+
+**Review round (same day, Tim).**
+- **Material / Product lines default to RETAIL, always.** SOLAR comes only from the price-book item's `Tax_Category__c` or an explicit choice.
+- **`Taxable__c` is read-only and derived** (RETAIL = ticked) on lines and items. `taxable` in a request is rejected; exempting is a category choice.
+  - Consequence: open estimates whose material lines were unticked will gain tax at their next recalculation (an invoiced estimate never changes).
+- **Issue freezes each line's effective category** (after the warranty rule) onto the line. The invoiced estimate ignores the job's Bill To, and a void restores the lines from the `invoice_issued` activity row. The test covers both directions plus void → reissue.
+- **`scripts/backfill-job-tax-zones.mjs`** with its pure planner in `lib/tax-zones.js` (`planJobZones`, `cityFromAddressLine`): a dry run by default, exact matches only, canary first. Cache preview: 864 of 892 open jobs match, 28 don't.
+- **Tests:** tax-zones 20, estimate 65.
+
 ## 2026-10-14 — HCP lead customers get their notes back (`scripts/hcp-restore-lead-notes.mjs`)
 
 **Why.** Harmon (Ben): some customers "migrated without the historical notes". The import's leads phase (`leadFields`, `lib/hcp-import.js`) wrote the lead block (`HCP lead #… · status`, tags, job type, + the archive line) into `Sundial_Customer__c.Description__c` and replaced the customer's own HCP notes, which the customers phase had just written there.

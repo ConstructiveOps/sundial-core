@@ -361,7 +361,7 @@ export function createLaborHandlers(d, h) {
       const est = job.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
       const [calls, lines, burdenPercent] = await Promise.all([loadCompletedCalls(job.Id, tenantId), est && h.loadLines ? h.loadLines(est.Id, tenantId) : [], burdenPercentFor(tenantId)]);
       const rows = calls.map((c) => laborRow(c, null, { burdenPercent }));
-      const totals = est && h.estimateTotals ? h.estimateTotals(est, lines) : null;
+      const totals = est && h.estimateTotals ? await h.estimateTotals(est, lines, { tenantId }) : null;
       // The live invoice's total is the revenue once issued; the estimate's total before.
       let invoiceTotal = null;
       try {

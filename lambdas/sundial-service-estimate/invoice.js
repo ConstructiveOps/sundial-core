@@ -18,6 +18,11 @@
 //     function (settleMoney), the way settleJobStatus owns the schedule states.
 //   - Deposits taken before the invoice existed (Invoice__c blank) are back-filled onto
 //     the invoice at issue and count toward it.
+//   - TAX CATEGORIES ARE FROZEN TOO (D-083): issue writes each line's EFFECTIVE category
+//     (after the job-level warranty rule) onto the line, and the invoiced estimate ignores
+//     the job's Bill To from then on — a later Bill To change never re-taxes an issued
+//     invoice. What each line held before is kept in the invoice_issued activity row, and a
+//     void puts it back so the reissue is taxed by the job as it is then.
 //   - Stripe rows are written by stripe.js (the webhook + the off-session charge) through
 //     the SAME settleMoney — createMoneyCore() below is what both modules share. Manual
 //     rows here are Succeeded the moment the office records them — a check in hand is
@@ -30,8 +35,9 @@
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { buildInvoiceModel, renderEstimateDocument } from "../../lib/estimate-document.js";
 import { buildKey, publicUrlForKey, registerFileMetadata, findFileMetadataByKey } from "../../lib/file-access.js";
-import { EVENTS } from "../../lib/service-activity.js";
-import { computeTotals, lineFromRecord, estimateFromRecord } from "./totals.js";
+import { EVENTS, listActivity } from "../../lib/service-activity.js";
+import { validTaxCategory, lineTaxable } from "../../lib/tax-zones.js";
+
 import { LINE_SF_OBJECT } from "./pricebook.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 import { billToCustomerLoader, BILL_TO_SELF } from "../../lib/bill-to.js";
@@ -52,7 +58,7 @@ export const PAYMENT_SELECT =
 export const INVOICE_JOB_SELECT =
   "Id, Name, Sundial_Customer__c, Estimate__c, Client__c, Status__c, Payment_Status__c, Bill_To_Type__c, Bill_To_Name__c, " +
   "Bill_To_Customer__c, Billing_Reference__c, Customer_Name_at_Creation__c, Address_at_Creation__c, Primary_Phone_at_Creation__c, " +
-  "Primary_Email_at_Creation__c, Customer_Summary__c, Customer_Card_on_File__c, First_Scheduled_Start__c";
+  "Primary_Email_at_Creation__c, Customer_Summary__c, Customer_Card_on_File__c, First_Scheduled_Start__c, Tax_Zone_Code__c, Tax_Zone_Label__c";
 
 export const PAYMENT_TYPES = ["Deposit", "Payment", "Refund", "Adjustment"];
 export const PAYMENT_METHODS = ["Card", "Check", "ACH", "Partner Remittance", "Other"];
@@ -435,11 +441,42 @@ export function createInvoiceHandlers(d, h) {
     };
   }
 
+  /** Put back the line categories an issue froze (D-083). { ok, count } — ok false when the record of them is unreadable. */
+  async function restoreFrozenCategories({ inv, job, tenantId }) {
+    let rows;
+    try {
+      const r = await listActivity(d.getSupabaseClient, { tenantId, jobSfId: job.Id, limit: 500 });
+      if (r.error) throw new Error(r.error);
+      rows = r.rows;
+    } catch (e) {
+      console.error("void: frozen-category read failed:", e?.message || e);
+      return { ok: false, count: 0 };
+    }
+    const issued = rows.find((a) => a.event === EVENTS.INVOICE_ISSUED && a.record_sf_id === inv.Id);
+    if (!issued) return { ok: false, count: 0 };
+    const frozen = Array.isArray(issued.details?.frozenCategories) ? issued.details.frozenCategories : [];
+    let count = 0;
+    for (const f of frozen) {
+      try {
+        // Taxable__c follows the restored category (blank = the kind's default).
+        const fields = { Tax_Category__c: f.from ?? null, Taxable__c: lineTaxable({ kind: f.kind, taxCategory: f.from }) };
+        await d.sfUpdateRecord(LINE_SF_OBJECT, f.lineId, fields);
+        count += 1;
+      } catch (e) {
+        console.error("void: category restore failed:", f.lineId, e?.message || e);
+      }
+    }
+    if (count) await h.markStale(CACHE.line, frozen.map((f) => f.lineId), tenantId);
+    return { ok: count === frozen.length, count };
+  }
+
   /** Why the job cannot be invoiced right now, or null. */
   function issueBlocker(job, invoices) {
     const live = invoices.find((i) => i.Status__c !== "Void");
     if (live) return { code: "INVOICE_EXISTS", message: `${live.Name} is already issued. Void it to reissue.`, invoiceId: live.Id };
     if (!job.Estimate__c) return { code: "NO_ESTIMATE", message: "This job has no estimate to invoice from." };
+    // D-083: a wrong guess is a wrong remittance — the office picks the zone on the job page.
+    if (!job.Tax_Zone_Code__c) return { code: "TAX_ZONE_REQUIRED", field: "Tax_Zone_Code__c", message: "This job has no tax zone. Pick the zone on the job before invoicing — Sundial never guesses one." };
     return null;
   }
 
@@ -634,9 +671,11 @@ export function createInvoiceHandlers(d, h) {
       if (!est) return bad(cors, "NO_ESTIMATE", "The job's estimate could not be loaded.");
       const lines = (await h.loadLines(est.Id, tenantId)).filter((l) => l.Stage__c !== "Removed");
       if (!lines.length) return bad(cors, "NO_LINES", "The estimate has no lines to invoice.");
-      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
-      const proposed = lines.filter((l) => l.Stage__c === "Proposed").length;
       const now = d.now();
+      // D-083: taxed by the JOB's zone at the rates in force on the issue date.
+      const totals = await h.estimateTotals({ ...est, Service_Job__c: job.Id }, lines, { tenantId, date: now, job });
+      if (!totals.tax.matched) return bad(cors, "TAX_ZONE_REQUIRED", `The job's tax zone ${job.Tax_Zone_Code__c} is not in the tax tables — pick the zone again on the job.`, { field: "Tax_Zone_Code__c" });
+      const proposed = lines.filter((l) => l.Stage__c === "Proposed").length;
       let dueDate = null;
       if (body?.dueDate) {
         const t = Date.parse(body.dueDate);
@@ -665,7 +704,7 @@ export function createInvoiceHandlers(d, h) {
         Billing_Reference__c: job.Billing_Reference__c || null,
         Subtotal__c: totals.subtotal,
         Discount_Amount__c: totals.discountAmount,
-        Tax_Rate__c: Number(est.Tax_Rate__c) || 0,
+        Tax_Rate__c: totals.tax.rate ?? 0,
         Tax_Amount__c: totals.taxAmount,
         Total__c: totals.total,
         Paid_Amount__c: 0,
@@ -686,7 +725,19 @@ export function createInvoiceHandlers(d, h) {
       for (const p of orphans) await d.sfUpdateRecord(PAYMENT_SF_OBJECT, p.Id, { Invoice__c: invoice.Id });
 
       // The estimate is now the invoice's frozen source: lock it; the job moves on.
-      await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Status__c: "Invoiced" });
+      // …with the totals, rate and jurisdiction the invoice froze, so the two documents agree.
+      await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Status__c: "Invoiced", ...totals.fields, Tax_Rate__c: totals.tax.rate, Tax_Jurisdiction__c: totals.tax.label });
+      Object.assign(est, { Tax_Rate__c: totals.tax.rate, Tax_Jurisdiction__c: totals.tax.label });
+      // …and each line's EFFECTIVE tax category (D-083), so the job's Bill To no longer moves it.
+      const frozenCategories = [];
+      for (const lt of totals.lineTotals) {
+        const line = lines.find((l) => l.Id === lt.id);
+        if (!line || !lt.taxCategory || validTaxCategory(line.Tax_Category__c) === lt.taxCategory) continue;
+        await d.sfUpdateRecord(LINE_SF_OBJECT, line.Id, { Tax_Category__c: lt.taxCategory, Taxable__c: lt.taxCategory === "RETAIL" });
+        frozenCategories.push({ lineId: line.Id, kind: line.Kind__c ?? null, from: validTaxCategory(line.Tax_Category__c), to: lt.taxCategory });
+        line.Tax_Category__c = lt.taxCategory;
+      }
+      if (frozenCategories.length) await h.markStale(CACHE.line, frozenCategories.map((f) => f.lineId), tenantId);
       await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Status__c: "Invoiced", Status_Changed_At__c: now.toISOString() });
       await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: est.Id, details: { fields: { Status__c: { from: job.Status__c, to: "Invoiced" } }, via: "invoice" } });
       job.Status__c = "Invoiced";
@@ -697,7 +748,7 @@ export function createInvoiceHandlers(d, h) {
       await h.markStale(CACHE.invoice, [invoice.Id], tenantId);
       await h.act(ctx, {
         event: EVENTS.INVOICE_ISSUED, recordType: "serviceinvoice", recordSfId: invoice.Id, jobSfId: job.Id, estimateSfId: est.Id,
-        details: { number: invoice.Name, total: totals.total, lineCount: lines.length, proposedLines: proposed, billTo: invoice.Bill_To_Type__c, dueDate, depositsApplied: orphans.length, paid: money.summary.paid, pdfKey: pdf.key },
+        details: { number: invoice.Name, total: totals.total, lineCount: lines.length, proposedLines: proposed, billTo: invoice.Bill_To_Type__c, dueDate, depositsApplied: orphans.length, paid: money.summary.paid, pdfKey: pdf.key, taxZone: totals.tax.zoneCode, taxRate: totals.tax.rate, frozenCategories },
       });
       // Customer-pay job with a card on file: charge the balance now, off-session (D-065.6).
       // The charge's own outcome rides along; a decline never un-issues the invoice.
@@ -845,6 +896,10 @@ export function createInvoiceHandlers(d, h) {
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Status__c: estimateStatusAfterVoid(est) });
         await h.markStale(CACHE.estimate, [est.Id], tenantId);
       }
+      // D-083: the categories issue froze go back to what they were, so the reissue is taxed by
+      // the job as it is now (a corrected Bill To included). From the issue's activity row;
+      // if that row cannot be read, the frozen categories stay and the response says so.
+      const restored = await restoreFrozenCategories({ inv, job, tenantId });
       const summary = paidSummary(payments);
       const jobFields = { Payment_Status__c: jobPaymentStatusFor(summary, 0, false) };
       if (["Invoiced", "Paid"].includes(job.Status__c)) {
@@ -858,7 +913,10 @@ export function createInvoiceHandlers(d, h) {
       await h.markStale(CACHE.job, [job.Id], tenantId);
       await h.markStale(CACHE.invoice, [inv.Id], tenantId);
       await h.act(ctx, { event: EVENTS.INVOICE_VOIDED, recordType: "serviceinvoice", recordSfId: inv.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { number: inv.Name, reason, paymentsUnhooked: payments.length } });
-      return jsonResponse(200, cors, { success: true, id: inv.Id, status: "Void", jobStatus: jobFields.Status__c ?? job.Status__c });
+      return jsonResponse(200, cors, {
+        success: true, id: inv.Id, status: "Void", jobStatus: jobFields.Status__c ?? job.Status__c, categoriesRestored: restored.count,
+        warnings: restored.ok ? [] : ["The line tax categories frozen at issue could not be restored automatically — check each line's Tax Category before reissuing."],
+      });
     },
   };
 }

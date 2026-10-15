@@ -641,3 +641,12 @@ test("a customer create that names no type still defaults to Solar (the Sales po
   assert.equal(res.statusCode, 201);
   assert.equal(ctx.writes.find((w) => w.method === "POST").body.Customer_Type__c, "Solar");
 });
+
+test("D-083: a job PATCH naming the tax zone is refused — the zone has one write path (the estimate Lambda's picker route)", async () => {
+  const { jobTaxZoneRefusal } = await import("./index.js");
+  assert.equal(jobTaxZoneRefusal({ Status__c: "New" }), null);
+  const r = jobTaxZoneRefusal({ tax_zone_code__c: "08PHOENIXR" });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "TAX_ZONE_READ_ONLY");
+  assert.equal(jobTaxZoneRefusal({ Tax_Zone_Label__c: "Phoenix" }).body.field, "Tax_Zone_Label__c");
+});

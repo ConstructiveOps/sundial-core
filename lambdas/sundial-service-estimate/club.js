@@ -45,7 +45,7 @@ import { customerDisplayName } from "../../lib/customer-name.js";
 import { candidateSoql, matchCandidates, normalizeNewCustomer, CANDIDATE_SELECT, CUSTOMER_SF_OBJECT } from "./customer.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 import { ITEM_SELECT, ITEM_SF_OBJECT } from "./pricebook.js";
-import { computeTotals, lineFromRecord, estimateFromRecord } from "./totals.js";
+
 
 export const PLAN_SF_OBJECT = "Sundial_Service_Plan__c";
 export const MEMBERSHIP_SF_OBJECT = "Sundial_Membership__c";
@@ -846,7 +846,7 @@ export function createClubHandlers(d, h) {
       // Approved as sold, deposit = the whole price, so the existing deposit checkout + webhook pay it.
       const full0 = await h.loadEstimate(est.id, t.tenantId);
       const lineRows = await h.loadLines(est.id, t.tenantId);
-      const pre = computeTotals(lineRows.map(lineFromRecord), estimateFromRecord(full0));
+      const pre = await h.estimateTotals(full0, lineRows, { tenantId: t.tenantId }); // D-083: the zone's tax, like every other total
       const approval = { Status__c: "Approved", Approved_At__c: d.now().toISOString(), Approved_Version__c: 0, Approved_Amount__c: pre.total, Approval_Method__c: "Online", Approved_By_Name__c: name, Deposit_Required__c: true, Deposit_Type__c: "Flat", Deposit_Value__c: pre.total };
       await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.id, approval);
       const { totals } = await h.recomputeAndStore({ ...full0, ...approval }, t.tenantId);

@@ -5,6 +5,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHandler, matchRoute } from "./index.js";
+import { tablesFromRows } from "../../lib/tax-zones.js";
+
+// D-083: the job's zone taxes the page. One test zone at the 8.6 these tests always used.
+const TAX_TABLES = tablesFromRows({
+  zones: [{ zone_code: "08PHOENIXR", description: "Phoenix - Retail", city_key: "PHOENIX", is_retail: true, tax_ids: ["CITY", "COUNTY", "LABSERVE"] }],
+  rates: [{ tax_id: "CITY", schedule: [{ start: "2021-01-01", rate: 2.3 }] }, { tax_id: "COUNTY", schedule: [{ start: "2021-01-01", rate: 6.3 }] }, { tax_id: "LABSERVE", schedule: [{ start: "2021-01-01", rate: 0 }] }],
+  categories: [{ category_id: "RETAIL", tax_ids: ["CITY", "COUNTY"] }, { category_id: "LABSERV", tax_ids: ["LABSERVE"] }],
+});
 
 const TENANT = "a1W7y000007AszBEAS";
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
@@ -31,6 +39,7 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
     sfQuery: async (soql) => {
       if (soql.includes("FROM Sundial_Estimate__c")) return soql.includes(`Public_Token__c = '${TOKEN}'`) ? [{ ...est }] : [];
       if (soql.includes("FROM Sundial_Service_Line__c")) return lines.map((l) => ({ ...l }));
+      if (soql.includes("Tax_Zone_Code__c, Tax_Zone_Label__c, Bill_To_Type__c FROM Sundial_Service_Job__c")) return [{ Id: est.Service_Job__c, Tax_Zone_Code__c: "08PHOENIXR", Bill_To_Type__c: "Customer" }];
       // The estimate's tenant exists and is the PRIMARY tenant (D-078): SERVICE_BRAND_NAME
       // (`brandName` below) is the primary tenant's name and only names the primary tenant.
       if (soql.includes("FROM Sundial_Tenant__c")) return [{ Id: TENANT, Name: "harmon" }];
@@ -46,6 +55,7 @@ function fake({ status = "Sent", expiresAt = "2026-10-30T00:00:00Z", version = 1
     },
     getSupabaseClient: async () => ({ from: () => ({ insert: async (row) => { activity.push(row); return { error: null }; } }) }),
     now: () => NOW,
+    loadTaxTables: async (slug) => (slug === "harmon" ? TAX_TABLES : null),
     brandName: "Acme Solar",
     // Notifications (D-074): recorded, never delivered.
     notifier: { toOffice: async (n) => (notes.push(n), { inserted: 1, skipped: 0, pushed: 0 }) },

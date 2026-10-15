@@ -69,8 +69,14 @@
 // The customer side of that link is lambdas/sundial-service-public (view / accept /
 // decline by token, no login).
 //
-// NOT HERE (deliberately, next increments): the PDF per send, SMS, the AZ city tax
-// table (Tax_Rate__c is set per estimate for now), invoices/payments.
+// SALES TAX (D-083, lib/tax-zones.js): Acumatica's own zones / rates / categories, copied
+// daily into Supabase. A job is stamped with its zone (Tax_Zone_Code__c / _Label__c) from
+// the customer's city at creation — never a guess: no match = blank, "Tax zone needed",
+// and invoice issue refuses (400 TAX_ZONE_REQUIRED) until the office sets it
+// (POST /service/jobs/{id}/tax-zone). The estimate's Tax_Rate__c / Tax_Jurisdiction__c are
+// OUTPUTS of that zone (the job's, else the customer's city), no longer typed or defaulted.
+//   GET    /service/tax-zones                      the office picker (retail zones, today's rates)
+//   POST   /service/jobs/{id}/tax-zone             { zoneCode } — set / correct the job's zone
 //
 // Dependencies are injectable (createHandler) so test.js drives the real router with
 // recorded Salesforce calls and no module mocking.
@@ -128,6 +134,12 @@ import {
 } from "../../lib/http.js";
 import { computeTotals, lineFromRecord, estimateFromRecord } from "./totals.js";
 import {
+  estimateTaxContext,
+  loadTaxTables as realLoadTaxTables,
+  resolveTaxZoneIn,
+  headlineRate,
+} from "../../lib/tax-zones.js";
+import {
   CUSTOMER_SF_OBJECT,
   PROJECT_TYPES_FIELD,
   candidateSoql,
@@ -152,6 +164,7 @@ import {
   linePatchFields,
   linkLineToItem,
   cloneLineFields,
+  withDerivedTaxable,
 } from "./pricebook.js";
 
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT } from "./fields.js";
@@ -195,15 +208,16 @@ export const SERVICE_REQUEST_TYPE_FIELD = "Service_Request_Type__c";
 
 // Tenant settings on Sundial_Tenant__c (2026-10-05, the first of that surface — fields Tim
 // adds in Setup, every one describe-guarded so an org without them simply has no default):
-//   Default_Tax_Rate__c          Percent — stamped on every new estimate's Tax_Rate__c
-//   Default_Tax_Jurisdiction__c  Text    — its Tax_Jurisdiction__c label ("Phoenix")
 //   Labor_Burden_Percent__c      Percent — a tech's burdened cost = Hourly_Cost_Rate__c × (1 + this)
+// (Default_Tax_Rate__c / Default_Tax_Jurisdiction__c were read here until D-083: tax now comes
+// from the job's Acumatica zone, never a tenant-wide default. The fields may stay in the org.)
 export const TENANT_SF_OBJECT_SETTINGS = "Sundial_Tenant__c";
 export const TENANT_SETTINGS_FIELDS = Object.freeze({
-  defaultTaxRate: "Default_Tax_Rate__c",
-  defaultTaxJurisdiction: "Default_Tax_Jurisdiction__c",
   laborBurdenPercent: "Labor_Burden_Percent__c",
 });
+/** The job fields D-083 stamps (Setup: Text(20) / Text(80)). */
+export const TAX_ZONE_CODE_FIELD = "Tax_Zone_Code__c";
+export const TAX_ZONE_LABEL_FIELD = "Tax_Zone_Label__c";
 // Tenant config placeholders (service-workflows.md §12). GET FROM HARMON: validity days, default template.
 export const DEFAULTS = Object.freeze({
   validDays: 30,
@@ -290,8 +304,8 @@ const ESTIMATE_PATCHABLE = Object.freeze({
   discountSource: ["Discount_Source__c", (v) => v],
   markupType: ["Markup_Type__c", (v) => v],
   markupValue: ["Markup_Value__c", numOrNull],
-  taxRate: ["Tax_Rate__c", numOrNull],
-  taxJurisdiction: ["Tax_Jurisdiction__c", strOrNull],
+  // taxRate / taxJurisdiction are no longer typed (D-083): they are the zone's, written by
+  // recomputeAndStore. A body that still sends them gets them back in rejectedFields.
   depositRequired: ["Deposit_Required__c", (v) => v === true],
   depositType: ["Deposit_Type__c", (v) => v],
   depositValue: ["Deposit_Value__c", numOrNull],
@@ -395,6 +409,8 @@ const ROUTES = [
   ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
   ["GET", /^\/service\/address\/suggest\/?$/, "suggestAddress"], // address lookup for customer create (address.js, 2026-09-22)
   ["GET", /^\/service\/address\/place\/([^/]+)\/?$/, "resolveAddress"],
+  ["GET", /^\/service\/tax-zones\/?$/, "listTaxZones"], // the office's zone picker (D-083)
+  ["POST", /^\/service\/jobs\/([^/]+)\/tax-zone\/?$/, "setJobTaxZone"], // set / correct a job's zone (D-083)
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/?$/, "getReport"], // the customer's job report (report.js, D-072 am. 10)
   ["PUT", /^\/service\/jobs\/([^/]+)\/report\/?$/, "saveReport"],
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
@@ -507,6 +523,8 @@ export function createHandler(deps = {}) {
     fetchUrl: (url, init) => fetch(url, init), // Street View (GET) and Stripe (POST) share it
     ...deps,
   };
+  // The tax tables (D-083): Supabase, cached per warm container. Tests inject their own.
+  if (!d.loadTaxTables) d.loadTaxTables = (slug) => realLoadTaxTables(slug, { getSupabaseClient: d.getSupabaseClient });
   // Notifications (D-074): the office's bell for money + club + website events (stripe.js, club.js).
   if (!d.notifier) d.notifier = createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, now: d.now, env: process.env, ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
 
@@ -577,7 +595,7 @@ export function createHandler(deps = {}) {
   async function tenantSettings(tenantId) {
     const hit = tenantSettingsCache.get(tenantId);
     if (hit && Date.now() - hit.at < DESCRIBE_TTL_MS) return hit.value;
-    const value = { defaultTaxRate: null, defaultTaxJurisdiction: null, laborBurdenPercent: null, missing: [] };
+    const value = { laborBurdenPercent: null, missing: [] };
     const present = [];
     for (const [key, field] of Object.entries(TENANT_SETTINGS_FIELDS)) {
       const exists = await fieldExists(TENANT_SF_OBJECT_SETTINGS, field);
@@ -590,7 +608,7 @@ export function createHandler(deps = {}) {
         const row = rows?.[0] || {};
         for (const [key, field] of present) {
           const v = row[field];
-          value[key] = v == null || v === "" ? null : key === "defaultTaxJurisdiction" ? String(v) : Number(v);
+          value[key] = v == null || v === "" ? null : Number(v);
         }
       } catch (e) {
         console.error("tenant settings read failed:", e?.message || e);
@@ -694,11 +712,65 @@ export function createHandler(deps = {}) {
     return Array.isArray(rows) ? rows.length : 0;
   }
 
+  // --- sales tax (D-083, lib/tax-zones.js) -----------------------------------------
+  // The tables are keyed by tenant SLUG; most helpers here carry the tenant's Salesforce id.
+  // The dispatcher remembers each id's slug; anything else (the public club pages pass their
+  // own) is looked up once.
+  const slugByTenant = new Map();
+  async function slugFor(tenantId) {
+    if (!tenantId) return null;
+    if (slugByTenant.has(tenantId)) return slugByTenant.get(tenantId);
+    let slug = null;
+    try {
+      const rows = await d.sfQuery(`SELECT Name FROM Sundial_Tenant__c WHERE Id = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+      slug = rows?.[0]?.Name ?? null;
+    } catch (e) {
+      console.error("tenant slug read failed:", e?.message || e);
+    }
+    if (slug) slugByTenant.set(tenantId, slug);
+    return slug;
+  }
+  async function taxTablesFor(tenantId) {
+    return d.loadTaxTables(await slugFor(tenantId));
+  }
+  /** The estimate's tax context on `date` (default today). See lib/tax-zones.js estimateTaxContext. */
+  async function taxContext(est, tenantId, { date = undefined, job = undefined } = {}) {
+    return estimateTaxContext({ est, tenantId, tenantSlug: await slugFor(tenantId), date, now: d.now(), sfQuery: d.sfQuery, soqlEscapeString, loadTables: d.loadTaxTables, job });
+  }
+  /** What a response says about the tax (no tables, just the answer). */
+  function publicTax(tax) {
+    return { matched: tax.matched, zoneCode: tax.zoneCode, label: tax.label, rate: tax.rate, source: tax.source, reason: tax.reason, needed: !tax.matched && tax.reason !== "TEMPLATE" };
+  }
+  /** Totals the way every reader must see them: lines × the zone's category rates on the date. */
+  async function estimateTotals(est, lines, { tenantId = est?.Client__c, date, job } = {}) {
+    const tax = await taxContext(est, tenantId, { date, job });
+    const totals = computeTotals((lines || []).map(lineFromRecord), estimateFromRecord(est, tax));
+    return Object.assign(totals, { tax: publicTax(tax) });
+  }
+  /** The zone a NEW job gets: the customer's city through the resolver. Fields empty when unresolved. */
+  async function jobZoneFields(customer, tenantId) {
+    const tables = await taxTablesFor(tenantId);
+    const r = resolveTaxZoneIn(tables, customer?.City__c);
+    if (!r.matched) return { fields: {}, matched: false, reason: r.reason, normalized: r.normalized };
+    return { fields: { [TAX_ZONE_CODE_FIELD]: r.zone.code, [TAX_ZONE_LABEL_FIELD]: r.zone.label }, matched: true, zoneCode: r.zone.code, label: r.zone.label, via: r.via };
+  }
+  const zoneSummary = (z) => (z ? { matched: z.matched, zoneCode: z.zoneCode ?? null, label: z.label ?? null, needed: !z.matched, reason: z.reason ?? null } : null);
+  const zoneWarnings = (z) => (z && !z.matched ? [`Tax zone needed: the customer's city${z.normalized ? ` ("${z.normalized}")` : ""} is not an Acumatica tax zone — pick the zone on the job before invoicing.`] : []);
+
   // --- totals: recompute + persist ----------------------------------------------
+  // Tax_Rate__c / Tax_Jurisdiction__c are written with the totals — the zone's, as of today
+  // (blank when the zone is not known). An Invoiced estimate is frozen: nothing is written.
   async function recomputeAndStore(est, tenantId) {
     const lines = await loadLines(est.Id, tenantId);
-    const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
-    await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, totals.fields);
+    const totals = await estimateTotals(est, lines, { tenantId });
+    if (est.Status__c === "Invoiced") return { totals, lines };
+    const fields = { ...totals.fields };
+    if (est.Is_Template__c !== true) {
+      fields.Tax_Rate__c = totals.tax.matched ? totals.tax.rate : null;
+      fields.Tax_Jurisdiction__c = totals.tax.matched ? totals.tax.label : null;
+    }
+    await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, fields);
+    if ("Tax_Rate__c" in fields) Object.assign(est, { Tax_Rate__c: fields.Tax_Rate__c, Tax_Jurisdiction__c: fields.Tax_Jurisdiction__c });
     await markStale(CACHE.estimate, [est.Id], tenantId);
     return { totals, lines };
   }
@@ -891,13 +963,8 @@ export function createHandler(deps = {}) {
     if (!isTemplate) {
       fields.Sundial_Customer__c = customer.Id;
       Object.assign(fields, snapshotFields(customer));
-      // The tenant's default tax (2026-10-05): Tax_Rate__c was null on every new estimate, so
-      // a taxable line added $0 of tax until someone typed a rate on each estimate.
-      if (extra.Tax_Rate__c === undefined) {
-        const settings = await tenantSettings(tenantId);
-        if (settings.defaultTaxRate != null) fields.Tax_Rate__c = settings.defaultTaxRate;
-        if (extra.Tax_Jurisdiction__c === undefined && settings.defaultTaxJurisdiction) fields.Tax_Jurisdiction__c = settings.defaultTaxJurisdiction;
-      }
+      // Tax (D-083): no default here — recomputeAndStore writes the zone's rate and label
+      // right after the lines land (the customer's city until the estimate has a job).
       // A Service Club member's estimate starts with the plan's discount (D-073.7) unless
       // the caller set a discount of its own; the office can change it like any discount.
       if (extra.Discount_Value__c === undefined) {
@@ -972,6 +1039,7 @@ export function createHandler(deps = {}) {
             sortOrder: fields.Sort_Order__c,
             source: "Template",
             showUnitPrice: l.Show_Unit_Price__c !== false,
+            taxCategory: l.Tax_Category__c, // the template's own choice wins over the item's default
           }, { estimateId, tenantId });
         }
       }
@@ -1008,6 +1076,8 @@ export function createHandler(deps = {}) {
     const resolved = billTo ?? (await jobBillTo(body?.job, tenantId));
     if (!resolved.ok) throw Object.assign(new Error(resolved.message), { billTo: resolved });
     Object.assign(extra, resolved.fields);
+    // The tax zone (D-083), from the customer's city — never a guess: unmatched = blank.
+    const zone = await jobZoneFields(customer, tenantId);
     const fields = {
       Client__c: tenantId,
       Sundial_Customer__c: customer.Id,
@@ -1020,10 +1090,11 @@ export function createHandler(deps = {}) {
       Geocode_Status__c: "Pending",
       ...snapshotFields(customer),
       ...extra,
+      ...zone.fields,
     };
     for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
     const created = await d.sfCreateRecord(JOB_SF_OBJECT, fields);
-    return { id: created.id, fields, rejected };
+    return { id: created.id, fields, rejected, taxZone: zone };
   }
 
   // ---------------------------------------------------------------------------
@@ -1085,8 +1156,8 @@ export function createHandler(deps = {}) {
       const est = await loadEstimate(params[0], tenantId);
       if (!est) return notFound(cors);
       const lines = await loadLines(est.Id, tenantId);
-      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
-      return jsonResponse(200, cors, { estimate: est, lines, totals });
+      const totals = await estimateTotals(est, lines, { tenantId });
+      return jsonResponse(200, cors, { estimate: est, lines, totals, taxZone: totals.tax });
     },
 
     async patchEstimate({ ctx, params, body }) {
@@ -1210,7 +1281,8 @@ export function createHandler(deps = {}) {
       }
       // A money-affecting edit to an APPROVED line needs the customer's approval again:
       // drop it to Proposed (unless the caller is explicitly setting a stage).
-      const MONEY_FIELDS = ["Unit_Price__c", "Quantity__c", "Kind__c", "Taxable__c"];
+      withDerivedTaxable(fields, line); // Taxable__c is derived from the category (D-083), never typed
+      const MONEY_FIELDS = ["Unit_Price__c", "Quantity__c", "Kind__c", "Taxable__c", "Tax_Category__c"];
       const changed = diffFields(line, fields);
       const moneyChanged = MONEY_FIELDS.some((f) => f in changed);
       let reapproval = false;
@@ -1515,6 +1587,13 @@ export function createHandler(deps = {}) {
         return sfError(cors, e, "job create");
       }
       await markStale(CACHE.estimate, [est.Id], tenantId);
+      // The estimate is now taxed by the job's zone (D-083): its rate and label follow.
+      let totalsAfter = null;
+      try {
+        ({ totals: totalsAfter } = await recomputeAndStore({ ...est, Service_Job__c: job.id }, tenantId));
+      } catch (e) {
+        console.error("create job: estimate tax recompute failed:", e?.sfBody || e?.message || e);
+      }
       await linkEstimateActivityToJob(d.getSupabaseClient, { tenantId, estimateSfId: est.Id, jobSfId: job.id });
       await act(ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.Id, details: { fromEstimate: true, estimateNumber: est.Name ?? null, customerId: customer.Id } });
       // A deposit / card that arrived before the job existed (Stripe ledger) lands on it now.
@@ -1524,7 +1603,7 @@ export function createHandler(deps = {}) {
       } catch (e) {
         console.error("create job: deferred Stripe apply failed:", e?.message || e);
       }
-      return jsonResponse(201, cors, { success: true, jobId: job.id, estimateId: est.Id, rejectedFields: job.rejected, stripeApplied: stripeDeferred.applied });
+      return jsonResponse(201, cors, { success: true, jobId: job.id, estimateId: est.Id, rejectedFields: job.rejected, stripeApplied: stripeDeferred.applied, taxZone: zoneSummary(job.taxZone), totals: totalsAfter?.fields ?? null, warnings: zoneWarnings(job.taxZone) });
     },
 
     // The Service module's New Customer and its "Add to Service" button (D-075,
@@ -1658,7 +1737,8 @@ export function createHandler(deps = {}) {
         lineProblems: lineResult.problems,
         totals: totals.fields,
         rejectedFields: [...est.rejected, ...job.rejected],
-        warnings,
+        taxZone: zoneSummary(job.taxZone),
+        warnings: [...warnings, ...zoneWarnings(job.taxZone)],
       });
     },
 
@@ -1681,7 +1761,7 @@ export function createHandler(deps = {}) {
       }
       let created;
       try {
-        created = await d.sfCreateRecord(ITEM_SF_OBJECT, { ...fields, Version__c: 1, Is_Active__c: true, Client__c: tenantId });
+        created = await d.sfCreateRecord(ITEM_SF_OBJECT, withDerivedTaxable({ ...fields, Version__c: 1, Is_Active__c: true, Client__c: tenantId }));
       } catch (e) {
         return sfError(cors, e, "item create");
       }
@@ -1706,6 +1786,7 @@ export function createHandler(deps = {}) {
           referencingLines: refs,
         });
       }
+      withDerivedTaxable(fields, item); // Taxable__c follows the item's category (D-083)
       try {
         await d.sfUpdateRecord(ITEM_SF_OBJECT, item.Id, fields);
       } catch (e) {
@@ -1753,13 +1834,77 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, cors, { success: true, id: item.Id });
     },
 
+    // --- sales tax zones (D-083) ------------------------------------------------------
+    /**
+     * GET /service/tax-zones[?city=] — the office's picker: every RETAIL zone (cities and the
+     * county-only zones) with today's rate. With ?city= it also says what the resolver
+     * would pick for that city (or that it would not).
+     */
+    async listTaxZones({ ctx, query }) {
+      const { tenantId, cors } = ctx;
+      const tables = await taxTablesFor(tenantId);
+      if (!tables || !tables.zones.size) return jsonResponse(200, cors, { zones: [], configured: false, message: "The tax tables are not loaded for this account yet." });
+      const today = d.now();
+      const zones = [...tables.zones.values()]
+        .filter((z) => z.isRetail)
+        .map((z) => ({ code: z.code, label: z.label, county: z.county, cityKey: z.cityKey, countyOnly: !z.cityKey, rate: headlineRate({ zone: z, tables, date: today }) }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      let resolved = undefined;
+      if (typeof query?.city === "string") {
+        const r = resolveTaxZoneIn(tables, query.city);
+        resolved = r.matched ? { matched: true, code: r.zone.code, label: r.zone.label, via: r.via } : { matched: false, reason: r.reason, normalized: r.normalized };
+      }
+      return jsonResponse(200, cors, { zones, configured: true, ...(resolved ? { resolved } : {}) });
+    },
+
+    /**
+     * POST /service/jobs/{id}/tax-zone { zoneCode } — the office sets or corrects the job's
+     * zone (the "Tax zone needed" fix). The code must be one of the tenant's RETAIL zones; the
+     * label is derived, never typed. null clears it. The estimate is re-taxed unless invoiced.
+     */
+    async setJobTaxZone({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      if (!SF_ID_RE.test(params[0] || "")) return notFound(cors);
+      const rows = await d.sfQuery(
+        `SELECT Id, Name, Estimate__c, ${TAX_ZONE_CODE_FIELD}, ${TAX_ZONE_LABEL_FIELD} FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(params[0])}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const job = rows?.[0];
+      if (!job) return notFound(cors);
+      let fields;
+      if (body?.zoneCode === null) {
+        fields = { [TAX_ZONE_CODE_FIELD]: null, [TAX_ZONE_LABEL_FIELD]: null };
+      } else {
+        const code = String(body?.zoneCode ?? "").trim().toUpperCase();
+        if (!code) return bad(cors, "ZONE_CODE_REQUIRED", "Pick a tax zone (zoneCode).");
+        const tables = await taxTablesFor(tenantId);
+        const zone = tables?.zones.get(code);
+        if (!zone || !zone.isRetail) return bad(cors, "TAX_ZONE_UNKNOWN", `${code} is not one of this account's retail tax zones.`);
+        fields = { [TAX_ZONE_CODE_FIELD]: zone.code, [TAX_ZONE_LABEL_FIELD]: zone.label };
+      }
+      try {
+        await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, fields);
+      } catch (e) {
+        return sfError(cors, e, "job tax zone");
+      }
+      await markStale(CACHE.job, [job.Id], tenantId);
+      let totals = null;
+      if (job.Estimate__c) {
+        const est = await loadEstimate(job.Estimate__c, tenantId);
+        if (est && est.Status__c !== "Invoiced") ({ totals } = await recomputeAndStore(est, tenantId));
+      }
+      await act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { fields: diffFields(job, fields), via: "tax-zone" } });
+      return jsonResponse(200, cors, { success: true, jobId: job.Id, taxZone: { zoneCode: fields[TAX_ZONE_CODE_FIELD], label: fields[TAX_ZONE_LABEL_FIELD], needed: !fields[TAX_ZONE_CODE_FIELD] }, totals: totals?.fields ?? null });
+    },
+
     // --- preview (read-only; the same renderer the hosted page / PDF / email use) ------
     async previewEstimate({ ctx, params }) {
       const { tenantId, cors } = ctx;
       const est = await loadEstimate(params[0], tenantId);
       if (!est) return notFound(cors);
       const lines = await loadLines(est.Id, tenantId);
-      const totals = computeTotals(lines.map(lineFromRecord), estimateFromRecord(est));
+      const totals = await estimateTotals(est, lines, { tenantId });
+      // The printed jurisdiction / rate are the zone's today.
+      if (est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: totals.tax.label, Tax_Rate__c: totals.tax.rate });
       // Brand block: per-tenant config when that surface lands (service-workflows.md
       // §12). Until then the document renders with the tenant slug as the name so the
       // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.
@@ -1883,10 +2028,10 @@ export function createHandler(deps = {}) {
   const money = createMoneyCore(d, { act, markStale, CACHE, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken });
   // The Service Club (D-073): public join / truck roll / request, the office's memberships,
   // and the webhook's subscription branch (consulted by stripe.js before the payments branch).
-  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor, notifier: d.notifier });
+  const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, estimateTotals, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
   const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken, portalBaseUrl: (ctx) => publicBaseFor(ctx) });
-  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, estimateTotals, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
   H.jobCard = stripeH.jobCard;
@@ -1894,7 +2039,7 @@ export function createHandler(deps = {}) {
   H.jobCardLink = stripeH.jobCardLink;
   H.jobCharge = stripeH.jobCharge;
   Object.assign(H, createAddressHandlers(d, { jsonResponse, bad }));
-  Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE, tenantSettings, fieldExists, estimateTotals: (est, lines) => computeTotals(lines.map(lineFromRecord), estimateFromRecord(est)) }));
+  Object.assign(H, createLaborHandlers(d, { loadEstimate, loadLines, recomputeAndStore, act, markStale, jsonResponse, bad, notFound, sfError, CACHE, tenantSettings, fieldExists, estimateTotals }));
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
   // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
   if (!d.sms) d.sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, now: d.now, ...(d.sendSms ? { sendSms: d.sendSms } : {}), ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
@@ -1913,6 +2058,7 @@ export function createHandler(deps = {}) {
     jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed
     previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
     suggestAddress: "service.estimate.write", resolveAddress: "service.estimate.write", // whoever can make an estimate can make its customer
+    listTaxZones: "service.estimate.write", setJobTaxZone: "service.estimate.write", // D-083: whoever prices the job picks its zone
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     unlockEstimate: "service.estimate.write", // whoever may edit the estimate may reopen it; the invoice is not touched
     invoiceReport: "service.estimate.write", // a read, like getInvoice
@@ -1977,6 +2123,7 @@ export function createHandler(deps = {}) {
     }
     const tenantId = identity?.tenantId;
     if (!tenantId) return jsonResponse(403, cors, { error: "no_tenant", code: "NO_TENANT" });
+    if (identity?.tenantSlug) slugByTenant.set(tenantId, identity.tenantSlug); // the tax tables' key (D-083)
     const denied = assertAction(ACTION_FOR[route.name], alwaysEnforcedAccess(identity));
     if (denied) return jsonResponse(denied.status, cors, denied.body);
 

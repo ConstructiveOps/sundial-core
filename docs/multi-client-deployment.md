@@ -224,6 +224,12 @@ set up", not "uses Harmon's".
   block [STRIPE].
 - **Service Club:** `node scripts/seed-service-club.mjs` for the tenant (mints the Stripe
   Products / Prices from the plan rows) [CLUB]; `docs/integrations/service-club.md`.
+- **Service sales tax (D-083):** the `sundial_tax_*` tables are keyed by tenant slug and filled
+  only for the primary tenant (from Harmon's Acumatica). A tenant with no rows charges **no
+  tax**, and every Service invoice issue is refused with `TAX_ZONE_REQUIRED`. Before a client
+  invoices Service work, load its own zones, rates, categories and aliases into those tables for
+  its slug. From its own Acumatica, that is a code change: the refresh is single-credential.
+  Otherwise, a seed in the same shape. `docs/integrations/acumatica-tax.md`.
 
 ### 5. Lambdas — nothing to deploy
 

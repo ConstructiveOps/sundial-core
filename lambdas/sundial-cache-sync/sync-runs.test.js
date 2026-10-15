@@ -77,6 +77,11 @@ mock.module("../../lib/salesforce.js", {
   },
 });
 
+// Acumatica (D-083's tax refresh): never reached from a unit test.
+mock.module("../../lib/acumatica.js", {
+  namedExports: { getAcumaticaEntity: async () => ({ ok: false, status: 503, data: null, text: "test: no Acumatica" }) },
+});
+
 // Cache columns (OpenAPI) and describes. The job has a cross-object formula column.
 const COLS = ["sf_id", "client_sf_id", "tenant_id", "created_date", "last_synced_at", "is_stale", "cache_version", "name", "estimate_total"];
 const DESCRIBES = {
@@ -203,4 +208,36 @@ test("old run rows are pruned (14-day retention)", async () => {
   await handler({ objects: ["customer"], intervalMinutes: 5 });
   assert.ok(!ctx.tables.cache_sync_runs.some((r) => r.started_at === "2026-01-01T00:00:00.000Z"));
   assert.equal(runsFor("customer").length, 1, "today's row stays");
+});
+
+// D-083: the tax tables ride the same run log under object 'taxzones' — ok or not.
+test("taxzones task: one cache_sync_runs row per run (ok with counts, or the error), primary tenant, daily interval", async () => {
+  const { runTaxZoneRefresh } = await import("./index.js");
+  const supabase = { from: (t) => new Q(t) };
+  const seen = [];
+  const ok = await runTaxZoneRefresh(supabase, { task: "taxzones", intervalMinutes: 1440 }, {
+    pull: async () => ({ zones: [], taxes: [], categories: [] }),
+    sync: async (args) => (seen.push(args.tenant), { zones: 143, taxes: 151, categories: 10, aliases: 4, deleted: 0, drift: { cityTaxNotRetail: [], contractingTaxOnRetail: [], unmappedRetail: [] } }),
+  });
+  assert.equal(ok.status, "ok");
+  assert.deepEqual(seen, ["harmon"], "Acumatica is the primary tenant's");
+  const [run] = runsFor("taxzones");
+  assert.equal(run.ok, true);
+  assert.equal(run.rows_upserted, 304);
+  assert.equal(run.expected_interval_s, 86400);
+  const bad = await runTaxZoneRefresh(supabase, { task: "taxzones" }, { pull: async () => { throw new Error("Acumatica TaxZone read failed: 401"); } });
+  assert.equal(bad.status, "error");
+  const last = runsFor("taxzones").at(-1);
+  assert.equal(last.ok, false);
+  assert.match(last.error, /401/);
+});
+
+test("taxzones task: the handler routes { task: 'taxzones' } away from the Salesforce sync (no SOQL)", async () => {
+  // Acumatica is mocked to fail: the run row is still written, and no Salesforce object is touched.
+  const r = await handler({ task: "taxzones" });
+  assert.equal(r.task, "taxzones");
+  assert.equal(r.status, "error");
+  assert.match(r.error, /503/);
+  assert.equal(ctx.soql.length, 0);
+  assert.equal(runsFor("taxzones").length, 1);
 });

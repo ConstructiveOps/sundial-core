@@ -277,6 +277,8 @@ Queue-based, asynchronous-first design:
 - AR Invoice triggering (residential vs commercial patterns)
 - Vendor creation
 
+**The Acumatica project's Description is its own field** (2026-10-16): `Sundial_Customer__c.Acumatica_Project_Description__c`, composed by Tim's Flow (`Name - Utility Partner Type`) and read by `sundial-acumatica-push`. **`Description__c` is the Service intake's "Tell us more about your issue"** — a person's words; no Flow, Lambda or import may compose into it (the Flow did, and rewrote Harmon's intake notes on every save until the field was split).
+
 **Acumatica → Salesforce:**
 - Payment received events
 - Vendor bill status updates

@@ -266,7 +266,11 @@ const CUSTOMER_FIELDS = [
   "Acumatica_Customer_ID__c",
   "Acumatica_Customer_GUID__c",
   "Synced_to_Acumatica__c",
-  "Description__c",
+  // The Acumatica project's Description, composed by Tim's Flow (`Name - Utility Partner Type`)
+  // into a field of its OWN (2026-10-16). It used to be `Description__c`, which is also the
+  // Service intake's "Tell us more about your issue" — the Flow rewrote the office's notes on
+  // every save. Never read Description__c here again.
+  "Acumatica_Project_Description__c",
   "Linked_Solar_Project__c",
   "Client__c",
   // Drives RS vs RSDC template selection (see isDomesticContentEligible above).
@@ -803,7 +807,14 @@ export const handler = async (event) => {
         );
       }
 
-      const description = orNull(cust.Description__c);
+      // Blank only on a customer the Flow has not touched since the field was added (it fills
+      // on save, and "Sync to Acumatica" follows a save of the project id). Omit-and-warn, like
+      // the phone and the project manager: never fall back to Description__c, that is the
+      // customer's intake notes.
+      const description = orNull(cust.Acumatica_Project_Description__c);
+      if (!description) {
+        summary.warnings.push({ code: "project_description_missing", field: "Acumatica_Project_Description__c" });
+      }
 
       // PROJECT MANAGER (item C). Omit-and-warn on anything not confidently resolved —
       // the same rule as the phone and the tax zone, and for the same reason: a project

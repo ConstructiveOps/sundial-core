@@ -4,6 +4,12 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-16 — Intake notes vs. the Acumatica project description (Harmon)
+
+- [x] `sundial-acumatica-push` reads `Acumatica_Project_Description__c` (Tim's new field, the Flow's target) for the project's Description; `Description__c` stays the Service intake's text. +1 test (39).
+- [ ] **Tim:** FLS read on `Acumatica_Project_Description__c` for the integration user's permission set; `.\deploy.ps1 sundial-acumatica-push`; tell Geovanna to re-enter the Blake Stoddard / Erin McNamara notes (they are in the comments).
+- [ ] Later: `scripts/probe-customer-description.mjs --tenant harmon --name …` on a sold customer after a save, to see the Flow fill the new field and leave `Description__c` alone.
+
 ## URGENT 2026-10-16 — restore the pre-D-083 tax (Tim)
 
 - [ ] Run `node scripts/backfill-line-tax-categories.mjs` (a dry run). It should say about 173 lines and 96 price-book items → SOLAR.

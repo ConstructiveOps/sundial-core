@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-16 — Intake notes that would not save: the Acumatica project description gets its own field (Harmon — Geovanna, Blake Stoddard / Erin McNamara)
+
+**What Harmon saw.** "Tell us more about your issue" typed on an existing customer (the popup, then Edit on the customer page) came back as `Blake Stoddard - Arizona Public Service Company Other Lease` / `Erin McNamara - Salt River Project Mosaic Loan` — `Name - Utility Partner Type`, nobody's typing. Every Sundial path writes `Description__c` outright and the page re-reads live, so the value was being replaced INSIDE Salesforce: Tim's record-triggered Flow composes the Acumatica project description into `Description__c` on every save of a sold solar customer (fresh service-only customers have no utility / financing, which is why intake notes stuck on those). `scripts/probe-customer-description.mjs` (read-only; `--test-write` on the ZZ test record only) shows the field, who last wrote it, the composed-pattern check and the field history.
+
+**Fix (the right way, Tim's call).** New field `Sundial_Customer__c.Acumatica_Project_Description__c` (Setup); the Flow now writes THAT. `sundial-acumatica-push` reads it for the project's `Description` (`CUSTOMER_FIELDS`), never `Description__c`; blank → omitted + `warnings: [{ code: "project_description_missing" }]` (the Flow fills it on the next save, and "Sync to Acumatica" follows a save of the project id). `Description__c` is the Service intake's text and nothing else — CLAUDE.md, `docs/salesforce-schema.md`, `docs/api-endpoints.md`. Tests: acumatica-push 39 (+1: the intake notes never reach Acumatica; blank field → no Description + the warning). Geovanna's two sets of notes were overwritten — they are in the records' comments and need re-entering once this is deployed.
+
+**Deploy (Tim):** grant the integration user's permission set read on `Acumatica_Project_Description__c`; `.\deploy.ps1 sundial-acumatica-push`.
+
 ## 2026-10-16 (later) — Shown estimates keep their stored totals; the ticked-material pass (`--taxed-lines`)
 
 Evidence from the live site: EST-02686 (Draft) 6,466.14 → 6,990.29 and EST-02629 (Approved) 2,030.00 → 2,066.40, because their ticked material lines now tax as RETAIL. Before D-083 a ticked line was taxed only when the estimate also had a typed rate.

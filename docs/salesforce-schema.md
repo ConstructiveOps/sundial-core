@@ -151,6 +151,8 @@ resolution in the access model; the three hierarchy fields below it are legacy.
 - `Is_Company__c` — Checkbox (D-081, 2026-10-07). The record is a COMPANY — SunRun, APS, a manufacturer — that can be a job's payer. Its name is `Company_Name__c`; First / Last on a company are its contact (printed "Attn:" on the invoice), never its name.
 - `Company_Name__c` — Text(255) (D-081). The display name of a company (`lib/customer-name.js` `customerDisplayName`: company name when `Is_Company__c` and set, else First + Last, else `Name`). Searched by the customer search (the Bill To picker).
 - `Warranty_Notes__c` — Long Text Area(32768) (D-081, 2026-10-07; cache column `warranty_notes`).
+- `Description__c` — Long text. **The Service intake's "Tell us more about your issue"** (the popups' `intake.description`, the customer page's Intake tab; the HCP import put HCP's customer notes here). Nothing but a person and the import writes it.
+- `Acumatica_Project_Description__c` — Text (2026-10-16, Setup). The Acumatica project's Description, composed by Tim's Flow (`Name - Utility Partner Type`); `sundial-acumatica-push` reads it for `Description` on project create. Until 2026-10-16 the Flow wrote this into `Description__c` and overwrote the office's intake notes on every save (Harmon: Blake Stoddard, Erin McNamara).
 - `Status__c` — Picklist: Lead, Opportunity, Customer, Past Customer
 - `Lead_Source__c` — Picklist
 - `Lead_Date__c` — Date

@@ -488,6 +488,8 @@ curl -i -X POST \
 
 **Primary tenant only (D-078, 2026-09-29).** There is one Acumatica login and it is the primary tenant's. A caller from any other tenant gets `403 { "error": "integration_not_enabled", "code": "INTEGRATION_NOT_ENABLED", "message": "Acumatica isn't enabled for this account." }` before the record is read — unless the slug is listed in this Lambda's `SUNDIAL_ACUMATICA_TENANTS`. The same refusal stands on `POST /projects/{recordId}/budget/push` and `POST /acumatica/push`.
 
+**`POST /acumatica/push` — the project's Description (2026-10-16).** The Acumatica project is created with `Description` = the customer's **`Acumatica_Project_Description__c`** (the Flow's `Name - Utility Partner Type`), never `Description__c` (that is the Service intake's "Tell us more about your issue"). Blank → `Description` is omitted and the summary carries `warnings: [{ code: "project_description_missing", field: "Acumatica_Project_Description__c" }]` — the Flow fills it on the customer's next save.
+
 ##### One gate, and only one
 
 The record must carry an `Acumatica_Project_ID__c`. **There is deliberately no `Budget_Calc_Status__c` check and no `Commission_Deal_Type__c` guard.** Those exist to stop a *wrong budget* being posted, and this route posts no budget. A legacy record legitimately has neither, so gating on them would refuse exactly the records this exists to serve.

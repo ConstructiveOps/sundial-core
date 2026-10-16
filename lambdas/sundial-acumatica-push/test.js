@@ -433,7 +433,10 @@ function customerRow(over = {}) {
     Acumatica_Customer_ID__c: null,
     Acumatica_Customer_GUID__c: null,
     Synced_to_Acumatica__c: false,
-    Description__c: "Jane Roe - APS LightReach Lease",
+    // The Flow's composed project description lives in its own field (2026-10-16);
+    // Description__c is the Service intake's free text and must never reach Acumatica.
+    Acumatica_Project_Description__c: "Jane Roe - APS LightReach Lease",
+    Description__c: "Inverter shows a red light since the storm — customer wants a call back",
     Linked_Solar_Project__c: "a1Q000000000001",
     Client__c: TENANT,
     Domestic_Content_Eligible__c: null,
@@ -528,6 +531,15 @@ test("the project body carries JOBTYPE=RS and the mapped project manager", async
   });
   assert.equal(body.project.jobType, "RS");
   assert.equal(body.project.projectManager, "E00675");
+});
+
+test("the project Description is Acumatica_Project_Description__c, never the customer's Description__c (intake notes); blank → omitted with a warning", async () => {
+  const { body } = await runPush({ customer: { Acumatica_Project_Description__c: null } });
+  assert.equal(body.ok, true);
+  const put = projectPut();
+  assert.equal("Description" in put, false, "no Description sent when the Flow's field is blank");
+  assert.ok(!JSON.stringify(put).includes("red light"), "the intake notes never reach Acumatica");
+  assert.deepEqual(body.warnings, [{ code: "project_description_missing", field: "Acumatica_Project_Description__c" }]);
 });
 
 test("JOBTYPE=RS is sent on the RSDC template too — the attribute is not the template", async () => {

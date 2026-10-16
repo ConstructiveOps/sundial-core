@@ -166,6 +166,7 @@ import {
   lineFromItem,
   adHocLine,
   linePatchFields,
+  LINE_DESCRIPTION_FALLBACK_MAX,
   linkLineToItem,
   cloneLineFields,
   withDerivedTaxable,
@@ -687,6 +688,26 @@ export function createHandler(deps = {}) {
     return (hit.meta?.fields || []).some((x) => x.name === field);
   }
 
+  /**
+   * How long `Sundial_Service_Line__c.Description__c` is in THIS org (2026-10-16): the
+   * builders refuse longer text instead of cutting it. The fallback (255, the field's
+   * original Text length) only applies when the describe cannot be read.
+   */
+  async function lineDescriptionMax() {
+    let hit = describeCache.get(LINE_SF_OBJECT);
+    if (!hit || Date.now() - hit.at > DESCRIBE_TTL_MS) {
+      try {
+        hit = { at: Date.now(), meta: await d.describeObject(LINE_SF_OBJECT) };
+        describeCache.set(LINE_SF_OBJECT, hit);
+      } catch (e) {
+        console.error("describe failed:", LINE_SF_OBJECT, e?.message || e);
+        return LINE_DESCRIPTION_FALLBACK_MAX;
+      }
+    }
+    const len = Number((hit.meta?.fields || []).find((x) => x.name === "Description__c")?.length);
+    return len > 0 ? len : LINE_DESCRIPTION_FALLBACK_MAX;
+  }
+
   // --- cache stale flags (best-effort, never fail the write) ----------------------
   async function markStale(table, ids, tenantId) {
     const list = (ids || []).filter(Boolean);
@@ -1061,6 +1082,7 @@ export function createHandler(deps = {}) {
   async function addLinesToEstimate(estimateId, tenantId, lines) {
     const createdIds = [];
     const problems = [];
+    const descriptionMax = await lineDescriptionMax();
     let sort = 0;
     for (const spec of lines || []) {
       sort += 10;
@@ -1075,9 +1097,9 @@ export function createHandler(deps = {}) {
           problems.push(`price book item ${item.Item_Code__c} v${item.Version__c} is not the active version`);
           continue;
         }
-        fields = lineFromItem(item, { ...spec, sortOrder: spec.sortOrder ?? sort }, { estimateId, tenantId });
+        fields = lineFromItem(item, { ...spec, sortOrder: spec.sortOrder ?? sort }, { estimateId, tenantId, descriptionMax });
       } else {
-        const r = adHocLine({ ...spec, sortOrder: spec?.sortOrder ?? sort }, { estimateId, tenantId });
+        const r = adHocLine({ ...spec, sortOrder: spec?.sortOrder ?? sort }, { estimateId, tenantId, descriptionMax });
         if (r.problems) {
           problems.push(...r.problems);
           continue;
@@ -1096,6 +1118,7 @@ export function createHandler(deps = {}) {
     const existing = await loadLines(estimateId, tenantId);
     const offset = existing.reduce((m, l) => Math.max(m, Number(l.Sort_Order__c) || 0), 0);
     const lines = await loadLines(templateId, tenantId);
+    const descriptionMax = await lineDescriptionMax();
     const ids = [];
     for (const l of lines) {
       let fields = cloneLineFields(l, { estimateId, tenantId, sortOffset: offset });
@@ -1120,7 +1143,7 @@ export function createHandler(deps = {}) {
             source: "Template",
             showUnitPrice: l.Show_Unit_Price__c !== false,
             taxCategory: l.Tax_Category__c, // the template's own choice wins over the item's default
-          }, { estimateId, tenantId });
+          }, { estimateId, tenantId, descriptionMax });
         }
       }
       const c = await d.sfCreateRecord(LINE_SF_OBJECT, fields);
@@ -1358,7 +1381,7 @@ export function createHandler(deps = {}) {
       // flow creates the item first, then PATCHes the line with its id). It is handled
       // apart from the plain field map because it re-snapshots several fields at once.
       const { priceBookItemId, ...plain } = body && typeof body === "object" ? body : {};
-      const { fields, rejected, problems } = linePatchFields(plain);
+      const { fields, rejected, problems } = linePatchFields(plain, { descriptionMax: await lineDescriptionMax() });
       if (problems.length) return bad(cors, "LINE_INVALID", problems.join("; "));
       let linkedItem = null;
       if (priceBookItemId != null) {

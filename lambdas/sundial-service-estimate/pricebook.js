@@ -19,6 +19,15 @@ import { validTaxCategory, lineTaxable, TAX_CATEGORIES } from "../../lib/tax-zon
 
 export const ITEM_SF_OBJECT = "Sundial_Price_Book_Item__c";
 export const LINE_SF_OBJECT = "Sundial_Service_Line__c";
+/**
+ * `Sundial_Service_Line__c.Description__c` was born Text(255) and the builders below cut
+ * the text to fit — which is how Harmon's long scope lines lost their endings on the
+ * invoice (2026-10-16). The field is a Long Text Area now; the live length comes from the
+ * org's describe (`descriptionMax`, read by the Lambda), this is only the fallback when the
+ * describe could not be read. Typed text over the limit is REFUSED, never trimmed.
+ */
+export const LINE_DESCRIPTION_FALLBACK_MAX = 255;
+const tooLong = (s, max) => `description is ${s.length} characters; this field holds ${max} — shorten it or split the line`;
 
 /** Every item field the portal may set on create / edit / new-version. */
 export const ITEM_WRITABLE = Object.freeze({
@@ -147,7 +156,7 @@ export function inPlaceEditable(referencingLineCount) {
  * source, addedByServiceCallId. Price_Overridden__c is set when the unit price differs
  * from the item's Price__c at add time.
  */
-export function lineFromItem(item, overrides = {}, { estimateId, tenantId }) {
+export function lineFromItem(item, overrides = {}, { estimateId, tenantId, descriptionMax = LINE_DESCRIPTION_FALLBACK_MAX }) {
   const itemPrice = num(item.Price__c) ?? (num(item.Labor_Price__c) ?? 0) + (num(item.Material_Price__c) ?? 0);
   const unitPrice = num(overrides.unitPrice) ?? itemPrice;
   const qty = num(overrides.quantity) ?? num(item.Default_Quantity__c) ?? 1;
@@ -156,7 +165,8 @@ export function lineFromItem(item, overrides = {}, { estimateId, tenantId }) {
     Price_Book_Item__c: item.Id,
     Client__c: tenantId,
     Kind__c: item.Kind__c || "Labor",
-    Description__c: (overrides.description ?? item.Description__c ?? item.Name ?? "").toString().slice(0, 255),
+    // A catalog description (Long Text, 4000) is copied whole; the slice is only the org's own ceiling.
+    Description__c: (overrides.description ?? item.Description__c ?? item.Name ?? "").toString().slice(0, descriptionMax),
     Quantity__c: qty,
     Unit_of_Measure__c: item.Unit_of_Measure__c || "Each",
     Unit_Price__c: unitPrice,
@@ -178,9 +188,10 @@ export function lineFromItem(item, overrides = {}, { estimateId, tenantId }) {
 }
 
 /** Build an AD-HOC line (no catalog item). description, kind, unitPrice required. */
-export function adHocLine(body, { estimateId, tenantId }) {
+export function adHocLine(body, { estimateId, tenantId, descriptionMax = LINE_DESCRIPTION_FALLBACK_MAX }) {
   const problems = [];
   const description = (body?.description ?? "").toString().trim();
+  if (description.length > descriptionMax) problems.push(tooLong(description, descriptionMax));
   const kind = body?.kind || "Labor";
   const unitPrice = num(body?.unitPrice);
   if (!description) problems.push("description is required for an ad-hoc line");
@@ -193,7 +204,7 @@ export function adHocLine(body, { estimateId, tenantId }) {
     Estimate__c: estimateId,
     Client__c: tenantId,
     Kind__c: kind,
-    Description__c: description.slice(0, 255),
+    Description__c: description,
     Quantity__c: num(body?.quantity) ?? 1,
     Unit_of_Measure__c: body?.unitOfMeasure || "Each",
     Unit_Price__c: unitPrice,
@@ -212,9 +223,9 @@ export function adHocLine(body, { estimateId, tenantId }) {
 }
 
 /** Editable line fields on PATCH, translated. Unknown keys rejected. */
-export function linePatchFields(body) {
+export function linePatchFields(body, { descriptionMax = LINE_DESCRIPTION_FALLBACK_MAX } = {}) {
   const map = {
-    description: (v) => ["Description__c", v == null ? null : String(v).slice(0, 255)],
+    description: (v) => ["Description__c", v == null ? null : String(v)],
     quantity: (v) => ["Quantity__c", num(v)],
     unitPrice: (v) => ["Unit_Price__c", num(v)],
     stage: (v) => ["Stage__c", v],
@@ -238,6 +249,9 @@ export function linePatchFields(body) {
   if (fields.Tax_Category__c === "__INVALID__") return { fields: {}, rejected, problems: [`taxCategory must be one of ${TAX_CATEGORIES.join(", ")}`] };
   if (fields.Stage__c && !["Proposed", "Approved", "Completed", "Removed"].includes(fields.Stage__c)) {
     return { fields: {}, rejected, problems: ["invalid stage"] };
+  }
+  if (typeof fields.Description__c === "string" && fields.Description__c.length > descriptionMax) {
+    return { fields: {}, rejected, problems: [tooLong(fields.Description__c, descriptionMax)] };
   }
   return { fields, rejected, problems: [] };
 }

@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-16 — Hotfix: a line's description is never cut (Harmon — EST-02769's scope line ended mid-sentence on the invoice)
+
+**Why.** `Sundial_Service_Line__c.Description__c` was Text(255) and every line builder in the estimate Lambda (`pricebook.js` `lineFromItem` / `adHocLine` / `linePatchFields`) sliced the text to 255 to fit — silently. A 300-character scope line lost its last sentence on the estimate, the invoice and the PDF; nothing in the portal or the painters was at fault (both wrap).
+
+**Fix.** The field is a **Long Text Area (32768)** (Tim, Setup — the `.object` in `salesforce/service-objects/` says so too, so a redeploy cannot shrink it back). The Lambda reads the field's live length from the describe (`lineDescriptionMax()`, cached with the other describes; `LINE_DESCRIPTION_FALLBACK_MAX = 255` only when the describe cannot be read) and the builders take `descriptionMax`: a catalog description is copied whole, and typed text over the limit is **refused** (`400 LINE_INVALID` "description is N characters; this field holds M — shorten it or split the line"), never trimmed. The PDF painter's line table (`lib/document-pdf.js` `drawLineTable`) now flows a long description across a page break — the amounts on the row's first line, the band redrawn on the new page — instead of needing the whole row to fit. **Backend only — nothing in harmon-crm changed.** Tests: estimate 73 (+1 unit on the three builders; the lifecycle test stores a 370-character scope whole and, on a Text(255) org, is refused with the count), `lib/estimate-pdf.test.js` 6 (+1: a 2,600-character line printed in full across pages).
+
+**Deploy (Tim):** change the field type in Setup FIRST (Object Manager → Sundial Service Line → Description → Change Field Type → Text Area (Long), 32,768), then `.\deploy.ps1 sundial-service-estimate`. Lines saved before the change are cut for good (the text was never stored) — EST-02769's needs re-typing.
+
 ## 2026-10-16 (night) — The estimate's markup is hidden like cost (D-072 amendment 13, item 4)
 
 - Harmon: the markup is a margin number. For anyone without `service.costing.read` every response `sundial-service-estimate` sends a signed-in user drops `Markup_Type__c`, `Markup_Value__c`, `Markup_Amount__c` and `totals.markupAmount` (any spelling, any depth — `stripMarkup` in `lib/cost-gate.js`, applied once in the handler as `withoutMarkup`): the estimate read, add-line / patch / recalculate / club / labor responses. Totals, subtotal and line prices are unchanged — the markup is still applied.

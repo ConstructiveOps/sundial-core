@@ -18,6 +18,11 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Note for Prompt B: the price-book modal may keep sending blank cost keys (allowed), but must not send a non-blank one for a non-Admin (403). Same for the estimate's markup inputs: hide them when the read has no `Markup_*` keys; blank is allowed, a value is 403.
 - [x] Markup hidden like cost (2026-10-16 night) — `.\deploy.ps1 sundial-service-estimate`. [ ] Optional: the same for `sundial-sf-query`'s estimate cache columns and `sundial-sf-update`'s estimate PATCH.
 
+## 2026-10-16 — A line's description is never cut (Harmon)
+
+- [x] Estimate Lambda: the line description limit is the org's field length (describe), typed text over it refused — never trimmed; the PDF line table flows a long description across pages. +2 tests.
+- [ ] **Tim:** Setup → Sundial Service Line → Description → Change Field Type → Text Area (Long) 32,768 (data kept); then `.\deploy.ps1 sundial-service-estimate`; re-type EST-02769's scope line.
+
 ## 2026-10-16 — Intake notes vs. the Acumatica project description (Harmon)
 
 - [x] `sundial-acumatica-push` reads `Acumatica_Project_Description__c` (Tim's new field, the Flow's target) for the project's Description; `Description__c` stays the Service intake's text. +1 test (39).

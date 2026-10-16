@@ -92,14 +92,13 @@
     </fields>
     <fields>
         <fullName>Description__c</fullName>
-        <description>Customer-facing line text (snapshot of the item description, editable per line).</description>
+        <description>Customer-facing line text (snapshot of the item description, editable per line). Long Text Area since 2026-10-16 — it was Text(255) and long scope lines were cut on the invoice; never shorten it again.</description>
         <externalId>false</externalId>
         <label>Description</label>
-        <length>255</length>
-        <required>false</required>
+        <length>32768</length>
         <trackTrending>false</trackTrending>
-        <type>Text</type>
-        <unique>false</unique>
+        <type>LongTextArea</type>
+        <visibleLines>4</visibleLines>
     </fields>
     <fields>
         <fullName>Quantity__c</fullName>

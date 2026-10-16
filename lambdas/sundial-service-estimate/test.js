@@ -224,6 +224,21 @@ test("adHocLine requires description + unitPrice; linePatchFields refuses unknow
   assert.deepEqual(linePatchFields({ stage: "Bogus" }).problems, ["invalid stage"]);
 });
 
+test("a line's description is never cut: the org's field length is the limit, and typed text over it is refused, not trimmed (2026-10-16)", () => {
+  const long = "Remove existing (45) solar modules and associated racking components as well as all standoffs/flashings. ".repeat(6).trim(); // ~630 chars
+  // the fallback (describe unreadable) is the field's original 255: refused, with the count
+  const refused = adHocLine({ description: long, kind: "Labor", unitPrice: 8100 }, { estimateId: "E", tenantId: TENANT });
+  assert.match(refused.problems[0], /description is \d+ characters; this field holds 255/);
+  assert.match(linePatchFields({ description: long }).problems[0], /this field holds 255/);
+  // the live length (a Long Text Area): kept whole
+  const ok = adHocLine({ description: long, kind: "Labor", unitPrice: 8100 }, { estimateId: "E", tenantId: TENANT, descriptionMax: 32768 });
+  assert.equal(ok.fields.Description__c, long);
+  assert.equal(linePatchFields({ description: long }, { descriptionMax: 32768 }).fields.Description__c, long);
+  // a catalog item's Long Text description is copied whole too
+  const item = { Id: "PB1", Description__c: long, Price__c: 10 };
+  assert.equal(lineFromItem(item, {}, { estimateId: "E", tenantId: TENANT, descriptionMax: 4000 }).fields?.Description__c ?? lineFromItem(item, {}, { estimateId: "E", tenantId: TENANT, descriptionMax: 4000 }).Description__c, long);
+});
+
 // ---------------------------------------------------------------------------
 // Router + handler with an in-memory Salesforce
 // ---------------------------------------------------------------------------
@@ -358,7 +373,11 @@ function fakeSalesforce() {
         ? [{ name: "Default_Tax_Rate__c", type: "percent" }, { name: "Default_Tax_Jurisdiction__c", type: "string" }, { name: "Labor_Burden_Percent__c", type: "percent" }]
         : obj === "Sundial_User__c" && flags.costRate
           ? [{ name: "Hourly_Cost_Rate__c", type: "currency" }]
-          : [],
+          // 2026-10-16: the line's Description__c is a Long Text Area now; `fake.flags.shortLineDescription`
+          // plays the old Text(255) org.
+          : obj === "Sundial_Service_Line__c"
+            ? [{ name: "Description__c", type: "textarea", length: flags.shortLineDescription ? 255 : 32768 }]
+            : [],
   });
   // A PostgREST-shaped stub over three things: stale flags, the activity table, and
   // the file-metadata table (the estimate PDF registers a row there on send).
@@ -861,6 +880,18 @@ test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versi
   const catalogLine = fake.store.Sundial_Service_Line__c.find((l) => l.Price_Book_Item__c);
   const d1 = await call(h, "PATCH", `/service/estimates/${estId}/lines/${catalogLine.Id}`, { description: "Square D disconnect, 60A, as discussed on site" });
   assert.equal(d1.status, 200);
+  // 2026-10-16: a long scope line is stored whole (the field is a Long Text Area; the Lambda reads its length from the describe)
+  const scope = "Remove existing (45) solar modules and associated racking components as well as all standoffs/flashings for all (45) modules being removed. Store solar modules and related racking material onsite. Upon completion of roof repairs Harmon will return and reinstall the modules and racking, replace any flashings that cannot be reused, and recommission the system.";
+  const dLong = await call(h, "PATCH", `/service/estimates/${estId}/lines/${catalogLine.Id}`, { description: scope });
+  assert.equal(dLong.status, 200);
+  assert.equal(catalogLine.Description__c, scope, "nothing cut off");
+  fake.flags.shortLineDescription = true; // the old Text(255) org (a fresh handler: the describe is cached per handler): refused with the count, never trimmed
+  const dShort = await call(makeHandler(fake), "PATCH", `/service/estimates/${estId}/lines/${catalogLine.Id}`, { description: `${scope} And more.` });
+  delete fake.flags.shortLineDescription;
+  assert.equal(dShort.status, 400);
+  assert.equal(dShort.body.code, "LINE_INVALID");
+  assert.match(dShort.body.message, /this field holds 255/);
+  assert.equal(catalogLine.Description__c, scope, "the stored text is untouched by a refused edit");
   assert.equal(d1.body.needsReapproval, false);
   assert.equal(catalogLine.Stage__c, "Approved");
   const d2 = await call(h, "PATCH", `/service/estimates/${estId}/lines/${catalogLine.Id}`, { unitPrice: 135 });
@@ -876,7 +907,7 @@ test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versi
   // the job feed starts at the first quote.
   const feed = await call(h, "GET", `/service/jobs/${job.Id}/activity`);
   const evs = feed.body.activity.map((a) => a.event).reverse();
-  assert.deepEqual(evs, ["customer_tagged", "estimate_created", "line_added", "line_added", "estimate_updated", "estimate_sent", "estimate_sent", "estimate_approved", "job_created", "line_updated", "line_updated"]);
+  assert.deepEqual(evs, ["customer_tagged", "estimate_created", "line_added", "line_added", "estimate_updated", "estimate_sent", "estimate_sent", "estimate_approved", "job_created", "line_updated", "line_updated", "line_updated"]); // the third line_updated is the long-scope edit (2026-10-16); the refused one wrote nothing
   const priceEdit = feed.body.activity[0];
   assert.deepEqual(priceEdit.details.fields.Unit_Price__c, { from: 120, to: 135 });
   assert.equal(priceEdit.details.needsReapproval, true);

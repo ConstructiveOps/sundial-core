@@ -63,9 +63,11 @@ import {
   userFilter,
   rowVisible,
   canReadObject,
+  canAction,
   OBJECT_ACCESS,
   DENY,
 } from "../../lib/access.js";
+import { COST_FIELDS, COSTING_READ, stripCost } from "../../lib/cost-gate.js";
 // FIELD MANIFEST (D-064 Phase 4, §4.3/§4.4). Imported at module scope on purpose: the
 // loader validates every manifest at import and THROWS, so a broken or missing manifest
 // fails this Lambda at cold start rather than serving unfiltered data at request time.
@@ -302,10 +304,11 @@ export const SEARCH_FIELDS = {
   // (Billing_Reference__c is an External ID for the same reason). Estimates add the
   // template name so the template picker is a search; the price book searches
   // name + item code + description.
+  // D-081 amendment 2 (2026-10-16): an estimate is found by its payer's name too, as an invoice is.
   estimate: {
-    cache: ["name", "customer_name_at_creation", "template_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
+    cache: ["name", "customer_name_at_creation", "template_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation", "bill_to_name"],
     phone: ["primary_phone_at_creation"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
+    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c", "Bill_To_Name__c"],
   },
   job: {
     cache: ["name", "customer_name_at_creation", "billing_reference", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
@@ -389,6 +392,7 @@ export const LIST_PROJECTION = {
     ...LIST_META,
     "name", "status", "archived", "is_template", "template_name", "customer_name_at_creation",
     "version", "total", "service_job_sf_id", "last_sent_at", "valid_until",
+    "bill_to_type", "bill_to_customer_sf_id", "bill_to_name", // D-081 amendment 2: who pays the estimate
   ],
   // ServiceInvoicesPage (row click needs service_job_sf_id; CSV uses its own route).
   serviceinvoice: [
@@ -1185,6 +1189,27 @@ async function handleSingleReadFull(ctx) {
     // Both are needed: read is not edit, and a field can be renderable-but-read-only.
     access: { visible, editable, manifestVersion: MANIFEST_VERSION },
   });
+}
+
+// --- COST (2026-10-16, lib/cost-gate.js) ------------------------------------
+// What a price-book item or a line COSTS is Admin / Executive only (service.costing.read).
+// Applied to the finished response of EVERY read of those two objects — single (cache or
+// ?full=true) and list / search — so no path can forget it. Unlike the field manifest it
+// does NOT wait for ACCESS_MODEL_MODE=enforce: it is a level gate like payroll, always on.
+// Selling prices stay. Keys are removed, not nulled ("absent" = the portal hides the input).
+export function hideCost(objectKey, response, seesCost) {
+  if (seesCost || !COST_FIELDS[objectKey] || response?.statusCode !== 200 || !response.body) return response;
+  let body;
+  try {
+    body = JSON.parse(response.body);
+  } catch {
+    return response;
+  }
+  if (body && typeof body === "object") {
+    if (body.record) body.record = stripCost(objectKey, body.record);
+    if (Array.isArray(body.records)) body.records = body.records.map((r) => stripCost(objectKey, r));
+  }
+  return { ...response, body: JSON.stringify(body) };
 }
 
 // --- SINGLE-RECORD read ----------------------------------------------------
@@ -2562,16 +2587,28 @@ export const handler = async (event) => {
     };
 
     const qs = event.queryStringParameters || {};
+    // Cost columns (lib/cost-gate.js): always the caller's real access, whatever the mode.
+    // Asked only for the two objects that carry cost, and a lib/access failure HIDES cost
+    // (the safe side) instead of failing the read.
+    let seesCost = true;
+    if (COST_FIELDS[objectKey]) {
+      try {
+        seesCost = canAction(COSTING_READ, access) === true;
+      } catch (e) {
+        console.error("sf-query: cost gate failed, hiding cost:", e?.message || e);
+        seesCost = false;
+      }
+    }
 
     if (route.kind === "single") {
       // ?full=true (exact, case-insensitive) opts into the all-fields, cache-
       // bypassing detail read. Any other value keeps existing cache-first behavior.
       const full = String(qs.full).toLowerCase() === "true";
-      return await handleSingleRead({ ...shared, id: route.id, full });
+      return hideCost(objectKey, await handleSingleRead({ ...shared, id: route.id, full }), seesCost);
     }
     // Repeated keys (f[stage]=A&f[stage]=B) survive ONLY in the multi-value map —
     // see caller-filters.js readMulti.
-    return await handleListRead({ ...shared, qs, multi: readMulti(event, qs) });
+    return hideCost(objectKey, await handleListRead({ ...shared, qs, multi: readMulti(event, qs) }), seesCost);
   } catch (err) {
     console.error("sf-query unexpected error:", err?.message || String(err));
     return jsonResponse(500, cors, { error: "server_error" });

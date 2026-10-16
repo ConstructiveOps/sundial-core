@@ -171,6 +171,8 @@ globalThis.fetch = async (url) => {
           sundial_solar_cache: { properties },
           sundial_roofing_cache: { properties },
           sundial_customer_cache: { properties },
+          // 2026-10-16: the price book carries cost columns (lib/cost-gate.js).
+          sundial_price_book_item_cache: { properties: { ...properties, name: {}, price: {}, material_price: {}, labor_cost: {}, material_cost: {} } },
         },
       }),
     };
@@ -179,7 +181,7 @@ globalThis.fetch = async (url) => {
   return { ok: true, status: 200, json: async () => ({ fields: SF_FIELDS }) };
 };
 
-const { handler } = await import("./index.js");
+const { handler, hideCost } = await import("./index.js");
 
 function listEvent(object, query = {}) {
   return {
@@ -420,4 +422,44 @@ test("the response shape is unchanged by the parent filter", async () => {
     assert.ok(key in body, `response lost the ${key} field`);
   }
   assert.equal(body.count, body.records.length);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-16: what a price-book item COSTS is Admin / Executive (lib/cost-gate.js). Every
+// read of pricebookitem / serviceline drops the cost columns for anyone else — always on,
+// whatever ACCESS_MODEL_MODE says; the sell price stays.
+// ---------------------------------------------------------------------------
+function officeIdentity(accessLevel) {
+  const user = { id: "u9", hierarchyLevel: "Client", accessLevel, dealer: null };
+  return { tenantId: TENANT, tenantSlug: "harmon", user, access: accessBlock(resolveScope(user, TENANT)) };
+}
+const itemRow = { sf_id: "a1R000000000001AAA", client_sf_id: TENANT, name: "Disconnect", price: 120, material_price: 120, labor_cost: 5, material_cost: 60, created_date: "2026-01-01T00:00:00Z", last_synced_at: new Date().toISOString(), is_stale: false };
+
+test("cost: a Manager's price-book list has no cost keys; an Admin's does; the sell price is there for both", async () => {
+  resetCtx();
+  ctx.cacheRows = [itemRow];
+  ctx.identity = officeIdentity("Manager");
+  let body = JSON.parse((await handler(listEvent("pricebookitem"))).body);
+  assert.equal(body.records.length, 1);
+  assert.ok(!("labor_cost" in body.records[0]));
+  assert.ok(!("material_cost" in body.records[0]));
+  assert.equal(body.records[0].price, 120);
+  assert.equal(body.records[0].material_price, 120);
+  ctx.identity = officeIdentity("Admin");
+  body = JSON.parse((await handler(listEvent("pricebookitem"))).body);
+  assert.equal(body.records[0].material_cost, 60);
+  assert.equal(body.records[0].labor_cost, 5);
+});
+
+test("hideCost: strips the single record and every list row for pricebookitem / serviceline only; errors and other objects pass through", async () => {
+  const resp = (b, statusCode = 200) => ({ statusCode, headers: {}, body: JSON.stringify(b) });
+  const one = JSON.parse(hideCost("pricebookitem", resp({ record: { Id: "x", Labor_Cost__c: 1, Material_Cost__c: 2, Price__c: 3 } }), false).body);
+  assert.deepEqual(one.record, { Id: "x", Price__c: 3 });
+  const lines = JSON.parse(hideCost("serviceline", resp({ records: [{ sf_id: "l", unit_labor_cost: 1, unit_material_cost: 2, unit_price: 5 }] }), false).body);
+  assert.deepEqual(lines.records, [{ sf_id: "l", unit_price: 5 }]);
+  const r = resp({ record: { Labor_Cost__c: 1 } });
+  assert.equal(hideCost("pricebookitem", r, true), r, "a costing user gets the response untouched");
+  assert.equal(hideCost("customer", r, false), r, "another object passes through");
+  const err = resp({ error: "x" }, 404);
+  assert.equal(hideCost("pricebookitem", err, false), err);
 });

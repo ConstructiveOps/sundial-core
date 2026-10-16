@@ -39,6 +39,7 @@ import {
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
+import { billToCustomerLoader, BILL_TO_SELF } from "../../lib/bill-to.js";
 import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals, showsStoredTotals } from "../sundial-service-estimate/totals.js";
 import { estimateTaxContext, loadTaxTables as realLoadTaxTables } from "../../lib/tax-zones.js";
@@ -312,7 +313,17 @@ export function createHandler(deps = {}) {
         }
       }
       const brand = await brandFor(est.Client__c);
-      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, options: { mode: "customer" } });
+      // Who pays (D-081 amendment 2): the estimate's payer record for the "Bill to" block —
+      // best-effort, the page renders with the name alone if the read fails.
+      let payer = null;
+      if (est.Bill_To_Type__c && est.Bill_To_Type__c !== BILL_TO_SELF && est.Bill_To_Customer__c) {
+        try {
+          payer = await billToCustomerLoader({ sfQuery: d.sfQuery, soqlEscapeString, tenantId: est.Client__c })(est.Bill_To_Customer__c);
+        } catch (e) {
+          console.error("public view: payer read failed:", e?.message || e);
+        }
+      }
+      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand, payer, options: { mode: "customer" } });
       let payment = null;
       try {
         payment = await paymentFor(est);

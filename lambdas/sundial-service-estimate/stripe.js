@@ -12,7 +12,7 @@
 //   POST /service/jobs/{id}/card-link       text / email the customer the estimate link so THEY add the card
 //   POST /service/jobs/{id}/charge          charge the card on file for ANY amount up to what is owed — a
 //                                           deposit before the invoice, part or all of the balance after.
-//                                           Admin / Executive only (service.card.charge, ACTION_LEVELS).
+//                                           Admin / Executive / Manager (service.card.charge, ACTION_LEVELS).
 //
 // The customer's side (Checkout Sessions for card-on-file / deposit / balance) lives in
 // sundial-service-public. Everything that turns a Stripe event into MONEY lives here, and
@@ -639,7 +639,7 @@ export function createStripeHandlers(d, h) {
       return jsonResponse(200, cors, { success: true, via, to, url: link.url });
     },
 
-    /** POST /service/jobs/{id}/charge { amount, note? } — Admin / Executive: charge the card on file for any amount owed. */
+    /** POST /service/jobs/{id}/charge { amount, note? } — Admin / Executive / Manager: charge the card on file for any amount owed. */
     async jobCharge({ ctx, params, body }) {
       const { tenantId, cors } = ctx;
       const job = await money.loadJob(params[0], tenantId);

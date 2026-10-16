@@ -818,7 +818,14 @@ test("estimate lifecycle: add ad-hoc + catalog lines, patch discount, send versi
   assert.equal(p.body.totals.Tax_Amount__c, 19.68);
   assert.equal(p.body.totals.Total__c, 510.68);
 
-  const s1 = await call(h, "POST", `/service/estimates/${estId}/send`, {});
+  // Cy has a phone and no email: an email send with nothing in the box is refused before
+  // anything is recorded (D-072 amendment 12), then goes out to the typed address.
+  const s0 = await call(h, "POST", `/service/estimates/${estId}/send`, {});
+  assert.equal(s0.status, 400);
+  assert.equal(s0.body.code, "RECIPIENT_REQUIRED");
+  assert.deepEqual(s0.body.missing, ["email"]);
+  assert.equal(fake.store.Sundial_Estimate__c[0].Version__c, 0, "nothing recorded");
+  const s1 = await call(h, "POST", `/service/estimates/${estId}/send`, { to: "cy@example.com" });
   assert.equal(s1.status, 200);
   assert.equal(s1.body.version, 1);
   assert.equal(s1.body.publicToken, "TOKEN123");
@@ -1108,15 +1115,47 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   assert.equal(metaRows[0].category, "Estimate");
   assert.equal(metaRows[0].sf_record_id, estId);
 
-  // Explicit recipient override wins; SMS is recorded only.
-  const s2 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", via: "Both" });
+  // Both with no phone anywhere: refused (the phone is named), nothing recorded.
+  const s2x = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", via: "Both" });
+  assert.equal(s2x.status, 400);
+  assert.equal(s2x.body.code, "RECIPIENT_REQUIRED");
+  assert.deepEqual(s2x.body.missing, ["phone"]);
+  // A typed address that is not one: RECIPIENT_INVALID.
+  const s2y = await call(h, "POST", `/service/estimates/${c.body.id}/send`, { to: "not-an-email", toPhone: "12", via: "Both" });
+  assert.equal(s2y.status, 400);
+  assert.equal(s2y.body.code, "RECIPIENT_INVALID");
+  assert.deepEqual(s2y.body.invalid, ["email", "phone"]);
+  // The box wins for both, and SMS is real now (lib/sms-send.js, the job's conversation):
+  // Both = the email AND the text, each reported.
+  const texts = [];
+  fake.sms = { sendText: async (args) => (texts.push(args), { ok: true, code: null, error: null, to: "+16025550199", message: { id: "m1" } }) };
+  const hs = makeHandler(fake);
+  const s2 = await call(hs, "POST", `/service/estimates/${c.body.id}/send`, { to: "other@example.com", toPhone: "(602) 555-0199", via: "Both" });
+  assert.equal(s2.status, 200, JSON.stringify(s2.body));
   assert.equal(s2.body.recipient, "other@example.com");
-  assert.ok(s2.body.deliveryDetail.includes("SMS is not live"));
+  assert.equal(s2.body.delivery, "both");
+  assert.deepEqual(s2.body.recipients, { email: "other@example.com", phone: "+16025550199" });
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0].to, "+16025550199");
+  assert.ok(texts[0].body.includes("/estimate/TOKEN123"));
+  assert.equal(texts[0].sentBy.name, "Paige King");
+  assert.equal(s2.body.deliveryDetail, null);
+  const sent2 = fake.activity.filter((a) => a.event === "estimate_sent").at(-1);
+  assert.equal(sent2.details.via, "Both");
+  assert.deepEqual(sent2.details.recipients, { email: "other@example.com", phone: "+16025550199" });
+  // One half failing never undoes the other: the email goes, the text failure is reported.
+  fake.sms = { sendText: async () => ({ ok: false, code: "SEND_FAILED", error: "The text was not sent (carrier).", to: "+16025550199", message: null }) };
+  const s2z = await call(makeHandler(fake), "POST", `/service/estimates/${c.body.id}/send`, { toPhone: "6025550199", via: "Both" });
+  assert.equal(s2z.status, 200);
+  assert.equal(s2z.body.delivery, "email");
+  assert.equal(s2z.body.recipient, "em@example.com");
+  assert.ok(s2z.body.deliveryDetail.includes("Text failed"));
+  fake.sms = null;
 
   // SES failure: version still bumps, delivery says recorded + why.
   fake.emailFails = true;
   const s3 = await call(h, "POST", `/service/estimates/${c.body.id}/send`, {});
-  assert.equal(s3.body.version, 3);
+  assert.equal(s3.body.version, 4);
   assert.equal(s3.body.delivery, "recorded");
   assert.ok(s3.body.deliveryDetail.includes("boom"));
 
@@ -1125,6 +1164,7 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   fake.publicBaseUrl = "";
   const h2 = makeHandler(fake);
   const s4 = await call(h2, "POST", `/service/estimates/${c.body.id}/send`, {});
+  assert.equal(s4.body.version, 5);
   assert.equal(s4.body.delivery, "recorded");
   assert.ok(s4.body.deliveryDetail.includes("SERVICE_PUBLIC_BASE_URL"));
   assert.equal(s4.body.publicUrl, null);
@@ -1136,7 +1176,7 @@ test("send: emails the customer the link, records delivery; degrades honestly wi
   const h3 = makeHandler(fake);
   const s5 = await call(h3, "POST", `/service/estimates/${c.body.id}/send`, {});
   assert.equal(s5.status, 200);
-  assert.equal(s5.body.version, 5);
+  assert.equal(s5.body.version, 6);
   assert.equal(s5.body.delivery, "email");
   assert.equal(s5.body.pdfKey, null);
   assert.ok(s5.body.deliveryDetail.includes("PDF could not be generated"));
@@ -1974,7 +2014,7 @@ test("stripe: a deposit paid before the job exists is deferred, then lands when 
   assert.ok(!iss.body.warnings.some((w) => /not charged/.test(w)), JSON.stringify(iss.body.warnings));
 });
 
-test("stripe (amendment 11): the office's card on file — status from Stripe, the hosted card page, the customer link by text / email, an Admin charge of any amount (deposit before the invoice, the balance after), a Manager refused, the caps", async () => {
+test("stripe (amendment 11): the office's card on file — status from Stripe, the hosted card page, the customer link by text / email, an Admin charge of any amount (deposit before the invoice, the balance after), a Manager allowed (2026-10-16), a level-less user refused, the caps", async () => {
   const fake = fakeSalesforce();
   fake.stripeSecret = STRIPE_SECRET;
   const stripeCalls = [];
@@ -2068,25 +2108,27 @@ test("stripe (amendment 11): the office's card on file — status from Stripe, t
   assert.equal(piCall.params.get("amount"), "10000");
   assert.equal(piCall.params.get("off_session"), null, "off_session rides on the confirm call, not the create");
   assert.equal(piCall.params.get("metadata[kind]"), "deposit");
-  // More than what is left ($200) is refused; a Manager is refused outright (the level gate).
+  // More than what is left ($200) is refused; a tenant user with no listed level is refused
+  // outright (the level gate). A Manager may charge since 2026-10-16 — see step 5.
   r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 250 });
   assert.equal(r.status, 409);
   assert.equal(r.body.code, "AMOUNT_TOO_HIGH");
   assert.equal(r.body.owed, 200);
-  const manager = makeHandler(fake, { user: { id: "USR000000000000002" }, access: { level: "Manager", scope: "tenant", userId: "USR000000000000002", tenantId: TENANT } });
-  r = await call(manager, "POST", `/service/jobs/${job.Id}/charge`, { amount: 50 });
+  const noLevel = makeHandler(fake, { user: { id: "USR000000000000002" }, access: { level: null, scope: "tenant", userId: "USR000000000000002", tenantId: TENANT } });
+  r = await call(noLevel, "POST", `/service/jobs/${job.Id}/charge`, { amount: 50 });
   assert.equal(r.status, 403);
-  // The invoice-balance charge is the same Admin action; a Manager's issue with the tick still issues, uncharged.
-  r = await call(manager, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
+  // The invoice-balance charge is the same level-gated action; an issue with the tick by someone without it still issues, uncharged.
+  r = await call(noLevel, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.equal(r.body.charge.ok, false);
   assert.equal(r.body.charge.code, "FORBIDDEN");
-  assert.ok(r.body.warnings.some((w) => /Admin action/.test(w)));
+  assert.ok(r.body.warnings.some((w) => /Manager action/.test(w)));
   const invM = fake.store.Sundial_Service_Invoice__c[0];
-  assert.equal((await call(manager, "POST", `/service/invoices/${invM.Id}/charge`)).status, 403);
+  assert.equal((await call(noLevel, "POST", `/service/invoices/${invM.Id}/charge`)).status, 403);
   await call(h, "POST", `/service/invoices/${invM.Id}/void`, { reason: "test" });
-  // …but the Manager may still read the status and open the card page.
-  assert.equal((await call(manager, "GET", `/service/jobs/${job.Id}/card`)).status, 200);
+  // …but they may still read the status and open the card page.
+  assert.equal((await call(noLevel, "GET", `/service/jobs/${job.Id}/card`)).status, 200);
+  const manager = makeHandler(fake, { user: { id: "USR000000000000003" }, access: { level: "Manager", scope: "tenant", userId: "USR000000000000003", tenantId: TENANT } });
 
   // 5. The invoice is issued (the deposit rides on it); the office charges the $200 balance in part, then the rest.
   const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
@@ -2096,7 +2138,8 @@ test("stripe (amendment 11): the office's card on file — status from Stripe, t
   r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
   assert.equal(r.body.owedBasis, "invoice");
   assert.equal(r.body.owed, 200);
-  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 75 });
+  // A Manager runs billing (2026-10-16): the part payment is theirs.
+  r = await call(manager, "POST", `/service/jobs/${job.Id}/charge`, { amount: 75 });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(r.body.type, "Payment");
   assert.equal(inv.Paid_Amount__c, 175);
@@ -3318,4 +3361,202 @@ test("2026-10-16: a Sent / Viewed / Approved estimate shows its STORED totals �
   // A Draft computes live, whatever is stored.
   Object.assign(est, { Status__c: "Draft", Tax_Amount__c: 0, Total__c: 200 });
   assert.equal((await call(h, "GET", `/service/estimates/${est.Id}`)).body.totals.taxAmount, 17.2);
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-16 (Harmon's October batch): cost is Admin / Executive (lib/cost-gate.js), the
+// estimate has its own Bill To (D-081 amendment 2), the send box (D-072 amendment 12), the
+// Lead Source on a new service customer.
+// ---------------------------------------------------------------------------
+const MANAGER = { user: { id: "USR000000000000004", firstName: "Mo", lastName: "Manager" }, access: { level: "Manager", scope: "tenant", userId: "USR000000000000004", tenantId: TENANT } };
+
+test("2026-10-16 cost: a Manager's BLANK cost key is not sent (200, cost unchanged), a value is 403 COSTING_FORBIDDEN; an Admin sets it; the estimate read hides line cost from a Manager, sell prices stay", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cy", Primary_Email__c: "cy@example.com", City__c: "Mesa" });
+  await fake.deps.sfCreateRecord("Sundial_Price_Book_Item__c", { Client__c: TENANT, Name: "Disconnect", Item_Code__c: "MAT-DISC", Version__c: 1, Is_Active__c: true, Kind__c: "Material", Material_Price__c: 120, Material_Cost__c: 60, Labor_Cost__c: 5 });
+  const item = fake.store.Sundial_Price_Book_Item__c[0];
+  const admin = makeHandler(fake);
+  const manager = makeHandler(fake, MANAGER);
+
+  // Today's portal sends both cost fields on every save, blank when it never saw them.
+  let r = await call(manager, "PATCH", `/service/price-book-items/${item.Id}`, { name: "Disconnect 60A", laborCost: "", materialCost: null });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(item.Name, "Disconnect 60A");
+  assert.equal(item.Labor_Cost__c, 5, "the stored cost is untouched");
+  assert.equal(item.Material_Cost__c, 60);
+  assert.ok(!fake.calls.updates.some((u) => "Labor_Cost__c" in u.fields || "Material_Cost__c" in u.fields), "no cost field was written");
+  // A value from a Manager is refused out loud, never silently ignored.
+  r = await call(manager, "PATCH", `/service/price-book-items/${item.Id}`, { laborCost: 12 });
+  assert.equal(r.status, 403);
+  assert.equal(r.body.code, "COSTING_FORBIDDEN");
+  assert.deepEqual(r.body.fields, ["laborCost"]);
+  assert.equal(item.Labor_Cost__c, 5);
+  r = await call(manager, "POST", "/service/price-book-items", { name: "Fuse", itemCode: "MAT-FUSE", kind: "Material", materialPrice: 9, materialCost: 3 });
+  assert.equal(r.status, 403);
+  r = await call(manager, "POST", "/service/price-book-items", { name: "Fuse", itemCode: "MAT-FUSE", kind: "Material", materialPrice: 9, materialCost: "", laborCost: null });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Price_Book_Item__c.find((i) => i.Id === r.body.id).Material_Cost__c, undefined);
+  // An Admin sets cost.
+  r = await call(admin, "PATCH", `/service/price-book-items/${item.Id}`, { laborCost: 12 });
+  assert.equal(r.status, 200);
+  assert.equal(item.Labor_Cost__c, 12);
+  // A Manager's new version with blank cost keys carries the old version's cost forward.
+  r = await call(manager, "POST", `/service/price-book-items/${item.Id}/new-version`, { materialPrice: 130, laborCost: "", materialCost: "" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const v2 = fake.store.Sundial_Price_Book_Item__c.find((i) => i.Id === r.body.id);
+  assert.equal(v2.Material_Price__c, 130);
+  assert.equal(v2.Material_Cost__c, 60);
+  assert.equal(v2.Labor_Cost__c, 12);
+
+  // The estimate read: line cost for an Admin, none for a Manager; the sell price for both.
+  const e = await call(admin, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ priceBookItemId: v2.Id, quantity: 1 }] });
+  assert.equal(e.status, 201);
+  const asAdmin = await call(admin, "GET", `/service/estimates/${e.body.id}`);
+  assert.equal(asAdmin.body.lines[0].Unit_Material_Cost__c, 60);
+  const asManager = await call(manager, "GET", `/service/estimates/${e.body.id}`);
+  assert.equal(asManager.status, 200);
+  assert.ok(!("Unit_Material_Cost__c" in asManager.body.lines[0]));
+  assert.ok(!("Unit_Labor_Cost__c" in asManager.body.lines[0]));
+  assert.equal(asManager.body.lines[0].Unit_Price__c, 130);
+  assert.equal(fake.store.Sundial_Service_Line__c[0].Unit_Material_Cost__c, 60, "the line still snapshots the item's cost on add");
+});
+
+test("D-081 amendment 2: the estimate's Bill To — required payer, derived name, read + send defaults, the document's block; Create Job inherits it, quick-create shares it, then they are independent", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Mark Haughn", First_Name__c: "Mark", Last_Name__c: "Haughn", Primary_Email__c: "mark@example.com", Primary_Phone__c: "623-555-0142", Street__c: "25825 N 134th Drive", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "ZZ Bill-To Co", Is_Company__c: true, Company_Name__c: "ZZ Bill-To Co", First_Name__c: "Dana", Last_Name__c: "Ruiz", Primary_Email__c: "ap@billto.example.com", Primary_Phone__c: "(602) 555-0100", Street__c: "Po Box 53940", City__c: "Phoenix", State__c: "AZ", Postal_Code__c: "85072" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: "a1Q000000OTHERTEN", Name: "Elsewhere", Is_Company__c: true, Company_Name__c: "Elsewhere" });
+  const [home, co, foreign] = fake.store.Sundial_Customer__c;
+  const h = makeHandler(fake);
+
+  // A partner type with no paying customer: refused before anything is created.
+  let r = await call(h, "POST", "/service/estimates", { customer: { id: home.Id }, estimate: { billToType: "Leasing Partner" } });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "BILL_TO_CUSTOMER_REQUIRED");
+  assert.equal(fake.store.Sundial_Estimate__c.length, 0);
+  r = await call(h, "POST", "/service/estimates", { customer: { id: home.Id }, estimate: { billToType: "Leasing Partner", billToCustomerId: foreign.Id } });
+  assert.equal(r.status, 400, "another tenant's customer is not found");
+  // The payer named: the name is DERIVED; a typed billToName is ignored.
+  r = await call(h, "POST", "/service/estimates", { customer: { id: home.Id }, estimate: { billToType: "Leasing Partner", billToCustomerId: co.Id, billToName: "Somebody Else" }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const est = fake.store.Sundial_Estimate__c.find((x) => x.Id === r.body.id);
+  assert.equal(est.Bill_To_Type__c, "Leasing Partner");
+  assert.equal(est.Bill_To_Customer__c, co.Id);
+  assert.equal(est.Bill_To_Name__c, "ZZ Bill-To Co");
+
+  // The read: who pays, and the send box's prefill — the payer's address, said to be theirs.
+  const g = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.deepEqual(g.body.billTo, { type: "Leasing Partner", customerId: co.Id, name: "ZZ Bill-To Co" });
+  assert.deepEqual(g.body.sendDefaults, { email: "ap@billto.example.com", phone: "+16025550100", source: "billTo", name: "ZZ Bill-To Co" });
+  // The document: the payer top-left with Attn and its address, the homeowner under Service address.
+  const p = await call(h, "GET", `/service/estimates/${est.Id}/preview`);
+  assert.ok(p.body.html.includes("Attn: Dana Ruiz"));
+  assert.ok(p.body.html.includes("Po Box 53940"));
+  assert.ok(p.body.html.includes("Service address"));
+  // Send with an empty box goes to the payer.
+  const s = await call(h, "POST", `/service/estimates/${est.Id}/send`, {});
+  assert.equal(s.status, 200);
+  assert.equal(s.body.recipient, "ap@billto.example.com");
+  assert.equal(fake.emails.at(-1).to, "ap@billto.example.com");
+
+  // PATCH: billToName is rejected (derived); a partner type with the payer cleared is refused.
+  r = await call(h, "PATCH", `/service/estimates/${est.Id}`, { billToName: "X", scopeSummary: "Panel swap" });
+  assert.equal(r.status, 200);
+  assert.ok(r.body.rejectedFields.includes("billToName"));
+  assert.equal(est.Bill_To_Name__c, "ZZ Bill-To Co");
+  r = await call(h, "PATCH", `/service/estimates/${est.Id}`, { billToCustomerId: null });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "BILL_TO_CUSTOMER_REQUIRED");
+
+  // Create Job copies the estimate's Bill To onto the job (unless the request names one).
+  const cj = await call(h, "POST", `/service/estimates/${est.Id}/create-job`, {});
+  assert.equal(cj.status, 201, JSON.stringify(cj.body));
+  const job = fake.store.Sundial_Service_Job__c.find((j) => j.Id === cj.body.jobId);
+  assert.equal(job.Bill_To_Type__c, "Leasing Partner");
+  assert.equal(job.Bill_To_Customer__c, co.Id);
+  assert.equal(job.Bill_To_Name__c, "ZZ Bill-To Co");
+  // After creation they are independent: the estimate going back to the homeowner leaves the job alone.
+  r = await call(h, "PATCH", `/service/estimates/${est.Id}`, { billToType: "Customer" });
+  assert.equal(r.status, 200);
+  assert.equal(est.Bill_To_Customer__c, null);
+  assert.equal(est.Bill_To_Name__c, null);
+  assert.equal(job.Bill_To_Customer__c, co.Id);
+  // The invoice card reads the job's payer (what the invoice will snapshot).
+  const inv = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.deepEqual(inv.body.sendDefaults, { email: "ap@billto.example.com", phone: "+16025550100", source: "billTo", name: "ZZ Bill-To Co" });
+
+  // Quick-create: the estimate and the job are born with the same payer.
+  const q = await call(h, "POST", "/service/jobs", { customer: { id: home.Id }, job: { billToType: "Manufacturer", billToCustomerId: co.Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(q.status, 201, JSON.stringify(q.body));
+  const qe = fake.store.Sundial_Estimate__c.find((x) => x.Id === q.body.estimateId);
+  assert.equal(qe.Bill_To_Type__c, "Manufacturer");
+  assert.equal(qe.Bill_To_Customer__c, co.Id);
+  assert.equal(qe.Bill_To_Name__c, "ZZ Bill-To Co");
+  // A homeowner estimate reads type Customer and the customer's own address.
+  const plain = await call(h, "POST", "/service/estimates", { customer: { id: home.Id } });
+  const pg = await call(h, "GET", `/service/estimates/${plain.body.id}`);
+  assert.deepEqual(pg.body.billTo, { type: "Customer", customerId: null, name: null });
+  assert.deepEqual(pg.body.sendDefaults, { email: "mark@example.com", phone: "+16235550142", source: "customer", name: "Mark Haughn" });
+});
+
+test("D-072 amendment 12: invoice send — the box, else the frozen payer, else the customer; Email / SMS / Both; the partner-email detail is gone", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "ZZ Bill-To Co", Is_Company__c: true, Company_Name__c: "ZZ Bill-To Co", Primary_Email__c: "ap@billto.example.com", Primary_Phone__c: "602-555-0100" });
+  const [ivy, co] = fake.store.Sundial_Customer__c;
+  const texts = [];
+  fake.sms = { sendText: async (args) => (texts.push(args), { ok: true, code: null, error: null, to: args.to, message: { id: "m1" } }) };
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: ivy.Id }, job: { billToType: "Leasing Partner", billToCustomerId: co.Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const iss = await call(h, "POST", `/service/jobs/${j.body.jobId}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  const read = await call(h, "GET", `/service/invoices/${inv.Id}`);
+  assert.deepEqual(read.body.sendDefaults, { email: "ap@billto.example.com", phone: "+16025550100", source: "billTo", name: "ZZ Bill-To Co" });
+
+  // An empty box sends to the payer — no "enter the partner's email" any more.
+  let s = await call(h, "POST", `/service/invoices/${inv.Id}/send`, {});
+  assert.equal(s.status, 200, JSON.stringify(s.body));
+  assert.equal(s.body.delivery, "email");
+  assert.equal(s.body.recipient, "ap@billto.example.com");
+  assert.equal(inv.Status__c, "Sent");
+  // Both: the email to the typed address, the text to the payer's phone, into the job's conversation.
+  s = await call(h, "POST", `/service/invoices/${inv.Id}/send`, { via: "Both", to: "billing@billto.example.com" });
+  assert.equal(s.body.delivery, "both");
+  assert.deepEqual(s.body.recipients, { email: "billing@billto.example.com", phone: "+16025550100" });
+  assert.equal(texts.at(-1).job.Id, j.body.jobId);
+  assert.ok(texts.at(-1).body.includes(inv.Name));
+  assert.ok(texts.at(-1).body.includes("PDF comes by email"), "a partner has no pay page");
+  const sentRow = fake.activity.filter((a) => a.event === "invoice_sent").at(-1);
+  assert.equal(sentRow.details.via, "Both");
+  // SMS to nobody: refused before anything is rendered.
+  co.Primary_Phone__c = null;
+  const puts = fake.puts.length;
+  s = await call(h, "POST", `/service/invoices/${inv.Id}/send`, { via: "SMS" });
+  assert.equal(s.status, 400);
+  assert.equal(s.body.code, "RECIPIENT_REQUIRED");
+  assert.deepEqual(s.body.missing, ["phone"]);
+  assert.equal(fake.puts.length, puts, "no PDF was rendered for a refused send");
+});
+
+test("2026-10-16 Lead Source on a new service customer: matched case-insensitively, written in the org's spelling; an unknown value is 400 LEAD_SOURCE_INVALID and nothing is created", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  let r = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Lu", lastName: "Source", email: "lu@example.com", leadSource: "Billboard" } } });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "LEAD_SOURCE_INVALID");
+  assert.ok(!/Referral|Harmon Direct/.test(r.body.message), "the list is not echoed");
+  assert.equal(fake.store.Sundial_Customer__c.length, 0);
+  r = await call(h, "POST", "/service/customers", { customer: { new: { firstName: "Lu", lastName: "Source", email: "lu@example.com", leadSource: "  harmon DIRECT " } } });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Customer__c[0].Lead_Source__c, "Harmon Direct");
+  // The same on New Job's new-customer branch.
+  r = await call(h, "POST", "/service/jobs", { customer: { new: { firstName: "Jo", lastName: "Bee", phone: "602-555-0177", leadSource: "referral" } }, lines: [] });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Customer__c.find((c) => c.First_Name__c === "Jo").Lead_Source__c, "Referral");
+  r = await call(h, "POST", "/service/jobs", { customer: { new: { firstName: "No", lastName: "Way", phone: "602-555-0178", leadSource: "Carrier pigeon" } } });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, "LEAD_SOURCE_INVALID");
+  assert.equal(fake.store.Sundial_Service_Job__c.length, 1);
 });

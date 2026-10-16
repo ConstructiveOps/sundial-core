@@ -249,9 +249,16 @@ The service job's payer is two fields: **`Bill_To_Type__c`** (Customer / Interna
 |---|---|---|
 | `Sundial_Service_Job__c` | `Bill_To_Customer__c` | Null when the type is `Customer` (the job's own `Sundial_Customer__c` pays). REQUIRED for any other type (`400 BILL_TO_CUSTOMER_REQUIRED`). A customer in the same tenant. |
 | `Sundial_Service_Job__c` | `Bill_To_Name__c` | DERIVED from the paying customer's display name on every write that touches the type or the payer. Callers cannot set it. A rename of the payer does not flow back (refreshes on the job's next Bill To save). |
+| `Sundial_Estimate__c` | `Bill_To_Type__c` | Picklist, the job's five values (D-081 amendment 2, 2026-10-16). Blank reads as Customer. Copied job ↔ estimate at creation only (Create Job takes the estimate's; quick-create gives the estimate the job's); independent after. Does not change tax (the job's does). |
+| `Sundial_Estimate__c` | `Bill_To_Customer__c` | Lookup → `Sundial_Customer__c`. The job's rule: null for type Customer, REQUIRED otherwise, same tenant. The estimate document prints this record's name / "Attn:" / address live. |
+| `Sundial_Estimate__c` | `Bill_To_Name__c` | Text. DERIVED from the payer's display name; callers cannot set it. |
 | `Sundial_Service_Invoice__c` | `Bill_To_Customer__c` | Snapshot at issue: the job's payer, or the job's own customer when the type is Customer. The record whose `Acumatica_Customer_ID__c` the future invoice push will use. |
 | `Sundial_Service_Invoice__c` | `Bill_To_Name__c` | Snapshot at issue: the payer's display name. |
 | `Sundial_Service_Invoice__c` | `Bill_To_Address__c` | Text(255). Snapshot at issue: the payer's site address as one line ("street, city, ST zip"), else its mailing address. |
+
+**The invoice snapshots the JOB's Bill To, never the estimate's.** Estimate cache columns `bill_to_type`, `bill_to_customer_sf_id`, `bill_to_name` — `sql/2026-10-16_estimate_bill_to.sql`.
+
+**Cost fields are Admin / Executive (D-072 amendment 13, 2026-10-16):** `Sundial_Price_Book_Item__c.Labor_Cost__c` / `Material_Cost__c` and `Sundial_Service_Line__c.Unit_Labor_Cost__c` / `Unit_Material_Cost__c` are never served to, or set by, anyone without `service.costing.read` / `.write` (`lib/cost-gate.js`).
 
 The `-2` reissue re-snapshots; a void never rewrites. Cache columns: `bill_to_customer_sf_id` (job, invoice), `bill_to_address` (invoice), `is_company` / `company_name` / `warranty_notes` (customer) and the generated `display_name_sort` (customer; the Customer header's sort) — `sql/2026-10-07_company_customers.sql`.
 

@@ -17,4 +17,7 @@ export const ESTIMATE_SELECT =
   "Approved_At__c, Approved_Version__c, Approved_Amount__c, Approval_Method__c, Approved_By_Name__c, " +
   "Declined_Reason__c, Valid_Until__c, Last_Sent_At__c, Last_Sent_Via__c, Public_Token__c, " +
   "Public_Token_Expires_At__c, Scope_Summary__c, Created_In_Field__c, Created_By_Service_Call__c, " +
-  "Internal_Notes__c"; // the office's notes (2026-10-02: on the estimate page under Scope summary; never on the customer's document)
+  // Internal_Notes__c: the office's notes (2026-10-02: on the estimate page under Scope summary; never on the customer's document)
+  "Internal_Notes__c, " +
+  // Who pays (D-081 amendment 2, 2026-10-16): the job's rule on the estimate; the name derived.
+  "Bill_To_Type__c, Bill_To_Customer__c, Bill_To_Name__c";

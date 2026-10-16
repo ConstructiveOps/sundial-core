@@ -3608,3 +3608,34 @@ On the alternative — routing comments through a Lambda for techs — no: it wo
 **Rejected.** (a) Correcting the seven zones in Sundial: Sundial and Acumatica would disagree, and the remittance follows Acumatica. (b) Storing only today's combined rate per zone: wrong for 17 days or wrong after Nov 1. (c) Falling back to the tenant default or the county when a city does not match: a guess is a wrong remittance. (d) A RETAIL-only rule: Acumatica's categories are data, and a category that gains a tax there must start charging here without code.
 
 **Consequences.** New: `lib/tax-zones.js` (+17 tests), `sql/sundial_tax_zones.sql`, `scripts/acumatica-pull-tax.mjs`, `scripts/seed-tax-zones.mjs`, `scripts/wire-tax-zone-refresh.ps1`, `docs/integrations/acumatica-tax.md`. Changed: `totals.js` (per-category tax), `pricebook.js` (categories), the estimate Lambda (stamp, re-tax, two routes, issue refusal), `invoice.js`, `club.js`, `labor.js`, `sundial-service-public`, `sundial-sf-update` (refusal), `sundial-cache-sync` (task), `lib/estimate-document.js` (the $0 tax line), `lib/acumatica-tax-zones.js` (Yuma, Willcox; this also changes the Acumatica customer push). **Setup fields first**: the estimate Lambda SELECTs the new fields. Open jobs created before this have no zone, and each one is picked by hand before it is invoiced.
+
+
+## D-081 amendment 2 (2026-10-16): the estimate has its own Bill To — copied at creation, then independent; the invoice still snapshots the JOB's
+
+**Context.** Harmon quotes partner work (SunRun, APS, a manufacturer) before there is a job, and the estimate went to the homeowner because only the job knew who pays. Tim added `Bill_To_Type__c` / `Bill_To_Customer__c` / `Bill_To_Name__c` to `Sundial_Estimate__c` (same picklist values as the job's, checked by describe 2026-10-16).
+
+**Decision.**
+
+1. **The job's rule, on the estimate.** `Bill_To_Type__c` = what kind of payer; any type but `Customer` REQUIRES `Bill_To_Customer__c` (`400 BILL_TO_CUSTOMER_REQUIRED | _NOT_FOUND | _INVALID`, the same `lib/bill-to.js` `resolveBillTo`, tenant-scoped); `Bill_To_Name__c` is derived from the payer's display name on every save that touches either field; `billToName` from a caller is rejected. Estimate create (`estimate: { billToType, billToCustomerId }`, checked before the customer exists) and estimate PATCH.
+2. **Inheritance, both directions, at creation only.** Create Job from an estimate copies the estimate's Bill To onto the job (unless the request names one). Quick-create (New Job) gives the estimate the job's Bill To. **After that the two are independent — the JOB's Bill To is what the invoice snapshots, unchanged.** (There is no "create an estimate on an existing job" route: every job is born with its one estimate.)
+3. **The document shows who pays.** The estimate PDF and hosted page print the invoice's two blocks — the payer top-left (name, "Attn:" contact, address), the homeowner under SERVICE ADDRESS — collapsing to one when the homeowner pays. One builder for both documents: `billToBlocks()` in `lib/estimate-document.js`. The estimate has no address snapshot of its payer, so its block reads the payer record live; the invoice keeps printing its frozen `Bill_To_Address__c`.
+4. **Read + cache.** `GET /service/estimates/{id}` returns `billTo: { type, customerId, name }`. `sql/2026-10-16_estimate_bill_to.sql` adds `bill_to_type`, `bill_to_customer_sf_id`, `bill_to_name` to `sundial_estimate_cache` (the describe-driven mapper fills them; no cache-sync change); the estimate list projection carries them; estimate search matches the payer's name.
+
+**What this does NOT do.** The estimate's Bill To does not change tax: the warranty rule (D-083) still follows the job. A payer's rename does not flow back (as D-081).
+
+## D-072 amendment 12 (2026-10-16): one send box for estimates and invoices — email and text, always editable; estimate SMS is real
+
+**Decision.**
+
+1. **Who it goes to** (`lib/send-to.js`, per address): what the office typed (`to` / `toPhone`) → the PAYER (the estimate's own Bill To; for an invoice, the payer frozen at issue) → the document's customer → its snapshot. A `via` (`Email | SMS | Both`) that needs an address the order cannot supply is `400 RECIPIENT_REQUIRED` with `missing: ["email"|"phone"]`; a typed address that is not one is `400 RECIPIENT_INVALID`. Both are decided BEFORE anything is recorded (no version bump, no PDF).
+2. **Texts go through `lib/sms-send.js`**, exactly as the job report does: the job's conversation, `sentBy` set. The estimate's pre-Twilio stub ("SMS is not live yet") is gone. An estimate with no job yet texts against its customer (no thread until a job exists). `Both` = email AND text; one failing is reported in `deliveryDetail` and never undoes the other. Responses carry `recipients: { email, phone }` (what was used); the activity row records `via` and the recipients.
+3. **Invoice send is the same shape.** The partner-only `to` behaviour is the general one; "enter the partner's email" is gone (the portal always shows the box). A partner's text has no pay link (no customer page) and says the PDF comes by email.
+4. **Reads prefill the box.** `GET /service/estimates/{id}`, `GET /service/invoices/{id}` and `GET /service/jobs/{id}/invoice` return `sendDefaults: { email, phone, source: "billTo"|"customer", name }`.
+
+## D-072 amendment 13 (2026-10-16): a Manager runs billing; what work COSTS stays Admin / Executive
+
+**Decision.**
+
+1. **`service.card.charge` admits Manager** (`ACTION_LEVELS`: Admin / Executive / Manager). Payroll and costing stay Admin / Executive. (There is no "Office" access level: the tenant-wide levels are Executive, Admin and Manager.)
+2. **Cost is hidden from anyone without `service.costing.read`** (`lib/cost-gate.js`): the price-book item's `Labor_Cost__c` / `Material_Cost__c` and the line's `Unit_Labor_Cost__c` / `Unit_Material_Cost__c` are REMOVED (not nulled) from every read — `sundial-sf-query` (cache list / search / single, `?full=true`; always on, whatever `ACCESS_MODEL_MODE` says, and a failing access check hides) and the estimate read. Selling prices stay. Lines still snapshot the item's cost on add, whoever adds them.
+3. **The write rule, from anyone without `service.costing.write`:** a cost key that arrives BLANK (null, undefined, "") is "not sent" — dropped, the stored cost untouched; a non-blank value is `403 COSTING_FORBIDDEN` naming the field. Never silently ignored. Applies to the estimate Lambda's price-book create / PATCH / new-version and to `sundial-sf-update`'s generic PATCH / POST on `pricebookitem` and `serviceline`. **Why blank is allowed (Tim, 2026-10-16):** today's portal sends both cost fields on every price-book save, blank when the user never saw them — refusing them would block every Manager save until the portal changes; writing them would wipe the cost.

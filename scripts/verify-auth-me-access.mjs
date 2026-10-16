@@ -40,6 +40,7 @@ const EXPECTED = {
   tech: { scope: "none", dealer: null },
   admin: { scope: "tenant", dealer: null },
   exec: { scope: "tenant", dealer: null },
+  manager: { scope: "tenant", dealer: null }, // the office Manager (2026-10-16)
 };
 
 // The Supabase URL + publishable ("anon") key, resolved the same way

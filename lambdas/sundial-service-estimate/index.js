@@ -62,10 +62,12 @@
 //
 // SEND DELIVERS (2026-09-11): /send records the version, mints the hosted token, builds
 // the customer link (SERVICE_PUBLIC_BASE_URL + /estimate/{token}) and emails it through
-// lib/email.js (SES; EMAIL_FROM / EMAIL_REPLY_TO / EMAIL_CONFIG_SET). Every way the
-// email can NOT go out (no base URL, SES not configured, no customer email, SES error)
-// comes back as delivery "recorded" + deliveryDetail so the office knows to send the
-// link by hand — the version is on the record either way. SMS waits for Twilio.
+// lib/email.js (SES; EMAIL_FROM / EMAIL_REPLY_TO / EMAIL_CONFIG_SET) and / or texts it
+// through lib/sms-send.js (the job's conversation; 2026-10-16, D-072 amendment 12). Who
+// it goes to is lib/send-to.js: the office's send box, else the payer, else the customer —
+// nothing to send to is a 400 RECIPIENT_REQUIRED before the version is recorded. Every way
+// a message can NOT go out once recorded (no base URL, SES / Twilio not configured, a
+// provider error) comes back in deliveryDetail; `Both` reports each half on its own.
 // The customer side of that link is lambdas/sundial-service-public (view / accept /
 // decline by token, no login).
 //
@@ -106,7 +108,9 @@ import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake
 import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
-import { resolveBillTo, billToCustomerLoader } from "../../lib/bill-to.js";
+import { resolveBillTo, billToCustomerLoader, BILL_TO_SELF, BILL_TO_CUSTOMER_SELECT } from "../../lib/bill-to.js";
+import { sendDefaults, resolveRecipients, viaFrom, needsEmail, needsPhone } from "../../lib/send-to.js";
+import { costWriteGate, stripCost, COSTING_READ, COSTING_WRITE } from "../../lib/cost-gate.js";
 import {
   buildKey,
   listRecordFiles,
@@ -181,6 +185,8 @@ export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
 export const PROJECT_TYPE_TAG = "Service";
 /** Customer_Type__c (multi-select, 2026-09-19): the department tag the service module sets / adds — same value, second field. */
 export const CUSTOMER_TYPE_FIELD = "Customer_Type__c";
+// The lead source on a customer the Service module creates (2026-10-16): the org's picklist.
+export const LEAD_SOURCE_FIELD = "Lead_Source__c";
 // D-075: the Service module's own pipeline on the customer (docs/service-customer-layout.md).
 export const SERVICE_STAGE_FIELD = "Service_Stage__c";
 /** Archived__c (2026-10-02): off every Service list by default; a reuse of the customer clears it. */
@@ -253,8 +259,19 @@ function s3() {
 
 /** The customer email for an estimate send: what the customer record says today. */
 const CUSTOMER_EMAIL_SELECT = "Id, Primary_Email__c, Name";
+// The send box's records (lib/send-to.js) double as the document's payer (the "Bill to" block
+// needs the address and the "Attn:" contact), so one read serves both.
+const RECIPIENT_RECORD_SELECT = `${BILL_TO_CUSTOMER_SELECT}, Primary_Email__c, Primary_Phone__c`;
 
 /** Plain, deliverable email — the link is the point; the document lives on the page. */
+/** The text that carries the estimate link (D-072 amendment 12) — one short SMS. */
+export function buildEstimateText({ est, total, url, brandName }) {
+  const number = est?.Name || "your estimate";
+  const who = brandName ? ` from ${brandName}` : "";
+  const money = Number.isFinite(Number(total)) && total !== null ? ` (${Number(total).toLocaleString("en-US", { style: "currency", currency: "USD" })})` : "";
+  return `Your estimate ${number}${who}${money} is ready to view and approve: ${url}`.slice(0, 1600);
+}
+
 export function buildEstimateEmail({ est, total, url, brandName, validUntil, cardOnFile = false }) {
   const number = est.Name || "Estimate";
   const who = brandName ? ` from ${brandName}` : "";
@@ -321,6 +338,17 @@ const ESTIMATE_PATCHABLE = Object.freeze({
   originatingCommercialId: ["Originating_Commercial_Project__c", strOrNull],
 });
 
+// The estimate's Bill To (D-081 amendment 2) is not a plain field: billToType /
+// billToCustomerId go through lib/bill-to.js resolveBillTo (estimateBillTo), so the generic
+// translate never sees them and never lists them as rejected.
+const ESTIMATE_BILL_TO_KEYS = ["billToType", "billToCustomerId"];
+function withoutBillToKeys(body) {
+  if (!body || typeof body !== "object") return body;
+  const out = { ...body };
+  for (const k of [...ESTIMATE_BILL_TO_KEYS, "billToName"]) delete out[k];
+  return out;
+}
+
 const JOB_CREATE_FIELDS = Object.freeze({
   issueDescription: ["Issue_Description__c", strOrNull],
   priority: ["Priority__c", (v) => v],
@@ -371,6 +399,13 @@ function bad(cors, code, message, extra = {}) {
 }
 function notFound(cors) {
   return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
+}
+/** The price-book cost rule (lib/cost-gate.js) for this caller: blank cost keys dropped, a value refused. */
+function itemCostGate(ctx, body) {
+  return costWriteGate("pricebookitem", body, ctx?.can ? ctx.can(COSTING_WRITE) === true : false);
+}
+function costForbidden(cors, gate) {
+  return jsonResponse(403, cors, { error: "forbidden", code: gate.code, message: gate.message, fields: gate.fields });
 }
 function sfError(cors, err, where) {
   console.error(`service-estimate ${where}:`, err?.sfStatus, err?.sfBody || err?.message || err);
@@ -880,6 +915,20 @@ export function createHandler(deps = {}) {
         return { ok: false, response: bad(cors, "CUSTOMER_INVALID", "New customer needs a name (a company name for a company) and an email or phone.", { missing: norm.missing }) };
       }
       const c = norm.value;
+      // Lead Source (2026-10-16, Harmon): the org's own picklist, matched case-insensitively
+      // and written in the org's spelling. An unknown value is a 400 that lists nothing (the
+      // picklist is ~240 values; the portal reads them from GET /sf/meta/customer/picklists).
+      // Checked before the duplicate guard so a bad value never reaches a create.
+      let leadSource = null;
+      const rawLead = typeof spec.new.leadSource === "string" ? spec.new.leadSource.trim() : "";
+      if (rawLead) {
+        const values = await picklistValues(CUSTOMER_SF_OBJECT, LEAD_SOURCE_FIELD);
+        if (!values) warnings.push(`${LEAD_SOURCE_FIELD} could not be read from the org — the lead source was not saved.`);
+        else {
+          leadSource = matchPicklist(rawLead, values);
+          if (!leadSource) return { ok: false, response: bad(cors, "LEAD_SOURCE_INVALID", `"${rawLead.slice(0, 80)}" is not a Lead Source value.`) };
+        }
+      }
       // Soft duplicate guard — unless the office already looked and said "create anyway".
       if (spec.confirmNew !== true) {
         const soql = candidateSoql(tenantId, c);
@@ -909,6 +958,7 @@ export function createHandler(deps = {}) {
       fields.Client__c = tenantId;
       for (const t of tags) fields[t.field] = t.tag;
       Object.assign(fields, intake);
+      if (leadSource) fields[LEAD_SOURCE_FIELD] = leadSource;
       let created;
       try {
         created = await d.sfCreateRecord(CUSTOMER_SF_OBJECT, fields);
@@ -954,8 +1004,8 @@ export function createHandler(deps = {}) {
   }
 
   // --- estimate creation core (shared by createEstimate / createJob) ---------------
-  async function createEstimateRecord({ customer, body, tenantId, userId }) {
-    const { fields: extra, rejected } = translate(body?.estimate || {}, ESTIMATE_PATCHABLE);
+  async function createEstimateRecord({ customer, body, tenantId, userId, billTo = null }) {
+    const { fields: extra, rejected } = translate(withoutBillToKeys(body?.estimate || {}), ESTIMATE_PATCHABLE);
     const isTemplate = body?.isTemplate === true;
     const fields = {
       Client__c: tenantId,
@@ -981,6 +1031,8 @@ export function createHandler(deps = {}) {
       }
     }
     if (fields.Sold_By__c === undefined && body?.soldBySelf === true && userId) fields.Sold_By__c = userId;
+    // Who pays (D-081 amendment 2): decided by resolveBillTo BEFORE anything was created.
+    if (!isTemplate && billTo?.fields) Object.assign(fields, billTo.fields);
     for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
     const created = await d.sfCreateRecord(ESTIMATE_SF_OBJECT, fields);
     return { id: created.id, fields, rejected };
@@ -1116,6 +1168,10 @@ export function createHandler(deps = {}) {
       let warnings = [];
       let customerEvents = [];
       let resolved = null;
+      // Bill To first (D-081 amendment 2): a missing / unknown payer refuses before the
+      // customer exists, as on New Job.
+      const billTo = body?.isTemplate === true ? null : await estimateBillTo(body?.estimate, null, tenantId);
+      if (billTo && !billTo.ok) return billToRefused(cors, billTo);
       if (body?.isTemplate !== true) {
         const r = await resolveCustomer(body, ctx, cors);
         if (!r.ok) return r.response;
@@ -1126,7 +1182,7 @@ export function createHandler(deps = {}) {
       }
       let est;
       try {
-        est = await createEstimateRecord({ customer, body, tenantId, userId });
+        est = await createEstimateRecord({ customer, body, tenantId, userId, billTo });
       } catch (e) {
         const resp = sfError(cors, e, "estimate create");
         if (customerCreated) resp.body = JSON.stringify({ ...JSON.parse(resp.body), customerCreated: true, customerId: customer.Id });
@@ -1165,7 +1221,10 @@ export function createHandler(deps = {}) {
       if (!est) return notFound(cors);
       const lines = await loadLines(est.Id, tenantId);
       const totals = await estimateTotals(est, lines, { tenantId });
-      return jsonResponse(200, cors, { estimate: est, lines, totals, taxZone: totals.tax });
+      // What a line COSTS is Admin / Executive only (lib/cost-gate.js); the sell price stays.
+      const seesCost = ctx.can ? ctx.can(COSTING_READ) === true : false;
+      const shown = seesCost ? lines : lines.map((l) => stripCost("serviceline", l));
+      return jsonResponse(200, cors, { estimate: est, lines: shown, totals, taxZone: totals.tax, ...(await estimateReadExtras(est, tenantId)) });
     },
 
     async patchEstimate({ ctx, params, body }) {
@@ -1173,7 +1232,12 @@ export function createHandler(deps = {}) {
       const est = await loadEstimate(params[0], tenantId);
       if (!est) return notFound(cors);
       if (est.Status__c === "Invoiced") return jsonResponse(409, cors, { error: "locked", code: "ESTIMATE_INVOICED" });
-      const { fields, rejected } = translate(body, ESTIMATE_PATCHABLE);
+      const { fields, rejected } = translate(withoutBillToKeys(body), ESTIMATE_PATCHABLE);
+      // Who pays (D-081 amendment 2): the same resolveBillTo as the job; billToName is derived, never accepted.
+      if (body && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "billToName")) rejected.push("billToName");
+      const billTo = await estimateBillTo(body, est, tenantId);
+      if (!billTo.ok) return billToRefused(cors, billTo);
+      Object.assign(fields, billTo.fields);
       if (!Object.keys(fields).length) return bad(cors, "NO_FIELDS", "Nothing to update.", { rejectedFields: rejected });
       try {
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, fields);
@@ -1363,10 +1427,20 @@ export function createHandler(deps = {}) {
       if (!est) return notFound(cors);
       if (est.Is_Template__c === true) return bad(cors, "TEMPLATE_NOT_SENDABLE", "Templates are never sent.");
       if (est.Status__c === "Invoiced") return jsonResponse(409, cors, { error: "locked", code: "ESTIMATE_INVOICED" });
+      const via = viaFrom(body, { allowManual: true });
+      // Who it goes to (lib/send-to.js, D-072 amendment 12): the box, else the payer, else the
+      // customer — decided BEFORE the version is recorded, so a send that cannot reach anyone
+      // is a 400 and changes nothing.
+      const recs = await recipientRecords({ payerId: estimatePayerId(est), customerId: est.Sundial_Customer__c, tenantId });
+      let recipients = { email: null, phone: null };
+      if (via !== "Manual") {
+        const r = resolveRecipients({ via, to: body?.to, toPhone: body?.toPhone, ...recs, snapshot: estimateSnapshot(est) });
+        if (!r.ok) return jsonResponse(r.status, cors, { error: "bad_request", code: r.code, message: r.message, ...(r.missing ? { missing: r.missing } : {}), ...(r.invalid ? { invalid: r.invalid } : {}) });
+        recipients = { email: r.email, phone: r.phone };
+      }
       const { totals, lines } = await recomputeAndStore(est, tenantId);
       const now = d.now();
       const version = (Number(est.Version__c) || 0) + 1;
-      const via = ["Email", "SMS", "Both", "Manual"].includes(body?.via) ? body.via : "Email";
       const validDays = Number(body?.validDays) > 0 ? Number(body.validDays) : DEFAULTS.validDays;
       const validUntil = new Date(now.getTime() + validDays * 86400000);
       const tokenExpires = new Date(now.getTime() + Math.max(validDays, DEFAULTS.publicTokenDays) * 86400000);
@@ -1394,7 +1468,7 @@ export function createHandler(deps = {}) {
       let pdfKey = null;
       let pdfError = null;
       try {
-        const model = buildEstimateModel({ estimate: docEstimate, lines, totals, brand, options: { mode: "customer", acceptUrl: url || undefined } });
+        const model = buildEstimateModel({ estimate: docEstimate, lines, totals, brand, payer: recs.payer, options: { mode: "customer", acceptUrl: url || undefined } });
         pdfBytes = await d.renderPdf(model);
         const key = estimatePdfKey(est.Id, version);
         await d.putObject({ key, body: pdfBytes, contentType: "application/pdf" });
@@ -1464,52 +1538,55 @@ export function createHandler(deps = {}) {
         }
       }
 
-      // Delivery. Email now (SES, lib/email.js); SMS when Twilio lands — until then an
-      // SMS/Both send is recorded and the office texts the link by hand. Every failure
-      // mode is reported, never silent: the version is already recorded either way.
+      // Delivery: email (SES, lib/email.js) and / or a text (lib/sms-send.js, the job's
+      // conversation — D-072 amendment 12). `Both` sends both; one failing is reported in
+      // deliveryDetail and never undoes the other. The version is recorded either way.
       let delivery = "recorded";
-      let deliveryDetail = null;
+      const detail = [];
       let recipient = null;
-      if (via === "Email" || via === "Both") {
-        if (!url) deliveryDetail = noPublicUrlDetail(ctx);
-        else if (!d.isEmailConfigured()) deliveryDetail = "EMAIL_FROM is not set on this Lambda (SES not wired).";
+      let textedTo = null;
+      if (needsEmail(via)) {
+        if (!url) detail.push(noPublicUrlDetail(ctx));
+        else if (!d.isEmailConfigured()) detail.push("EMAIL_FROM is not set on this Lambda (SES not wired).");
         else {
-          let email = strOrNull(body?.to);
-          if (!email && est.Sundial_Customer__c) {
-            const cust = await d.sfQuery(
-              `SELECT ${CUSTOMER_EMAIL_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Sundial_Customer__c)}' ` +
-                `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
-            );
-            email = strOrNull(cust?.[0]?.Primary_Email__c) || strOrNull(est.Primary_Email_at_Creation__c);
+          const email = recipients.email; // resolved above; a send with no email never got this far
+          // The card line is left out once a card is on file for the estimate's job (amendment 11).
+          let cardOnFile = false;
+          if (est.Service_Job__c) {
+            const jobRows = await d.sfQuery(`SELECT Id, Customer_Card_on_File__c FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Service_Job__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`).catch(() => []);
+            cardOnFile = jobRows?.[0]?.Customer_Card_on_File__c === true;
           }
-          if (!email) deliveryDetail = "The customer has no email address on file.";
-          else {
-            // The card line is left out once a card is on file for the estimate's job (amendment 11).
-            let cardOnFile = false;
-            if (est.Service_Job__c) {
-              const jobRows = await d.sfQuery(`SELECT Id, Customer_Card_on_File__c FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Service_Job__c)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`).catch(() => []);
-              cardOnFile = jobRows?.[0]?.Customer_Card_on_File__c === true;
-            }
-            const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut, cardOnFile });
-            const attachments = pdfBytes
-              ? [{ fileName: `${est.Name || "estimate"}-v${version}.pdf`, contentType: "application/pdf", content: pdfBytes }]
-              : [];
-            const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
-            if (sent.ok) {
-              delivery = "email";
-              recipient = email;
-            } else deliveryDetail = `Email failed: ${sent.error}`;
-          }
+          const msg = buildEstimateEmail({ est, total: totals.total, url, brandName: brand.companyName, validUntil: validUntilOut, cardOnFile });
+          const attachments = pdfBytes
+            ? [{ fileName: `${est.Name || "estimate"}-v${version}.pdf`, contentType: "application/pdf", content: pdfBytes }]
+            : [];
+          const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
+          if (sent.ok) {
+            delivery = "email";
+            recipient = email;
+          } else detail.push(`Email failed: ${sent.error}`);
         }
       }
-      if (via === "SMS" || via === "Both") {
-        deliveryDetail = [deliveryDetail, "SMS is not live yet — text the link by hand."].filter(Boolean).join(" ");
+      if (needsPhone(via)) {
+        if (!url) {
+          if (!needsEmail(via)) detail.push(noPublicUrlDetail(ctx));
+        } else if (!d.sms) detail.push("Texting is not wired on this Lambda.");
+        else {
+          // The job's conversation when there is a job; before one, the text is kept against
+          // the customer (it joins no thread until a job exists).
+          const threadJob = { Id: est.Service_Job__c ?? null, Sundial_Customer__c: est.Sundial_Customer__c ?? null, Primary_Phone_at_Creation__c: est.Primary_Phone_at_Creation__c ?? null };
+          const r = await d.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job: threadJob, to: recipients.phone, body: buildEstimateText({ est, total: totals.total, url, brandName: brand.companyName }), sentBy: { id: ctx.userId ?? null, name: ctx.actor?.name ?? null } });
+          if (r.ok) {
+            textedTo = r.to ?? recipients.phone;
+            delivery = delivery === "email" ? "both" : "sms";
+          } else detail.push(r.code === "NO_PHONE" ? "There is no mobile number to text." : `Text failed: ${r.error || r.code}`);
+        }
       }
-      if (pdfError) {
-        deliveryDetail = [deliveryDetail, "The PDF could not be generated for this version (the link still works)."].filter(Boolean).join(" ");
-      }
+      if (pdfError) detail.push("The PDF could not be generated for this version (the link still works).");
+      const deliveryDetail = detail.filter(Boolean).join(" ") || null;
+      const used = { email: recipient, phone: textedTo };
 
-      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length, pdfKey } });
+      await act(ctx, { event: EVENTS.ESTIMATE_SENT, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { version, via, delivery, recipient, textedTo, recipients: used, deliveryDetail, total: totals.total, validUntil: validUntilOut, lineCount: entry.lines.length, pdfKey } });
       return jsonResponse(200, cors, {
         success: true,
         id: est.Id,
@@ -1520,8 +1597,10 @@ export function createHandler(deps = {}) {
         validUntil: validUntilOut,
         pdfKey,
         pdfUrl: pdfKey ? publicUrlForKey(pdfKey) : null,
-        delivery, // "email" (sent) | "recorded" (version bumped, nothing went out — see deliveryDetail)
+        delivery, // "email" | "sms" | "both" (what went out) | "recorded" (version bumped, nothing went out — see deliveryDetail)
         recipient,
+        textedTo,
+        recipients: used, // what was actually used: { email, phone } (null = not sent that way)
         deliveryDetail,
       });
     },
@@ -1585,7 +1664,11 @@ export function createHandler(deps = {}) {
       }
       const customer = await loadCustomer(est.Sundial_Customer__c, tenantId);
       if (!customer) return bad(cors, "ESTIMATE_NO_CUSTOMER", "The estimate has no customer; set one before creating a job.");
-      const billTo = await jobBillTo(body?.job, tenantId);
+      // Who pays (D-081 amendment 2): the request's Bill To when it names one, else the
+      // estimate's — copied at creation; after that the two are independent.
+      const namesBillTo = body?.job && ["billToType", "billToCustomerId"].some((k) => Object.prototype.hasOwnProperty.call(body.job, k));
+      const inherited = est.Bill_To_Type__c ? { billToType: est.Bill_To_Type__c, billToCustomerId: est.Bill_To_Customer__c ?? null } : {};
+      const billTo = await jobBillTo(namesBillTo ? body.job : inherited, tenantId);
       if (!billTo.ok) return billToRefused(cors, billTo);
       let job;
       try {
@@ -1696,7 +1779,8 @@ export function createHandler(deps = {}) {
       const { customer, created: customerCreated, warnings, events: customerEvents } = r;
       let est;
       try {
-        est = await createEstimateRecord({ customer, body, tenantId, userId });
+        // Created together = the same payer (D-081 amendment 2): the estimate takes the job's Bill To.
+        est = await createEstimateRecord({ customer, body, tenantId, userId, billTo });
       } catch (e) {
         const resp = sfError(cors, e, "estimate create");
         if (customerCreated) resp.body = JSON.stringify({ ...JSON.parse(resp.body), customerCreated: true, customerId: customer.Id });
@@ -1751,9 +1835,14 @@ export function createHandler(deps = {}) {
     },
 
     // --- price book ------------------------------------------------------------------
+    // What an item COSTS (laborCost / materialCost) is Admin / Executive only
+    // (lib/cost-gate.js, 2026-10-16): from anyone else a BLANK cost key is "not sent" and
+    // dropped — today's portal sends both on every save — and a non-blank one is a 403.
     async createItem({ ctx, body }) {
       const { tenantId, cors } = ctx;
-      const { fields, rejected, problems } = itemFieldsFromBody(body, { requireAll: true });
+      const gate = itemCostGate(ctx, body);
+      if (!gate.ok) return costForbidden(cors, gate);
+      const { fields, rejected, problems } = itemFieldsFromBody(gate.fields, { requireAll: true });
       if (problems.length) return bad(cors, "ITEM_INVALID", problems.join("; "), { rejectedFields: rejected });
       const clash = await d.sfQuery(
         `SELECT Id, Version__c FROM ${ITEM_SF_OBJECT} WHERE Item_Code__c = '${soqlEscapeString(fields.Item_Code__c)}' ` +
@@ -1781,7 +1870,9 @@ export function createHandler(deps = {}) {
       const { tenantId, cors } = ctx;
       const item = await loadItem(params[0], tenantId);
       if (!item) return notFound(cors);
-      const { fields, rejected, problems } = itemFieldsFromBody(body);
+      const gate = itemCostGate(ctx, body);
+      if (!gate.ok) return costForbidden(cors, gate);
+      const { fields, rejected, problems } = itemFieldsFromBody(gate.fields);
       if (problems.length) return bad(cors, "ITEM_INVALID", problems.join("; "));
       delete fields.Item_Code__c; // the code never changes on an existing version
       if (!Object.keys(fields).length) return bad(cors, "NO_FIELDS", "Nothing to update.", { rejectedFields: rejected });
@@ -1812,7 +1903,9 @@ export function createHandler(deps = {}) {
       if (item.Is_Active__c !== true) {
         return jsonResponse(409, cors, { error: "not_active", code: "ITEM_NOT_ACTIVE", message: "Only the active version can be updated.", supersededBy: item.Superseded_By__c ?? null });
       }
-      const { fields: edits, rejected, problems } = itemFieldsFromBody(body);
+      const gate = itemCostGate(ctx, body);
+      if (!gate.ok) return costForbidden(cors, gate);
+      const { fields: edits, rejected, problems } = itemFieldsFromBody(gate.fields);
       if (problems.length) return bad(cors, "ITEM_INVALID", problems.join("; "));
       delete edits.Item_Code__c;
       const fields = newVersionFields(item, edits, tenantId);
@@ -1916,7 +2009,8 @@ export function createHandler(deps = {}) {
       // Brand block: per-tenant config when that surface lands (service-workflows.md
       // §12). Until then the document renders with the tenant slug as the name so the
       // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.
-      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand: brandFor(ctx), options: { mode: "preview" } });
+      const { payer } = await recipientRecords({ payerId: estimatePayerId(est), tenantId }); // the "Bill to" block (D-081 amendment 2)
+      const { html, title } = renderEstimateDocument({ estimate: est, lines, totals, brand: brandFor(ctx), payer, options: { mode: "preview" } });
       return jsonResponse(200, cors, { html, title, version: Number(est.Version__c) || 0 });
     },
 
@@ -2032,6 +2126,53 @@ export function createHandler(deps = {}) {
     }
     return strOrNull(job?.Primary_Email_at_Creation__c);
   }
+
+  /**
+   * The two records the send box reads (lib/send-to.js): the payer (only when someone other
+   * than the homeowner pays) and the document's own customer, tenant-scoped, in one query.
+   * Best-effort: a failed read falls back to the snapshot fields.
+   */
+  async function recipientRecords({ payerId = null, customerId = null, tenantId }) {
+    const ids = [payerId, customerId].filter((x) => SF_ID_RE.test(x || ""));
+    let rows = [];
+    if (ids.length) {
+      try {
+        rows = await d.sfQuery(
+          `SELECT ${RECIPIENT_RECORD_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id IN (${[...new Set(ids)].map((x) => `'${soqlEscapeString(x)}'`).join(", ")}) ` +
+            `AND Client__c = '${soqlEscapeString(tenantId)}'`
+        );
+      } catch (e) {
+        console.error("send-to: recipient read failed:", e?.sfBody || e?.message || e);
+      }
+    }
+    // Exact id; a 15-character id (Salesforce's case-sensitive short form) matches its 18-character record.
+    const byId = (id) => (rows || []).find((r) => id && r.Id && (r.Id === id || (String(id).length === 15 && r.Id.slice(0, 15) === id))) || null;
+    return { payer: payerId ? byId(payerId) : null, customer: byId(customerId) };
+  }
+  /** An estimate's payer id: its Bill_To_Customer__c when someone other than the homeowner pays. */
+  const estimatePayerId = (est) => (est?.Bill_To_Type__c && est.Bill_To_Type__c !== BILL_TO_SELF ? est.Bill_To_Customer__c || null : null);
+  const estimateSnapshot = (est) => ({ email: est?.Primary_Email_at_Creation__c, phone: est?.Primary_Phone_at_Creation__c, name: est?.Customer_Name_at_Creation__c });
+  /** What GET /service/estimates/{id} adds (D-081 amendment 2 + D-072 amendment 12): who pays, and the send box's prefill. */
+  async function estimateReadExtras(est, tenantId) {
+    const billTo = { type: est.Bill_To_Type__c || BILL_TO_SELF, customerId: est.Bill_To_Customer__c ?? null, name: est.Bill_To_Name__c ?? null };
+    if (est.Is_Template__c === true) return { billTo, sendDefaults: null };
+    const recs = await recipientRecords({ payerId: estimatePayerId(est), customerId: est.Sundial_Customer__c, tenantId });
+    return { billTo, sendDefaults: sendDefaults({ ...recs, snapshot: estimateSnapshot(est) }) };
+  }
+  /**
+   * The Bill To fields for an estimate write (D-081 amendment 2): the job's rule, the same
+   * resolveBillTo — type says what kind, the customer says who, the name is derived.
+   * `src` holds billToType / billToCustomerId (either may be absent = not touched).
+   */
+  async function estimateBillTo(src, before, tenantId) {
+    const has = (k) => src && Object.prototype.hasOwnProperty.call(src, k);
+    return resolveBillTo({
+      type: has("billToType") ? strOrNull(src.billToType) ?? "" : undefined,
+      customerId: has("billToCustomerId") ? src.billToCustomerId : undefined,
+      before,
+      loadCustomer: billToCustomerLoader({ sfQuery: d.sfQuery, soqlEscapeString, tenantId }),
+    });
+  }
   // Money: one core (loaders + settleMoney) shared by the invoice routes and Stripe.
   const money = createMoneyCore(d, { act, markStale, CACHE, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken });
   // The Service Club (D-073): public join / truck roll / request, the office's memberships,
@@ -2039,7 +2180,7 @@ export function createHandler(deps = {}) {
   const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, estimateTotals, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
   const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken, portalBaseUrl: (ctx) => publicBaseFor(ctx) });
-  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, estimateTotals, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, chargeInvoice: stripeH.chargeInvoice }));
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, estimateTotals, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, recipientRecords, money, chargeInvoice: stripeH.chargeInvoice }));
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
   H.jobCard = stripeH.jobCard;
@@ -2071,9 +2212,9 @@ export function createHandler(deps = {}) {
     unlockEstimate: "service.estimate.write", // whoever may edit the estimate may reopen it; the invoice is not touched
     invoiceReport: "service.estimate.write", // a read, like getInvoice
     issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
-    chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is an Admin's action, everywhere
+    chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is a level-gated action, everywhere
     jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",
-    jobCharge: "service.card.charge", // Admin / Executive (lib/access.js ACTION_LEVELS)
+    jobCharge: "service.card.charge", // Admin / Executive / Manager (lib/access.js ACTION_LEVELS; Managers since 2026-10-16)
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     getCosting: "service.costing.read", setDefaultCostRate: "service.costing.write", listRates: "service.costing.read",
     getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", prepareReport: "service.estimate.send", sendReport: "service.estimate.send",

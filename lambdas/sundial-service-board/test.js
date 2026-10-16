@@ -379,6 +379,31 @@ test("GET /service/board: customerEmail on tray jobs, calls and unscheduled call
   assert.equal(callToBoard({ Id: "X", Visit_Type__c: "Event", Event_Name__c: "Training" }).customerEmail, null);
 });
 
+test("GET /service/board (2026-10-16): every call and unscheduled call carries jobId and the job's remoteDiagnosis — null when blank, null for an event", async () => {
+  const w = fakeWorld();
+  w.store.Sundial_Service_Job__c.find((j) => j.Id === "SVC000000000000001").Initial_Remote_Diagnosis__c = "Inverter offline since 9/12 — likely the AC breaker.";
+  w.store.Sundial_Service_Call__c.push({ Id: "SC0000000000000078", Client__c: TENANT, Name: "SC-00078", Visit_Type__c: "Service", Sundial_Service_Job__c: "SVC000000000000001", Status__c: "Unscheduled", SystemModstamp: "2026-09-12T10:00:00Z", CreatedDate: "2026-09-12T10:00:00Z" });
+  const h = makeHandler(w);
+  const r = await call(h, "GET", "/service/board", null, { from: "2026-09-14T07:00:00.000Z", to: "2026-09-15T07:00:00.000Z" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const u = r.body.unscheduledCalls.find((c) => c.number === "SC-00078");
+  assert.equal(u.jobId, "SVC000000000000001");
+  assert.equal(u.remoteDiagnosis, "Inverter offline since 9/12 — likely the AC breaker.");
+  assert.ok(r.body.calls.length > 0);
+  for (const c of [...r.body.calls, ...r.body.unscheduledCalls]) {
+    assert.ok("jobId" in c && "remoteDiagnosis" in c, `${c.number} carries both keys`);
+    assert.notEqual(c.remoteDiagnosis, undefined);
+  }
+  for (const c of r.body.calls) {
+    const job = w.store.Sundial_Service_Job__c.find((j) => j.Id === c.jobId);
+    assert.equal(c.remoteDiagnosis, c.isEvent ? null : job?.Initial_Remote_Diagnosis__c ?? null, `${c.number}: the job's own diagnosis, null when blank`);
+  }
+  assert.ok(w.calls.queries.some((q) => q.includes("Sundial_Service_Job__r.Initial_Remote_Diagnosis__c")));
+  // Null-safe with no job at all, and an event never shows one.
+  assert.equal(callToBoard({ Id: "X" }).remoteDiagnosis, null);
+  assert.equal(callToBoard({ Id: "X", Visit_Type__c: "Event", Event_Name__c: "Training", Sundial_Service_Job__r: { Initial_Remote_Diagnosis__c: "x" } }).remoteDiagnosis, null);
+});
+
 test("PATCH /service/calls/{id}: `end` alone resizes (start + tech untouched); end <= start is a 400; times snap to 15 minutes", async () => {
   const w = fakeWorld();
   const h = makeHandler(w);

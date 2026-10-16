@@ -281,6 +281,7 @@ const LIST_PROJECTION_SOURCES = {
       "sf_id", "is_template", "status", "archived", "created_date", "name", "template_name",
       "customer_name_at_creation", "version", "total", "service_job_sf_id", "last_sent_at", "valid_until",
     ],
+    "D-081 amendment 2: who pays the estimate (harmon-crm Prompt B)": ["bill_to_type", "bill_to_customer_sf_id", "bill_to_name"],
   },
   serviceinvoice: {
     "pages/service/ServiceInvoicesPage.tsx": [

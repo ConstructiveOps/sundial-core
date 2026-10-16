@@ -110,7 +110,10 @@ export const CALL_SELECT =
   "Sundial_Service_Job__r.Primary_Email_at_Creation__c, Sundial_Service_Job__r.Sundial_Customer__r.Primary_Email__c, " +
   "Sundial_Service_Job__r.Bill_To_Type__c, Sundial_Service_Job__r.Sundial_Customer__c, " +
   // The hover card + the invoice border on the dispatch board (2026-09-23).
-  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Payment_Status__c";
+  "Sundial_Service_Job__r.Issue_Description__c, Sundial_Service_Job__r.Payment_Status__c, " +
+  // The office's remote diagnosis on the card (2026-10-16): read here, saved through the
+  // job's own write (PATCH /sf/job/{id}), as the job page does — no board write route.
+  "Sundial_Service_Job__r.Initial_Remote_Diagnosis__c";
 
 export const INVOICE_SF_OBJECT = "Sundial_Service_Invoice__c";
 
@@ -195,6 +198,7 @@ export function callToBoard(c, invoiceByJob = null) {
     phone: job.Primary_Phone_at_Creation__c ?? null,
     customerEmail: event ? null : jobEmail(job),
     issueDescription: event ? c.Event_Details__c ?? null : job.Issue_Description__c ?? null,
+    remoteDiagnosis: event ? null : job.Initial_Remote_Diagnosis__c ?? null,
     paymentStatus: job.Payment_Status__c ?? null,
     invoiceStatus,
     invoiceState: invoiceStateFor({ jobStatus: job.Status__c ?? null, paymentStatus: job.Payment_Status__c ?? null, invoiceStatus }),

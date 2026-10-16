@@ -86,7 +86,9 @@ export const TECH_CALL_EXTRA =
   // Issue_Description__c is NOT repeated here: it joined the board's CALL_SELECT on 2026-09-23 (the hover
   // card) and Salesforce refuses a query that names a field twice — every tech-day request 500'd for
   // two days (2026-09-25). tech.test.js now asserts the combined list has no duplicates.
-  "Sundial_Service_Job__r.Initial_Remote_Diagnosis__c, Sundial_Service_Job__r.Estimate__c, " + // Primary_Email_at_Creation__c: in CALL_SELECT since 2026-10-09
+  // Primary_Email_at_Creation__c (2026-10-09) and Initial_Remote_Diagnosis__c (2026-10-16, the
+  // board's card) are in CALL_SELECT — not repeated here, for the same reason.
+  "Sundial_Service_Job__r.Estimate__c, " +
   "Sundial_Service_Job__r.Geocode_Lat__c, Sundial_Service_Job__r.Geocode_Lon__c, Sundial_Service_Job__r.Geocode_Status__c, Sundial_Service_Job__r.Street_View_Image_Key__c";
 
 /** The job's cached Street View still as a URL, or null (none yet / Google had no imagery). */

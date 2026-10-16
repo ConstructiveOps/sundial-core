@@ -106,11 +106,14 @@ const SF_API_VERSION = "v60.0";
 import { resolveMode, MODES } from "../sundial-sf-query/shadow.js";
 import {
   canReadObject,
+  canAction,
   rowFilter,
   OBJECT_ACCESS,
   DENY,
   escapeSoqlValue,
 } from "../../lib/access.js";
+// What a price-book item or a line COSTS is Admin / Executive only (2026-10-16).
+import { costWriteGate, COSTING_WRITE } from "../../lib/cost-gate.js";
 import { fieldsFor } from "../../lib/field-manifest/index.js";
 // Service module activity tracker (D-072 amendment 2): a PATCH/POST on a service object
 // through this generic route is logged like every write the estimate Lambda makes, so a
@@ -1170,6 +1173,21 @@ export const handler = async (event) => {
       isCreate: method === "POST",
     });
     if (gated) return gated;
+
+    // COST (2026-10-16, lib/cost-gate.js): Labor_Cost__c / Material_Cost__c on an item and
+    // Unit_Labor_Cost__c / Unit_Material_Cost__c on a line, from someone without
+    // service.costing.write — blank = not sent (dropped, the stored cost untouched), a
+    // value = 403 COSTING_FORBIDDEN. Always on, whatever ACCESS_MODEL_MODE says: it is a
+    // level gate like payroll, decided on the caller's real access.
+    const costGate = costWriteGate(objectKey, body.fields, canAction(COSTING_WRITE, identity.access ?? null));
+    if (!costGate.ok) {
+      return jsonResponse(403, cors, { error: "forbidden", code: costGate.code, message: costGate.message, fields: costGate.fields });
+    }
+    if (costGate.dropped.length && !Object.keys(costGate.fields).length) {
+      // Only blank cost keys arrived: nothing to write, and nothing was refused.
+      return jsonResponse(200, cors, { success: true, id: id ?? null, unchanged: true, ignoredFields: costGate.dropped });
+    }
+    body.fields = costGate.fields;
 
     // Describe is the authority for field-write safety (cached per object).
     const describe = await getRawDescribe(entry.sfObject);

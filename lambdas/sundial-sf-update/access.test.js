@@ -120,6 +120,10 @@ const DESCRIBE_FIELDS = [
   { name: "Is_Company__c", updateable: true, createable: true },
   { name: "Company_Name__c", updateable: true, createable: true },
   { name: "Name", updateable: true, createable: true },
+  // 2026-10-16: what a price-book item / a line costs (lib/cost-gate.js).
+  { name: "Labor_Cost__c", updateable: true, createable: true },
+  { name: "Material_Cost__c", updateable: true, createable: true },
+  { name: "Unit_Material_Cost__c", updateable: true, createable: true },
 ];
 
 globalThis.fetch = async (url, init) => {
@@ -649,4 +653,42 @@ test("D-083: a job PATCH naming the tax zone is refused — the zone has one wri
   assert.equal(r.status, 400);
   assert.equal(r.body.code, "TAX_ZONE_READ_ONLY");
   assert.equal(jobTaxZoneRefusal({ Tax_Zone_Label__c: "Phoenix" }).body.field, "Tax_Zone_Label__c");
+});
+
+// ---------------------------------------------------------------------------
+// 2026-10-16: cost is Admin / Executive (lib/cost-gate.js) — on the generic route too
+// ---------------------------------------------------------------------------
+const ITEM_1 = "a1R000000000001AAA";
+
+test("cost on the generic route: a Manager's BLANK cost key is not sent (the rest saves), a value is 403 COSTING_FORBIDDEN; an Admin writes it", async () => {
+  ctx.identity = identityFor("Manager", { userId: REP_A, dealer: null });
+  ctx.soqlRows = [{ Id: ITEM_1 }];
+  let res = await handler(patchEvent("pricebookitem", ITEM_1, { Name: "Disconnect 60A", Labor_Cost__c: "", Material_Cost__c: null }));
+  assert.equal(res.statusCode, 200, res.body);
+  const w = ctx.writes.find((x) => x.method === "PATCH");
+  assert.deepEqual(w.body, { Name: "Disconnect 60A" }, "only the non-cost field reached Salesforce");
+
+  // Only blank cost keys: nothing to write, nothing refused.
+  ctx.writes = [];
+  res = await handler(patchEvent("pricebookitem", ITEM_1, { Labor_Cost__c: "" }));
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).unchanged, true);
+  assert.equal(ctx.writes.length, 0);
+
+  // A value: refused, nothing written. On a line too.
+  res = await handler(patchEvent("pricebookitem", ITEM_1, { Name: "X", Labor_Cost__c: 12 }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(JSON.parse(res.body).code, "COSTING_FORBIDDEN");
+  assert.deepEqual(JSON.parse(res.body).fields, ["Labor_Cost__c"]);
+  res = await handler(patchEvent("serviceline", ITEM_1, { Unit_Material_Cost__c: 3 }));
+  assert.equal(res.statusCode, 403);
+  res = await handler(postEvent("pricebookitem", { Name: "Fuse", Material_Cost__c: 3 }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(ctx.writes.length, 0);
+
+  // An Admin writes cost.
+  ctx.identity = identityFor("Admin", { userId: REP_A, dealer: null });
+  res = await handler(patchEvent("pricebookitem", ITEM_1, { Labor_Cost__c: 12 }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.writes.find((x) => x.method === "PATCH").body, { Labor_Cost__c: 12 });
 });

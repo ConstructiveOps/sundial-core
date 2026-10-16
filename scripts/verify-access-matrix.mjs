@@ -55,6 +55,7 @@ const USERS = [
   { slug: "tech", accessLevel: "Technician", futureScope: "none" },
   { slug: "admin", accessLevel: "Admin", futureScope: "tenant" },
   { slug: "exec", accessLevel: "Executive", futureScope: "tenant" },
+  { slug: "manager", accessLevel: "Manager", futureScope: "tenant" }, // the office Manager (2026-10-16)
 ];
 
 /**

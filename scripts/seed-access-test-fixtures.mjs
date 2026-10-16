@@ -109,6 +109,11 @@ export const TEST_USERS = [
   { slug: "admin", first: "ZZ Admin", last: "One", accessLevel: "Admin",
     note: "Super_Admin__c is NOT set here — D-043 says Salesforce-only. Tick it by hand to unblock the endpoint assertion in verify-provisioning-e2e." },
   { slug: "exec", first: "ZZ Exec", last: "One", accessLevel: "Executive" },
+  // An OFFICE manager (tenant scope, level Manager — not the Sales Dealer "mgr-a"). Added
+  // 2026-10-16 (D-072 amendment 13): a Manager charges a stored card but never sees or sets
+  // what work costs; this is the account that proves both.
+  { slug: "manager", first: "ZZ Manager", last: "One", accessLevel: "Manager",
+    note: "office Manager — charges cards (service.card.charge), no cost (service.costing.*). No department on purpose: a Service-department Manager receives the live intake alerts" },
 ];
 
 // Test customers and their rep. The Solar twin inherits the same rep.

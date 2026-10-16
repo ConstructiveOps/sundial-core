@@ -42,6 +42,7 @@ import { LINE_SF_OBJECT } from "./pricebook.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
 import { billToCustomerLoader, BILL_TO_SELF } from "../../lib/bill-to.js";
 import { customerDisplayName, customerAddressLine } from "../../lib/customer-name.js";
+import { sendDefaults, resolveRecipients, viaFrom, needsEmail, needsPhone } from "../../lib/send-to.js";
 
 export const INVOICE_SF_OBJECT = "Sundial_Service_Invoice__c";
 export const PAYMENT_SF_OBJECT = "Sundial_Service_Payment__c";
@@ -184,6 +185,27 @@ export function buildInvoiceEmail({ invoice, job, brandName, balance, pdfAttache
   const text = showPay ? [...lines.slice(0, -1), `Pay online (card): ${payUrl}`, "", lines[lines.length - 1]].join("\n") : lines.join("\n");
   return { subject, text, html };
 }
+
+/**
+ * The text that carries an invoice (D-072 amendment 12). The pay link while the homeowner
+ * owes money; a partner's invoice has no customer page, so its text says the PDF is on its
+ * way by email (the office sends Both, or emails it).
+ */
+export function buildInvoiceText({ invoice, brandName, balance, payUrl = null }) {
+  const number = invoice?.Name || "your invoice";
+  const who = brandName ? ` from ${brandName}` : "";
+  const money = (n) => Number(n).toLocaleString("en-US", { style: "currency", currency: "USD" });
+  if (!(balance > 0)) return `Invoice ${number}${who} is paid in full — thank you.`;
+  const due = `Invoice ${number}${who}: ${money(balance)} due${invoice?.Due_Date__c ? ` by ${invoice.Due_Date__c}` : ""}.`;
+  return (payUrl ? `${due} Pay online: ${payUrl}` : `${due} The invoice PDF comes by email.`).slice(0, 1600);
+}
+
+/** The payer an invoice (else, before one is issued, the job) sends to: its Bill_To_Customer__c when a partner pays. */
+export function invoicePayerId(invoice, job) {
+  const src = invoice || job;
+  return src?.Bill_To_Type__c && src.Bill_To_Type__c !== BILL_TO_SELF ? src.Bill_To_Customer__c || null : null;
+}
+const jobSnapshot = (job) => ({ email: job?.Primary_Email_at_Creation__c, phone: job?.Primary_Phone_at_Creation__c, name: job?.Customer_Name_at_Creation__c });
 
 // --- handler factory ---------------------------------------------------------------
 /**
@@ -381,6 +403,21 @@ export function createInvoiceHandlers(d, h) {
     return { payer, serviceDate: localDay(serviceDate || job?.First_Scheduled_Start__c || null, d.env?.SERVICE_TIMEZONE) };
   }
 
+  /**
+   * The send box's prefill for an invoice (D-072 amendment 12): its frozen payer, else —
+   * before one is issued — the job's Bill To, else the job's customer. Best-effort.
+   */
+  async function invoiceSendDefaults(invoice, job, tenantId) {
+    if (!job || !h.recipientRecords) return null;
+    try {
+      const recs = await h.recipientRecords({ payerId: invoicePayerId(invoice, job), customerId: job.Sundial_Customer__c, tenantId });
+      return sendDefaults({ ...recs, snapshot: jobSnapshot(job) });
+    } catch (e) {
+      console.error("invoice send defaults:", e?.message || e);
+      return null;
+    }
+  }
+
   /** Render + store the PDF for an invoice (best-effort; returns { key, bytes } or nulls). */
   /** The "Pay this invoice" link: the customer's page, only while the customer owes money (amendment 11). */
   async function payUrlFor({ invoice, job, tenantId, ctx }) {
@@ -490,6 +527,7 @@ export function createInvoiceHandlers(d, h) {
       const payments = await loadJobPayments(job.Id, tenantId);
       const blocker = issueBlocker(job, invoices);
       return jsonResponse(200, cors, {
+        sendDefaults: await invoiceSendDefaults(inv, job, tenantId),
         jobId: job.Id,
         jobStatus: job.Status__c,
         paymentStatus: job.Payment_Status__c,
@@ -754,9 +792,9 @@ export function createInvoiceHandlers(d, h) {
       // The charge's own outcome rides along; a decline never un-issues the invoice.
       let charge = null;
       if (body?.chargeCard === true && h.chargeInvoice) {
-        // Charging the stored card is an Admin / Executive action (amendment 11) — the invoice
+        // Charging the stored card is an Admin / Executive / Manager action (amendment 11) — the invoice
         // still issues; the tick just does nothing for anyone else, and says so.
-        if (ctx.can && !ctx.can("service.card.charge")) charge = { ok: false, code: "FORBIDDEN", message: "Charging the card on file is an Admin action — the invoice was issued, not charged." };
+        if (ctx.can && !ctx.can("service.card.charge")) charge = { ok: false, code: "FORBIDDEN", message: "Charging the card on file is an Admin, Executive or Manager action — the invoice was issued, not charged." };
         else {
           charge = await h.chargeInvoice({ ctx, invoice, job });
           if (charge?.settled) money = charge.settled;
@@ -784,7 +822,7 @@ export function createInvoiceHandlers(d, h) {
       if (!inv) return notFound(cors);
       const job = await loadJob(inv.Service_Job__c, tenantId);
       const payments = (await loadJobPayments(inv.Service_Job__c, tenantId)).filter((p) => p.Invoice__c === inv.Id);
-      return jsonResponse(200, cors, { ...present(inv, payments), job: job ? { id: job.Id, name: job.Name, status: job.Status__c, paymentStatus: job.Payment_Status__c, customerId: job.Sundial_Customer__c, customerName: job.Customer_Name_at_Creation__c, estimateId: job.Estimate__c } : null });
+      return jsonResponse(200, cors, { ...present(inv, payments), sendDefaults: await invoiceSendDefaults(inv, job, tenantId), job: job ? { id: job.Id, name: job.Name, status: job.Status__c, paymentStatus: job.Payment_Status__c, customerId: job.Sundial_Customer__c, customerName: job.Customer_Name_at_Creation__c, estimateId: job.Estimate__c } : null });
     },
 
     async previewInvoice({ ctx, params }) {
@@ -832,44 +870,60 @@ export function createInvoiceHandlers(d, h) {
       if (inv.Status__c === "Void") return jsonResponse(409, cors, { error: "invoice_void", code: "INVOICE_VOID", message: "This invoice is void." });
       const job = await loadJob(inv.Service_Job__c, tenantId);
       if (!job) return notFound(cors);
+      // Who it goes to (lib/send-to.js, D-072 amendment 12): the box, else the payer frozen at
+      // issue, else the job's customer — decided before the PDF is rendered or anything stored.
+      const via = viaFrom(body);
+      const recs = await h.recipientRecords({ payerId: invoicePayerId(inv, job), customerId: job.Sundial_Customer__c, tenantId });
+      const who = resolveRecipients({ via, to: body?.to, toPhone: body?.toPhone, ...recs, snapshot: jobSnapshot(job) });
+      if (!who.ok) return jsonResponse(who.status, cors, { error: "bad_request", code: who.code, message: who.message, ...(who.missing ? { missing: who.missing } : {}), ...(who.invalid ? { invalid: who.invalid } : {}) });
       const est = job.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
       const lines = est ? (await h.loadLines(est.Id, tenantId)).filter((l) => l.Stage__c !== "Removed") : [];
       const payments = (await loadJobPayments(job.Id, tenantId)).filter((p) => p.Invoice__c === inv.Id);
       // Always a fresh PDF: the balance / PAID watermark reflect the money as of now.
       const pdf = await renderAndStorePdf({ invoice: inv, job, est, lines, payments, ctx, tenantId });
+      const balance = balanceOf(inv);
+      const payUrl = await payUrlFor({ invoice: inv, job, tenantId, ctx });
+      const brandName = h.brandFor(ctx).companyName;
 
+      // Email and / or text; `Both` reports each half on its own and one failing never undoes the other.
       let delivery = "recorded";
-      let deliveryDetail = null;
+      const detail = [];
       let recipient = null;
-      if (!d.isEmailConfigured()) deliveryDetail = "EMAIL_FROM is not set on this Lambda (SES not wired).";
-      else {
-        let email = body?.to ? String(body.to).trim() : null;
-        if (!email) {
-          if (inv.Bill_To_Type__c && inv.Bill_To_Type__c !== "Customer") deliveryDetail = `This invoice bills ${inv.Bill_To_Name__c || inv.Bill_To_Type__c} — enter the partner's email address to send it.`;
-          else email = await h.customerEmailFor(job, tenantId);
-        }
-        if (!email && !deliveryDetail) deliveryDetail = "The customer has no email address on file.";
-        if (email) {
-          const balance = balanceOf(inv);
-          const msg = buildInvoiceEmail({ invoice: inv, job, brandName: h.brandFor(ctx).companyName, balance, pdfAttached: Boolean(pdf.bytes), payUrl: await payUrlFor({ invoice: inv, job, tenantId, ctx }) });
+      let textedTo = null;
+      if (needsEmail(via)) {
+        if (!d.isEmailConfigured()) detail.push("EMAIL_FROM is not set on this Lambda (SES not wired).");
+        else {
+          const msg = buildInvoiceEmail({ invoice: inv, job, brandName, balance, pdfAttached: Boolean(pdf.bytes), payUrl });
           const attachments = pdf.bytes ? [{ fileName: `${inv.Name}.pdf`, contentType: "application/pdf", content: pdf.bytes }] : [];
-          const sent = await d.sendEmail({ to: email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
+          const sent = await d.sendEmail({ to: who.email, subject: msg.subject, html: msg.html, text: msg.text, attachments });
           if (sent.ok) {
             delivery = "email";
-            recipient = email;
-          } else deliveryDetail = `Email failed: ${sent.error}`;
+            recipient = who.email;
+          } else detail.push(`Email failed: ${sent.error}`);
         }
       }
-      if (pdf.error) deliveryDetail = [deliveryDetail, "The PDF could not be generated."].filter(Boolean).join(" ");
-      if (delivery === "email") {
+      if (needsPhone(via)) {
+        if (!d.sms) detail.push("Texting is not wired on this Lambda.");
+        else {
+          const r = await d.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job, to: who.phone, body: buildInvoiceText({ invoice: inv, brandName, balance, payUrl }), sentBy: { id: ctx.userId ?? null, name: ctx.actor?.name ?? null } });
+          if (r.ok) {
+            textedTo = r.to ?? who.phone;
+            delivery = delivery === "email" ? "both" : "sms";
+          } else detail.push(r.code === "NO_PHONE" ? "There is no mobile number to text." : `Text failed: ${r.error || r.code}`);
+        }
+      }
+      if (pdf.error) detail.push("The PDF could not be generated.");
+      const deliveryDetail = detail.join(" ") || null;
+      const used = { email: recipient, phone: textedTo };
+      if (delivery !== "recorded") {
         const upd = { Sent_At__c: d.now().toISOString() };
         if (inv.Status__c === "Issued") upd.Status__c = "Sent";
         await d.sfUpdateRecord(INVOICE_SF_OBJECT, inv.Id, upd);
         Object.assign(inv, upd);
         await h.markStale(CACHE.invoice, [inv.Id], tenantId);
       }
-      await h.act(ctx, { event: EVENTS.INVOICE_SENT, recordType: "serviceinvoice", recordSfId: inv.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { number: inv.Name, delivery, recipient, deliveryDetail, balance: balanceOf(inv), pdfKey: pdf.key } });
-      return jsonResponse(200, cors, { success: true, id: inv.Id, delivery, recipient, deliveryDetail, ...present(inv, payments) });
+      await h.act(ctx, { event: EVENTS.INVOICE_SENT, recordType: "serviceinvoice", recordSfId: inv.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { number: inv.Name, via, delivery, recipient, textedTo, recipients: used, deliveryDetail, balance: balanceOf(inv), pdfKey: pdf.key } });
+      return jsonResponse(200, cors, { success: true, id: inv.Id, via, delivery, recipient, textedTo, recipients: used, deliveryDetail, ...present(inv, payments) });
     },
 
     async voidInvoice({ ctx, params, body }) {

@@ -3582,6 +3582,8 @@ On the alternative — routing comments through a Lambda for techs — no: it wo
 **Decided.**
 1. **The old choice is made explicit, once.** `scripts/backfill-line-tax-categories.mjs` makes each blank Material / Product line or price-book item whose `Taxable__c` was off **SOLAR**. A taxed one stays blank (RETAIL). Labor / Fee are never written. ZZ records and archived jobs are never touched. The default rule for NEW lines is unchanged.
 2. **An Invoiced estimate's money is its stored totals** (`withStoredTotals`), on the office read, the costing and the hosted / pay page. Only the issue computes live. The invoice's own documents already printed its frozen amounts.
+3. **(Same day, later) Sent / Viewed / Approved too.** A shown estimate's money is what the customer was shown, until the office EDITS it: a line, the estimate, the zone, or labor billing. The edit recomputes and re-stores (`recomputeAndStore` `live: true`). Send, approve, Create Job and Recalculate never re-price it. Draft / Declined / Expired compute live.
+4. **Ticked materials (`--taxed-lines`).** Before D-083 a ticked line was taxed only with a typed rate. On a non-invoiced estimate that stored no tax, a ticked blank material → SOLAR. One that stored tax stays RETAIL and is listed for the office.
 
 ## D-083: Service sales tax comes from Acumatica's own zones, rates and categories — copied exactly, refreshed daily, never guessed (2026-10-15)
 

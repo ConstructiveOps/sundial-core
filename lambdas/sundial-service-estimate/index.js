@@ -132,7 +132,7 @@ import {
   parseJsonBody,
   httpMethod,
 } from "../../lib/http.js";
-import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals } from "./totals.js";
+import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals, showsStoredTotals } from "./totals.js";
 import {
   estimateTaxContext,
   loadTaxTables as realLoadTaxTables,
@@ -742,8 +742,8 @@ export function createHandler(deps = {}) {
     return { matched: tax.matched, zoneCode: tax.zoneCode, label: tax.label, rate: tax.rate, source: tax.source, reason: tax.reason, needed: !tax.matched && tax.reason !== "TEMPLATE" };
   }
   /** Totals the way every reader must see them: lines × the zone's category rates on the date. */
-  // An Invoiced estimate reads its stored (invoiced) money, never a recomputation; `live` is
-  // the invoice issue, which is what computes the numbers it freezes.
+  // A shown estimate (Sent / Viewed / Approved / Invoiced — showsStoredTotals) reads its STORED
+  // money, never a recomputation; `live` is an edit's recompute and the invoice issue.
   async function estimateTotals(est, lines, { tenantId = est?.Client__c, date, job, live = false } = {}) {
     const tax = await taxContext(est, tenantId, { date, job });
     const totals = computeTotals((lines || []).map(lineFromRecord), estimateFromRecord(est, tax));
@@ -763,10 +763,15 @@ export function createHandler(deps = {}) {
   // --- totals: recompute + persist ----------------------------------------------
   // Tax_Rate__c / Tax_Jurisdiction__c are written with the totals — the zone's, as of today
   // (blank when the zone is not known). An Invoiced estimate is frozen: nothing is written.
-  async function recomputeAndStore(est, tenantId) {
+  // A SHOWN estimate (Sent / Viewed / Approved with stored totals, 2026-10-16) keeps what the
+  // customer saw unless `live`: only an EDIT (a line, the estimate, the zone, labor billing, a
+  // create) passes live: true. Send, approve, Create Job and Recalculate never re-price it.
+  async function recomputeAndStore(est, tenantId, { live = false } = {}) {
     const lines = await loadLines(est.Id, tenantId);
-    const totals = await estimateTotals(est, lines, { tenantId });
-    if (est.Status__c === "Invoiced") return { totals, lines };
+    if (est.Status__c === "Invoiced") return { totals: await estimateTotals(est, lines, { tenantId }), lines };
+    const keep = !live && showsStoredTotals(est);
+    const totals = await estimateTotals(est, lines, { tenantId, live: !keep });
+    if (keep) return { totals, lines };
     const fields = { ...totals.fields };
     if (est.Is_Template__c !== true) {
       fields.Tax_Rate__c = totals.tax.matched ? totals.tax.rate : null;
@@ -1134,7 +1139,7 @@ export function createHandler(deps = {}) {
         if (template.error) warnings.push(`template ${body.templateId} not found — no lines added from it`);
       }
       const full = await loadEstimate(est.id, tenantId);
-      const { totals } = await recomputeAndStore(full, tenantId);
+      const { totals } = await recomputeAndStore(full, tenantId, { live: true });
       await flushEvents(ctx, customerEvents, { estimateSfId: est.id });
       if (resolved) await intakeAlerts(ctx, resolved);
       await act(ctx, {
@@ -1175,7 +1180,7 @@ export function createHandler(deps = {}) {
       } catch (e) {
         return sfError(cors, e, "estimate update");
       }
-      const { totals } = await recomputeAndStore({ ...est, ...fields }, tenantId);
+      const { totals } = await recomputeAndStore({ ...est, ...fields }, tenantId, { live: true });
       await act(ctx, { event: EVENTS.ESTIMATE_UPDATED, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { fields: diffFields(est, fields), total: totals.total } });
       return jsonResponse(200, cors, { success: true, id: est.Id, totals: totals.fields, rejectedFields: rejected });
     },
@@ -1193,7 +1198,7 @@ export function createHandler(deps = {}) {
         return sfError(cors, e, "line create");
       }
       if (!result.createdIds.length) return bad(cors, "LINE_INVALID", "No line could be added.", { problems: result.problems });
-      const { totals, lines: after } = await recomputeAndStore(est, tenantId);
+      const { totals, lines: after } = await recomputeAndStore(est, tenantId, { live: true });
       await markStale(CACHE.line, result.createdIds, tenantId);
       for (const id of result.createdIds) {
         const l = after.find((x) => x.Id === id) || {};
@@ -1239,7 +1244,7 @@ export function createHandler(deps = {}) {
         return sfError(cors, e, "field line create");
       }
       if (!result.createdIds.length) return bad(cors, "LINE_INVALID", "No line could be added.", { problems: result.problems });
-      const { totals, lines: after } = await recomputeAndStore(est, tenantId);
+      const { totals, lines: after } = await recomputeAndStore(est, tenantId, { live: true });
       await markStale(CACHE.line, result.createdIds, tenantId);
       const created = [];
       for (const id of result.createdIds) {
@@ -1301,7 +1306,7 @@ export function createHandler(deps = {}) {
       } catch (e) {
         return sfError(cors, e, "line update");
       }
-      const { totals } = await recomputeAndStore(est, tenantId);
+      const { totals } = await recomputeAndStore(est, tenantId, { live: true });
       await markStale(CACHE.line, [lineId], tenantId);
       await act(ctx, { event: EVENTS.LINE_UPDATED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: fields.Description__c ?? line.Description__c ?? null, fields: diffFields(line, fields), needsReapproval: reapproval, linkedItemCode: linkedItem?.Item_Code__c ?? null, total: totals.total } });
       return jsonResponse(200, cors, { success: true, id: lineId, needsReapproval: reapproval, priceBookItemId: linkedItem?.Id ?? line.Price_Book_Item__c ?? null, totals: totals.fields, rejectedFields: rejected });
@@ -1321,7 +1326,7 @@ export function createHandler(deps = {}) {
       } catch (e) {
         return sfError(cors, e, "line delete");
       }
-      const { totals } = await recomputeAndStore(est, tenantId);
+      const { totals } = await recomputeAndStore(est, tenantId, { live: true });
       await markStale(CACHE.line, [lineId], tenantId);
       await act(ctx, { event: EVENTS.LINE_REMOVED, recordType: "serviceline", recordSfId: lineId, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { description: line.Description__c ?? null, quantity: line.Quantity__c ?? null, unitPrice: line.Unit_Price__c ?? null, total: totals.total } });
       return jsonResponse(200, cors, { success: true, id: lineId, totals: totals.fields });
@@ -1339,7 +1344,7 @@ export function createHandler(deps = {}) {
         return sfError(cors, e, "template clone");
       }
       if (r.error) return notFound(cors);
-      const { totals } = await recomputeAndStore(est, tenantId);
+      const { totals } = await recomputeAndStore(est, tenantId, { live: true });
       await act(ctx, { event: EVENTS.TEMPLATE_APPLIED, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { templateId: String(body.templateId), linesAdded: r.count, total: totals.total } });
       return jsonResponse(201, cors, { success: true, ids: r.ids, totals: totals.fields });
     },
@@ -1726,7 +1731,7 @@ export function createHandler(deps = {}) {
         if (template.error) warnings.push(`template ${body.templateId} not found — no lines added from it`);
       }
       const full = await loadEstimate(est.id, tenantId);
-      const { totals } = await recomputeAndStore(full, tenantId);
+      const { totals } = await recomputeAndStore(full, tenantId, { live: true });
       await flushEvents(ctx, customerEvents, { estimateSfId: est.id, jobSfId: job.id });
       await intakeAlerts(ctx, r);
       await act(ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.id, details: { quickCreate: true, customerId: customer.Id, customerCreated, linesCreated: lineResult.createdIds.length + (template?.count ?? 0), total: totals.total } });
@@ -1893,7 +1898,7 @@ export function createHandler(deps = {}) {
       let totals = null;
       if (job.Estimate__c) {
         const est = await loadEstimate(job.Estimate__c, tenantId);
-        if (est && est.Status__c !== "Invoiced") ({ totals } = await recomputeAndStore(est, tenantId));
+        if (est && est.Status__c !== "Invoiced") ({ totals } = await recomputeAndStore(est, tenantId, { live: true }));
       }
       await act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { fields: diffFields(job, fields), via: "tax-zone" } });
       return jsonResponse(200, cors, { success: true, jobId: job.Id, taxZone: { zoneCode: fields[TAX_ZONE_CODE_FIELD], label: fields[TAX_ZONE_LABEL_FIELD], needed: !fields[TAX_ZONE_CODE_FIELD] }, totals: totals?.fields ?? null });
@@ -1906,8 +1911,8 @@ export function createHandler(deps = {}) {
       if (!est) return notFound(cors);
       const lines = await loadLines(est.Id, tenantId);
       const totals = await estimateTotals(est, lines, { tenantId });
-      // The printed jurisdiction / rate are the zone's today.
-      if (est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: totals.tax.label, Tax_Rate__c: totals.tax.rate });
+      // The printed jurisdiction / rate are the zone's today — unless the estimate shows its stored totals.
+      if (!showsStoredTotals(est) && est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: totals.tax.label, Tax_Rate__c: totals.tax.rate });
       // Brand block: per-tenant config when that surface lands (service-workflows.md
       // §12). Until then the document renders with the tenant slug as the name so the
       // layout can be reviewed; the real identity block is a GET-FROM-HARMON item.

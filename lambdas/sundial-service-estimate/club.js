@@ -849,7 +849,7 @@ export function createClubHandlers(d, h) {
       const pre = await h.estimateTotals(full0, lineRows, { tenantId: t.tenantId }); // D-083: the zone's tax, like every other total
       const approval = { Status__c: "Approved", Approved_At__c: d.now().toISOString(), Approved_Version__c: 0, Approved_Amount__c: pre.total, Approval_Method__c: "Online", Approved_By_Name__c: name, Deposit_Required__c: true, Deposit_Type__c: "Flat", Deposit_Value__c: pre.total };
       await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.id, approval);
-      const { totals } = await h.recomputeAndStore({ ...full0, ...approval }, t.tenantId);
+      const { totals } = await h.recomputeAndStore({ ...full0, ...approval }, t.tenantId, { live: true }); // a create
       await h.markStale(CACHE.job, [job.id], t.tenantId);
       await h.flushEvents(t.ctx, r.events, { estimateSfId: est.id, jobSfId: job.id });
       await h.act(t.ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.id, details: { online: true, plan: plan.Name, total: totals.total, customerId: customer.Id, customerCreated: r.created } });
@@ -911,7 +911,7 @@ export function createClubHandlers(d, h) {
         return sfError(cors, e, "request create");
       }
       const full = await h.loadEstimate(est.id, t.tenantId);
-      await h.recomputeAndStore(full, t.tenantId);
+      await h.recomputeAndStore(full, t.tenantId, { live: true }); // a create
       await h.markStale(CACHE.job, [job.id], t.tenantId);
       await h.flushEvents(t.ctx, r.events, { estimateSfId: est.id, jobSfId: job.id });
       await h.act(t.ctx, { event: EVENTS.JOB_CREATED, recordType: "job", recordSfId: job.id, jobSfId: job.id, estimateSfId: est.id, details: { online: true, request: true, customerId: customer.Id, customerCreated: r.created } });
@@ -1173,7 +1173,7 @@ export function createClubHandlers(d, h) {
       } catch (e) {
         return sfError(cors, e, "plan discount");
       }
-      const { totals } = await h.recomputeAndStore({ ...est, ...fields }, tenantId);
+      const { totals } = await h.recomputeAndStore({ ...est, ...fields }, tenantId, { live: true }); // the discount is an edit
       await h.act(ctx, { event: EVENTS.ESTIMATE_UPDATED, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { planDiscount: { plan: plan.Name, scope: fields.Discount_Scope__c, type: fields.Discount_Type__c, value: fields.Discount_Value__c }, total: totals.total } });
       return jsonResponse(200, cors, { success: true, id: est.Id, totals: totals.fields, plan: plan.Name, discount: { scope: fields.Discount_Scope__c, type: fields.Discount_Type__c, value: fields.Discount_Value__c, description: plan.Discount_Description__c ?? null } });
     },

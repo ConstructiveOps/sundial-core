@@ -57,7 +57,12 @@ takes a default (Tim, 2026-10-15):
 
 `scripts/backfill-line-tax-categories.mjs` made the old choice explicit. A blank material that was **untaxed** (`Taxable__c` off) became **SOLAR**, on lines and price-book items alike. A taxed one stays blank (RETAIL). ZZ records and archived jobs were not touched.
 
-An **Invoiced** estimate reads its stored totals (`withStoredTotals` in `totals.js`), never a recomputation from today's categories: on the office read, the costing, and the hosted / pay page. The invoice's own card, PDF and preview, and the job-report receipt, print the invoice's frozen `Tax_Amount__c`.
+A **Sent / Viewed / Approved / Invoiced** estimate reads its stored totals (`showsStoredTotals` / `withStoredTotals` in `totals.js`), never a recomputation from today's categories. That covers the office read, the preview, the PDF on (re)send, the costing, and the hosted / pay page, with its stored printed rate.
+- **What re-prices it:** only an office **edit** (a line, the estimate, the zone, labor billing), which recomputes and re-stores. Send, approve, Create Job and Recalculate never re-price it.
+- **What computes live:** Draft, Declined and Expired estimates, and the invoice issue.
+- **The invoice's own documents:** its card, PDF and preview, and the job-report receipt, print the invoice's frozen `Tax_Amount__c`.
+
+The second pass, `--taxed-lines`: before D-083 a ticked material line was taxed only when the estimate had a typed rate. On a non-invoiced estimate that stored **no** tax, a ticked blank material line → SOLAR. One that stored tax stays RETAIL and is printed in a list (stored tax, old typed rate, recomputed tax, zone) for the office to decide.
 
 ### Issue freezes the categories
 

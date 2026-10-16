@@ -3280,3 +3280,42 @@ test("2026-10-16: an estimate invoiced BEFORE D-083 reads at what it was invoice
   await call(h, "POST", `/service/estimates/${est.Id}/recalculate`, {});
   assert.equal(est.Tax_Amount__c, 0, "an invoiced estimate is never rewritten");
 });
+
+test("2026-10-16: a Sent / Viewed / Approved estimate shows its STORED totals — read, preview, send, approve and recalculate never re-price it; a line edit recomputes and re-stores; a Draft stays live", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Shown", Primary_Email__c: "s@example.com", City__c: "Mesa" });
+  const h = makeHandler(fake);
+  await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Disconnect", kind: "Material", unitPrice: 100 }] });
+  const est = fake.store.Sundial_Estimate__c[0];
+  const line = fake.store.Sundial_Service_Line__c[0];
+  // As a pre-D-083 approved estimate sits in the org: a ticked material, no typed rate, so no tax was ever stored.
+  Object.assign(line, { Tax_Category__c: null, Taxable__c: true });
+  Object.assign(est, { Status__c: "Approved", Subtotal__c: 100, Material_Subtotal__c: 100, Tax_Amount__c: 0, Total__c: 100, Tax_Rate__c: null, Tax_Jurisdiction__c: null });
+
+  const read = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(read.body.totals.taxAmount, 0, "stored, not Mesa's 8.6% RETAIL");
+  assert.equal(read.body.totals.total, 100);
+  assert.equal((await call(h, "POST", `/service/estimates/${est.Id}/recalculate`, {})).body.totals.Total__c, 100);
+  assert.equal(est.Total__c, 100, "recalculate does not re-price a shown estimate");
+  assert.equal((await call(h, "POST", `/service/estimates/${est.Id}/send`, {})).status, 200);
+  assert.equal(est.Status__c, "Sent");
+  assert.equal(est.Tax_Amount__c, 0, "a re-send keeps what the customer was shown");
+  assert.equal(est.Tax_Rate__c, null, "…and its printed rate");
+  est.Status__c = "Viewed";
+  assert.equal((await call(h, "GET", `/service/estimates/${est.Id}`)).body.totals.total, 100);
+  const a = await call(h, "POST", `/service/estimates/${est.Id}/approve`, { method: "Verbal" });
+  assert.equal(a.status, 200);
+  assert.equal(a.body.approvedAmount, 100, "approved at the shown total");
+  assert.equal(est.Total__c, 100);
+
+  // The office edits a line: now it recomputes with the zone, and stores it.
+  const e = await call(h, "PATCH", `/service/estimates/${est.Id}/lines/${line.Id}`, { quantity: 2 });
+  assert.equal(e.status, 200, JSON.stringify(e.body));
+  assert.equal(est.Tax_Amount__c, 17.2);
+  assert.equal(est.Total__c, 217.2);
+  assert.equal((await call(h, "GET", `/service/estimates/${est.Id}`)).body.totals.total, 217.2, "and the read follows the new stored totals");
+
+  // A Draft computes live, whatever is stored.
+  Object.assign(est, { Status__c: "Draft", Tax_Amount__c: 0, Total__c: 200 });
+  assert.equal((await call(h, "GET", `/service/estimates/${est.Id}`)).body.totals.taxAmount, 17.2);
+});

@@ -40,7 +40,7 @@ import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.j
 import { corsHeaders, normalizeHeaders, jsonResponse, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { EVENTS, recordActivity } from "../../lib/service-activity.js";
-import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals } from "../sundial-service-estimate/totals.js";
+import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals, showsStoredTotals } from "../sundial-service-estimate/totals.js";
 import { estimateTaxContext, loadTaxTables as realLoadTaxTables } from "../../lib/tax-zones.js";
 import { LINE_SELECT, LINE_SF_OBJECT } from "../sundial-service-estimate/pricebook.js";
 import { ESTIMATE_SELECT, ESTIMATE_SF_OBJECT } from "../sundial-service-estimate/fields.js";
@@ -262,7 +262,7 @@ export function createHandler(deps = {}) {
    * The estimate's totals with the zone's tax (D-083) — the one rule the estimate Lambda
    * uses (lib/tax-zones.js estimateTaxContext), so the page and the office never disagree.
    * The printed jurisdiction / rate follow the zone unless the estimate is invoiced (frozen) —
-   * and an invoiced estimate's money is its stored snapshot (withStoredTotals).
+   * and a shown estimate's money is its stored snapshot (withStoredTotals).
    */
   async function totalsFor(est, lines) {
     let tax;
@@ -273,8 +273,8 @@ export function createHandler(deps = {}) {
       console.error("public: tax context failed, showing the stored rate:", e?.message || e);
       return withStoredTotals(computeTotals(lines.map(lineFromRecord), estimateFromRecord(est)), est);
     }
-    if (est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: tax.label, Tax_Rate__c: tax.rate });
-    // An invoiced estimate shows what it was invoiced at, never today's recomputation.
+    if (!showsStoredTotals(est) && est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: tax.label, Tax_Rate__c: tax.rate });
+    // A shown estimate (Sent / Viewed / Approved / Invoiced) shows what the customer was given.
     return withStoredTotals(computeTotals(lines.map(lineFromRecord), estimateFromRecord(est, tax)), est);
   }
   /** The tenant's Stripe (null = not set up), computed once per request. */

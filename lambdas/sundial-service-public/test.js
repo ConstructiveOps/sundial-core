@@ -448,3 +448,14 @@ test("D-078: when the brand cannot be loaded, the fallback prints SERVICE_BRAND_
   html = await view((f) => ({ brands: brokenBrands, sfQuery: async (soql) => (soql.includes("FROM Sundial_Tenant__c") ? [] : f.deps.sfQuery(soql)) }));
   assert.ok(!html.includes("Harmon"));
 });
+
+test("2026-10-16: the hosted page / pay link shows a shown estimate's STORED totals and printed rate; without stored totals it computes live", async () => {
+  const f = fake({ status: "Approved" });
+  Object.assign(f.est, { Subtotal__c: 395, Tax_Amount__c: 0, Total__c: 395, Tax_Rate__c: null, Tax_Jurisdiction__c: null });
+  const r = await call(createHandler(f.deps), "GET", `/public/estimates/${TOKEN}`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.total, 395, "stored, not 395 + 8.6% RETAIL on the ticked material");
+  assert.ok(!r.body.html.includes("Phoenix - Retail"), "the zone's label is not printed over the stored (blank) one");
+  const g = fake({ status: "Approved" });
+  assert.equal((await call(createHandler(g.deps), "GET", `/public/estimates/${TOKEN}`)).body.total, 405.32, "nothing stored: live");
+});

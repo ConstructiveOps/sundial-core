@@ -10,6 +10,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Run `node scripts/backfill-line-tax-categories.mjs --apply`. It writes canary first, then batches; don't pipe it.
 - [ ] Deploy `sundial-service-estimate` and `sundial-service-public`, so an invoiced estimate reads its stored totals.
 - [ ] Run sundial-cache-sync Test events `{"object":"serviceline","mode":"full"}`, then `{"object":"pricebookitem","mode":"full"}`.
+- [ ] Second pass: run `node scripts/backfill-line-tax-categories.mjs --taxed-lines` (a dry run with the stored-tax list), then `--taxed-lines --apply`. Then run the `serviceline` full sync again.
+- [ ] OFFICE DECIDES: the estimates that stored tax and keep RETAIL. EST-02611 (Tempe, 8.1% both ways) and the 4 archived-job ones (EST-02294 / 02426 / 02442 / 02473; no zone, and HCP's tax is a Labor line). EST-02442's old rate was Chandler 7.8%, but the customer's city is Mesa.
 - [ ] DECIDE: there are 277 untaxed blank material lines on **archived** jobs, left alone by instruction. 13 of them are on Approved estimates and would show RETAIL tax if opened; the Invoiced ones read their snapshot. `--include-archived` is not built yet; ask if wanted.
 - [ ] DECIDE: there are 5 Labor lines ticked taxable (EST-00298, 01723, 02503, 02504, and the ZZ EST-00000). Before D-083 they were taxed; under LABSERV they are not. The 2 invoiced ones read their snapshot.
 

@@ -344,7 +344,7 @@ export function createLaborHandlers(d, h) {
       }
       await h.markStale(CACHE.call, applied.map((a) => a.id), tenantId);
       await h.markStale(CACHE.line, [...existing.values()].map((l) => l.Id), tenantId);
-      const { totals } = await h.recomputeAndStore(est, tenantId);
+      const { totals } = await h.recomputeAndStore(est, tenantId, { live: true }); // a Time line changed: an edit
       await h.act(ctx, {
         event: EVENTS.LABOR_BILLED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: est.Id,
         details: { calls: applied, total: totals.total },

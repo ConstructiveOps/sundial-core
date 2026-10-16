@@ -244,14 +244,26 @@ const STORED_TOTALS = [
 ];
 
 /**
- * An INVOICED estimate shows the money it was invoiced at, never a recomputation (2026-10-16).
- * Its stored totals were written at issue (or by the import) and nothing rewrites them — the
- * recalc skips an Invoiced estimate — so they are the snapshot. Recomputing from the lines
- * re-taxed old invoices when D-083 changed the default category. Any other status: unchanged.
- * The per-line rows (lineTotals) still come from the lines; only the money figures are pinned.
+ * The statuses whose money is what the customer was SHOWN (2026-10-16): Sent / Viewed / Approved
+ * (the customer has the numbers) and Invoiced (the snapshot). Draft, Declined, Expired and a
+ * template compute live. A shown estimate changes only when the office edits it — a line, the
+ * estimate, the zone — which recomputes and re-stores (recomputeAndStore with live: true).
+ */
+export const STORED_TOTAL_STATUSES = Object.freeze(["Sent", "Viewed", "Approved", "Invoiced"]);
+
+/** True when this estimate displays its stored totals (a shown status AND a stored total). */
+export function showsStoredTotals(r) {
+  return !!r && r.Is_Template__c !== true && STORED_TOTAL_STATUSES.includes(r.Status__c) && r.Total__c != null && Number.isFinite(Number(r.Total__c));
+}
+
+/**
+ * A shown estimate (showsStoredTotals) displays its STORED money, never a recomputation
+ * (2026-10-16). D-083 changed the default category and re-taxed estimates the customer had
+ * already been sent and invoices already issued. Any other status: unchanged. The per-line rows
+ * (lineTotals) still come from the lines; only the money figures are pinned.
  */
 export function withStoredTotals(totals, r) {
-  if (!totals || r?.Status__c !== "Invoiced" || r.Total__c == null || !Number.isFinite(Number(r.Total__c))) return totals;
+  if (!totals || !showsStoredTotals(r)) return totals;
   for (const [field, key] of STORED_TOTALS) {
     if (r[field] == null || !Number.isFinite(Number(r[field]))) continue;
     totals[key] = Number(r[field]);

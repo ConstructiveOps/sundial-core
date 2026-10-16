@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-10-16 (later) — Shown estimates keep their stored totals; the ticked-material pass (`--taxed-lines`)
+
+Evidence from the live site: EST-02686 (Draft) 6,466.14 → 6,990.29 and EST-02629 (Approved) 2,030.00 → 2,066.40, because their ticked material lines now tax as RETAIL. Before D-083 a ticked line was taxed only when the estimate also had a typed rate.
+
+- **Sent / Viewed / Approved / Invoiced estimates show their STORED totals** (`STORED_TOTAL_STATUSES`, `showsStoredTotals`, `withStoredTotals` in `totals.js`). This covers the office read, the preview, the PDF on (re)send, the job costing, and the hosted page / pay link, together with the stored printed rate. Draft, Declined, Expired and a template compute live.
+  - `recomputeAndStore(est, tenantId, { live })`: **only an edit passes `live: true`**. That means a line add / edit / delete, a template apply, an estimate PATCH, a zone change, labor billing, the club discount, and every create. Send, approve, Create Job and Recalculate keep a shown estimate's money (the approve stamps the shown total). The invoice issue still computes live.
+- **`scripts/backfill-line-tax-categories.mjs --taxed-lines`**: on non-invoiced estimates, a ticked blank material line → SOLAR when the estimate stored no tax, and is left RETAIL and listed when it stored some (`planTaxedLineBackfill`, +1 test).
+  - **Dry run (harmon):** 20 lines → SOLAR (Declined 7, Sent 6, Approved 6, Draft 1; EST-02686 and EST-02629 among them).
+  - **Listed:** EST-02611 (Approved, 109.45 stored = Tempe 8.1% recomputed), plus 4 on archived jobs, listed only: EST-02294 / 02426 / 02442 / 02473. Their job has no zone, and the HCP import carried their tax as a Labor line, so the stored Total includes it.
+- **Tests:** the status gate (unit + estimate endpoint + public page). Full suite 1,551.
+- **Deploy** `sundial-service-estimate` and `sundial-service-public`; after `--apply`, a full cache-sync of `serviceline`.
+
 ## 2026-10-16 — URGENT: restore the pre-D-083 tax on existing lines; invoiced estimates read their snapshot
 
 D-083 made a blank `Tax_Category__c` on a Material line mean RETAIL, so materials Harmon had left untaxed began to be taxed on every open estimate, and an invoiced estimate's read (and the hosted page, which is the pay link) recomputed it too.

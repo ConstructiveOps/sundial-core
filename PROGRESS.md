@@ -1,5 +1,9 @@
 # Sundial — Progress Log
 
+## 2026-10-16 — D-083 follow-up: the Jobs list carries the job's tax zone; portal inventory S51
+
+The portal's Jobs list asks `GET /sf/job?fields=list`, and `LIST_PROJECTION.job` (`sundial-sf-query`) did not name the new `tax_zone_code` / `tax_zone_label` cache columns. Without them the "Tax zone needed" flag would have shown on every row. Added both, with a `list-projection.test.js` line. **Deploy `sundial-sf-query`** for the flag to be right. `docs/portal-feature-inventory.md`: S51 (the harmon-crm tax UI), S3 no longer lists the typed tax, and S42 is retired.
+
 ## 2026-10-15 — Service sales tax from Acumatica's own tables (D-083) — `feature/tax-zones`, awaiting review
 
 **Why.** The estimate's tax rate was a tenant-wide default or typed by hand, and a line was simply taxable or not. Arizona tax is per city, per county and per category, it changes on dates, and Harmon remits through Acumatica. Julie's exports never came, so we pulled the tables from Acumatica directly.

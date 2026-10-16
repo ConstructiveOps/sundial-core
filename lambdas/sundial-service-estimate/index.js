@@ -110,7 +110,7 @@ import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
 import { resolveBillTo, billToCustomerLoader, BILL_TO_SELF, BILL_TO_CUSTOMER_SELECT } from "../../lib/bill-to.js";
 import { sendDefaults, resolveRecipients, viaFrom, needsEmail, needsPhone } from "../../lib/send-to.js";
-import { costWriteGate, stripCost, COSTING_READ, COSTING_WRITE } from "../../lib/cost-gate.js";
+import { costWriteGate, stripCost, stripMarkup, markupWriteGate, COSTING_READ, COSTING_WRITE } from "../../lib/cost-gate.js";
 import {
   buildKey,
   listRecordFiles,
@@ -406,6 +406,26 @@ function itemCostGate(ctx, body) {
 }
 function costForbidden(cors, gate) {
   return jsonResponse(403, cors, { error: "forbidden", code: gate.code, message: gate.message, fields: gate.fields });
+}
+/** The markup rule (lib/cost-gate.js, 2026-10-16) for this caller: blank markup keys dropped, a value refused. */
+function markupGate(ctx, body) {
+  return markupWriteGate(body, ctx?.can ? ctx.can(COSTING_WRITE) === true : false);
+}
+/**
+ * The markup is a margin number (2026-10-16, Harmon): hidden like cost from anyone without
+ * service.costing.read, on EVERY response this Lambda sends a signed-in user — the estimate
+ * record, totals, totals.fields, the add-line / patch / club / labor responses alike — so no
+ * route can forget it. The markup is still applied; only the numbers are not shown.
+ */
+export function withoutMarkup(response) {
+  if (!response?.body || typeof response.body !== "string") return response;
+  let parsed;
+  try {
+    parsed = JSON.parse(response.body);
+  } catch {
+    return response; // not JSON (never the case today) — nothing to strip
+  }
+  return { ...response, body: JSON.stringify(stripMarkup(parsed)) };
 }
 function sfError(cors, err, where) {
   console.error(`service-estimate ${where}:`, err?.sfStatus, err?.sfBody || err?.message || err);
@@ -1232,6 +1252,12 @@ export function createHandler(deps = {}) {
       const est = await loadEstimate(params[0], tenantId);
       if (!est) return notFound(cors);
       if (est.Status__c === "Invoiced") return jsonResponse(409, cors, { error: "locked", code: "ESTIMATE_INVOICED" });
+      // The markup is Admin / Executive (2026-10-16): a blank markupType / markupValue from anyone
+      // else is not sent, a value is 403. Only blank markup keys = nothing to do, not a 400.
+      const mg = markupGate(ctx, body);
+      if (!mg.ok) return costForbidden(cors, mg);
+      if (mg.dropped.length && !Object.keys(mg.fields).length) return jsonResponse(200, cors, { success: true, id: est.Id, unchanged: true, ignoredFields: mg.dropped });
+      body = mg.fields;
       const { fields, rejected } = translate(withoutBillToKeys(body), ESTIMATE_PATCHABLE);
       // Who pays (D-081 amendment 2): the same resolveBillTo as the job; billToName is derived, never accepted.
       if (body && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "billToName")) rejected.push("billToName");
@@ -2297,7 +2323,14 @@ export function createHandler(deps = {}) {
         // (issue with "charge the card" is the office's route, the charge is an Admin's).
         can: (key) => canAction(key, alwaysEnforcedAccess(identity) ?? identity?.access ?? null),
       };
-      return await H[route.name]({ ctx, params: route.params, body, query: event?.queryStringParameters || {} });
+      // Markup on a new estimate (New Estimate / New Job's `estimate` block): the PATCH rule.
+      if ((route.name === "createEstimate" || route.name === "createJob") && body?.estimate && typeof body.estimate === "object") {
+        const mg = markupGate(ctx, body.estimate);
+        if (!mg.ok) return costForbidden(cors, mg);
+        body = { ...body, estimate: mg.fields };
+      }
+      const res = await H[route.name]({ ctx, params: route.params, body, query: event?.queryStringParameters || {} });
+      return ctx.can(COSTING_READ) ? res : withoutMarkup(res);
     } catch (err) {
       console.error(`service-estimate ${route.name} error:`, err?.sfBody || err?.message || err);
       return jsonResponse(500, cors, { error: "server_error", route: route.name });

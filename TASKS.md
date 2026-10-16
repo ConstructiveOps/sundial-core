@@ -4,18 +4,19 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## 2026-10-16 — October batch (`feature/oct-batch`): estimate Bill To, send box, Manager billing, remote diagnosis, Lead Source — ON THE BRANCH, NOT MERGED
+## 2026-10-16 — October batch (`feature/oct-batch`): estimate Bill To, send box, Manager billing, remote diagnosis, Lead Source — MERGED (`df6a14f` on `master`) and DEPLOYED
 
 - [x] A1 estimate Bill To (D-081 amendment 2) · A2 send box + real estimate SMS (D-072 amendment 12) · A3 Manager charges, cost Admin / Executive (D-072 amendment 13) · A4 board `remoteDiagnosis` · A5 Lead Source. Full suite green (1,569).
 - [ ] **Tim, in this order:**
   1. **Supabase** → SQL editor → paste and run `sql/2026-10-16_estimate_bill_to.sql` (adds three columns; safe to run twice).
-  2. **Merge** `feature/oct-batch` into `master` and push (after your review).
-  3. **Deploy** (PowerShell, from `C:\Users\TimMurphy\Projects\sundial-core`): `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-service-public`, `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-auth-proxy`, `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`.
+  2. [x] **Merge** `feature/oct-batch` into `master` and push.
+  3. [x] **Deploy** (PowerShell, from `C:\Users\TimMurphy\Projects\sundial-core`): `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-service-public`, `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-auth-proxy`, `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`.
   4. **AWS console** → Lambda → `sundial-cache-sync` → Test → event `{"object":"estimate","mode":"full"}` → Test. Expect `status: "ok"`.
   5. **harmon-crm** `main` after Prompt B (the estimate Bill To picker, the send box, the cost-hidden price book, the board card's diagnosis, Lead Source on the popups).
   6. **ZZ test users first:** `node scripts/seed-access-test-fixtures.mjs` (dry run), then `node scripts/seed-access-test-fixtures.mjs --apply` — adds **ZZ Manager One** (`tim+zz-manager@…`, level Manager; password into Secrets Manager `sundial/test-users`). Then create the payer once in the portal if it is not there: a company customer **ZZ Bill-To Co** with your test email and the ZZ phone.
   7. **ZZ test** (never a live customer): on a ZZ estimate set Bill to = Leasing Partner → **ZZ Bill-To Co** → Send → the box is prefilled with the company's email ("ZZ Bill-To Co's address") → add the ZZ phone, Both → the email arrives and the text lands in the job's Communications. Log in as the **Manager** ZZ test user → charge the ZZ card (succeeds) → open a price-book item (no cost fields shown) → save it (saves; the cost is unchanged when an Admin reopens it).
-- [ ] Note for Prompt B: the price-book modal may keep sending blank cost keys (allowed), but must not send a non-blank one for a non-Admin (403).
+- [ ] Note for Prompt B: the price-book modal may keep sending blank cost keys (allowed), but must not send a non-blank one for a non-Admin (403). Same for the estimate's markup inputs: hide them when the read has no `Markup_*` keys; blank is allowed, a value is 403.
+- [x] Markup hidden like cost (2026-10-16 night) — `.\deploy.ps1 sundial-service-estimate`. [ ] Optional: the same for `sundial-sf-query`'s estimate cache columns and `sundial-sf-update`'s estimate PATCH.
 
 ## 2026-10-16 — Intake notes vs. the Acumatica project description (Harmon)
 

@@ -1,6 +1,14 @@
 # Sundial — Progress Log
 
-## 2026-10-16 (evening) — October batch: estimate Bill To, the send box, Managers bill / cost hidden, remote diagnosis on the board, Lead Source — ON `feature/oct-batch`, NOT MERGED
+## 2026-10-16 (night) — The estimate's markup is hidden like cost (D-072 amendment 13, item 4)
+
+- Harmon: the markup is a margin number. For anyone without `service.costing.read` every response `sundial-service-estimate` sends a signed-in user drops `Markup_Type__c`, `Markup_Value__c`, `Markup_Amount__c` and `totals.markupAmount` (any spelling, any depth — `stripMarkup` in `lib/cost-gate.js`, applied once in the handler as `withoutMarkup`): the estimate read, add-line / patch / recalculate / club / labor responses. Totals, subtotal and line prices are unchanged — the markup is still applied.
+- Writes: `markupType` / `markupValue` from anyone without `service.costing.write` on estimate PATCH and on New Estimate / New Job's `estimate` block — blank is ignored (a blank-only PATCH answers `200 { unchanged: true }`), a value (0 included) is `403 COSTING_FORBIDDEN`.
+- Tests: estimate Lambda +1 (Manager read has no markup key anywhere, Admin does, same totals; Manager PATCH `markupValue: 10` → 403, `""` → 200 unchanged; a Manager's New Estimate with markup → 403), `cost-gate` +1.
+- **Not covered:** `sundial-sf-query` still serves the estimate cache's `markup_type` / `markup_value` / `markup_amount` columns (the estimate templates list reads full rows); `sundial-sf-update`'s generic estimate PATCH could still set `Markup_*__c`. Both are a one-line addition to `lib/cost-gate.js` if wanted.
+- **Deploy:** `sundial-service-estimate`.
+
+## 2026-10-16 (evening) — October batch: estimate Bill To, the send box, Managers bill / cost hidden, remote diagnosis on the board, Lead Source — MERGED to `master` (`df6a14f`) and DEPLOYED
 
 - **A1 Bill To on estimates (D-081 amendment 2).** Describe checked first: the three fields exist on `Sundial_Estimate__c`, picklist = the job's. Estimate create / PATCH go through `resolveBillTo` (same 400s, name derived, `billToName` rejected). Create Job inherits the estimate's Bill To unless the request names one; quick-create gives the estimate the job's; then independent — the invoice still snapshots the job's. `billToBlocks()` in `lib/estimate-document.js` now draws the payer block for the invoice AND the estimate (PDF, preview, hosted page — the payer read live). `GET /service/estimates/{id}` → `billTo`, `sendDefaults`. `sql/2026-10-16_estimate_bill_to.sql`; estimate list projection + payer-name search in `sundial-sf-query`.
 - **A2 Send box (D-072 amendment 12).** `lib/send-to.js`: box → payer → customer → snapshot, per address; `400 RECIPIENT_REQUIRED` / `RECIPIENT_INVALID` before anything is recorded. Estimate SMS is real (`d.sms.sendText`, the job's thread); the "SMS is not live" stub, its comments and the test pinning it are gone. Invoice send: same body and resolution, SMS too, the partner-email message gone. `sendDefaults` on the estimate, invoice and job-invoice reads.

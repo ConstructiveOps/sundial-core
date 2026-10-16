@@ -3560,3 +3560,62 @@ test("2026-10-16 Lead Source on a new service customer: matched case-insensitive
   assert.equal(r.body.code, "LEAD_SOURCE_INVALID");
   assert.equal(fake.store.Sundial_Service_Job__c.length, 1);
 });
+
+test("2026-10-16 markup is a margin number: a Manager never sees it (record, totals, totals.fields, add-line / patch responses) and cannot set it — blank is ignored, a value is 403; an Admin sees and sets it; the markup is still applied", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Cy", Primary_Email__c: "cy@example.com", City__c: "Mesa" });
+  const admin = makeHandler(fake);
+  const manager = makeHandler(fake, MANAGER);
+  const hasMarkup = (o) => JSON.stringify(o).match(/markup/i) !== null;
+
+  const c = await call(admin, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { markupType: "Percent", markupValue: 10 }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 200 }] });
+  assert.equal(c.status, 201, JSON.stringify(c.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(est.Markup_Value__c, 10);
+
+  // The Admin read carries the markup; the Manager's carries none of it, anywhere — same money.
+  const a = await call(admin, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(a.body.estimate.Markup_Type__c, "Percent");
+  assert.equal(a.body.estimate.Markup_Value__c, 10);
+  assert.equal(a.body.totals.markupAmount, 20);
+  const m = await call(manager, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(m.status, 200);
+  assert.ok(!hasMarkup(m.body), "no markup key anywhere in the Manager's read");
+  assert.equal(m.body.totals.total, a.body.totals.total, "the markup is still applied");
+  assert.equal(m.body.totals.subtotal, a.body.totals.subtotal);
+  assert.equal(m.body.lines[0].Unit_Price__c, 200);
+  // Add-line and recalculate responses (totals.fields) too.
+  const l = await call(manager, "POST", `/service/estimates/${est.Id}/lines`, { description: "Fuse", kind: "Material", unitPrice: 10 });
+  assert.equal(l.status, 201);
+  assert.ok(!hasMarkup(l.body));
+  assert.ok(l.body.totals.Total__c > 0);
+  assert.ok(!hasMarkup((await call(manager, "POST", `/service/estimates/${est.Id}/recalculate`)).body));
+
+  // Writes: a value is refused, blank is not sent.
+  let r = await call(manager, "PATCH", `/service/estimates/${est.Id}`, { markupValue: 10 });
+  assert.equal(r.status, 403);
+  assert.equal(r.body.code, "COSTING_FORBIDDEN");
+  assert.deepEqual(r.body.fields, ["markupValue"]);
+  r = await call(manager, "PATCH", `/service/estimates/${est.Id}`, { markupType: "Fixed", markupValue: 0 });
+  assert.equal(r.status, 403, "0 is a value, not blank");
+  r = await call(manager, "PATCH", `/service/estimates/${est.Id}`, { markupValue: "" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.unchanged, true);
+  r = await call(manager, "PATCH", `/service/estimates/${est.Id}`, { markupType: null, markupValue: "", scopeSummary: "Swap the breaker" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(est.Scope_Summary__c, "Swap the breaker");
+  assert.equal(est.Markup_Type__c, "Percent", "the stored markup is untouched");
+  assert.equal(est.Markup_Value__c, 10);
+  assert.ok(!hasMarkup(r.body));
+  // A Manager's New Estimate with a markup value is refused before anything is created.
+  const before = fake.store.Sundial_Estimate__c.length;
+  r = await call(manager, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { markupValue: 5 } });
+  assert.equal(r.status, 403);
+  assert.equal(fake.store.Sundial_Estimate__c.length, before);
+
+  // An Admin sets it.
+  r = await call(admin, "PATCH", `/service/estimates/${est.Id}`, { markupValue: 15 });
+  assert.equal(r.status, 200);
+  assert.equal(est.Markup_Value__c, 15);
+  assert.ok(hasMarkup(r.body), "an Admin's response keeps Markup_Amount__c");
+});

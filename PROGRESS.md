@@ -1,5 +1,15 @@
 # Sundial — Progress Log
 
+## 2026-10-16 — URGENT: restore the pre-D-083 tax on existing lines; invoiced estimates read their snapshot
+
+D-083 made a blank `Tax_Category__c` on a Material line mean RETAIL, so materials Harmon had left untaxed began to be taxed on every open estimate, and an invoiced estimate's read (and the hosted page, which is the pay link) recomputed it too.
+
+- **The old flag survived.** `Taxable__c` was never rewritten by the recalc. Only a D-083 line PATCH that touches kind or category, an issue, or a void derives it, and since the deploy (07:34 UTC) that has touched one material line, a ZZ test line.
+- **`scripts/backfill-line-tax-categories.mjs`** (dry run default, `--apply` canary first then batches of 200 through the new `sfUpdateMany`). An untaxed blank Material / Product → `SOLAR`, a taxed one stays blank (RETAIL), Labor / Fee are never written, and the same applies to every price-book item version. Every estimate status is covered. ZZ records and lines on archived jobs are never touched. The decision table is `lib/line-tax-backfill.js` (+6 tests).
+  - **Dry run (harmon):** 173 lines → SOLAR (Approved 91, Sent 28, Declined 26, Invoiced 21, Viewed 4, Draft 3); 25 taxed materials and 1,043 labor / fee lines left; 12 ZZ and 4,451 archived-job lines skipped; 96 price-book items → SOLAR (95 active).
+- **An Invoiced estimate shows its stored totals** (`withStoredTotals`, `totals.js`). These are the estimate Lambda's reads, the job costing, and the hosted estimate / pay page. The issue alone computes live (`live: true`). The invoice card, the invoice PDF / preview and the job-report receipt already read the invoice's frozen `Tax_Amount__c`. +1 endpoint test.
+- **Deploy** `sundial-service-estimate` and `sundial-service-public`; after `--apply`, run full cache-sync for `serviceline` and `pricebookitem`.
+
 ## 2026-10-16 — D-083 follow-up: the Jobs list carries the job's tax zone; portal inventory S51
 
 The portal's Jobs list asks `GET /sf/job?fields=list`, and `LIST_PROJECTION.job` (`sundial-sf-query`) did not name the new `tax_zone_code` / `tax_zone_label` cache columns. Without them the "Tax zone needed" flag would have shown on every row. Added both, with a `list-projection.test.js` line. **Deploy `sundial-sf-query`** for the flag to be right. `docs/portal-feature-inventory.md`: S51 (the harmon-crm tax UI), S3 no longer lists the typed tax, and S42 is retired.

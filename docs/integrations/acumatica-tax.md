@@ -53,6 +53,12 @@ takes a default (Tim, 2026-10-15):
 - **`Taxable__c` is read-only and derived**, on lines and price-book items alike: RETAIL = ticked, judged on the record's own category (explicit, else the kind's default). A `taxable` key in a request is rejected. **There is no "untick to exempt"**: exempting a material means choosing SOLAR, WARRANTY or RESALE on the line.
 - **On screen**, the portal shows the mark from the *effective* category (after the warranty rule), which the estimate read returns per line in `totals.lineTotals[].taxCategory`.
 
+### Lines from before D-083 (2026-10-16, D-083 amendment 1)
+
+`scripts/backfill-line-tax-categories.mjs` made the old choice explicit. A blank material that was **untaxed** (`Taxable__c` off) became **SOLAR**, on lines and price-book items alike. A taxed one stays blank (RETAIL). ZZ records and archived jobs were not touched.
+
+An **Invoiced** estimate reads its stored totals (`withStoredTotals` in `totals.js`), never a recomputation from today's categories: on the office read, the costing, and the hosted / pay page. The invoice's own card, PDF and preview, and the job-report receipt, print the invoice's frozen `Tax_Amount__c`.
+
 ### Issue freezes the categories
 
 Invoice issue writes each line's **effective** category (after the warranty rule) onto the line.
@@ -108,6 +114,7 @@ check the refresh logs. As of 2026-10-15:
 |---|---|
 | `node scripts/acumatica-pull-tax.mjs [--offline]` | Read-only pull to `_delivery/acumatica-tax/` (git-ignored) and the report. |
 | `node scripts/seed-tax-zones.mjs [--pull] [--apply]` | The first load, using the refresh's own writer. A dry run unless `--apply`. |
+| `node scripts/backfill-line-tax-categories.mjs [--apply]` | 2026-10-16: an untaxed blank material line / price-book item → SOLAR (restores the pre-D-083 tax). A dry run by default (counts by estimate status + a sample); `--apply` writes canary first, then batches of 200. Then run a full cache-sync for `serviceline` and `pricebookitem`. |
 | `node scripts/backfill-job-tax-zones.mjs [--apply]` | For open jobs (not Closed / Cancelled / Paid) with a blank zone, resolves the service address's city with the same resolver. A dry run by default: the matched count by zone and the unmatched list (job, customer, city, reason), also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. `--apply` writes **exact matches only**, canary first. |
 
 **Backfill preview (2026-10-15, from the job cache).** Of 892 open jobs, **865 match exactly** and

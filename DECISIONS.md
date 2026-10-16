@@ -3575,6 +3575,14 @@ On the alternative — routing comments through a Lambda for techs — no: it wo
 **Consequences.** `sundial-welcome-call` `format.js`, `fields.js`, `webhook.js`, `orphanMatch.js`; 12 new tests (welcome-call 153). The Salesforce **retry Flow** must select the two new statuses as well as `No Answer`, or those customers are never redialed (the Lambda accepts the call either way). Records already at `Verified` (e.g. `a1P7y00000BWpPFEA1`) need no repair: their earlier `Result: Verified - Exceptions` lines predate the statuses and precedence held the record at Verified.
 
 
+## D-083 amendment 1 (2026-10-16): existing lines keep their pre-D-083 tax; an invoiced estimate reads its snapshot
+
+**Why.** The RETAIL-always default (Tim, 2026-10-15) re-taxed every material Harmon had left untaxed, on every open estimate and on the read of every invoiced one.
+
+**Decided.**
+1. **The old choice is made explicit, once.** `scripts/backfill-line-tax-categories.mjs` makes each blank Material / Product line or price-book item whose `Taxable__c` was off **SOLAR**. A taxed one stays blank (RETAIL). Labor / Fee are never written. ZZ records and archived jobs are never touched. The default rule for NEW lines is unchanged.
+2. **An Invoiced estimate's money is its stored totals** (`withStoredTotals`), on the office read, the costing and the hosted / pay page. Only the issue computes live. The invoice's own documents already printed its frozen amounts.
+
 ## D-083: Service sales tax comes from Acumatica's own zones, rates and categories — copied exactly, refreshed daily, never guessed (2026-10-15)
 
 **Context.** Until now the estimate's `Tax_Rate__c` / `Tax_Jurisdiction__c` came from a tenant-wide default (`Sundial_Tenant__c.Default_Tax_Rate__c`, 2026-10-05) or was typed by hand, and every line was simply taxable or not. Arizona tax is per city, per county, per category, and it changes on dates — ten rates change on 2026-11-01. Harmon remits through Acumatica, so any rate Sundial charges that Acumatica does not hold is a wrong remittance. The CFO's (Julie's) exports never arrived, so on 2026-10-15 the tables were pulled from Acumatica itself (live tenant "Harmon Electric", GET only): 143 zones (78 retail), 151 taxes, 10 categories.

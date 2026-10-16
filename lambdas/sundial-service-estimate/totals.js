@@ -229,3 +229,34 @@ export function estimateFromRecord(r, tax = null) {
     depositValue: r.Deposit_Value__c,
   };
 }
+
+// The stored money fields and the computeTotals() keys they stand for.
+const STORED_TOTALS = [
+  ["Labor_Subtotal__c", "laborSubtotal"],
+  ["Material_Subtotal__c", "materialSubtotal"],
+  ["Fee_Subtotal__c", "feeSubtotal"],
+  ["Subtotal__c", "subtotal"],
+  ["Discount_Amount__c", "discountAmount"],
+  ["Markup_Amount__c", "markupAmount"],
+  ["Tax_Amount__c", "taxAmount"],
+  ["Total__c", "total"],
+  ["Deposit_Amount__c", "depositAmount"],
+];
+
+/**
+ * An INVOICED estimate shows the money it was invoiced at, never a recomputation (2026-10-16).
+ * Its stored totals were written at issue (or by the import) and nothing rewrites them — the
+ * recalc skips an Invoiced estimate — so they are the snapshot. Recomputing from the lines
+ * re-taxed old invoices when D-083 changed the default category. Any other status: unchanged.
+ * The per-line rows (lineTotals) still come from the lines; only the money figures are pinned.
+ */
+export function withStoredTotals(totals, r) {
+  if (!totals || r?.Status__c !== "Invoiced" || r.Total__c == null || !Number.isFinite(Number(r.Total__c))) return totals;
+  for (const [field, key] of STORED_TOTALS) {
+    if (r[field] == null || !Number.isFinite(Number(r[field]))) continue;
+    totals[key] = Number(r[field]);
+    if (totals.fields) totals.fields[field] = Number(r[field]);
+  }
+  totals.frozen = true;
+  return totals;
+}

@@ -4,6 +4,15 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## URGENT 2026-10-16 — restore the pre-D-083 tax (Tim)
+
+- [ ] Run `node scripts/backfill-line-tax-categories.mjs` (a dry run). It should say about 173 lines and 96 price-book items → SOLAR.
+- [ ] Run `node scripts/backfill-line-tax-categories.mjs --apply`. It writes canary first, then batches; don't pipe it.
+- [ ] Deploy `sundial-service-estimate` and `sundial-service-public`, so an invoiced estimate reads its stored totals.
+- [ ] Run sundial-cache-sync Test events `{"object":"serviceline","mode":"full"}`, then `{"object":"pricebookitem","mode":"full"}`.
+- [ ] DECIDE: there are 277 untaxed blank material lines on **archived** jobs, left alone by instruction. 13 of them are on Approved estimates and would show RETAIL tax if opened; the Invoiced ones read their snapshot. `--include-archived` is not built yet; ask if wanted.
+- [ ] DECIDE: there are 5 Labor lines ticked taxable (EST-00298, 01723, 02503, 02504, and the ZZ EST-00000). Before D-083 they were taxed; under LABSERV they are not. The 2 invoiced ones read their snapshot.
+
 ## Service sales tax from Acumatica (D-083, 2026-10-15) — ON `feature/tax-zones`, NOT DEPLOYED, awaiting review
 
 Runbook: `docs/integrations/acumatica-tax.md`.

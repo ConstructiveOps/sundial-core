@@ -3255,3 +3255,28 @@ test("D-083: issue freezes each line's EFFECTIVE category (after the warranty ru
   assert.equal(re.status, 201, JSON.stringify(re.body));
   assert.equal(fake.store.Sundial_Service_Invoice__c[1].Tax_Amount__c, 8.6, "customer-pay now: the part is taxed");
 });
+
+test("2026-10-16: an estimate invoiced BEFORE D-083 reads at what it was invoiced at — the blank material is not re-taxed as RETAIL on the estimate read or the invoice document", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Pre", Primary_Email__c: "p@example.com", City__c: "Mesa" });
+  const h = makeHandler(fake);
+  await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Panel clip", kind: "Material", unitPrice: 100 }] });
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal((await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {})).status, 201);
+  const est = fake.store.Sundial_Estimate__c[0];
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  const line = fake.store.Sundial_Service_Line__c[0];
+  // Rewind to how a pre-D-083 invoice sits in the org: the line untaxed with no category, no tax frozen anywhere.
+  Object.assign(line, { Tax_Category__c: null, Taxable__c: false });
+  Object.assign(est, { Tax_Amount__c: 0, Total__c: 100 });
+  Object.assign(inv, { Tax_Amount__c: 0, Total__c: 100 });
+
+  const read = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(read.status, 200);
+  assert.equal(read.body.totals.taxAmount, 0, "the stored snapshot, not a RETAIL recomputation (8.60)");
+  assert.equal(read.body.totals.total, 100);
+  const doc = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.equal(doc.body.total, 100);
+  await call(h, "POST", `/service/estimates/${est.Id}/recalculate`, {});
+  assert.equal(est.Tax_Amount__c, 0, "an invoiced estimate is never rewritten");
+});

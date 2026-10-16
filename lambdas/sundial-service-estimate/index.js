@@ -132,7 +132,7 @@ import {
   parseJsonBody,
   httpMethod,
 } from "../../lib/http.js";
-import { computeTotals, lineFromRecord, estimateFromRecord } from "./totals.js";
+import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals } from "./totals.js";
 import {
   estimateTaxContext,
   loadTaxTables as realLoadTaxTables,
@@ -742,9 +742,12 @@ export function createHandler(deps = {}) {
     return { matched: tax.matched, zoneCode: tax.zoneCode, label: tax.label, rate: tax.rate, source: tax.source, reason: tax.reason, needed: !tax.matched && tax.reason !== "TEMPLATE" };
   }
   /** Totals the way every reader must see them: lines × the zone's category rates on the date. */
-  async function estimateTotals(est, lines, { tenantId = est?.Client__c, date, job } = {}) {
+  // An Invoiced estimate reads its stored (invoiced) money, never a recomputation; `live` is
+  // the invoice issue, which is what computes the numbers it freezes.
+  async function estimateTotals(est, lines, { tenantId = est?.Client__c, date, job, live = false } = {}) {
     const tax = await taxContext(est, tenantId, { date, job });
     const totals = computeTotals((lines || []).map(lineFromRecord), estimateFromRecord(est, tax));
+    if (!live) withStoredTotals(totals, est);
     return Object.assign(totals, { tax: publicTax(tax) });
   }
   /** The zone a NEW job gets: the customer's city through the resolver. Fields empty when unresolved. */

@@ -335,6 +335,7 @@ Harmon currently runs 7 service techs on HCP Max (15 seats, ~150-230 tickets/mon
   - **`Taxable__c` is derived** (RETAIL = ticked), never an input. **Issue freezes each line's effective category**, so a later Bill To change never re-taxes an issued invoice; a void restores the lines.
   - **The zone.** The job carries it (`Tax_Zone_Code__c` / `_Label__c`), stamped from the customer's city at creation. Unmatched = blank = "Tax zone needed", and invoice issue refuses (`400 TAX_ZONE_REQUIRED`). Its one write path is `POST /service/jobs/{id}/tax-zone` (the generic job PATCH refuses the fields).
   - **The estimate's** `Tax_Rate__c` / `Tax_Jurisdiction__c` are outputs, never typed or defaulted.
+  - **An Invoiced estimate reads its stored totals** (`withStoredTotals`), never a recomputation; only the issue computes live. Pre-D-083 untaxed materials were made SOLAR by `scripts/backfill-line-tax-categories.mjs` (amendment 1, 2026-10-16).
 - **The price book is tenant-scoped** (`Client__c` on every item) — never the standard Salesforce `Pricebook2`/`Product2`, which cannot be isolated per tenant.
 
 ### Key Workflows

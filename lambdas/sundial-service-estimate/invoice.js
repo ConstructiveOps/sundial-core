@@ -673,7 +673,7 @@ export function createInvoiceHandlers(d, h) {
       if (!lines.length) return bad(cors, "NO_LINES", "The estimate has no lines to invoice.");
       const now = d.now();
       // D-083: taxed by the JOB's zone at the rates in force on the issue date.
-      const totals = await h.estimateTotals({ ...est, Service_Job__c: job.Id }, lines, { tenantId, date: now, job });
+      const totals = await h.estimateTotals({ ...est, Service_Job__c: job.Id }, lines, { tenantId, date: now, job, live: true });
       if (!totals.tax.matched) return bad(cors, "TAX_ZONE_REQUIRED", `The job's tax zone ${job.Tax_Zone_Code__c} is not in the tax tables — pick the zone again on the job.`, { field: "Tax_Zone_Code__c" });
       const proposed = lines.filter((l) => l.Stage__c === "Proposed").length;
       let dueDate = null;

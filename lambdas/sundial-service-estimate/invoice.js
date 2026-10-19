@@ -781,25 +781,23 @@ export function createInvoiceHandlers(d, h) {
       job.Status__c = "Invoiced";
       await h.markStale(CACHE.estimate, [est.Id], tenantId);
 
-      let money = await settleMoney({ invoice, job, tenantId, ctx });
+      const money = await settleMoney({ invoice, job, tenantId, ctx });
       const pdf = await renderAndStorePdf({ invoice, job, est, lines, payments: money.payments, ctx, tenantId });
       await h.markStale(CACHE.invoice, [invoice.Id], tenantId);
       await h.act(ctx, {
         event: EVENTS.INVOICE_ISSUED, recordType: "serviceinvoice", recordSfId: invoice.Id, jobSfId: job.Id, estimateSfId: est.Id,
         details: { number: invoice.Name, total: totals.total, lineCount: lines.length, proposedLines: proposed, billTo: invoice.Bill_To_Type__c, dueDate, depositsApplied: orphans.length, paid: money.summary.paid, pdfKey: pdf.key, taxZone: totals.tax.zoneCode, taxRate: totals.tax.rate, frozenCategories },
       });
-      // Customer-pay job with a card on file: charge the balance now, off-session (D-065.6).
-      // The charge's own outcome rides along; a decline never un-issues the invoice.
-      let charge = null;
-      if (body?.chargeCard === true && h.chargeInvoice) {
-        // Charging the stored card is an Admin / Executive / Manager action (amendment 11) — the invoice
-        // still issues; the tick just does nothing for anyone else, and says so.
-        if (ctx.can && !ctx.can("service.card.charge")) charge = { ok: false, code: "FORBIDDEN", message: "Charging the card on file is an Admin, Executive or Manager action — the invoice was issued, not charged." };
-        else {
-          charge = await h.chargeInvoice({ ctx, invoice, job });
-          if (charge?.settled) money = charge.settled;
-        }
-      }
+      // ISSUING NEVER CHARGES THE CARD (Harmon, 2026-10-19). Until today `chargeCard: true`
+      // charged the stored card's balance in the same request — and the portal ticked that box
+      // by default, so invoices were charging cards the office never meant to charge. Money
+      // moves only when someone records a payment: the office's own "Charge card" button
+      // (`POST /service/jobs/{id}/charge`, level-gated), a manual payment, or the customer
+      // paying on the hosted page. A caller still sending the old flag gets the invoice
+      // issued, nothing charged, and is told so in `charge` + a warning.
+      const charge = body?.chargeCard === true
+        ? { ok: false, code: "NOT_AT_ISSUE", message: "Issuing an invoice never charges the card on file — use Charge card on the job page when the customer has agreed." }
+        : null;
       return jsonResponse(201, cors, {
         success: true,
         id: invoice.Id,

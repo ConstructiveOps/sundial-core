@@ -3,7 +3,8 @@
 //   POST /webhooks/stripe/{tenant}          Stripe's events for this tenant's account (no login;
 //                                           gated only by the Stripe-Signature check, fail closed)
 //   POST /service/invoices/{id}/charge      the office charges the card on file for the balance
-//                                           (off-session; also `chargeCard: true` on issue)
+//                                           (off-session; the ONLY office-side charge — issuing an
+//                                           invoice never charges, 2026-10-19)
 //   THE OFFICE'S CARD ON FILE (amendment 11, 2026-09-28 — a card over the phone):
 //   GET  /service/jobs/{id}/card            is there a card? (brand / last 4, live from Stripe), what is owed
 //   POST /service/jobs/{id}/card-session    a Stripe-hosted card page for the OFFICE to type the card the

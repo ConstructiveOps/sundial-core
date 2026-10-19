@@ -3632,6 +3632,14 @@ On the alternative — routing comments through a Lambda for techs — no: it wo
 3. **Invoice send is the same shape.** The partner-only `to` behaviour is the general one; "enter the partner's email" is gone (the portal always shows the box). A partner's text has no pay link (no customer page) and says the PDF comes by email.
 4. **Reads prefill the box.** `GET /service/estimates/{id}`, `GET /service/invoices/{id}` and `GET /service/jobs/{id}/invoice` return `sendDefaults: { email, phone, source: "billTo"|"customer", name }`.
 
+## D-072 amendment 14 (2026-10-19): issuing an invoice never charges a card — money moves only when a payment is created
+
+**Context.** Since amendment 11, `POST /service/jobs/{id}/invoice` took `chargeCard: true` and charged the stored card's balance in the same request, and the portal's Issue invoice row ticked "Charge the card on file now" by default whenever a card was on file. Harmon found invoices charging customers' cards the office had not meant to charge (2026-10-19).
+
+**Decision.** Issuing is a document action, never a money action. The server ignores `chargeCard` on issue (the invoice is issued, `charge: { ok: false, code: "NOT_AT_ISSUE" }`, a warning), the portal's tick is removed, and the only ways money moves on a job are the office's explicit **Charge card** (`POST /service/jobs/{id}/charge` / `POST /service/invoices/{id}/charge`, level-gated), a recorded manual payment, and the customer paying on the hosted page. **Never add an implicit charge to any other action.**
+
+**Consequences.** One less step for the office that wanted the charge (Issue, then Charge card); no surprise charges. The invoice email still carries the pay link.
+
 ## D-072 amendment 13 (2026-10-16): a Manager runs billing; what work COSTS stays Admin / Executive
 
 **Decision.**

@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-19 — Hotfix: issuing an invoice never charges the card on file (D-072 amendment 14, Harmon)
+
+**What Harmon saw.** Issuing an invoice charged the customer's card on file. The cause was a feature, not a bug in the charge: `POST /service/jobs/{id}/invoice` honoured `chargeCard: true` (amendment 11) and the portal's Issue row ticked "Charge the card on file now" **by default** whenever a card was on file — so the charge happened unless someone unticked it.
+
+**Fix.** `invoice.js` `issueInvoice` no longer charges, whatever the body says: the flag yields `charge: { ok: false, code: "NOT_AT_ISSUE" }` + a warning, the invoice issues, no PaymentIntent, no Payment row (`chargeInvoice` is no longer handed to the invoice handlers). The portal's tick, its state and the `chargeCard` field are gone (`JobInvoiceCard.tsx`, `service-api.ts`). Money moves only through Charge card, a recorded payment, or the customer paying. Tests: estimate 73 (the deposit test now proves an issue with the old flag creates no PaymentIntent and the Charge card route still charges the 150 balance; the level test's FORBIDDEN case became NOT_AT_ISSUE), portal `JobInvoiceCard.test.tsx` 5.
+
+**Deploy (Tim):** `.\deploy.ps1 sundial-service-estimate`; harmon-crm `main` (Vercel). The server fix alone stops the charges even before the portal deploys (an old portal's tick is ignored with a warning).
+
 ## 2026-10-16 — Hotfix: a line's description is never cut (Harmon — EST-02769's scope line ended mid-sentence on the invoice)
 
 **Why.** `Sundial_Service_Line__c.Description__c` was Text(255) and every line builder in the estimate Lambda (`pricebook.js` `lineFromItem` / `adHocLine` / `linePatchFields`) sliced the text to 255 to fit — silently. A 300-character scope line lost its last sentence on the estimate, the invoice and the PDF; nothing in the portal or the painters was at fault (both wrap).

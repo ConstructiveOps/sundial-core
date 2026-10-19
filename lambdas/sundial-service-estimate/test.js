@@ -1988,10 +1988,12 @@ test("stripe webhook: signature is the gate (bad / tampered / unknown tenant / n
   assert.equal(fake.store.Sundial_Service_Payment__c.filter((p) => p.Type__c === "Refund").length, 1);
 });
 
-test("stripe: a deposit paid before the job exists is deferred, then lands when the office creates the job; issue with chargeCard charges the balance", async () => {
+test("stripe: a deposit paid before the job exists is deferred, then lands when the office creates the job; issue NEVER charges the balance (2026-10-19), the Charge card button does", async () => {
   const fake = fakeSalesforce();
   fake.stripeSecret = STRIPE_SECRET;
+  const stripeCalls = [];
   fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, method: init?.method });
     if (url.endsWith("/customers/cus_1")) return { ok: true, status: 200, json: async () => ({ id: "cus_1", invoice_settings: { default_payment_method: "pm_card" } }) };
     if (url.endsWith("/payment_intents") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "pi_auto", status: "requires_confirmation" }) };
     if (url.endsWith("/payment_intents/pi_auto/confirm")) return { ok: true, status: 200, json: async () => ({ id: "pi_auto", status: "succeeded", created: 1_789_001_000, latest_charge: "ch_auto" }) };
@@ -2033,16 +2035,27 @@ test("stripe: a deposit paid before the job exists is deferred, then lands when 
   assert.ok(fake.stripeEvents.every((e) => e.status === "applied"), JSON.stringify(fake.stripeEvents.map((e) => [e.id, e.status, e.error])));
   assert.equal(fake.stripeEvents.find((e) => e.id === "evt_early").job_sf_id, job.Id);
 
-  // Issue with chargeCard: the 150 balance is charged in the same request.
+  // Issue — even with the old `chargeCard: true` flag — moves no money: the invoice is issued,
+  // the deposit alone is applied, the card untouched, and the caller is told (Harmon, 2026-10-19:
+  // the portal's ticked-by-default box was charging cards the office never meant to charge).
+  const piBefore = stripeCalls.filter((c) => c.url.endsWith("/payment_intents") && c.method === "POST").length;
   const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
   assert.equal(iss.status, 201, JSON.stringify(iss.body));
-  assert.equal(iss.body.charge.ok, true);
-  assert.equal(iss.body.charge.amount, 150);
+  assert.equal(iss.body.charge.ok, false);
+  assert.equal(iss.body.charge.code, "NOT_AT_ISSUE");
+  assert.ok(iss.body.warnings.some((w) => /never charges the card on file/.test(w)), JSON.stringify(iss.body.warnings));
+  assert.equal(stripeCalls.filter((c) => c.url.endsWith("/payment_intents") && c.method === "POST").length, piBefore, "no PaymentIntent was created by the issue");
   const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.equal(inv.Paid_Amount__c, 50, "only the deposit is applied");
+  assert.equal(inv.Status__c, "Partially Paid");
+  assert.equal(iss.body.paymentStatus, "Partially Paid");
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 1, "no payment row was written by the issue");
+  // Money moves only when a payment is created: the office's Charge card button charges the 150 balance.
+  const chg = await call(h, "POST", `/service/invoices/${inv.Id}/charge`);
+  assert.equal(chg.status, 200, JSON.stringify(chg.body));
+  assert.equal(chg.body.amount, 150);
   assert.equal(inv.Paid_Amount__c, 200);
   assert.equal(inv.Status__c, "Paid");
-  assert.equal(iss.body.paymentStatus, "Paid");
-  assert.ok(!iss.body.warnings.some((w) => /not charged/.test(w)), JSON.stringify(iss.body.warnings));
 });
 
 test("stripe (amendment 11): the office's card on file — status from Stripe, the hosted card page, the customer link by text / email, an Admin charge of any amount (deposit before the invoice, the balance after), a Manager allowed (2026-10-16), a level-less user refused, the caps", async () => {
@@ -2148,12 +2161,12 @@ test("stripe (amendment 11): the office's card on file — status from Stripe, t
   const noLevel = makeHandler(fake, { user: { id: "USR000000000000002" }, access: { level: null, scope: "tenant", userId: "USR000000000000002", tenantId: TENANT } });
   r = await call(noLevel, "POST", `/service/jobs/${job.Id}/charge`, { amount: 50 });
   assert.equal(r.status, 403);
-  // The invoice-balance charge is the same level-gated action; an issue with the tick by someone without it still issues, uncharged.
+  // Issue never charges, whoever asks (2026-10-19): the old tick issues the invoice, uncharged, and says so.
   r = await call(noLevel, "POST", `/service/jobs/${job.Id}/invoice`, { chargeCard: true });
   assert.equal(r.status, 201, JSON.stringify(r.body));
   assert.equal(r.body.charge.ok, false);
-  assert.equal(r.body.charge.code, "FORBIDDEN");
-  assert.ok(r.body.warnings.some((w) => /Manager action/.test(w)));
+  assert.equal(r.body.charge.code, "NOT_AT_ISSUE");
+  assert.ok(r.body.warnings.some((w) => /never charges the card on file/.test(w)));
   const invM = fake.store.Sundial_Service_Invoice__c[0];
   assert.equal((await call(noLevel, "POST", `/service/invoices/${invM.Id}/charge`)).status, 403);
   await call(h, "POST", `/service/invoices/${invM.Id}/void`, { reason: "test" });

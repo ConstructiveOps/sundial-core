@@ -18,6 +18,11 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Note for Prompt B: the price-book modal may keep sending blank cost keys (allowed), but must not send a non-blank one for a non-Admin (403). Same for the estimate's markup inputs: hide them when the read has no `Markup_*` keys; blank is allowed, a value is 403.
 - [x] Markup hidden like cost (2026-10-16 night) — `.\deploy.ps1 sundial-service-estimate`. [ ] Optional: the same for `sundial-sf-query`'s estimate cache columns and `sundial-sf-update`'s estimate PATCH.
 
+## 2026-10-19 — Issuing never charges a card (Harmon, D-072 am. 14)
+
+- [x] Estimate Lambda: `chargeCard` on issue ignored (NOT_AT_ISSUE + warning); portal tick removed.
+- [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; commit + push harmon-crm `main`. Refund any charge Harmon did not intend in the Stripe dashboard (the webhook mirrors it).
+
 ## 2026-10-16 — A line's description is never cut (Harmon)
 
 - [x] Estimate Lambda: the line description limit is the org's field length (describe), typed text over it refused — never trimmed; the PDF line table flows a long description across pages. +2 tests.

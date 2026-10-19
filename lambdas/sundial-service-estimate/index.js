@@ -2229,7 +2229,7 @@ export function createHandler(deps = {}) {
   const club = createClubHandlers(d, { resolveCustomer, createEstimateRecord, createJobRecord, addLinesToEstimate, loadEstimate, loadLines, recomputeAndStore, estimateTotals, act, markStale, flushEvents, CACHE, jsonResponse, bad, notFound, sfError, brandFor, publicBaseFor, notifier: d.notifier });
   Object.assign(H, club.handlers);
   const stripeH = createStripeHandlers(d, { money, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, club, notifier: d.notifier, publicEstimateUrl: (token, ctx) => publicEstimateUrl(token, publicBaseFor(ctx)), randomToken: d.randomToken, portalBaseUrl: (ctx) => publicBaseFor(ctx) });
-  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, estimateTotals, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, recipientRecords, money, chargeInvoice: stripeH.chargeInvoice }));
+  Object.assign(H, createInvoiceHandlers(d, { loadEstimate, loadLines, estimateTotals, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, recipientRecords, money })); // issue never charges a card (2026-10-19): chargeInvoice is the Charge card route's alone
   H.chargeInvoiceRoute = stripeH.chargeInvoiceRoute;
   H.stripeWebhook = stripeH.stripeWebhook;
   H.jobCard = stripeH.jobCard;

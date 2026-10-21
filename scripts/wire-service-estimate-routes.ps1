@@ -10,7 +10,8 @@
       PATCH  /service/estimates/{id}/lines/{lineId}
       DELETE /service/estimates/{id}/lines/{lineId}
       POST   /service/estimates/{id}/add-template | recalculate | send | approve | decline | create-job | unlock
-      GET    /service/estimates/{id}/activity | preview
+      GET    /service/estimates/{id}/activity | preview | pdf             (pdf: the estimate as it stands, 2026-10-22)
+      POST   /service/estimates/{id}/lines/reorder                      (the office's line order, 2026-10-22)
       POST   /service/jobs
       GET    /service/jobs/{id}/activity | street-view | invoice | labor
       POST   /service/jobs/{id}/invoice | labor
@@ -101,12 +102,16 @@ Write-Host "==> /service/estimates/{id}/lines : POST, OPTIONS" -ForegroundColor 
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $lines $m }
 Write-Host "==> /service/estimates/{id}/lines/{lineId} : PATCH, DELETE, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("PATCH", "DELETE", "OPTIONS")) { Wire-Method $lineId $m }
+# The office's line order (2026-10-22): a static "reorder" beside {lineId} — API Gateway prefers the literal.
+Write-Host "==> /service/estimates/{id}/lines/reorder : POST, OPTIONS" -ForegroundColor Cyan
+$reorder = Ensure-Resource $lines "reorder"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $reorder $m }
 foreach ($action in @("add-template", "recalculate", "send", "approve", "decline", "create-job", "unlock")) {  # unlock = reopen an invoiced estimate (2026-09-30)
     Write-Host "==> /service/estimates/{id}/$action : POST, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $estId $action
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
 }
-foreach ($action in @("activity", "preview")) {
+foreach ($action in @("activity", "preview", "pdf")) {  # pdf = download the estimate before sending (2026-10-22)
     Write-Host "==> /service/estimates/{id}/$action : GET, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $estId $action
     foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m }

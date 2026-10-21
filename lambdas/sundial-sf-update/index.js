@@ -38,6 +38,11 @@ import { resolveIdentity } from "../../lib/identity.js";
 import { getSupabaseClient } from "../../lib/supabase.js";
 import { createNotifier } from "../../lib/notify.js";
 import { alertAssigned, alertUnassignedCustomer, isServiceCustomer } from "../../lib/service-intake-alerts.js";
+// 2026-10-22: the customer's feed gets the server's own intake / assignment lines (D-084),
+// a new follow-up date ticks Follow-up needed, a report date makes the job Ready to Bill.
+import { INTAKE_API_NAMES, commentOnCustomerWrite, userDisplayName } from "../../lib/intake-comment.js";
+import { FOLLOW_UP_DATE_FIELD, applyFollowUpFlag } from "../../lib/follow-up.js";
+import { REPORT_DATE_FIELDS, readyToBillFromReportDates } from "../../lib/job-status.js";
 
 // --- Object allowlist (the security spine) ---------------------------------
 // The {object} path param is one of these short keys. Anything else => 400.
@@ -227,11 +232,57 @@ function touchesIntakeAlertFields(fields) {
   const keys = Object.keys(fields || {}).map((k) => k.toLowerCase());
   return INTAKE_ALERT_FIELDS.some((f) => keys.includes(f.toLowerCase()));
 }
-/** The customer as it was before the PATCH, for the alert decisions (null when not needed / unreadable). */
-async function readCustomerForAlerts(entry, recordId, tenantId) {
+/**
+ * The customer fields a PATCH needs the BEFORE value of (2026-10-22): the alert fields, the
+ * intake answers it writes (for the feed's "Intake updated" line) and the follow-up date (a
+ * new one ticks Follow-up needed). `needed` false = no pre-read at all; `fields` are the
+ * extra canonical API names to SELECT beside the alert fields.
+ */
+export function customerBeforeFields(clean) {
+  const keys = Object.keys(clean || {}).map((k) => k.toLowerCase());
+  const fields = [...INTAKE_API_NAMES, FOLLOW_UP_DATE_FIELD].filter((f) => keys.includes(f.toLowerCase()));
+  return { needed: fields.length > 0 || touchesIntakeAlertFields(clean), fields };
+}
+
+/**
+ * D-072 amendment 4 (2026-10-22): a call's window and status have their own routes on the
+ * dispatch board, which settle the job's status in ONE place (settleJobStatus). A generic
+ * PATCH naming any of them would skip that, so it is refused, never half-applied.
+ */
+export const CALL_SCHEDULE_FIELDS = ["Scheduled_Start__c", "Scheduled_End__c", "Status__c"];
+export function callScheduleRefusal(clean) {
+  const hit = CALL_SCHEDULE_FIELDS.find((f) => keyOf(clean, f));
+  if (!hit) return null;
+  return {
+    status: 400,
+    body: {
+      error: "call_schedule_read_only",
+      code: "CALL_SCHEDULE_READ_ONLY",
+      field: hit,
+      message: "A service call's window and status are changed on the dispatch board: PATCH /service/calls/{id} (move / status), POST /service/calls/{id}/unschedule, POST /service/calls/{id}/cancel.",
+    },
+  };
+}
+
+/** Whether the object's describe has this field (any casing). */
+function hasField(describe, name) {
+  return (describe?.fields || []).some((f) => f.name.toLowerCase() === name.toLowerCase());
+}
+
+/** The assignee's name for the feed's "Assigned to …" line — tenant-scoped, null when unknown. */
+async function loadUserNameFor(tenantId, id) {
+  const rows = await sfQuery(
+    `SELECT Id, First_Name__c, Last_Name__c FROM Sundial_User__c WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+  );
+  return rows?.[0] ? userDisplayName(rows[0]) : null;
+}
+/** The customer as it was before the PATCH, for the alerts / comments / follow-up (null when unreadable). */
+async function readCustomerForAlerts(entry, recordId, tenantId, extraFields = []) {
   try {
+    const base = ["Id", "Name", "First_Name__c", "Last_Name__c", "Assigned_To__c", "Archived__c", "Customer_Type__c"];
+    const select = [...new Set([...base, ...extraFields])].join(", ");
     const rows = await sfQuery(
-      `SELECT Id, Name, First_Name__c, Last_Name__c, Assigned_To__c, Archived__c, Customer_Type__c FROM ${entry.sfObject} ` +
+      `SELECT ${select} FROM ${entry.sfObject} ` +
         `WHERE Id = '${soqlEscapeString(recordId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`,
     );
     return rows?.[0] ?? null;
@@ -835,11 +886,38 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
     const billTo = await deriveJobBillTo({ entry, clean, recordId, tenantId });
     if (!billTo.ok) return jsonResponse(billTo.status, cors, { error: billTo.code.toLowerCase(), code: billTo.code, field: "Bill_To_Customer__c", message: billTo.message });
   }
+  if (objectKey === "servicecall") {
+    const refused = callScheduleRefusal(clean);
+    if (refused) return jsonResponse(refused.status, cors, refused.body);
+  }
+
+  // 4a') D-081 amendment 3 (2026-10-22): a report date set on a job that is still before
+  //      Ready to Bill moves it there, in THIS update (lib/job-status.js). Never backwards;
+  //      clearing a date does nothing.
+  let reportDateMove = null;
+  if (objectKey === "job" && REPORT_DATE_FIELDS.some((f) => keyOf(clean, f))) {
+    const rows = await sfQuery(
+      `SELECT Id, Status__c, Estimate__c, ${REPORT_DATE_FIELDS.join(", ")} FROM ${entry.sfObject} ` +
+        `WHERE Id = '${soqlEscapeString(recordId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+    );
+    const job = rows?.[0] ?? null;
+    const move = readyToBillFromReportDates(job, clean);
+    if (move) {
+      reportDateMove = { from: job.Status__c ?? null, to: move.to, dates: move.fields, estimateSfId: job.Estimate__c ?? null };
+      clean.Status__c = move.to;
+      clean.Status_Changed_At__c = new Date().toISOString();
+    }
+  }
 
   // 4b) Service objects: capture the values about to change, for the activity row.
   const before = await readBeforeForActivity(objectKey, entry, recordId, tenantId, Object.keys(clean));
-  // 4c) A customer's Assigned To / Archived edit: what it was, for the intake alerts (2026-10-02).
-  const customerBefore = objectKey === "customer" && touchesIntakeAlertFields(clean) ? await readCustomerForAlerts(entry, recordId, tenantId) : null;
+  // 4c) A customer edit: what it was, for the intake alerts (2026-10-02), the feed's intake /
+  //     assignment lines and the follow-up flag (2026-10-22).
+  const customerPre = objectKey === "customer" ? customerBeforeFields(clean) : { needed: false, fields: [] };
+  const customerBefore = customerPre.needed ? await readCustomerForAlerts(entry, recordId, tenantId, customerPre.fields) : null;
+  // A new follow-up date ticks Follow-up needed in the same write (lib/follow-up.js) — only
+  // when the org has the flag (describe), and never set false here.
+  if (objectKey === "customer" && hasField(describe, "Follow_Up_Needed__c")) applyFollowUpFlag(customerBefore, clean);
 
   // 5) PATCH to Salesforce (success is 204 No Content).
   const resp = await sfWrite(
@@ -868,10 +946,39 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
 
   // 6b) The intake alerts, after the write (best-effort; never fails the save).
   if (customerBefore) await customerIntakeAlertsAfterUpdate({ before: customerBefore, clean, recordId, tenantId, identity });
+  // 6c) The feed's own lines (D-084): one "Intake updated …" for the answers this write
+  //     changed, one "Assigned to …" for a new assignee. Best-effort, after the write. A
+  //     failed pre-read (null) means we cannot tell what changed — say nothing rather than guess.
+  if (customerBefore) {
+    await commentOnCustomerWrite({
+      getSupabaseClient,
+      loadUserName: (id) => loadUserNameFor(tenantId, id),
+      tenantId,
+      customerId: recordId,
+      before: customerBefore,
+      written: clean,
+      actor: { ...activityActor(identity), profileId: identity?.authUserId ?? null },
+    });
+  }
 
   // 7) Activity tracker (service objects only). Best-effort, after the write.
   if (SERVICE_ACTIVITY_KEYS[objectKey]) {
     const refs = activityRefs(objectKey, before, recordId);
+    // The report-date status move is its own row (via: report_date), not part of the edit's diff.
+    const diffed = reportDateMove ? Object.fromEntries(Object.entries(clean).filter(([k]) => !["Status__c", "Status_Changed_At__c"].includes(k))) : clean;
+    if (reportDateMove) {
+      await recordActivity(getSupabaseClient, {
+        tenantId,
+        tenantSlug: identity?.tenantSlug ?? null,
+        event: ACTIVITY_EVENTS.JOB_UPDATED,
+        recordType: "job",
+        recordSfId: recordId,
+        jobSfId: recordId,
+        estimateSfId: reportDateMove.estimateSfId,
+        actor: activityActor(identity),
+        details: { via: "report_date", dates: reportDateMove.dates, fields: { Status__c: { from: reportDateMove.from, to: reportDateMove.to } } },
+      });
+    }
     await recordActivity(getSupabaseClient, {
       tenantId,
       tenantSlug: identity?.tenantSlug ?? null,
@@ -881,7 +988,7 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
       jobSfId: refs.jobSfId,
       estimateSfId: refs.estimateSfId,
       actor: activityActor(identity),
-      details: { via: "sf-update", name: before?.Name ?? null, fields: diffFields(before || {}, clean) },
+      details: { via: "sf-update", name: before?.Name ?? null, fields: diffFields(before || {}, diffed) },
     });
   }
 
@@ -889,6 +996,7 @@ async function handleUpdate({ entry, id, tenantId, fields, describe, cors, objec
     success: true,
     id: recordId,
     source: "salesforce",
+    ...(reportDateMove ? { jobStatusChanged: reportDateMove.to } : {}),
   });
 }
 
@@ -1043,6 +1151,9 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
     }
   }
 
+  // A follow-up date on a new customer ticks Follow-up needed too (2026-10-22, lib/follow-up.js).
+  if (objectKey === "customer" && hasField(describe, "Follow_Up_Needed__c")) applyFollowUpFlag(null, payload);
+
   const resp = await sfWrite(
     "POST",
     `/services/data/${SF_API_VERSION}/sobjects/${entry.sfObject}`,
@@ -1064,6 +1175,18 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
   if (newId && objectKey === "customer" && isServiceCustomer(payload) && !pick(payload, "Assigned_To__c")) {
     const actor = activityActor(identity);
     await alertUnassignedCustomer({ notifier: notifier(), sfQuery, tenantId, customer: { ...payload, Id: newId, Assigned_To__c: null }, reason: "created", actorUserSfId: actor.id });
+  }
+  // The feed's own lines on a new customer created here with intake answers / an assignee (D-084).
+  if (newId && objectKey === "customer") {
+    await commentOnCustomerWrite({
+      getSupabaseClient,
+      loadUserName: (id) => loadUserNameFor(tenantId, id),
+      tenantId,
+      customerId: newId,
+      before: {},
+      written: payload,
+      actor: { ...activityActor(identity), profileId: identity?.authUserId ?? null },
+    });
   }
 
   // Activity tracker (service objects only). Best-effort, after the write.

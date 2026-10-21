@@ -258,6 +258,22 @@ The service job's payer is two fields: **`Bill_To_Type__c`** (Customer / Interna
 
 **The invoice snapshots the JOB's Bill To, never the estimate's.** Estimate cache columns `bill_to_type`, `bill_to_customer_sf_id`, `bill_to_name` — `sql/2026-10-16_estimate_bill_to.sql`.
 
+### The job's report dates (D-081 amendment 3, 2026-10-22)
+
+Three Date fields Tim added in Setup on `Sundial_Service_Job__c` (no package; describe-confirmed 2026-10-21), typed by the office on the job page:
+
+| Field | Label | Cache column |
+|---|---|---|
+| `Report_Uploaded_to_Partner_Portal__c` | Report Uploaded to Partner Portal | `report_uploaded_to_partner_portal` |
+| `Report_Sent_to_Customer__c` | Report Sent to Customer | `report_sent_to_customer` |
+| `Notes_Reported__c` | Notes Reported | `notes_reported` |
+
+Any one going from blank to a date moves a job still before `Ready to Bill` to `Ready to Bill` in the same write (`sundial-sf-update`, `lib/job-status.js`); never backwards. Sending the job report does not stamp `Report_Sent_to_Customer__c`. Cache columns: `sql/2026-10-22_job_report_dates.sql`, not in the list projection.
+
+**Customer follow-up (2026-10-22):** a write that sets `Sundial_Customer__c.Next_Follow_Up_Date__c` to a new date also sets `Follow_Up_Needed__c = true` (`lib/follow-up.js`, sf-update and the Service popups); clearing the date never touches the flag.
+
+**Service calls:** `Sundial_Service_Call__c.Scheduled_Start__c` / `Scheduled_End__c` / `Status__c` are written only by `sundial-service-board` (the generic `PATCH /sf/servicecall` refuses them, `CALL_SCHEDULE_READ_ONLY`).
+
 **Cost fields are Admin / Executive (D-072 amendment 13, 2026-10-16):** `Sundial_Price_Book_Item__c.Labor_Cost__c` / `Material_Cost__c` and `Sundial_Service_Line__c.Unit_Labor_Cost__c` / `Unit_Material_Cost__c` are never served to, or set by, anyone without `service.costing.read` / `.write` (`lib/cost-gate.js`).
 
 The `-2` reissue re-snapshots; a void never rewrites. Cache columns: `bill_to_customer_sf_id` (job, invoice), `bill_to_address` (invoice), `is_company` / `company_name` / `warranty_notes` (customer) and the generated `display_name_sort` (customer; the Customer header's sort) — `sql/2026-10-07_company_customers.sql`.

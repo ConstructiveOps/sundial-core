@@ -312,7 +312,16 @@ function fakeSalesforce() {
     calls.queries.push(soql);
     const obj = soql.match(/FROM (\w+)/)[1];
     let where = (soql.split(" WHERE ")[1] || "").replace(/\s+(ORDER BY|LIMIT).*$/, "").trim();
-    const rows = store[obj].filter((r) => (where ? evalWhere(r, where) : true));
+    let rows = store[obj].filter((r) => (where ? evalWhere(r, where) : true));
+    // The line order every reader asks for (2026-10-22): Sort_Order__c NULLS LAST, then the
+    // store's insertion order standing in for CreatedDate. Other ORDER BYs stay unmodelled.
+    if (/ORDER BY Sort_Order__c NULLS LAST/.test(soql)) {
+      rows = rows.map((r, i) => [r, i]).sort(([a, i], [b, j]) => {
+        const x = a.Sort_Order__c == null ? Infinity : Number(a.Sort_Order__c);
+        const y = b.Sort_Order__c == null ? Infinity : Number(b.Sort_Order__c);
+        return x === y ? i - j : x - y;
+      }).map(([r]) => r);
+    }
     // The one relationship the labor routes read: a call's Tech__r (name + bill rate).
     return rows.map((r) => {
       if (obj === "Sundial_Service_Call__c" && r.Tech__c) return { ...r, Tech__r: store.Sundial_User__c.find((u) => u.Id === r.Tech__c) ?? null };
@@ -387,7 +396,8 @@ function fakeSalesforce() {
   const stripeEvents = []; // the Stripe webhook ledger (sundial_stripe_events)
   store.sundial_file_metadata = files;
   store.sundial_stripe_events = stripeEvents;
-  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : table === "sundial_stripe_events" ? stripeEvents : null);
+  const comments = []; // the customer feed's system lines (D-084)
+  const tableRows = (table) => (table === "sundial_service_activity" ? activity : table === "sundial_file_metadata" ? files : table === "sundial_stripe_events" ? stripeEvents : table === "comments" ? comments : null);
   function chain(table, op, patch) {
     const filters = [];
     const q = {
@@ -448,7 +458,7 @@ function fakeSalesforce() {
     toUsers: async (n) => (notes.push({ to: "users", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
     toProfile: async (n) => (notes.push({ to: "profile", ...n }), { inserted: 1, skipped: 0, pushed: 0 }),
   };
-  return { store, calls, stale, activity, stripeEvents, notes, flags, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
+  return { store, calls, stale, activity, stripeEvents, notes, flags, comments, emails: [], puts: [], fetches, deps: { sfQuery, sfCreateRecord, sfUpdateRecord, sfDeleteRecord, describeObject, getSupabaseClient, notifier } };
 }
 
 // The tax tables the tests run on (D-083) — Acumatica's shape, test numbers: Mesa's retail
@@ -3662,4 +3672,123 @@ test("2026-10-16 markup is a margin number: a Manager never sees it (record, tot
   assert.equal(r.status, 200);
   assert.equal(est.Markup_Value__c, 15);
   assert.ok(hasMarkup(r.body), "an Admin's response keeps Markup_Amount__c");
+});
+
+test("GET /service/estimates/{id}/pdf (2026-10-22): the PDF as it stands — DRAFT watermark, base64 JSON, no version / file / status change; PREVIEW once sent; 403 without the action", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Pd", Primary_Email__c: "pd@example.com" });
+  // The real painter, with the model it is handed kept for the watermark check (PDF text is encoded).
+  const { renderEstimatePdf } = await import("../../lib/estimate-pdf.js");
+  const painted = [];
+  fake.deps.renderPdf = async (m) => (painted.push(m), renderEstimatePdf(m));
+  const h = makeHandler(fake);
+  const c = await call(h, "POST", "/service/estimates", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  const est = fake.store.Sundial_Estimate__c[0];
+  const versionBefore = est.Version__c;
+  const putsBefore = fake.puts.length;
+  const updatesBefore = fake.calls.updates.filter((u) => u.obj === "Sundial_Estimate__c").length;
+  const r = await call(h, "GET", `/service/estimates/${c.body.id}/pdf`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.contentType, "application/pdf");
+  assert.equal(r.body.watermark, "DRAFT");
+  assert.equal(r.body.fileName, `${String(est.Name || "estimate").replace(/[^A-Za-z0-9._-]+/g, "-")}-draft.pdf`);
+  const bytes = Buffer.from(r.body.base64, "base64");
+  assert.equal(bytes.subarray(0, 5).toString("latin1"), "%PDF-");
+  assert.equal(painted.at(-1).watermark, "DRAFT", "the painter draws the DRAFT watermark");
+  assert.equal(est.Version__c, versionBefore, "version unchanged");
+  assert.equal(est.Status__c, "Draft", "status unchanged");
+  assert.equal(fake.puts.length, putsBefore, "nothing stored");
+  assert.equal(fake.calls.updates.filter((u) => u.obj === "Sundial_Estimate__c").length, updatesBefore, "no estimate write");
+  est.Status__c = "Sent";
+  assert.equal((await call(h, "GET", `/service/estimates/${c.body.id}/pdf`)).body.watermark, "PREVIEW");
+  const tech = makeHandler(fake, { access: { level: "Technician", scope: "tech", userId: USER, tenantId: TENANT } });
+  assert.equal((await call(tech, "GET", `/service/estimates/${c.body.id}/pdf`)).status, 403);
+  assert.equal((await call(h, "GET", "/service/estimates/000000000000000000/pdf")).status, 404);
+});
+
+test("POST /service/estimates/{id}/lines/reorder (2026-10-22): every line once → Sort_Order__c 1..n, money untouched; the read, the PDF model and the issued invoice follow the order; bad lists 400; invoiced 409", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ro", Primary_Email__c: "ro@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Alpha", kind: "Labor", unitPrice: 100 }, { description: "Bravo", kind: "Labor", unitPrice: 200 }, { description: "Charlie", kind: "Fee", unitPrice: 50 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const read = async () => (await call(h, "GET", `/service/estimates/${est.Id}`)).body.lines.map((l) => l.Description__c);
+  assert.deepEqual(await read(), ["Alpha", "Bravo", "Charlie"]);
+  const ids = Object.fromEntries(fake.store.Sundial_Service_Line__c.map((l) => [l.Description__c, l.Id]));
+  const totalBefore = est.Total__c;
+
+  // Bad lists: a missing line, a duplicate, a stranger.
+  for (const lineIds of [[ids.Alpha, ids.Bravo], [ids.Alpha, ids.Alpha, ids.Bravo], [ids.Alpha, ids.Bravo, "a1X000000000000AAA"], null]) {
+    const bad = await call(h, "POST", `/service/estimates/${est.Id}/lines/reorder`, { lineIds });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.code, "REORDER_INVALID");
+  }
+
+  const r = await call(h, "POST", `/service/estimates/${est.Id}/lines/reorder`, { lineIds: [ids.Charlie, ids.Alpha, ids.Bravo] });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(await read(), ["Charlie", "Alpha", "Bravo"]);
+  assert.deepEqual(["Charlie", "Alpha", "Bravo"].map((n) => fake.store.Sundial_Service_Line__c.find((l) => l.Id === ids[n]).Sort_Order__c), [1, 2, 3]);
+  assert.equal(est.Total__c, totalBefore, "money is order-independent");
+  const act = fake.activity.find((a) => a.event === "estimate_updated" && a.details?.reordered === true);
+  assert.ok(act, "activity estimate_updated with reordered: true");
+
+  // The document model the PDF and the hosted page are painted from.
+  const { buildEstimateModel } = await import("../../lib/estimate-document.js");
+  const lines = (await fake.deps.sfQuery(`SELECT Id FROM Sundial_Service_Line__c WHERE Estimate__c = '${est.Id}' ORDER BY Sort_Order__c NULLS LAST, CreatedDate`));
+  const model = buildEstimateModel({ estimate: est, lines, totals: { total: 0, rows: [] }, brand: {}, options: { mode: "pdf" } });
+  assert.deepEqual(model.rows.map((row) => JSON.stringify(row)).map((s) => ["Charlie", "Alpha", "Bravo"].find((n) => s.includes(n))), ["Charlie", "Alpha", "Bravo"]);
+
+  // Issue: the invoice is the estimate's lines in that order — the version log too.
+  job.Tax_Zone_Code__c = job.Tax_Zone_Code__c || "MESA";
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  const preview = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  const html = preview.body.html;
+  assert.ok(html.indexOf("Charlie") < html.indexOf("Alpha") && html.indexOf("Alpha") < html.indexOf("Bravo"), "invoice rows in the reordered order");
+
+  // Every line reader asks Salesforce for the same order.
+  const lineReads = fake.calls.queries.filter((q) => /FROM Sundial_Service_Line__c WHERE Estimate__c/.test(q) && /ORDER BY/.test(q));
+  assert.ok(lineReads.length > 0 && lineReads.every((q) => /ORDER BY Sort_Order__c NULLS LAST, CreatedDate/.test(q)), lineReads.find((q) => !/Sort_Order__c NULLS LAST/.test(q)));
+
+  // Locked once invoiced.
+  const locked = await call(h, "POST", `/service/estimates/${est.Id}/lines/reorder`, { lineIds: [ids.Alpha, ids.Bravo, ids.Charlie] });
+  assert.equal(locked.status, 409);
+});
+
+test("the customer feed's system lines (D-084) + the follow-up flag from the popups: create-with-intake → one intake comment; an existing customer's changed answers → one; unchanged → none; assignment → its own line; a follow-up date ticks Follow_Up_Needed__c", async () => {
+  const fake = fakeSalesforce();
+  fake.store.Sundial_User__c.push({ Id: "a0U000000000001AAA", Client__c: TENANT, First_Name__c: "Paige", Last_Name__c: "Ng", Active__c: true });
+  const h = makeHandler(fake, { authUserId: "uuid-paige-king" });
+  const r = await call(h, "POST", "/service/customers", {
+    customer: { new: { firstName: "Nora", lastName: "Quinn", phone: "602-555-0177" } },
+    intake: { systemOwnership: "Own", inverterManufacturer: "Enphase" },
+    request: { assignedTo: "a0U000000000001AAA", nextFollowUp: "2026-09-25" },
+  });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const custId = r.body.customerId;
+  const cust = fake.store.Sundial_Customer__c.find((c) => c.Id === custId);
+  assert.equal(cust.Follow_Up_Needed__c, true, "a follow-up date ticks the flag");
+  const intake = fake.comments.filter((c) => c.body.startsWith("Intake updated"));
+  assert.equal(intake.length, 1);
+  assert.match(intake[0].body, /^Intake updated by Paige King on .* \(Arizona\): Do you own or lease the system\? — Own; What brand is your solar inverter\? — Enphase$/);
+  assert.equal(intake[0].record_object, "customer");
+  assert.equal(intake[0].record_id, custId);
+  assert.equal(intake[0].kind, "system");
+  assert.equal(intake[0].author_id, "uuid-paige-king");
+  const assigned = fake.comments.filter((c) => c.body.startsWith("Assigned to"));
+  assert.equal(assigned.length, 1);
+  assert.match(assigned[0].body, /^Assigned to Paige Ng by Paige King on /);
+
+  // The same customer picked in New Estimate: a changed answer → one line; the same answers → none.
+  const n0 = fake.comments.length;
+  const e1 = await call(h, "POST", "/service/estimates", { customer: { id: custId }, intake: { systemOwnership: "Lease", inverterManufacturer: "Enphase" } });
+  assert.equal(e1.status, 201, JSON.stringify(e1.body));
+  assert.equal(fake.comments.length, n0 + 1);
+  assert.match(fake.comments.at(-1).body, /: Do you own or lease the system\? — Lease$/);
+  const e2 = await call(h, "POST", "/service/estimates", { customer: { id: custId }, intake: { systemOwnership: "Lease" } });
+  assert.equal(e2.status, 201);
+  assert.equal(fake.comments.length, n0 + 1, "unchanged answers say nothing");
 });

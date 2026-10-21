@@ -22,6 +22,9 @@
 //   POST   /service/price-book-items/{id}/new-version   the "Update" clone
 //   POST   /service/price-book-items/{id}/deactivate
 //   GET    /service/estimates/{id}/preview          read-only rendered document (what the customer sees)
+//   GET    /service/estimates/{id}/pdf              the PDF as it stands now, before any send: DRAFT / PREVIEW watermark,
+//                                                   nothing stored, no version, no status (2026-10-22)
+//   POST   /service/estimates/{id}/lines/reorder    { lineIds } → Sort_Order__c 1..n (2026-10-22)
 //   GET    /service/jobs/{id}/activity              the job's activity feed (newest first)
 //   GET    /service/jobs/{id}/street-view           the house: Google Street View still, fetched once, cached in S3
 //   GET    /service/address/suggest?q=&session=     address lookup for customer create (Google Places, key server-side; address.js)
@@ -105,6 +108,10 @@ import { resizeJpegForReport as realResizeJpegForReport } from "../../lib/image-
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
 import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake-alerts.js";
+// 2026-10-22: the customer's feed gets the server's own intake / assignment lines (D-084);
+// a new follow-up date ticks Follow-up needed.
+import { commentOnCustomerWrite, userDisplayName } from "../../lib/intake-comment.js";
+import { FOLLOW_UP_DATE_FIELD, applyFollowUpFlag } from "../../lib/follow-up.js";
 import { createBrandLoader, brandPublicUrl } from "../../lib/brand.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
@@ -461,6 +468,8 @@ const ROUTES = [
   ["POST", /^\/service\/price-book-items\/([^/]+)\/new-version\/?$/, "newItemVersion"],
   ["POST", /^\/service\/price-book-items\/([^/]+)\/deactivate\/?$/, "deactivateItem"],
   ["GET", /^\/service\/estimates\/([^/]+)\/preview\/?$/, "previewEstimate"],
+  ["GET", /^\/service\/estimates\/([^/]+)\/pdf\/?$/, "estimatePdf"], // the PDF as it stands, before a send (2026-10-22)
+  ["POST", /^\/service\/estimates\/([^/]+)\/lines\/reorder\/?$/, "reorderLines"], // the office's line order (2026-10-22)
   ["GET", /^\/service\/jobs\/([^/]+)\/activity\/?$/, "jobActivity"],
   ["GET", /^\/service\/jobs\/([^/]+)\/street-view\/?$/, "jobStreetView"],
   ["GET", /^\/service\/address\/suggest\/?$/, "suggestAddress"], // address lookup for customer create (address.js, 2026-09-22)
@@ -934,10 +943,22 @@ export function createHandler(deps = {}) {
           console.error("archived read failed:", e?.message || e); // bookkeeping only
         }
       }
+      // What the intake answers were, for the feed's "Intake updated" line (D-084): read only
+      // when the popup sent answers, and only those fields (each one passed the describe above).
+      let intakeBefore = null;
+      if (Object.keys(intake).length) {
+        try {
+          const rows = await d.sfQuery(`SELECT Id, ${Object.keys(intake).join(", ")} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+          intakeBefore = rows?.[0] ?? null;
+        } catch (e) {
+          console.error("intake before-read failed:", e?.message || e); // no comment rather than a wrong one
+        }
+      }
       if (Object.keys(upd).length) {
         try {
           await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, upd);
           Object.assign(customer, upd);
+          if (intakeBefore) await customerFeedLines(ctx, customer.Id, intakeBefore, intake);
           await markStale(CACHE.customer, [customer.Id], tenantId);
           const [field, to] = Object.entries(upd)[0]; // one feed row per pick; `fields` carries both when both changed
           events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field, to, fields: upd, unarchived: upd[ARCHIVED_FIELD] === false || undefined } });
@@ -1007,10 +1028,32 @@ export function createHandler(deps = {}) {
         return { ok: false, response: sfError(cors, e, "customer create") };
       }
       const customer = { Id: created.id, ...fields };
+      await customerFeedLines(ctx, customer.Id, {}, intake);
       events.push({ event: EVENTS.CUSTOMER_CREATED, recordType: "customer", recordSfId: customer.Id, details: { name: fields.Name, tagged: tag ? [tag] : [], viaPopup: true, intake: Object.keys(intake).length ? Object.keys(intake) : undefined } });
       return { ok: true, customer, created: true, warnings, events, unarchived: false, taggedNow: true };
     }
     return { ok: false, response: bad(cors, "CUSTOMER_REQUIRED", "customer must carry id or new.") };
+  }
+
+  /**
+   * The customer feed's own lines (D-084, lib/intake-comment.js): "Intake updated …" for the
+   * answers this write changed, "Assigned to …" for a new assignee. After the Salesforce write,
+   * best-effort — never a reason to fail the popup.
+   */
+  async function customerFeedLines(ctx, customerId, before, written) {
+    await commentOnCustomerWrite({
+      getSupabaseClient: d.getSupabaseClient,
+      loadUserName: async (id) => {
+        const rows = await d.sfQuery(`SELECT Id, First_Name__c, Last_Name__c FROM Sundial_User__c WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(ctx.tenantId)}' LIMIT 1`);
+        return rows?.[0] ? userDisplayName(rows[0]) : null;
+      },
+      tenantId: ctx.tenantId,
+      customerId,
+      before,
+      written,
+      actor: { ...(ctx.actor || {}), profileId: ctx.profileId ?? null },
+      at: d.now(),
+    });
   }
 
   /**
@@ -1767,10 +1810,12 @@ export function createHandler(deps = {}) {
         // popup), so an existing customer's current stage is read here, guarded.
         let currentStage = null;
         if (!created) {
-          const rows = await d.sfQuery(`SELECT ${SERVICE_STAGE_FIELD}, Assigned_To__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
+          const rows = await d.sfQuery(`SELECT ${SERVICE_STAGE_FIELD}, Assigned_To__c, Description__c, ${FOLLOW_UP_DATE_FIELD} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(customer.Id)}' LIMIT 1`);
           currentStage = rows?.[0]?.[SERVICE_STAGE_FIELD] ?? null;
           customer[SERVICE_STAGE_FIELD] = currentStage;
           customer.Assigned_To__c = rows?.[0]?.Assigned_To__c ?? null;
+          customer.Description__c = rows?.[0]?.Description__c ?? customer.Description__c ?? null;
+          customer[FOLLOW_UP_DATE_FIELD] = rows?.[0]?.[FOLLOW_UP_DATE_FIELD] ?? null;
         }
         if (created || !currentStage) upd[SERVICE_STAGE_FIELD] = newStage;
       }
@@ -1787,16 +1832,22 @@ export function createHandler(deps = {}) {
         upd.Assigned_Date__c = d.now().toISOString().slice(0, 10);
       }
       if (typeof req.nextFollowUp === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.nextFollowUp)) upd.Next_Follow_Up_Date__c = req.nextFollowUp;
+      // A new follow-up date ticks Follow-up needed in the same write (lib/follow-up.js).
+      applyFollowUpFlag(created ? null : customer, upd);
       if (typeof req.leadSource === "string" && req.leadSource.trim()) {
         const values = await picklistValues(CUSTOMER_SF_OBJECT, "Lead_Source__c");
         const m = values ? matchPicklist(req.leadSource.trim(), values) : null;
         if (m) upd.Lead_Source__c = m;
         else warnings.push(`Lead source "${req.leadSource}" is not a Lead_Source__c value — left blank.`);
       }
+      // The feed's lines for THIS write (the request's description, the assignee) — the intake
+      // answers were already commented by resolveCustomer. What they were before, for the diff.
+      const feedBefore = created ? {} : { Assigned_To__c: customer.Assigned_To__c ?? null, Description__c: customer.Description__c ?? null };
       if (Object.keys(upd).length) {
         try {
           await d.sfUpdateRecord(CUSTOMER_SF_OBJECT, customer.Id, upd);
           await markStale(CACHE.customer, [customer.Id], tenantId);
+          await customerFeedLines(ctx, customer.Id, feedBefore, upd);
           events.push({ event: EVENTS.CUSTOMER_TAGGED, recordType: "customer", recordSfId: customer.Id, details: { field: SERVICE_STAGE_FIELD, to: upd[SERVICE_STAGE_FIELD] ?? null, fields: upd, service: true } });
         } catch (e) {
           warnings.push(`Customer saved, but the Service fields were not: ${e?.sfBody || e?.message || e}`);
@@ -2063,6 +2114,77 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, cors, { html, title, version: Number(est.Version__c) || 0 });
     },
 
+    /**
+     * GET /service/estimates/{id}/pdf (2026-10-22, D-072 amendment 15): the estimate AS IT
+     * STANDS, through the same document model the send uses (buildEstimateModel → the PDF
+     * painter), so the office can download it before sending. Watermarked DRAFT while Draft,
+     * PREVIEW otherwise. Nothing is stored, the version does not move, the status does not
+     * change. Returned as JSON { fileName, contentType, base64 }: the REST API has no binary
+     * media types (a raw PDF would arrive as mangled text), and a signed URL would need a
+     * stored file. An estimate PDF is tens of KB — far under the 6 MB response limit.
+     */
+    async estimatePdf({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const est = await loadEstimate(params[0], tenantId);
+      if (!est) return notFound(cors);
+      const lines = await loadLines(est.Id, tenantId);
+      const totals = await estimateTotals(est, lines, { tenantId });
+      if (!showsStoredTotals(est) && est.Status__c !== "Invoiced" && est.Is_Template__c !== true) Object.assign(est, { Tax_Jurisdiction__c: totals.tax.label, Tax_Rate__c: totals.tax.rate });
+      const { payer } = await recipientRecords({ payerId: estimatePayerId(est), tenantId });
+      const draft = est.Status__c === "Draft" || est.Status__c === "Template" || est.Is_Template__c === true;
+      const watermark = draft ? "DRAFT" : "PREVIEW";
+      let bytes;
+      try {
+        const model = buildEstimateModel({ estimate: est, lines, totals, brand: brandFor(ctx), payer, options: { mode: "pdf", watermark } });
+        bytes = await d.renderPdf(model);
+      } catch (e) {
+        console.error(`estimate pdf: render failed for ${est.Id}: ${e?.message || e}`);
+        return jsonResponse(502, cors, { error: "pdf_failed", code: "PDF_RENDER_FAILED", message: "The PDF could not be made. Try again." });
+      }
+      const fileName = `${String(est.Name || "estimate").replace(/[^A-Za-z0-9._-]+/g, "-")}-${watermark.toLowerCase()}.pdf`;
+      return jsonResponse(200, cors, { fileName, contentType: "application/pdf", base64: Buffer.from(bytes).toString("base64"), version: Number(est.Version__c) || 0, watermark });
+    },
+
+    /**
+     * POST /service/estimates/{id}/lines/reorder { lineIds } (2026-10-22): the office's order.
+     * Every line of the estimate, once each — anything else is 400 REORDER_INVALID. Writes
+     * Sort_Order__c 1..n (only the lines whose number moves) and recomputes NOTHING: money
+     * does not depend on order. Every reader sorts Sort_Order__c NULLS LAST, CreatedDate, so
+     * the page, both PDFs, the version log, the invoice and the job report follow.
+     */
+    async reorderLines({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const est = await loadEstimate(params[0], tenantId);
+      if (!est) return notFound(cors);
+      if (est.Status__c === "Invoiced") return jsonResponse(409, cors, { error: "locked", code: "ESTIMATE_INVOICED" });
+      const ids = Array.isArray(body?.lineIds) ? body.lineIds.map(String) : null;
+      const lines = await loadLines(est.Id, tenantId);
+      const known = new Set(lines.map((l) => l.Id));
+      if (!ids || ids.length !== lines.length || new Set(ids).size !== ids.length || ids.some((id) => !known.has(id))) {
+        return bad(cors, "REORDER_INVALID", "lineIds must list every line of this estimate exactly once.", { expected: lines.length });
+      }
+      const byId = new Map(lines.map((l) => [l.Id, l]));
+      const moved = [];
+      try {
+        for (let i = 0; i < ids.length; i++) {
+          const line = byId.get(ids[i]);
+          if (Number(line.Sort_Order__c) === i + 1) continue;
+          await d.sfUpdateRecord(LINE_SF_OBJECT, line.Id, { Sort_Order__c: i + 1 });
+          moved.push(line.Id);
+        }
+        // The estimate's own SystemModstamp moves too (a same-value write), so a page that
+        // loaded it before the reorder sees it changed.
+        if (moved.length) await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Status__c: est.Status__c });
+      } catch (e) {
+        return sfError(cors, e, "line reorder");
+      }
+      if (!moved.length) return jsonResponse(200, cors, { success: true, unchanged: true, lineIds: ids });
+      await markStale(CACHE.line, moved, tenantId);
+      await markStale(CACHE.estimate, [est.Id], tenantId);
+      await act(ctx, { event: EVENTS.ESTIMATE_UPDATED, recordType: "estimate", recordSfId: est.Id, estimateSfId: est.Id, jobSfId: est.Service_Job__c ?? null, details: { reordered: true, order: ids, moved: moved.length } });
+      return jsonResponse(200, cors, { success: true, lineIds: ids, moved: moved.length });
+    },
+
     // --- activity feeds -----------------------------------------------------------------
     async jobActivity({ ctx, params, query }) {
       const { tenantId, cors } = ctx;
@@ -2254,7 +2376,7 @@ export function createHandler(deps = {}) {
     createItem: "service.pricebook.write", patchItem: "service.pricebook.write",
     newItemVersion: "service.pricebook.write", deactivateItem: "service.pricebook.write",
     jobActivity: ["service.estimate.write", "service.tech.read"], estimateActivity: "service.estimate.write", // the tech app reads the job's feed
-    previewEstimate: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
+    previewEstimate: "service.estimate.write", estimatePdf: "service.estimate.write", reorderLines: "service.estimate.write", jobStreetView: "service.estimate.write", techJobStreetView: "service.tech.read",
     suggestAddress: "service.estimate.write", resolveAddress: "service.estimate.write", // whoever can make an estimate can make its customer
     listTaxZones: "service.estimate.write", setJobTaxZone: "service.estimate.write", // D-083: whoever prices the job picks its zone
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
@@ -2341,6 +2463,8 @@ export function createHandler(deps = {}) {
         userId: u.id ?? null,
         scope: identity?.access?.scope ?? null,
         actor: { id: u.id ?? null, name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.email || null },
+        // The signed-in person's Supabase profile — the author of the feed's system lines (D-084).
+        profileId: identity?.authUserId ?? null,
         cors,
         // A handler that does a second, narrower thing inside a broader route asks this
         // (issue with "charge the card" is the office's route, the charge is an Admin's).

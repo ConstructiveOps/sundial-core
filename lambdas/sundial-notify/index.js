@@ -23,6 +23,17 @@
 //                         its scheduled end — "are you still at the job?"  → the tech
 //                         (only; Harmon, 2026-10-21)
 //
+// And ONE status move that is not a notification (2026-10-22, Harmon — D-074 amendment 2):
+//
+//   day_of                a Scheduled job whose Scheduled call starts TODAY (local,
+//                         from DAY_OF_HOUR) → In Progress. The rule is lib/job-status.js
+//                         nextJobStatus("day_of"), the same table the dispatch board's
+//                         settleJobStatus uses; this sweep only does the write, the
+//                         activity row (via: "day_of") and the cache stale mark. It
+//                         rings nobody. Idempotent by construction: it acts on Scheduled
+//                         jobs only, so the next sweep finds nothing to do. A tech's
+//                         clock-in still moves the job earlier if it comes first.
+//
 // Every sweep notification carries a dedupe key ({kind}:{callId}[:{day}]), so a sweep
 // that runs every five minutes re-finds the same calls and rings nobody twice. The
 // sweep is a system process with no tenant of its own: it reads calls across tenants in
@@ -35,7 +46,9 @@
 // Value-safety: never logs an endpoint, a key, or a notification body.
 
 import { resolveIdentity as realResolveIdentity } from "../../lib/identity.js";
-import { sfQuery as realSfQuery, soqlEscapeString } from "../../lib/salesforce.js";
+import { sfQuery as realSfQuery, sfUpdateRecord as realSfUpdateRecord, soqlEscapeString } from "../../lib/salesforce.js";
+import { EVENTS, recordActivity } from "../../lib/service-activity.js";
+import { localDay, nextJobStatus } from "../../lib/job-status.js";
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { broadcast as realBroadcast } from "../../lib/realtime.js";
@@ -50,6 +63,14 @@ export const LATE_LOOKBACK_HOURS = 12; // older than this is yesterday's problem
 export const DAY_BEFORE_HOUR = Number(process.env.REMINDER_HOUR || 17); // 5 pm local
 export const OVERRUN_AFTER_MIN = 120; // 2 hours past the scheduled end
 export const OVERRUN_LOOKBACK_HOURS = 12; // same horizon as the late sweep
+// The local hour from which a job whose call is today counts as In Progress (0 = from
+// midnight; Tim may prefer 6 — set the env var, no deploy of code needed).
+export const DAY_OF_HOUR = Number(process.env.DAY_OF_HOUR || 0);
+export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
+export const JOB_CACHE_TABLE = "sundial_service_job_cache";
+export const DAY_OF_SELECT =
+  "Id, Client__c, Client__r.Name, Status__c, Scheduled_Start__c, Sundial_Service_Job__c, " +
+  "Sundial_Service_Job__r.Name, Sundial_Service_Job__r.Status__c, Sundial_Service_Job__r.Estimate__c";
 
 export const CALL_SELECT =
   "Id, Name, Client__c, Client__r.Name, Tech__c, Status__c, Scheduled_Start__c, Scheduled_End__c, Sundial_Service_Job__c, " +
@@ -127,6 +148,7 @@ export function createHandler(deps = {}) {
   const d = {
     resolveIdentity: realResolveIdentity,
     sfQuery: realSfQuery,
+    sfUpdateRecord: realSfUpdateRecord,
     getSupabaseClient: realGetSupabaseClient,
     getSecret: realGetSecret,
     broadcast: realBroadcast,
@@ -216,6 +238,62 @@ export function createHandler(deps = {}) {
       return jsonResponse(200, ctx.cors, { success: true, ...r });
     },
   };
+
+  /**
+   * The day-of move (D-074 amendment 2): every Scheduled job with a Scheduled call whose
+   * start falls on today's LOCAL date goes In Progress, once the local hour has reached
+   * DAY_OF_HOUR. One query across tenants (like the reminders); each write is stamped and
+   * staled under the call's own Client__c. Returns the number of jobs moved.
+   */
+  async function dayOfMoves(now, local) {
+    const fromHour = Number(d.env.DAY_OF_HOUR ?? DAY_OF_HOUR) || 0;
+    if (local.hour < fromHour) return 0;
+    const iso = (t) => new Date(t).toISOString();
+    // A 48h window around now, bucketed by local day here (Salesforce compares in UTC).
+    const rows = await d.sfQuery(
+      `SELECT ${DAY_OF_SELECT} FROM ${CALL_SF_OBJECT} WHERE Status__c = 'Scheduled' AND Sundial_Service_Job__c != null ` +
+        `AND Sundial_Service_Job__r.Status__c = 'Scheduled' ` +
+        `AND Scheduled_Start__c >= ${iso(now.getTime() - 24 * 3600000)} AND Scheduled_Start__c <= ${iso(now.getTime() + 24 * 3600000)} ORDER BY Scheduled_Start__c LIMIT 1000`
+    );
+    const seen = new Set(); // one move per job, however many of its calls are today
+    let moved = 0;
+    for (const c of rows || []) {
+      const job = c.Sundial_Service_Job__r;
+      if (!c.Sundial_Service_Job__c || seen.has(c.Sundial_Service_Job__c)) continue;
+      if (localDay(c.Scheduled_Start__c, timeZone) !== local.day) continue;
+      const next = nextJobStatus(job?.Status__c, "day_of", [c]);
+      if (!next) continue;
+      seen.add(c.Sundial_Service_Job__c);
+      const at = d.now().toISOString();
+      try {
+        await d.sfUpdateRecord(JOB_SF_OBJECT, c.Sundial_Service_Job__c, { Status__c: next, Status_Changed_At__c: at });
+      } catch (e) {
+        console.error(`day-of: job ${c.Sundial_Service_Job__c} status write failed:`, e?.sfBody || e?.message || e);
+        continue;
+      }
+      moved += 1;
+      await recordActivity(d.getSupabaseClient, {
+        tenantId: c.Client__c,
+        tenantSlug: c.Client__r?.Name ?? null,
+        event: EVENTS.JOB_UPDATED,
+        recordType: "job",
+        recordSfId: c.Sundial_Service_Job__c,
+        jobSfId: c.Sundial_Service_Job__c,
+        estimateSfId: job?.Estimate__c ?? null,
+        actor: { id: null, name: "Sundial" },
+        at,
+        details: { fields: { Status__c: { from: job?.Status__c ?? null, to: next } }, via: "day_of", callSfId: c.Id },
+      });
+      try {
+        const supabase = await d.getSupabaseClient();
+        const { error } = await supabase.from(JOB_CACHE_TABLE).update({ is_stale: true }).eq("sf_id", c.Sundial_Service_Job__c).eq("client_sf_id", c.Client__c);
+        if (error) console.error("day-of: cache stale-flag error:", error.message);
+      } catch (e) {
+        console.error("day-of: cache stale-flag threw:", e?.message || String(e));
+      }
+    }
+    return moved;
+  }
 
   // --- the sweep ----------------------------------------------------------------------
   async function sweep() {
@@ -335,6 +413,15 @@ export function createHandler(deps = {}) {
         dedupeKey: `overrun:${c.Id}`,
       });
       summary.overrun += r.inserted;
+    }
+
+    // (5) Day-of (2026-10-22): the job's call is today → the job is In Progress. Its own
+    // try: a failure here must never cost a reminder above, and the next sweep retries.
+    try {
+      summary.dayOf = await dayOfMoves(now, local);
+    } catch (e) {
+      console.error("notify sweep: day-of move failed:", e?.sfBody || e?.message || e);
+      summary.dayOf = 0;
     }
     console.log(`notify sweep: ${JSON.stringify(summary)} at ${now.toISOString()} (${timeZone} ${local.day} ${local.hour}h)`);
     return summary;

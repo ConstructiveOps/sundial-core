@@ -4,6 +4,35 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-22 — October 22 batch (`feature/oct22-batch`): report dates → Ready to Bill, job status on the day, follow-up flag, feed lines, estimate PDF + reorder, photo thumbnails — ON THE BRANCH, NOT DEPLOYED, awaiting review
+
+- [x] A5/A6 report dates + Ready to Bill (D-081 am. 3) · A7 job status follows the call, day-of in the sweep, the generic call-PATCH side door closed (D-072 am. 15, D-074 am. 2) · A8 follow-up date → Follow-up needed · A9 the server's intake / assignment lines in the customer feed (D-084) · A10 `GET /service/estimates/{id}/pdf` · A11 line reorder · A12 photo thumbnails. Full suite green.
+- [ ] **Tim, in this order (after merging):**
+  1. **Supabase → SQL editor:** run `sql/2026-10-22_job_report_dates.sql` (the three job cache columns + `comments.kind`).
+  2. **Lambda console → `sundial-service-board` → Configuration → General → Memory: 1024 MB** (it is 256). Below 1,024 MB the photo confirm skips making the thumbnail (safe — the backfill makes it), because a 12 MP photo needs ~100 MB to decode.
+  3. **Deploys** (PowerShell, from `C:\Users\TimMurphy\Projects\sundial-core`): `.\deploy.ps1 sundial-service-board`, `.\deploy.ps1 sundial-notify`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-service-estimate`. **Not** needed: `sundial-service-public` (already sorted lines by `Sort_Order__c`), `sundial-comment-notify` (its trigger is on `comment_mentions`; system lines have none), `sundial-cache-sync` (`lib/cache-row.js` did not change — columns map by name).
+  4. **Wire:** `.\scripts\wire-service-estimate-routes.ps1` (the `pdf` and `lines/reorder` routes) and `.\scripts\wire-service-tech-routes.ps1` (`POST /service/jobs/{id}/photos/thumbs`).
+  5. **Lambda → `sundial-cache-sync` → Test →** `{"object":"job","mode":"full"}`.
+  6. Optional: `sundial-notify` env var `DAY_OF_HOUR` = `6` if jobs should flip to In Progress at 6 AM instead of midnight.
+  7. **Thumbnail backfill:** `node scripts/backfill-photo-thumbs.mjs` (dry run: 1,410 jobs with photos) → `node scripts/backfill-photo-thumbs.mjs --apply --limit 1` (canary) → `node scripts/backfill-photo-thumbs.mjs --apply` (long — ~1.5 s per photo; resumable; don't pipe it). Writes only under `SUNDIAL/_cache/photo-thumbs/`.
+  8. harmon-crm `main` after Prompt B.
+  9. **ZZ tests** (the ZZ PORTAL TEST customer `a1P7y00000AmyXCEAZ` and a job on it — never a live customer):
+     - A6: on a ZZ job at Awaiting Office Review, set Notes reported → the job reads Ready to Bill; clear it → stays; set a date on a Paid ZZ job → stays Paid.
+     - A7: schedule a ZZ job's call for today → the next sweep (≤ 5 min) shows In Progress; drag the call to tomorrow before anyone clocks in → back to Scheduled; unschedule it → Ready to Schedule.
+     - A8: set Next follow-up on the ZZ customer → Follow-up needed ticks.
+     - A9: change two intake answers on the ZZ customer → one "Intake updated…" line in its feed; assign it to a ZZ test user → "Assigned to…".
+     - A10: Download PDF on a Draft ZZ estimate → DRAFT watermark; its version and status unchanged.
+     - A11: reorder a ZZ estimate's lines → page, Preview, PDF in the new order.
+     - A12: upload a photo to a ZZ job → it shows its thumbnail; run the thumbs backfill on that job → `remaining: 0`.
+- [ ] **Future switch (Tim said no, 2026-10-22):** sending the job report could stamp `Report_Sent_to_Customer__c` (one line in `report.js` `sendReport`, and that would move the job to Ready to Bill).
+- [ ] **Notes for Prompt B (harmon-crm):**
+  - The job page: the three report dates as date inputs (PATCH `/sf/job/{id}`); the response's `jobStatusChanged` says the status moved.
+  - Photos: show `thumbUrl` (≤ 400 px, JPEG q80) in every grid; open `publicUrl` (the untouched original) in the lightbox and for Download / Download all; `thumbUrl: null` → show the original as today. Thumbs are public-read in `sfsolproj` like the originals (same bucket CORS).
+  - Estimate: **Download PDF** → `GET /service/estimates/{id}/pdf` → decode `base64` into a Blob (`application/pdf`) and save as `fileName`.
+  - Estimate lines: drag to reorder → `POST /service/estimates/{id}/lines/reorder { lineIds }` with EVERY line id; `409 ESTIMATE_INVOICED` when billed.
+  - Comments feed: rows with `kind === 'system'` (intake / assignment lines) in a muted style, no reply / mention affordance. They carry `author_name` (the person who made the change).
+  - The board / job page: a PATCH that clears a call's dates is refused — use Unschedule.
+
 ## 2026-10-21 — Payer name on the Jobs list; overrun push to the tech (D-074 am. 1)
 
 - [x] `sundial-sf-query`: `bill_to_name` in the job list projection; `sort=bill_to_name` allowed.

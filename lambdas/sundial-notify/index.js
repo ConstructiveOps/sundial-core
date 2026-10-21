@@ -19,6 +19,9 @@
 //   reminder / day_before tomorrow's calls, once, at REMINDER_HOUR local   → the tech
 //   tech_activity / late  a Scheduled call 30+ minutes past its start with
 //                         no tap from the tech                             → the office
+//   reminder / overrun    a call the tech is still clocked into 2+ hours past
+//                         its scheduled end — "are you still at the job?"  → the tech
+//                         (only; Harmon, 2026-10-21)
 //
 // Every sweep notification carries a dedupe key ({kind}:{callId}[:{day}]), so a sweep
 // that runs every five minutes re-finds the same calls and rings nobody twice. The
@@ -45,6 +48,8 @@ export const ONE_HOUR_WINDOW_MIN = 65; // a 5-minute sweep must not miss a call 
 export const LATE_AFTER_MIN = 30;
 export const LATE_LOOKBACK_HOURS = 12; // older than this is yesterday's problem, not a live alert
 export const DAY_BEFORE_HOUR = Number(process.env.REMINDER_HOUR || 17); // 5 pm local
+export const OVERRUN_AFTER_MIN = 120; // 2 hours past the scheduled end
+export const OVERRUN_LOOKBACK_HOURS = 12; // same horizon as the late sweep
 
 export const CALL_SELECT =
   "Id, Name, Client__c, Client__r.Name, Tech__c, Status__c, Scheduled_Start__c, Scheduled_End__c, Sundial_Service_Job__c, " +
@@ -78,6 +83,32 @@ function str(v) {
   return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 const techName = (r) => [r?.First_Name__c, r?.Last_Name__c].filter(Boolean).join(" ").trim() || null;
+
+/**
+ * Is the tech still on the clock on this call? A tech who leaves for the next job has the
+ * old call's interval closed but its Actual_End__c left blank (paused — Complete sets it,
+ * sundial-service-board/tech.js), so a blank end alone would ask someone who already left.
+ * With a clock log, an open live interval (no `out`, not removed by the office) decides;
+ * with none (an office-started call), the blank Actual_End__c does.
+ */
+export function stillOnClock(call) {
+  let log = call?.Clock_Intervals__c;
+  if (typeof log === "string") {
+    try {
+      log = JSON.parse(log);
+    } catch {
+      log = null;
+    }
+  }
+  if (!Array.isArray(log) || !log.length) return !!call?.Actual_Start__c && !call?.Actual_End__c;
+  return log.some((i) => i && typeof i.in === "string" && !i.out && !i.removed);
+}
+
+/** "SVC-01234 was scheduled to end 2 hours ago" — whole hours, never under the 2-hour threshold. */
+export function overrunTitle(label, overrunMin) {
+  const hours = Math.max(Math.floor(OVERRUN_AFTER_MIN / 60), Math.floor(overrunMin / 60));
+  return `${label} was scheduled to end ${hours} hours ago`;
+}
 
 /** Local calendar day (YYYY-MM-DD) and hour of a moment in a time zone. */
 export function localParts(date, timeZone) {
@@ -190,7 +221,7 @@ export function createHandler(deps = {}) {
   async function sweep() {
     const now = d.now();
     const iso = (t) => new Date(t).toISOString();
-    const summary = { oneHour: 0, dayBefore: 0, late: 0, techsReminded: 0 };
+    const summary = { oneHour: 0, dayBefore: 0, late: 0, overrun: 0, techsReminded: 0 };
 
     // (1) One hour out: Scheduled calls starting within the next 65 minutes.
     const soon = await d.sfQuery(
@@ -276,6 +307,34 @@ export function createHandler(deps = {}) {
         dedupeKey: `late:${c.Id}`,
       });
       summary.late += r.inserted;
+    }
+
+    // (4) Overrun (2026-10-21, Harmon): the tech clocked in and never out, and the call's
+    // scheduled end is 2+ hours gone (within the last 12 hours). Ask the TECH — the office
+    // is not told by this kind. Rings once per call; nothing here changes the call.
+    const overrun = await d.sfQuery(
+      `SELECT ${CALL_SELECT}, Actual_Start__c, Actual_End__c, Clock_Intervals__c FROM ${CALL_SF_OBJECT} ` +
+        `WHERE Status__c = 'In Progress' AND Tech__c != null AND Actual_Start__c != null AND Actual_End__c = null ` +
+        `AND Scheduled_End__c <= ${iso(now.getTime() - OVERRUN_AFTER_MIN * 60000)} AND Scheduled_End__c >= ${iso(now.getTime() - OVERRUN_LOOKBACK_HOURS * 3600000)} ORDER BY Scheduled_End__c LIMIT 500`
+    );
+    for (const c of overrun || []) {
+      if (!stillOnClock(c)) continue; // clocked out (paused) — they already left
+      const job = c.Sundial_Service_Job__r;
+      const where = [job?.Customer_Name_at_Creation__c, job?.Address_at_Creation__c].filter(Boolean).join(", ") || "the job";
+      const overrunMin = Math.floor((now.getTime() - Date.parse(c.Scheduled_End__c)) / 60000);
+      const r = await notifier.toUsers({
+        tenantId: c.Client__c,
+        userSfIds: [c.Tech__c],
+        category: CATEGORIES.REMINDER,
+        kind: "overrun",
+        title: overrunTitle(job?.Name ?? c.Name ?? "Your call", overrunMin),
+        body: `Are you still at ${where}? Tap to clock out or keep going.`,
+        url: `/tech/calls/${c.Id}`,
+        recordType: "servicecall",
+        recordSfId: c.Id,
+        dedupeKey: `overrun:${c.Id}`,
+      });
+      summary.overrun += r.inserted;
     }
     console.log(`notify sweep: ${JSON.stringify(summary)} at ${now.toISOString()} (${timeZone} ${local.day} ${local.hour}h)`);
     return summary;

@@ -60,7 +60,8 @@ Recipients are Supabase auth uuids. A Salesforce `Sundial_User__c` id (a call's 
 2. **Row but no push?** `pushed_at` empty + `push_error` names the push service's answer. No subscription row → push is off on that device (Settings shows "Off"). `sundial/push` missing → CloudWatch `push disabled`.
 3. **Row, pushed, nothing on the phone?** iPhone from a Safari tab (not installed); notifications off for the site in the browser / OS settings; Focus mode.
 4. **Rang twice?** It should not: check the `dedupe_key` — two rows with different keys are two events (a genuine second move carries a new start time).
-5. **Reminders missing?** EventBridge → `sundial-notify-sweep` → last invocation; CloudWatch `notify sweep: {"oneHour":…}`; `REMINDER_HOUR` in the right zone.
+5. **Reminders missing?** EventBridge → `sundial-notify-sweep` → last invocation; CloudWatch `notify sweep: {"oneHour":…,"overrun":…}`; `REMINDER_HOUR` in the right zone.
+   - **"Are you still at the job?" (`reminder/overrun`, 2026-10-21).** The tech — never the office — gets one push per call when they are still clocked into an In Progress call 2 hours after its scheduled end (within 12 hours): "SVC-01234 was scheduled to end 2 hours ago" (3+ hours says the real number), "Are you still at <customer>, <address>? Tap to clock out or keep going.", opening the call in the tech app. A tech who already clocked out of the call (paused — left for the next job) is not asked. Key `overrun:{call}`; nothing changes the call. Not ringing? The tech's **Reminders** switch in Settings is the same one the hour-before reminder uses.
 
 ## Security
 

@@ -85,6 +85,9 @@ export const SORT_ALLOWLIST = {
     "created_date", "project_name", "customer_name", "address", "harmon_job_number", "contract_type",
     "stage", "system_size", "authority_having_jurisdiction", "utility_company", "project_manager", "sales_rep_name",
   ],
+  // job (2026-10-21): the Jobs list's Bill To column. Text, so the cold-cache SOQL path
+  // sorts by Bill_To_Name__c too; blanks last, sf_id tie-break like every other key.
+  job: ["created_date", "bill_to_name"],
 };
 
 /**

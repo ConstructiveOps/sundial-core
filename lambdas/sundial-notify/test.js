@@ -5,11 +5,11 @@
 // body) and re-subscribing the same endpoint replaces the row, unsubscribe only removes
 // the caller's own row, /test rings the caller, and the sweep: one-hour reminders to the
 // tech, the day-before digest only at the reminder hour and once per tech per day,
-// late calls to the office — all deduped across runs.
+// late calls to the office, overrun calls to the tech — all deduped across runs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHandler, matchRoute, isSweepEvent, localParts, nextDay } from "./index.js";
+import { createHandler, matchRoute, isSweepEvent, localParts, nextDay, overrunTitle, stillOnClock } from "./index.js";
 import { fakeSupabase } from "../../lib/notify.test-fakes.js";
 
 const TENANT = "a1W7y000007AszBEAS";
@@ -38,6 +38,12 @@ function setup(over = {}) {
       access: { level: over.level ?? "Admin", scope: over.scope ?? "tenant", userId: "a0U-beth", tenantId: TENANT },
     }),
     sfQuery: async (soql) => {
+      // The overrun query: In Progress, clocked in, not out, Scheduled_End__c in its window.
+      if (soql.includes("Actual_Start__c != null")) {
+        const ge = soql.match(/Scheduled_End__c >= ([\dT:.Z-]+)/)?.[1];
+        const le = soql.match(/Scheduled_End__c <= ([\dT:.Z-]+)/)?.[1];
+        return calls.filter((c) => c.Status__c === "In Progress" && c.Tech__c && c.Actual_Start__c && !c.Actual_End__c && c.Scheduled_End__c >= ge && c.Scheduled_End__c <= le);
+      }
       const ge = soql.match(/Scheduled_Start__c >= ([\dT:.Z-]+)/)?.[1];
       const le = soql.match(/Scheduled_Start__c <= ([\dT:.Z-]+)/)?.[1];
       return calls.filter((c) => c.Status__c === "Scheduled" && (!soql.includes("Tech__c != null") || c.Tech__c) && (!ge || c.Scheduled_Start__c >= ge) && (!le || c.Scheduled_Start__c <= le));
@@ -148,7 +154,7 @@ test("sweep: one-hour reminder to the tech, late call to the office, both dedupe
   ];
   const { store, handler } = setup({ calls });
   let r = await handler({ source: "aws.events", "detail-type": "Scheduled Event" });
-  assert.deepEqual(r, { ok: true, oneHour: 1, dayBefore: 0, late: 2, techsReminded: 0 }); // late → Beth + Paige
+  assert.deepEqual(r, { ok: true, oneHour: 1, dayBefore: 0, late: 2, overrun: 0, techsReminded: 0 }); // late → Beth + Paige
   const rows = store.sundial_notifications;
   const oneHour = rows.find((x) => x.kind === "one_hour");
   assert.equal(oneHour.profile_id, "uuid-larry");
@@ -162,7 +168,7 @@ test("sweep: one-hour reminder to the tech, late call to the office, both dedupe
   assert.equal(late[0].url, "/service/jobs/J1");
   // Five minutes later: the same calls are found again and nobody is rung twice.
   r = await handler({ sweep: true });
-  assert.deepEqual(r, { ok: true, oneHour: 0, dayBefore: 0, late: 0, techsReminded: 0 });
+  assert.deepEqual(r, { ok: true, oneHour: 0, dayBefore: 0, late: 0, overrun: 0, techsReminded: 0 });
   assert.equal(store.sundial_notifications.length, 3);
 });
 
@@ -190,4 +196,58 @@ test("sweep: the day-before digest fires only at the reminder hour, once per tec
   const morning = setup({ calls });
   r = await morning.handler({ sweep: true });
   assert.equal(r.dayBefore, 0);
+});
+
+// --- overrun (2026-10-21, Harmon): "are you still at the job?" to the TECH ---------------
+const open = (inAt) => JSON.stringify([{ in: inAt, ids: [] }]);
+const closed = (inAt, outAt) => JSON.stringify([{ in: inAt, out: outAt, ids: [] }]);
+const mkRunning = (Id, end, over = {}) => ({
+  ...mkCall(Id, "2026-09-21T11:00:00Z", "a0U-larry", "In Progress"),
+  Scheduled_End__c: end, Actual_Start__c: "2026-09-21T11:02:00Z", Actual_End__c: null, Clock_Intervals__c: open("2026-09-21T11:02:00Z"),
+  ...over,
+});
+
+test("sweep: overrun — a call still on the clock 2h+ past its scheduled end rings its tech once; never the office", async () => {
+  // now = 15:00Z (8:00 AM Phoenix)
+  const calls = [
+    mkRunning("O1", "2026-09-21T12:55:00Z"), // 2h05m past, still clocked in → push
+    mkRunning("O2", "2026-09-21T12:55:00Z", { Actual_End__c: "2026-09-21T13:00:00Z", Clock_Intervals__c: closed("2026-09-21T11:02:00Z", "2026-09-21T13:00:00Z") }), // clocked out → none
+    { ...mkCall("O3", "2026-09-21T11:00:00Z"), Scheduled_End__c: "2026-09-21T12:55:00Z", Actual_Start__c: null, Actual_End__c: null }, // never clocked in → the late kind's business
+    mkRunning("O4", "2026-09-21T02:00:00Z"), // 13 h past → too old
+    mkRunning("O5", "2026-09-21T12:55:00Z", { Clock_Intervals__c: closed("2026-09-21T11:02:00Z", "2026-09-21T12:30:00Z") }), // paused (left for the next job): end blank, clock closed → none
+    mkRunning("O6", "2026-09-21T13:10:00Z"), // 1h50m past → not yet
+  ];
+  const { store, handler } = setup({ calls });
+  let r = await handler({ sweep: true });
+  assert.equal(r.overrun, 1);
+  assert.equal(r.late, 2, "the never-clocked-in call is the office's late alert, not an overrun");
+  const rows = store.sundial_notifications.filter((x) => x.kind === "overrun");
+  assert.equal(rows.length, 1);
+  const o = rows[0];
+  assert.equal(o.profile_id, "uuid-larry", "the tech only");
+  assert.equal(o.category, "reminder");
+  assert.equal(o.title, "SVC-00012 was scheduled to end 2 hours ago");
+  assert.equal(o.body, "Are you still at Ann Lee, 1 Main St, Phoenix? Tap to clock out or keep going.");
+  assert.equal(o.url, "/tech/calls/O1");
+  assert.equal(o.dedupe_key, "overrun:O1");
+  assert.equal(calls[0].Status__c, "In Progress", "nothing here changes the call");
+  // The next sweep finds the same call and rings nobody.
+  r = await handler({ sweep: true });
+  assert.equal(r.overrun, 0);
+  assert.equal(store.sundial_notifications.filter((x) => x.kind === "overrun").length, 1);
+});
+
+test("overrun: the title says the whole hours past 3, and the clock decides who is still there", async () => {
+  assert.equal(overrunTitle("SVC-01234", 125), "SVC-01234 was scheduled to end 2 hours ago");
+  assert.equal(overrunTitle("SVC-01234", 179), "SVC-01234 was scheduled to end 2 hours ago");
+  assert.equal(overrunTitle("SVC-01234", 185), "SVC-01234 was scheduled to end 3 hours ago");
+  assert.equal(overrunTitle("SVC-01234", 5 * 60 + 59), "SVC-01234 was scheduled to end 5 hours ago");
+  assert.equal(stillOnClock({ Actual_Start__c: "x", Clock_Intervals__c: open("2026-09-21T11:02:00Z") }), true);
+  assert.equal(stillOnClock({ Actual_Start__c: "x", Clock_Intervals__c: closed("a", "b") }), false);
+  assert.equal(stillOnClock({ Actual_Start__c: "x", Clock_Intervals__c: JSON.stringify([{ in: "a", ids: [], removed: { at: "b" } }]) }), false, "an interval the office removed is not the clock");
+  assert.equal(stillOnClock({ Actual_Start__c: "x", Clock_Intervals__c: null }), true, "no log: the blank end decides");
+  // A 3h40m overrun through the sweep says 3.
+  const { store, handler } = setup({ calls: [mkRunning("O7", "2026-09-21T11:20:00Z")] });
+  await handler({ sweep: true });
+  assert.equal(store.sundial_notifications.find((x) => x.kind === "overrun").title, "SVC-00012 was scheduled to end 3 hours ago");
 });

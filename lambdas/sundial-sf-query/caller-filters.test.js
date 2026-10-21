@@ -158,8 +158,17 @@ test("sort: the Sales table's Address / Phone / Requested Types columns are sort
 });
 
 test("sort: an object with no allowlist may only sort by created_date", () => {
-  assert.ok(parseSort({ sort: "created_date:asc" }, "job", COLS).ok);
-  assert.equal(parseSort({ sort: "name:asc" }, "job", COLS).body.code, "INVALID_SORT");
+  assert.ok(parseSort({ sort: "created_date:asc" }, "estimate", COLS).ok);
+  assert.equal(parseSort({ sort: "name:asc" }, "estimate", COLS).body.code, "INVALID_SORT");
+});
+
+test("sort: the job list sorts by its payer's name (2026-10-21); other job columns stay refused", () => {
+  const JOB_COLS = new Set(["sf_id", "created_date", "name", "bill_to_name"]);
+  assert.deepEqual(parseSort({ sort: "bill_to_name:asc" }, "job", JOB_COLS).sort, { column: "bill_to_name", columns: ["bill_to_name"], ascending: true });
+  assert.equal(parseSort({ sort: "bill_to_name:desc" }, "job", JOB_COLS).sort.ascending, false);
+  assert.ok(parseSort({ sort: "created_date:asc" }, "job", JOB_COLS).ok);
+  assert.equal(parseSort({ sort: "name:asc" }, "job", JOB_COLS).body.code, "INVALID_SORT");
+  assert.equal(parseSort({ sort: "bill_to_name:asc" }, "job", new Set(["sf_id"])).body.code, "INVALID_SORT", "a cache without the column refuses");
 });
 
 test("sort: an allowlisted column the cache table lacks is refused", () => {

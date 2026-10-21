@@ -4,6 +4,13 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-21 — Payer name on the Jobs list; overrun push to the tech (D-074 am. 1)
+
+- [x] `sundial-sf-query`: `bill_to_name` in the job list projection; `sort=bill_to_name` allowed.
+- [x] `sundial-notify`: the fourth sweep kind `reminder/overrun` (tech only, once per call).
+- [ ] **Tim** (PowerShell, from `C:\Users\TimMurphy\Projects\sundial-core`): `.\deploy.ps1 sundial-sf-query` and `.\deploy.ps1 sundial-notify`. No wire script — the EventBridge rule already exists.
+- [ ] harmon-crm: show `bill_to_name` on the Jobs list (sortable) and the board's job cards.
+
 ## 2026-10-16 — October batch (`feature/oct-batch`): estimate Bill To, send box, Manager billing, remote diagnosis, Lead Source — MERGED (`df6a14f` on `master`) and DEPLOYED
 
 - [x] A1 estimate Bill To (D-081 amendment 2) · A2 send box + real estimate SMS (D-072 amendment 12) · A3 Manager charges, cost Admin / Executive (D-072 amendment 13) · A4 board `remoteDiagnosis` · A5 Lead Source. Full suite green (1,569).

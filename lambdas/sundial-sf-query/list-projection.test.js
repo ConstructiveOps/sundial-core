@@ -275,6 +275,7 @@ const LIST_PROJECTION_SOURCES = {
     ],
     "D-081: the job's paying customer (harmon-crm Prompt 2)": ["bill_to_customer_sf_id"],
     "D-083: the Jobs list's Tax zone needed flag": ["tax_zone_code", "tax_zone_label"],
+    "2026-10-21: the payer's name on the Jobs list + the dispatch board's job cards": ["bill_to_name"],
   },
   estimate: {
     "pages/service/ServiceEstimatesPage.tsx": [

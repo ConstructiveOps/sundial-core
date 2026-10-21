@@ -1,5 +1,12 @@
 # Sundial — Progress Log
 
+## 2026-10-21 — The payer's name on the Jobs list; "are you still at the job?" to the tech (D-074 amendment 1)
+
+- **`bill_to_name` on the job list.** `sundial-sf-query` `LIST_PROJECTION.job` gains `bill_to_name` (cache and cold-cache paths alike — the live path maps every describe field, the projection narrows both), so the Jobs list and the dispatch board's job cards can show who pays. The job gets its first sort allowlist (`SORT_ALLOWLIST.job = ["created_date", "bill_to_name"]`): `sort=bill_to_name:asc|desc`, blanks last, `sf_id` tie-break; the cold path orders by `Bill_To_Name__c`. The column already existed in `sundial_service_job_cache` — no SQL.
+- **Overrun push** (`sundial-notify` sweep, fourth kind `reminder/overrun`): an In Progress call the tech clocked into and never out, 2+ hours past its `Scheduled_End__c` (within 12 h) → one push to the tech ("SVC-01234 was scheduled to end 2 hours ago" / "Are you still at Ann Lee, 1 Main St, Phoenix? Tap to clock out or keep going." → `/tech/calls/{id}`), key `overrun:{call}`; the office is not told; the call is not changed. **One addition to the brief:** besides a blank `Actual_End__c` the call must have an OPEN interval in `Clock_Intervals__c` — a tech who left for the next job has the old call's clock closed but its end left blank (paused, `tech.js`), and would otherwise be asked whether they are still there. Constants `OVERRUN_AFTER_MIN = 120`, `OVERRUN_LOOKBACK_HOURS = 12`; the summary / log line carry `overrun`.
+- Tests: sf-query +1 (job sort by `bill_to_name`, the "no allowlist" test moved to estimate) and the list-projection coverage row; notify +2 (2h05m → one push with the title / body / url / key, next sweep zero, clocked out none, never clocked in none (the office's late alert instead), 13 h none, paused none, 1h50m none; the 3-hour title; `stillOnClock`).
+- **Deploy:** `sundial-sf-query`, `sundial-notify`. No wire script — the `sundial-notify-sweep` rule already runs it.
+
 ## 2026-10-19 — Hotfix: issuing an invoice never charges the card on file (D-072 amendment 14, Harmon)
 
 **What Harmon saw.** Issuing an invoice charged the customer's card on file. The cause was a feature, not a bug in the charge: `POST /service/jobs/{id}/invoice` honoured `chargeCard: true` (amendment 11) and the portal's Issue row ticked "Charge the card on file now" **by default** whenever a card was on file — so the charge happened unless someone unticked it.

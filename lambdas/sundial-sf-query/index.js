@@ -386,6 +386,7 @@ export const LIST_PROJECTION = {
     "estimate_status", "estimate_total", "bill_to_type", "report_sent_at", "intake_date",
     "bill_to_customer_sf_id", // D-081: who pays, as a record
     "tax_zone_code", "tax_zone_label", // D-083: the "Tax zone needed" flag on the Jobs list
+    "bill_to_name", // 2026-10-21: the payer's name on the Jobs list and the board's job cards
   ],
   // ServiceEstimatesPage (incl. the Templates view).
   estimate: [

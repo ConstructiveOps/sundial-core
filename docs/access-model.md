@@ -806,6 +806,73 @@ whose fields carry their own marks. The D7 mirror tabs (`solar-adders`, `solar-c
 Solar fields on the Customer page; they are governed by the *Solar* manifest, which the server applies
 to the linked-Solar read those panels perform. The synthetic `files` tab is an action (§3.6), not a field.
 
+### 4.1a The two sales-role columns come from Harmon's dealer-portal sheet (2026-10-22)
+
+**Source of truth for `Sales Rep` / `Sales Dealer` on Customer and Solar:** Harmon's
+dealer-portal sheet **`sundial-core/docs/Dealer Portal Field Visibility from Harmon.xlsx`**
+(sheet `Sheet1`, returned by Ralph for the Dealer module, step 0), plus two tables at the top
+of `scripts/apply-dealer-visibility.mjs`: `SOLAR_MIRROR` (rule 7) and `OVERRIDES`.
+
+**The Harmon sheet has exactly one home, sundial-core `docs/`.** Never copy it to harmon-crm.
+The two field-design workbooks are still copied there, as before; the generator checks they
+match.
+
+Edit the sheet or the tables and re-apply. Do not hand-edit the two role columns for any
+field the sheet or the tables cover; the next re-apply would overwrite it. Every other
+workbook cell, including the role columns of fields nobody lists, is still edited by hand.
+Roofing is untouched (still all-hidden, §4.1).
+
+**What the sheet means.** Its Customer sections are Contact & Household, Property & Site,
+Lead & Source, Utility Company, Contract & Financing, Project Routing, Budget Inputs and Adders.
+Its Solar sections are Customer/Site Details, Audit, Roofing, Design/Engineering, PM/NTP/Adder
+Review, Permitting, Utility, HOA, Installation and Post Install/PTO (`SECTION_OBJECT`; a section
+not in that table is refused). The sheet speaks **only for the fields it lists**:
+
+| On the sheet | Result, per role |
+|---|---|
+| listed, `Y` | `read`, or `edit` if the workbook already said `edit`. The script never grants `edit` |
+| listed, blank | `hidden` |
+| **not listed** | **unchanged.** The sheet never hides a field it does not mention |
+| listed twice with different answers | the stricter answer, reported by name (2026-10-22: `Dealer_Fee__c`, Y under Contract & Financing, blank under Budget Inputs for the rep → hidden) |
+| API name the workbook does not have | reported and skipped, never added (2026-10-22: none) |
+
+The first version (earlier the same day) hid every unlisted field. That took away `Stage__c`
+(a rep's stage picklist became a 404), `Status__c`, the Solar name and address snapshot,
+`Customer_Name_at_Creation__c` and the other structural fields. "Not listed = unchanged" fixes
+all of them without an override each.
+
+**Rule 7: the Solar adder mirror (`SOLAR_MIRROR`).** The dealer page's Pricing section shows the
+Customer's adders until `Linked_Solar_Project__c` is set, and the Solar's after. The audience
+must not change at that switch.
+
+- **Which fields:** the mirror config's own selection (harmon-crm `src/config/customer-solar-mirror.ts`), read from the Solar workbook it is generated from. That is the whole Adders and Commissions sections, the Budget fields matching `ADDER_OUTPUT` / `ADDER_OUTPUT_EXTRA`, plus Budget Inputs.
+- **What they get:** a Solar field takes Harmon's Customer answer for the same API name **only when that answer is Dealer-Y**. Sales Dealer gets `read`; Sales Rep gets the Customer's own rep answer (blank → hidden for every adder; `Contract_Amount__c` stays `read`).
+- **Named extras:** `Total_Adder_Price__c` and `Battery_Unit_Price__c`, which have no Customer row, are dealer `read` / rep hidden.
+- **Left alone, deliberately:** the mirror also shows internal cost and margin. That is `Adder_*_Cost__c`, the Budget roll-ups, every commission amount and rate, and the Budget Inputs cost basis (70 fields on 2026-10-22). None has a Customer-side Dealer Y, so they keep the workbook's value (hidden for dealers today), and the dry run lists them.
+- **Named by Tim, not in the mirror:** `Tesla_Expansion_Pack_Qty__c` does not exist on Solar (Solar has `Tesla_Expansion_Pack_Quantity__c`, in Materials). `System_Size_Watts__c` is in Solar's Budget section, which the mirror does not show. Both are left as the workbook says.
+
+**`OVERRIDES`** are applied last, so they win over the sheet and over rule 7, and they survive
+a new sheet. 2026-10-22 (Tim, Ralph left them off): `Commission_Total__c`,
+`Commission_Total_PPW__c` and `Commission_Redline_PPW__c` are `read` for Sales Dealer and
+hidden for Sales Rep, on both objects.
+
+**Re-applying a new sheet:**
+
+1. Save Harmon's sheet over `docs/Dealer Portal Field Visibility from Harmon.xlsx` (or pass `--sheet <path>`).
+2. `node scripts/apply-dealer-visibility.mjs`. This is a dry run: before/after read/edit/hidden counts per object and role, every cell that changes and why, the conflicts, the unknown names, and rule 7's included and excluded lists. Read it.
+3. `node scripts/apply-dealer-visibility.mjs --apply` writes the two workbooks. Only role cells change, and a second run changes nothing. Because unlisted fields are kept, a field Harmon drops from a later sheet keeps its last answer; set it in the workbook (or `OVERRIDES`) if it should change.
+4. `node scripts/generate-field-configs.mjs --apply`, then copy **the two workbooks** (not the Harmon sheet) to `harmon-crm/docs/`. The generator warns on drift.
+5. `npm test`, then redeploy `sundial-sf-query`, `sundial-sf-update` (both bundle `lib/field-manifest/`) and `sundial-auth-proxy`, then `node scripts/verify-field-manifest-live.mjs`.
+
+**First application (2026-10-22), manifest read / edit (read includes edit):**
+
+| | Sales Rep | Sales Dealer |
+|---|---|---|
+| Customer | 237 / 146 → 187 / 147 | 241 / 146 → 263 / 147 |
+| Solar | 121 / 0 → 139 / 0 | 124 / 0 → 214 / 0 |
+
+(Customer edit goes 146 → 147 because `Company_Name__c` came in with the harmon-crm rows; see PROGRESS.)
+
 ### 4.2 Generator — lives in `sundial-core`
 
 `scripts/generate-field-configs.mjs` (moved from harmon-crm's two generators, merged, plus the roofing

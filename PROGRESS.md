@@ -1,5 +1,32 @@
 # Sundial — Progress Log
 
+## 2026-10-22 — Dealer module step 0: field visibility from Harmon's dealer-portal sheet (`feature/dealer-visibility`)
+
+- **`scripts/apply-dealer-visibility.mjs`** applies `docs/Dealer Portal Field Visibility from Harmon.xlsx` (Ralph's sheet; the file name has spaces; it lives only in sundial-core) to the `Sales Rep` / `Sales Dealer` columns of `docs/Sundial_Customer__c_Field_Design.xlsx` and `docs/Sundial_Solar_Fields_by_Section.xlsx`. Rules, in `docs/access-model.md` §4.1a:
+  - A listed field is authoritative: Y → `read` (an existing `edit` stays `edit`, `edit` is never added), blank → `hidden`.
+  - **An unlisted field is unchanged.**
+  - A conflicting duplicate → the stricter answer, reported. An unknown name → reported, skipped.
+  - Rule 7: the Solar adder mirror takes the dealer's Customer answer.
+  - `OVERRIDES` run last: the commission fields are `read` for Sales Dealer and hidden for Sales Rep, both objects.
+  - The default is a dry run; `--apply` writes.
+- **Revised the same day (Tim).** The first version hid every unlisted field, which took `Stage__c` (a rep's stage picklist → 404; `shadow.test.js` failed), `Status__c`, the Solar name / address snapshot and `Customer_Name_at_Creation__c`. "Unlisted = unchanged" restores them all.
+  - `Sold_Date__c` only looked hidden: the hidden copy was **Solar** row 81. Harmon lists `Sold_Date__c` under Contract & Financing, which is a Customer section, so the Solar copy was "not on the sheet". It is now `read` on both objects.
+  - Re-applied from the pre-step-0 workbooks, not from the first run's output.
+- **Rule 7, derived from the mirror rather than typed.** The selection is harmon-crm `customer-solar-mirror.ts`'s, read from the Solar workbook (Adders, Commissions, Budget `ADDER_OUTPUT` fields, plus Budget Inputs).
+  - It is filtered to the names Harmon marked Dealer-Y on Customer: 73 fields, including `Total_Adder_Price__c` and `Battery_Unit_Price__c`, which Tim named.
+  - The mirror's other **70 fields are internal cost / margin** (`Adder_*_Cost__c`, the Budget roll-ups, every commission amount, the Budget Inputs cost basis). They are not opened to dealers, and the dry run lists them.
+  - The rep copies the Customer rep answer: hidden for adders, `read` for `Contract_Amount__c`. A fixed "rep hidden" would have removed the rep's Solar contract amount.
+  - `Tesla_Expansion_Pack_Qty__c` does not exist on Solar. `System_Size_Watts__c` is not in the mirror. Both are left as the workbook says.
+- **Customer base workbook.** The harmon-crm copy had 3 rows this repo lacked (`Is_Company__c`, `Company_Name__c`, `Warranty_Notes__c`, D-081, harmon-crm `9a730d7`) and no other difference. It is the base, so copying back loses nothing. Its `Company_Name__c` row was already `edit` / `edit`, so **both sales roles can now edit `Company_Name__c`**. That is the only edit-set change, and it comes from that row, not from Harmon's sheet.
+- **Applied:** 79 Customer + 225 Solar role cells changed versus the pre-step-0 workbooks; no other cell changed (checked cell by cell); a second `--apply` dry run changes 0. Manifests regenerated. Both workbooks copied to harmon-crm `docs/`; no drift. The Harmon sheet was not copied.
+
+  | read / edit | Sales Rep | Sales Dealer |
+  |---|---|---|
+  | Customer | 237 / 146 → 187 / 147 | 241 / 146 → 263 / 147 |
+  | Solar | 121 / 0 → 139 / 0 | 124 / 0 → 214 / 0 |
+- **Tests:** 1,608 / 1,608. `shadow.test.js` "the picklist MODULE gate closes" passes again, with the test unchanged. `verify-field-manifest-live.mjs` was not run: it checks the deployed Lambdas against the local manifest, so it only means something after the redeploy.
+- **Not deployed.** No change to `lib/access.js`, RLS or Lambda code. Redeploys: see TASKS.md.
+
 ## 2026-10-22 — October 22 batch: report dates → Ready to Bill, job status on the day, follow-up flag, the server's lines in the customer feed, estimate PDF + line reorder, photo thumbnails (`feature/oct22-batch`)
 
 Describe first (read-only, 2026-10-21): the three job Date fields exist and are updateable (`Report_Uploaded_to_Partner_Portal__c`, `Report_Sent_to_Customer__c`, `Notes_Reported__c`); `Ready to Bill` is in the job's status picklist; `Follow_Up_Needed__c` / `Next_Follow_Up_Date__c` / `Sort_Order__c` exist.

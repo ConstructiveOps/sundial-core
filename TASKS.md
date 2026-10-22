@@ -4,6 +4,13 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-22 — Dealer module step 0 of 9: field visibility from Harmon's sheet (`feature/dealer-visibility`) — APPLIED TO THE WORKBOOKS + MANIFEST, NOT DEPLOYED
+
+- [x] `scripts/apply-dealer-visibility.mjs`: sheet ("unlisted = unchanged") + rule 7 Solar adder mirror + `OVERRIDES`; applied; manifests regenerated; workbooks copied to harmon-crm `docs/` (access-model §4.1a). Suite 1,608 / 1,608
+- [ ] **TIM: confirm `Company_Name__c` as `edit` for both sales roles.** It came from harmon-crm's D-081 sheet row, not from Harmon's sheet. If it should be read-only for sales, change that row to `read` in the workbook (both repos) and regenerate
+- [ ] **TIM: redeploy, server first:** `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update` (both bundle `lib/field-manifest/`), `.\deploy.ps1 sundial-auth-proxy` (imports no manifest today; ships `/auth/me` from the same commit). Then `node scripts/verify-field-manifest-live.mjs` and `node scripts/verify-access-matrix.mjs`
+- [ ] **harmon-crm:** regenerate its client configs from the copied workbooks (`npm run generate:configs`) and commit on `main`. The Harmon sheet is NOT copied there
+
 ## 2026-10-22 — October 22 batch (`feature/oct22-batch`): report dates → Ready to Bill, job status on the day, follow-up flag, feed lines, estimate PDF + reorder, photo thumbnails — ON THE BRANCH, NOT DEPLOYED, awaiting review
 
 - [x] A5/A6 report dates + Ready to Bill (D-081 am. 3) · A7 job status follows the call, day-of in the sweep, the generic call-PATCH side door closed (D-072 am. 15, D-074 am. 2) · A8 follow-up date → Follow-up needed · A9 the server's intake / assignment lines in the customer feed (D-084) · A10 `GET /service/estimates/{id}/pdf` · A11 line reorder · A12 photo thumbnails. Full suite green.

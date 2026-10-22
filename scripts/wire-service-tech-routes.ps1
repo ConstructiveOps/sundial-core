@@ -123,6 +123,10 @@ $jPhotos = Ensure-Resource $jobId "photos"
 foreach ($m in @("GET", "POST", "DELETE", "OPTIONS")) { Wire-Method $jPhotos $m $Board }  # DELETE = the office removes one photo (2026-09-30)
 $jConfirm = Ensure-Resource $jPhotos "confirm"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jConfirm $m $Board }
+# The thumbnail backfill (2026-10-22, lib/photo-thumbs.js): the office makes the missing ~400 px copies in rounds.
+Write-Host "==> /service/jobs/{id}/photos/thumbs : POST, OPTIONS (board)" -ForegroundColor Cyan
+$jThumbs = Ensure-Resource $jPhotos "thumbs"
+foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jThumbs $m $Board }
 Write-Host "==> /service/tech/jobs/{id}/photos, /files : GET, OPTIONS (board)" -ForegroundColor Cyan
 $tJobs  = Ensure-Resource $tech "jobs"
 $tJobId = Ensure-Resource $tJobs "{id}"

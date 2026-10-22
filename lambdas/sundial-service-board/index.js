@@ -6,6 +6,8 @@
 //   POST  /service/jobs/{id}/calls               schedule a tech onto a job (tray drop)
 //   PATCH /service/calls/{id}                    move / resize / reassign / status / notes
 //   POST  /service/calls/{id}/cancel             { reason } → Cancelled
+//   GET   /service/jobs/{id}/photos              the job's photos grouped by call, each with thumbUrl
+//   POST  /service/jobs/{id}/photos/thumbs       the thumbnail backfill, in ~20 s rounds (2026-10-22)
 //   /service/tech/*                              the technician app — see tech.js
 //
 // A service call is ONE tech × ONE appointment on a job (D-072). Multi-tech jobs are
@@ -27,8 +29,12 @@
 //   first call scheduled          job New/Triaging/Remote Inv./Ready/Awaiting Parts → Scheduled
 //   a call goes In Progress       job Scheduled → In Progress
 //   last open call Complete       job In Progress/Scheduled → Awaiting Office Review
-//   last open call Cancelled      job Scheduled → Ready to Schedule
+//   last open call Cancelled /    job Scheduled / In Progress → Ready to Schedule
+//     taken off the schedule        (In Progress with a Complete call → Awaiting Office Review)
+//   a call moved off today        job In Progress → Scheduled, only if nobody clocked in
 //   a tech reopens a Complete     job Awaiting Office Review → In Progress
+//   (the call's day itself, Scheduled → In Progress, is the notify sweep's "day_of")
+// One table for this Lambda and the sweep: lib/job-status.js nextJobStatus.
 // Nothing else on the job is touched; anything more opinionated is a per-tenant rule
 // added on request (D-072 rule 5).
 //
@@ -55,12 +61,13 @@ import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { createSmsSender } from "../../lib/sms-send.js";
-import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realDeleteObject, realListPhotos, realPresignPut } from "./tech.js";
+import { applyClockEvent, clockFields, createTechHandlers, liveIntervals, parseIntervals, realDeleteObject, realGetObject, realListPhotos, realPresignPut, realPutObject } from "./tech.js";
 import { createDayHandlers } from "./day.js";
 import { eventOccurrences, MAX_OCCURRENCES, REPEATS } from "./events.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, createNotifier, fmtWhen, jobLabel } from "../../lib/notify.js";
 import { createTenantSettings } from "../../lib/tenant-settings.js";
+import { OPEN_CALL_STATUSES, UNSCHEDULED_JOB_STATUSES, localDay, nextJobStatus } from "../../lib/job-status.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const JOB_SF_OBJECT = "Sundial_Service_Job__c";
@@ -74,12 +81,12 @@ const CACHE = Object.freeze({ call: "sundial_service_call_cache", job: "sundial_
 // a window is set (drop on the board or the schedule form). It is not "open" for the
 // job-status rules — a job with only an unscheduled call is still Ready to Schedule.
 export const CALL_STATUSES = Object.freeze(["Unscheduled", "Scheduled", "En Route", "In Progress", "Complete", "Cancelled", "No-Show"]);
-export const OPEN_CALL_STATUSES = Object.freeze(["Scheduled", "En Route", "In Progress"]);
 export const STARTED_CALL_STATUSES = Object.freeze(["In Progress", "Complete"]);
 export const SUB_TYPES = Object.freeze(["On-Site", "Remote", "Office Work", "In-Field", "Travel", "Prep"]);
 
-/** Job statuses that mean "nothing on the calendar yet" — the tray. */
-export const UNSCHEDULED_JOB_STATUSES = Object.freeze(["New", "Triaging", "Remote Investigation", "Ready to Schedule", "Awaiting Parts"]);
+// The open call statuses and the tray's job statuses belong to the job-status rule
+// (lib/job-status.js); re-exported so existing imports keep working.
+export { OPEN_CALL_STATUSES, UNSCHEDULED_JOB_STATUSES };
 const PRIORITY_RANK = { Emergency: 0, High: 1, Standard: 2, Low: 3 };
 
 // Tenant config placeholders (service-workflows.md §12): default block length, the
@@ -348,6 +355,7 @@ const ROUTES = [
   // The job's photos (2026-09-18): the office reads + adds at the top level; a tech reads.
   ["GET", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotos"],
   ["POST", /^\/service\/jobs\/([^/]+)\/photos\/confirm\/?$/, "jobPhotoConfirm"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/photos\/thumbs\/?$/, "jobPhotoThumbs"], // the thumbnail backfill (2026-10-22) — before "photos"
   ["POST", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoPresign"],
   ["DELETE", /^\/service\/jobs\/([^/]+)\/photos\/?$/, "jobPhotoDelete"],
   ["GET", /^\/service\/tech\/jobs\/([^/]+)\/photos\/?$/, "techJobPhotos"],
@@ -405,6 +413,7 @@ const ACTION_FOR = Object.freeze({
   jobPhotos: "service.board.read",
   jobPhotoPresign: "files.job.upload",
   jobPhotoConfirm: "files.job.upload",
+  jobPhotoThumbs: "files.job.upload", // the office's backfill; writes only under SUNDIAL/_cache/
   jobPhotoDelete: "files.job.delete",
   techJobPhotos: "service.tech.read",
   techJobFiles: "service.tech.read",
@@ -491,6 +500,8 @@ export function createHandler(deps = {}) {
     presignPut: realPresignPut,
     listPhotos: realListPhotos,
     deleteObject: realDeleteObject,
+    getObject: realGetObject, // photo thumbnails (2026-10-22): read the original…
+    putObject: realPutObject, // …and write the ~400 px copy under SUNDIAL/_cache/photo-thumbs/
     now: () => new Date(),
     env: process.env,
     ...deps,
@@ -667,15 +678,11 @@ export function createHandler(deps = {}) {
   }
 
   /** The job-status automation described in the header. Returns the new status or null. */
+  // The DECISION is lib/job-status.js nextJobStatus (one table, shared with the day-of
+  // sweep in sundial-notify); this function does the write, the activity row, the stale mark.
   async function settleJobStatus(ctx, job, trigger, callsAfter) {
-    const open = callsAfter.filter((c) => OPEN_CALL_STATUSES.includes(c.Status__c));
-    let next = null;
-    if (trigger === "scheduled" && UNSCHEDULED_JOB_STATUSES.includes(job.Status__c)) next = "Scheduled";
-    if (trigger === "in_progress" && job.Status__c === "Scheduled") next = "In Progress";
-    if (trigger === "complete" && open.length === 0 && ["Scheduled", "In Progress"].includes(job.Status__c)) next = "Awaiting Office Review";
-    if ((trigger === "cancelled" || trigger === "unscheduled") && open.length === 0 && job.Status__c === "Scheduled") next = "Ready to Schedule";
-    if (trigger === "reopened" && job.Status__c === "Awaiting Office Review") next = "In Progress";
-    if (!next || next === job.Status__c) return null;
+    const next = nextJobStatus(job.Status__c, trigger, callsAfter, { today: localDay(d.now().toISOString(), DEFAULTS.timeZone), timeZone: DEFAULTS.timeZone });
+    if (!next) return null;
     try {
       await d.sfUpdateRecord(JOB_SF_OBJECT, job.Id, { Status__c: next, Status_Changed_At__c: d.now().toISOString() });
     } catch (e) {
@@ -1014,6 +1021,10 @@ export function createHandler(deps = {}) {
           // re-opens a call from the board card) — the job follows the way the phone's reopen does.
           else if (changes.Status__c.to === "In Progress") jobStatusChanged = await settleJobStatus(ctx, job, ["Complete", "No-Show"].includes(call.Status__c) ? "reopened" : "in_progress", calls);
           else if (["Complete", "No-Show"].includes(changes.Status__c.to)) jobStatusChanged = await settleJobStatus(ctx, job, "complete", calls);
+        } else if (job && changes.Scheduled_Start__c && job.Status__c === "In Progress") {
+          // The day-of sweep put the job In Progress and its call just moved off today: back to
+          // Scheduled — unless a tech has clocked in on the job (lib/job-status.js "moved").
+          jobStatusChanged = await settleJobStatus(ctx, job, "moved", await loadJobCalls(job.Id, tenantId));
         }
       }
       let notify = { notified: false, detail: null };

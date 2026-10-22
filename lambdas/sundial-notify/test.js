@@ -28,6 +28,7 @@ function setup(over = {}) {
   };
   const calls = over.calls || [];
   const pushes = [];
+  const updates = [];
   const supabase = fakeSupabase(store);
   const deps = {
     resolveIdentity: async () => ({
@@ -49,16 +50,17 @@ function setup(over = {}) {
       return calls.filter((c) => c.Status__c === "Scheduled" && (!soql.includes("Tech__c != null") || c.Tech__c) && (!ge || c.Scheduled_Start__c >= ge) && (!le || c.Scheduled_Start__c <= le));
     },
     getSupabaseClient: async () => supabase,
+    sfUpdateRecord: async (obj, id, fields) => { updates.push({ obj, id, fields }); for (const c of calls) if (c.Sundial_Service_Job__c === id && c.Sundial_Service_Job__r) c.Sundial_Service_Job__r = { ...c.Sundial_Service_Job__r, ...fields }; return { ok: true, id }; },
     getSecret: async () => (over.noPush ? {} : { publicKey: "PUB", privateKey: "PRIV", subject: "mailto:x@y.z" }),
     broadcast: async () => ({ ok: true }),
     sendPush: async (sub, payload) => (pushes.push({ endpoint: sub.endpoint, payload }), { ok: true }),
     now: () => over.now ?? new Date("2026-09-21T15:00:00Z"), // 8:00 AM Phoenix
-    env: { SERVICE_TIMEZONE: "America/Phoenix" },
+    env: { SERVICE_TIMEZONE: "America/Phoenix", ...(over.env || {}) },
   };
   const handler = createHandler(deps);
   const call = (method, path, body, headers = {}) =>
     handler({ requestContext: { http: { method } }, rawPath: path, headers: { authorization: "Bearer t", origin: "https://sundial.harmonelectric.net", "user-agent": "TestBrowser/1", ...headers }, body: body == null ? undefined : JSON.stringify(body) }).then((r) => ({ status: r.statusCode, body: r.body ? JSON.parse(r.body) : null }));
-  return { store, pushes, handler, call };
+  return { store, pushes, updates, handler, call };
 }
 
 const SUB = { endpoint: "https://push.example/abc", keys: { p256dh: "P", auth: "A" } };
@@ -154,7 +156,7 @@ test("sweep: one-hour reminder to the tech, late call to the office, both dedupe
   ];
   const { store, handler } = setup({ calls });
   let r = await handler({ source: "aws.events", "detail-type": "Scheduled Event" });
-  assert.deepEqual(r, { ok: true, oneHour: 1, dayBefore: 0, late: 2, overrun: 0, techsReminded: 0 }); // late → Beth + Paige
+  assert.deepEqual(r, { ok: true, oneHour: 1, dayBefore: 0, late: 2, overrun: 0, techsReminded: 0, dayOf: 0 }); // late → Beth + Paige
   const rows = store.sundial_notifications;
   const oneHour = rows.find((x) => x.kind === "one_hour");
   assert.equal(oneHour.profile_id, "uuid-larry");
@@ -168,7 +170,7 @@ test("sweep: one-hour reminder to the tech, late call to the office, both dedupe
   assert.equal(late[0].url, "/service/jobs/J1");
   // Five minutes later: the same calls are found again and nobody is rung twice.
   r = await handler({ sweep: true });
-  assert.deepEqual(r, { ok: true, oneHour: 0, dayBefore: 0, late: 0, overrun: 0, techsReminded: 0 });
+  assert.deepEqual(r, { ok: true, oneHour: 0, dayBefore: 0, late: 0, overrun: 0, techsReminded: 0, dayOf: 0 });
   assert.equal(store.sundial_notifications.length, 3);
 });
 
@@ -250,4 +252,38 @@ test("overrun: the title says the whole hours past 3, and the clock decides who 
   const { store, handler } = setup({ calls: [mkRunning("O7", "2026-09-21T11:20:00Z")] });
   await handler({ sweep: true });
   assert.equal(store.sundial_notifications.find((x) => x.kind === "overrun").title, "SVC-00012 was scheduled to end 3 hours ago");
+});
+
+test("sweep: day-of (2026-10-22) — a Scheduled job whose call is today goes In Progress once, logged and staled, ringing nobody; tomorrow's / an already-moved job / before DAY_OF_HOUR stay", async () => {
+  const job = (id, Status__c) => ({ Name: `SVC-${id}`, Status__c, Estimate__c: `EST-${id}`, Customer_Name_at_Creation__c: "Ann Lee" });
+  const day = (Id, jobId, start, jobStatus) => ({ ...mkCall(Id, start), Sundial_Service_Job__c: jobId, Sundial_Service_Job__r: job(jobId, jobStatus) });
+  const calls = [
+    day("D1", "JA", "2026-09-21T23:00:00Z", "Scheduled"), // 4 pm Phoenix today → moves
+    day("D2", "JA", "2026-09-21T20:00:00Z", "Scheduled"), // same job, second call → still one move
+    day("D3", "JB", "2026-09-22T16:00:00Z", "Scheduled"), // tomorrow → stays
+    day("D4", "JC", "2026-09-21T18:00:00Z", "In Progress"), // already moved (the tech clocked in) → stays
+  ];
+  const { store, updates, handler } = setup({ calls });
+  const r = await handler({ sweep: true });
+  assert.equal(r.dayOf, 1);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].obj, "Sundial_Service_Job__c");
+  assert.equal(updates[0].id, "JA");
+  assert.equal(updates[0].fields.Status__c, "In Progress");
+  assert.ok(updates[0].fields.Status_Changed_At__c);
+  const act = store.sundial_service_activity.filter((a) => a.event === "job_updated");
+  assert.equal(act.length, 1);
+  assert.equal(act[0].details.via, "day_of");
+  assert.deepEqual(act[0].details.fields.Status__c, { from: "Scheduled", to: "In Progress" });
+  assert.equal(act[0].client_sf_id, TENANT);
+  assert.equal(act[0].job_sf_id, "JA");
+  assert.equal(store.sundial_notifications.filter((n) => n.kind === "day_of").length, 0);
+  // Five minutes later: the job is In Progress now, nothing to do.
+  assert.equal((await handler({ sweep: true })).dayOf, 0);
+  assert.equal(updates.length, 1);
+
+  // Before DAY_OF_HOUR (8 am local now, hour set to 9): nothing moves yet.
+  const early = setup({ calls: [day("E1", "JE", "2026-09-21T23:00:00Z", "Scheduled")], env: { DAY_OF_HOUR: "9" } });
+  assert.equal((await early.handler({ sweep: true })).dayOf, 0);
+  assert.equal(early.updates.length, 0);
 });

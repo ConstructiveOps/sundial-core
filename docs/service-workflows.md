@@ -122,6 +122,34 @@ recorded as a lost lead and wrecks their KPIs. On `Closed`, `Resolution__c` is r
   requires `Resolution__c`; `Ready to Bill` requires zero open visits). Admin edits in
   Salesforce stay possible for repair; the portal enforces the happy path.
 
+### 2a. The automatic moves — as built (2026-10-22, D-072 am. 15, D-074 am. 2, D-081 am. 3)
+
+Every automatic change to a job's `Status__c` is decided in ONE place, `lib/job-status.js`
+(`nextJobStatus` for the call-driven moves, `readyToBillFromReportDates` for the paperwork
+move). The callers only write, log (`job_updated` activity, `details.via`) and stale the
+cache row. Nothing else moves a job's status on its own. ("Open" call = Scheduled, En Route
+or In Progress; an Unscheduled call is not open — it is in the tray.)
+
+| What happened | From | To | Who does it (`via`) |
+|---|---|---|---|
+| A call gets a window (tray drop, schedule form, an Unscheduled call given a start) | New · Triaging · Remote Investigation · Ready to Schedule · Awaiting Parts | **Scheduled** | dispatch board (`dispatch`) |
+| The call's day arrives (local date, from `DAY_OF_HOUR`, default midnight) | Scheduled | **In Progress** | notify sweep, every 5 min (`day_of`) |
+| A tech taps On my way → Clock in / the office sets a call In Progress (earlier than the sweep, if first) | Scheduled | **In Progress** | board / tech app (`dispatch`) |
+| A call moves and no open call is left on today, **and no call on the job has been clocked into** | In Progress | **Scheduled** | dispatch board (`dispatch`) |
+| The last open call is unscheduled or cancelled | Scheduled · In Progress | **Ready to Schedule** (or **Awaiting Office Review** if a call on the job is Complete) | board (`dispatch`) |
+| The last open call is completed (Complete / No-Show) | Scheduled · In Progress | **Awaiting Office Review** | board / tech app / clock correction |
+| A Complete call is reopened | Awaiting Office Review | **In Progress** | board / tech app |
+| A report date goes from blank to a date (Report uploaded to partner portal · Report sent to customer · Notes reported) | anything before Ready to Bill | **Ready to Bill** | job PATCH, sf-update (`report_date`) |
+| The invoice is issued / paid / voided | — | Invoiced · Paid · back to Ready to Bill | `settleMoney` / void (`invoice`) |
+
+Never backwards: nothing above moves a job out of Ready to Bill / Invoiced / Paid / Closed
+except the invoice's own void. A job a tech clocked in on stays In Progress through any
+date move. Clearing a report date does nothing. A PATCH that sets `Status__c` itself wins
+over the report-date rule. A call's window and status are changed only through the board's
+routes (`PATCH /service/calls/{id}`, `/unschedule`, `/cancel`); the generic
+`PATCH /sf/servicecall/{id}` refuses them (`CALL_SCHEDULE_READ_ONLY`), and a board PATCH
+with empty dates is refused (`WINDOW_INVALID`) — unschedule is its own route.
+
 ---
 
 ## 3. Intake

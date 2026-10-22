@@ -1881,3 +1881,100 @@ test("D-078: SERVICE_BRAND_NAME names the PRIMARY tenant only — another tenant
   assert.equal(noNumber.omw.body.text.reason, "NOT_CONFIGURED");
   assert.equal(noNumber.w.texts.length, 0, "Twilio is never called");
 });
+
+test("job status follows the call (2026-10-22): a day-of In Progress job goes back to Scheduled when its call moves off today — never once a tech clocked in; unschedule from In Progress → Ready to Schedule", async () => {
+  const w = fakeWorld();
+  const job = w.store.Sundial_Service_Job__c[2]; // SVC-00003: SC1 today 9 am Phoenix, SC2 on the 20th
+  job.Status__c = "In Progress"; // as the day-of sweep leaves it
+  const h = makeHandler(w);
+  const moved = await call(h, "PATCH", "/service/calls/SC0000000000000001", { start: "2026-09-15T16:00:00.000Z", end: "2026-09-15T18:00:00.000Z" });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  assert.equal(moved.body.jobStatusChanged, "Scheduled");
+  assert.equal(job.Status__c, "Scheduled");
+  assert.equal(w.activity.filter((a) => a.event === "job_updated").at(-1).details.fields.Status__c.to, "Scheduled");
+
+  // Clocked in on the job (a previous call) → a date move never undoes In Progress.
+  job.Status__c = "In Progress";
+  w.store.Sundial_Service_Call__c[1].Actual_Start__c = "2026-09-13T16:00:00Z";
+  const kept = await call(h, "PATCH", "/service/calls/SC0000000000000001", { start: "2026-09-16T16:00:00.000Z", end: "2026-09-16T18:00:00.000Z" });
+  assert.equal(kept.body.jobStatusChanged, null);
+  assert.equal(job.Status__c, "In Progress");
+
+  // A move that stays on today keeps the job where it is.
+  w.store.Sundial_Service_Call__c[1].Actual_Start__c = null;
+  const sameDay = await call(h, "PATCH", "/service/calls/SC0000000000000001", { start: "2026-09-14T20:00:00.000Z", end: "2026-09-14T22:00:00.000Z" });
+  assert.equal(sameDay.body.jobStatusChanged, null);
+
+  // Unschedule the last open call from In Progress → Ready to Schedule.
+  w.store.Sundial_Service_Call__c[1].Status__c = "Cancelled";
+  job.Status__c = "In Progress";
+  const off = await call(h, "POST", "/service/calls/SC0000000000000001/unschedule", {});
+  assert.equal(off.body.jobStatusChanged, "Ready to Schedule");
+
+  // A PATCH that clears the window is still refused (CLAUDE.md: unschedule has its own route).
+  const cleared = await call(h, "PATCH", "/service/calls/SC0000000000000002", { start: null, end: null });
+  assert.equal(cleared.body.code, "WINDOW_INVALID");
+});
+
+test("photo thumbnails (2026-10-22): made at the office's upload (when the Lambda has the memory), listed as thumbUrl; the backfill route makes the rest in rounds; originals untouched; a tech cannot run it", async () => {
+  const { makeThumb: _m, thumbKey, THUMB_PREFIX } = await import("../../lib/photo-thumbs.js");
+  const jpeg = (await import("jpeg-js")).default;
+  const jpg = (w, h) => new Uint8Array(jpeg.encode({ data: new Uint8Array(w * h * 4).fill(90), width: w, height: h }, 90).data);
+  const w = fakeWorld();
+  const jobId = "SVC000000000000003";
+  const bytes = new Map();
+  const puts = [];
+  w.deps.getObject = async ({ key }) => ({ bytes: bytes.get(key) });
+  w.deps.putObject = async ({ key, body, contentType }) => {
+    puts.push({ key, contentType });
+    w.photos.push({ key, fileName: key.split("/").pop(), publicUrl: `https://s3/${key}`, size: body.length, lastModified: "2026-09-14T15:00:00.000Z" });
+  };
+  w.deps.thumbInline = true; // stands for AWS_LAMBDA_FUNCTION_MEMORY_SIZE >= 1024
+  // Two photos from before thumbnails (one HCP), one PNG.
+  for (const [k, b] of [[`SUNDIAL/${jobId}/photos/hcp/old1.jpg`, jpg(1200, 900)], [`SUNDIAL/${jobId}/photos/SC0000000000000001/old2.jpg`, jpg(1000, 800)], [`SUNDIAL/${jobId}/photos/drawing.png`, new Uint8Array([1])]]) {
+    bytes.set(k, b);
+    w.photos.push({ key: k, fileName: k.split("/").pop(), publicUrl: `https://s3/${k}`, size: b.length, lastModified: "2026-09-13T15:00:00.000Z" });
+  }
+  const office = makeHandler(w);
+  // The office uploads one: the confirm makes its thumb.
+  const key = `SUNDIAL/${jobId}/photos/20260914T150000Z-panel.jpg`;
+  bytes.set(key, jpg(1600, 1200));
+  w.photos.push({ key, fileName: "panel.jpg", publicUrl: `https://s3/${key}`, size: 1, lastModified: "2026-09-14T15:00:00.000Z" });
+  let r = await call(office, "POST", `/service/jobs/${jobId}/photos/confirm`, { key, contentType: "image/jpeg", size: 1 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(puts.map((p) => p.key), [thumbKey(jobId, key)]);
+  assert.ok(puts.every((p) => p.key.startsWith(THUMB_PREFIX) && p.contentType === "image/jpeg"), "only thumbs written");
+
+  // The list: the new photo has its thumb, the old ones not yet — and the thumbs are not photos of the job.
+  r = await call(office, "GET", `/service/jobs/${jobId}/photos`);
+  const all = r.body.groups.flatMap((g) => g.photos);
+  assert.equal(r.body.total, 4);
+  assert.ok(all.find((p) => p.key === key).thumbUrl.includes("/SUNDIAL/_cache/photo-thumbs/"));
+  assert.equal(all.find((p) => p.key.endsWith("old1.jpg")).thumbUrl, null);
+
+  // The backfill: the two old JPEGs get thumbs, the PNG is skipped, the new one is already done.
+  r = await call(office, "POST", `/service/jobs/${jobId}/photos/thumbs`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.made, 2);
+  assert.equal(r.body.already, 1);
+  assert.equal(r.body.skipped, 1);
+  assert.equal(r.body.remaining, 0);
+  r = await call(office, "GET", `/service/jobs/${jobId}/photos`);
+  assert.equal(r.body.groups.flatMap((g) => g.photos).filter((p) => p.thumbUrl).length, 3);
+  // Again: nothing left to do.
+  assert.equal((await call(office, "POST", `/service/jobs/${jobId}/photos/thumbs`, {})).body.made, 0);
+  // A tech reads thumbs but cannot run the backfill.
+  const tech = makeHandler(w, { user: { id: "USR000000000000001" }, access: { scope: "tech", level: "Technician", tenantId: TENANT, userId: "USR000000000000001" } });
+  assert.ok((await call(tech, "GET", `/service/tech/jobs/${jobId}/photos`)).body.groups.flatMap((g) => g.photos).some((p) => p.thumbUrl));
+  assert.equal((await call(tech, "POST", `/service/jobs/${jobId}/photos/thumbs`, {})).status, 403);
+
+  // Without the memory (256 MB, no override), an upload makes no thumb inline — the backfill does it later.
+  const w2 = fakeWorld();
+  w2.deps.getObject = w.deps.getObject;
+  const puts2 = [];
+  w2.deps.putObject = async (o) => puts2.push(o);
+  w2.deps.env = { ...w2.deps.env, AWS_LAMBDA_FUNCTION_MEMORY_SIZE: "256" };
+  w2.photos.push({ key, fileName: "panel.jpg", publicUrl: "u", size: 1, lastModified: "2026-09-14T15:00:00.000Z" });
+  assert.equal((await call(makeHandler(w2), "POST", `/service/jobs/${jobId}/photos/confirm`, { key, contentType: "image/jpeg", size: 1 })).status, 200);
+  assert.equal(puts2.length, 0);
+});

@@ -43,7 +43,7 @@
 //
 // TENANT ISOLATION: every read is Client__c-bound; ids from another tenant are 404.
 
-import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { soqlEscapeString } from "../../lib/salesforce.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
@@ -51,6 +51,8 @@ import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, FILE_METADATA_TABLE, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
 import { syncCallNotesToJob } from "./job-notes.js";
 import { CATEGORIES, fmtTime, jobLabel } from "../../lib/notify.js";
+// The job page's photo thumbnails (2026-10-22, D-072 amendment 15): made at upload, listed beside each photo.
+import { backfillThumbs, canThumbInline, makeThumb, thumbPrefix, withThumbUrls } from "../../lib/photo-thumbs.js";
 
 export const GOOGLE_SECRET_NAME = "sundial/google-maps"; // { apiKey } — same key the street-view feature uses
 export const ESTIMATE_SF_OBJECT = "Sundial_Estimate__c";
@@ -663,6 +665,15 @@ export async function realPresignPut({ key, contentType }) {
 export async function realDeleteObject(key) {
   await s3().send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key }));
 }
+/** One object's bytes (the thumbnail maker reads the original it shrinks). */
+export async function realGetObject({ key }) {
+  const out = await s3().send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+  return { bytes: new Uint8Array(await out.Body.transformToByteArray()), contentType: out.ContentType ?? null };
+}
+/** Write one object (a thumbnail under SUNDIAL/_cache/photo-thumbs/). */
+export async function realPutObject({ key, body, contentType }) {
+  await s3().send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: body, ContentType: contentType }));
+}
 export async function realListPhotos(prefix) {
   const out = [];
   let ContinuationToken;
@@ -725,6 +736,24 @@ export function createTechHandlers(d, h) {
   const SELECT = `${CALL_SELECT}, ${TECH_CALL_EXTRA}`;
   const geofenceMeters = () => Math.max(25, num(d.env?.SERVICE_GEOFENCE_METERS) ?? 250);
   const shopPoint = () => parseLatLng(d.env?.SERVICE_SHOP_LATLNG);
+
+  // --- photo thumbnails (2026-10-22, lib/photo-thumbs.js) ---------------------------
+  const thumbDeps = () => ({ getObject: d.getObject, putObject: d.putObject, ...(d.resizeImage ? { resize: d.resizeImage } : {}) });
+  /** The photos with thumbUrl set from ONE listing of the job's thumb folder. A failed listing = no thumbs, never a failed read. */
+  async function thumbed(jobId, photos) {
+    if (!photos?.length) return photos || [];
+    const keys = new Set((await d.listPhotos(thumbPrefix(jobId)).catch((e) => (console.error("thumbs list:", e?.message), []))).map((t) => t.key));
+    return withThumbUrls(photos, jobId, keys);
+  }
+  /**
+   * The thumbnail of a photo just uploaded — inline, best-effort, and only when this Lambda
+   * has the memory for a 12 MP decode (THUMB_MIN_MEMORY_MB); otherwise the backfill makes it.
+   */
+  async function thumbAtUpload(jobId, key) {
+    if (!jobId || !key || !d.getObject || !d.putObject) return null;
+    if (!d.thumbInline && !canThumbInline(d.env)) return null;
+    return makeThumb(thumbDeps(), jobId, key);
+  }
 
   // --- reads ---------------------------------------------------------------------
   async function loadTechCall(id, tenantId) {
@@ -1019,7 +1048,7 @@ export function createTechHandlers(d, h) {
       const estimateId = call.Sundial_Service_Job__r?.Estimate__c ?? null;
       const [siblings, photos, estimate, lines] = await Promise.all([
         jobId ? h.loadJobCalls(jobId, tenantId) : [],
-        jobId ? d.listPhotos(photoPrefix(jobId, call.Id)).catch((e) => (console.error("photos list:", e?.message), [])) : [],
+        jobId ? d.listPhotos(photoPrefix(jobId, call.Id)).then((p) => thumbed(jobId, p)).catch((e) => (console.error("photos list:", e?.message), [])) : [],
         estimateId
           ? d.sfQuery(`SELECT Id, Name, Status__c, Total__c, Subtotal__c FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(estimateId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`).then((r) => r?.[0] ?? null)
           : null,
@@ -1409,6 +1438,7 @@ export function createTechHandlers(d, h) {
       } catch (e) {
         console.error("photo metadata:", e?.message || e);
       }
+      await thumbAtUpload(call.Sundial_Service_Job__c, key);
       let photos = [];
       try {
         photos = await d.listPhotos(prefix);
@@ -1416,6 +1446,7 @@ export function createTechHandlers(d, h) {
         console.error("photos list:", e?.message || e);
       }
       const count = photos.length || (num(call.Photos_Count__c) ?? 0) + 1;
+      photos = await thumbed(call.Sundial_Service_Job__c, photos);
       try {
         await d.sfUpdateRecord(CALL_SF_OBJECT, call.Id, { Photos_Count__c: count });
       } catch (e) {
@@ -1470,7 +1501,7 @@ export function createTechHandlers(d, h) {
       const { tenantId, cors } = ctx;
       const call = await loadTechCall(params[0], tenantId);
       if (!call || !ownsCall(ctx, call)) return notFound(cors);
-      const photos = call.Sundial_Service_Job__c ? await d.listPhotos(photoPrefix(call.Sundial_Service_Job__c, call.Id)) : [];
+      const photos = call.Sundial_Service_Job__c ? await thumbed(call.Sundial_Service_Job__c, await d.listPhotos(photoPrefix(call.Sundial_Service_Job__c, call.Id))) : [];
       return jsonResponse(200, cors, { photos, photosCount: num(call.Photos_Count__c) ?? photos.length });
     },
 
@@ -1485,7 +1516,7 @@ export function createTechHandlers(d, h) {
       if (!job) return notFound(cors);
       const prefix = jobPhotoPrefix(job.Id);
       const [photos, calls] = await Promise.all([d.listPhotos(prefix).catch((e) => (console.error("job photos list:", e?.message), [])), h.loadJobCalls(job.Id, tenantId)]);
-      const groups = groupJobPhotos(photos, prefix, calls);
+      const groups = groupJobPhotos(await thumbed(job.Id, photos), prefix, calls);
       return jsonResponse(200, cors, { jobId: job.Id, jobNumber: job.Name ?? null, total: photos.length, groups });
     },
 
@@ -1539,8 +1570,26 @@ export function createTechHandlers(d, h) {
       if (registered) {
         await h.act(ctx, { event: EVENTS.SERVICE_CALL_PHOTO, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { key, publicUrl: publicUrlForKey(key), caption: strOrNull(body?.caption), via: "office" } });
       }
+      await thumbAtUpload(job.Id, key);
       const photos = await d.listPhotos(prefix).catch(() => []);
-      return jsonResponse(200, cors, { success: true, total: photos.length, groups: groupJobPhotos(photos, prefix, await h.loadJobCalls(job.Id, tenantId)) });
+      return jsonResponse(200, cors, { success: true, total: photos.length, groups: groupJobPhotos(await thumbed(job.Id, photos), prefix, await h.loadJobCalls(job.Id, tenantId)) });
+    },
+
+    /**
+     * POST /service/jobs/{id}/photos/thumbs (2026-10-22): the BACKFILL for photos that predate
+     * thumbnails (the HCP migration's included). Makes the missing ones until ~20 s have gone,
+     * then answers with what is left — call again until `remaining` is 0. Never needed by a
+     * page load: a photo without a thumb is listed with thumbUrl null. Office only.
+     */
+    async jobPhotoThumbs({ ctx, params }) {
+      const { tenantId, cors } = ctx;
+      const job = await h.loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const photos = await d.listPhotos(jobPhotoPrefix(job.Id)).catch((e) => (console.error("thumbs list:", e?.message), null));
+      if (!photos) return jsonResponse(502, cors, { error: "list_failed", code: "PHOTOS_LIST_FAILED" });
+      const existing = new Set((await d.listPhotos(thumbPrefix(job.Id)).catch(() => [])).map((t) => t.key));
+      const tally = await backfillThumbs(thumbDeps(), job.Id, photos, existing, { budgetMs: Number(d.env?.THUMB_BUDGET_MS) || 20000, now: () => d.now().getTime() });
+      return jsonResponse(200, cors, { success: true, jobId: job.Id, total: photos.length, ...tally });
     },
 
     /**

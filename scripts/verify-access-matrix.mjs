@@ -29,6 +29,7 @@
 
 import { getSecret } from "../lib/secrets.js";
 import { sfQuery, soqlEscapeString } from "../lib/salesforce.js";
+import { fieldsFor } from "../lib/field-manifest/index.js";
 
 const JSON_OUT = process.argv.includes("--json");
 const STRICT = process.argv.includes("--strict");
@@ -156,6 +157,30 @@ const SURFACES = [
     path: () => "/sf/meta/customer/picklists",
     pending: (u) => (u.futureScope === "none" ? 403 : 200),
   },
+  // --- The dealer shell (dealer module step 3, lambdas/sundial-dealer) ---------------
+  // dealer.read admits tenant, dealer and own; a technician and a dealer-less rep are 403
+  // before any read. Records follow the CUSTOMER row filter, exactly as /sf/customer.
+  // The deeper checks (same set as /sf/customer, the solar twin, another dealer's 404,
+  // the solar manifest) are dealerChecks() below.
+  {
+    key: "dealer.list",
+    label: "GET /dealer/customers",
+    path: () => "/dealer/customers?limit=5",
+    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+  },
+  {
+    key: "dealer.single.own",
+    label: "GET /dealer/customers/{ownRecord}",
+    path: (ctx) => (ctx.ownCustomerId ? `/dealer/customers/${ctx.ownCustomerId}` : null),
+    // `none` is refused by the ACTION gate (403) before any record is considered.
+    pending: (u, ctx) => (u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.ownRecord)),
+  },
+  {
+    key: "dealer.single.other",
+    label: "GET /dealer/customers/{otherRepsRecord}",
+    path: (ctx) => (ctx.otherCustomerId ? `/dealer/customers/${ctx.otherCustomerId}` : null),
+    pending: (u, ctx) => (u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.otherRecord)),
+  },
   {
     key: "files.customer.list",
     label: "GET /files/by-record/{ownRecord}",
@@ -229,6 +254,90 @@ async function login(cfg, email, password) {
     return { ok: false, error: `${res.status} ${body.error_description || body.msg || "login failed"}` };
   }
   return { ok: true, token: body.access_token };
+}
+
+async function getJson(token, path) {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    const body = await res.json().catch(() => null);
+    return { status: res.status, body };
+  } catch (err) {
+    return { status: null, body: null, error: err.message };
+  }
+}
+
+/** Every id a paged list endpoint returns, following hasMore. null if a page fails. */
+async function allIds(token, base, pageSize) {
+  const ids = new Set();
+  for (let offset = 0; offset < 50000; offset += pageSize) {
+    const sep = base.includes("?") ? "&" : "?";
+    const r = await getJson(token, `${base}${sep}limit=${pageSize}&offset=${offset}`);
+    if (r.status !== 200 || !Array.isArray(r.body?.records)) return null;
+    for (const rec of r.body.records) ids.add(rec.sf_id);
+    if (!r.body.hasMore) break;
+  }
+  return ids;
+}
+
+/**
+ * The dealer shell's checks for a SALES user (dealer / own scope), beyond the status
+ * codes in SURFACES:
+ *   1. /dealer/customers is exactly the /sf/customer set (minus Service-only customers,
+ *      which the shell leaves to the Service module, as the Sales page does);
+ *   2. a visible ZZ customer with a solar twin comes back WITH that twin;
+ *   3. another DEALER's ZZ customer is 404;
+ *   4. the solar's `visible` list is never wider than the solar manifest for the role.
+ * Each returns { label, ok, detail }.
+ */
+async function dealerChecks(u, ctx, token, fixtures) {
+  const out = [];
+  const [sfSet, dealerSet] = await Promise.all([
+    allIds(token, "/sf/customer?fields=list&not[customer_type]=Service", 5000),
+    allIds(token, "/dealer/customers", 200),
+  ]);
+  if (!sfSet || !dealerSet) {
+    out.push({ label: "dealer list = /sf/customer set", ok: false, detail: `a page failed (sf ${!!sfSet}, dealer ${!!dealerSet})` });
+  } else {
+    const extra = [...dealerSet].filter((id) => !sfSet.has(id));
+    const missing = [...sfSet].filter((id) => !dealerSet.has(id));
+    out.push({
+      label: "dealer list = /sf/customer set",
+      ok: extra.length === 0 && missing.length === 0,
+      detail: `${dealerSet.size} rows; ${extra.length} extra, ${missing.length} missing`,
+    });
+  }
+
+  const visibleTwins = fixtures.customers.filter(
+    (c) => c.Linked_Solar_Project__c && recordVisible(u, ctx, { rep: c.Sales_Rep__c ?? null, dealer: c.Dealer__c ?? null }) === 200
+  );
+  const role = { scope: u.futureScope, level: u.accessLevel };
+  const solarRead = fieldsFor("solar", role)?.read ?? new Set();
+  for (const c of visibleTwins) {
+    const r = await getJson(token, `/dealer/customers/${c.Id}`);
+    const got = r.body?.solar?.Id ?? null;
+    out.push({
+      label: `${c.Name}: solar twin`,
+      ok: r.status === 200 && got === c.Linked_Solar_Project__c,
+      detail: `status ${r.status}, solar ${got ?? "none"} (count ${r.body?.solarCount ?? "?"}), expected ${c.Linked_Solar_Project__c}`,
+    });
+    const visible = r.body?.access?.solar?.visible;
+    const wider = Array.isArray(visible) ? visible.filter((f) => !solarRead.has(f)) : null;
+    out.push({
+      label: `${c.Name}: solar visible ⊆ manifest`,
+      ok: Array.isArray(visible) && wider.length === 0,
+      detail: Array.isArray(visible) ? `${visible.length} fields${wider.length ? `; NOT in manifest: ${wider.join(", ")}` : ""}` : `visible = ${JSON.stringify(visible)}`,
+    });
+  }
+  if (visibleTwins.length === 0) out.push({ label: "solar twin", ok: true, detail: "no visible ZZ customer has a twin — nothing to check" });
+
+  const otherDealer = fixtures.customers.find((c) => c.Dealer__c && c.Dealer__c !== ctx.userDealer);
+  if (otherDealer) {
+    const r = await getJson(token, `/dealer/customers/${otherDealer.Id}`);
+    out.push({ label: `another dealer's customer (${otherDealer.Name})`, ok: r.status === 404, detail: `status ${r.status}` });
+  } else {
+    out.push({ label: "another dealer's customer", ok: false, detail: "no ZZ customer of another dealer — re-seed the fixtures" });
+  }
+  return out;
 }
 
 async function call(token, path) {
@@ -350,8 +459,14 @@ async function main() {
         pendingExpectation: expected, matchesPending: matches,
       });
     }
+    // The dealer shell's deeper checks, for the sales scopes it exists for.
+    let dealer = [];
+    if (u.futureScope === "dealer" || u.futureScope === "own") {
+      dealer = await dealerChecks(u, ctx, auth.token, fixtures);
+      pendingMismatches += dealer.filter((d) => !d.ok).length;
+    }
     report.rows.push({ user: u.slug, accessLevel: u.accessLevel, futureScope: u.futureScope,
-      sfUserId, login: "ok", ownsRecord: ctx.ownsRecord, surfaces });
+      sfUserId, login: "ok", ownsRecord: ctx.ownsRecord, surfaces, dealer });
   }
 
   if (JSON_OUT) { console.log(JSON.stringify(report, null, 2)); return; }
@@ -380,6 +495,9 @@ async function main() {
         `      ${s.label.padEnd(42)} now ${String(s.status).padEnd(4)}` +
           `${s.count !== null ? `(${s.count})`.padEnd(10) : "".padEnd(10)} ${flag} then ${s.pendingExpectation}`
       );
+    }
+    for (const d of row.dealer || []) {
+      console.log(`      ${d.ok ? "ok  " : "FAIL"} dealer: ${d.label.padEnd(40)} ${d.detail}`);
     }
     console.log();
   }

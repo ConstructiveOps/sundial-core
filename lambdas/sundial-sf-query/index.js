@@ -30,12 +30,32 @@
 // GET /sf/meta/{object}/picklist/{field}).
 
 import {
-  getSalesforceToken,
   sfQuery,
   soqlEscapeString,
 } from "../../lib/salesforce.js";
+// Shared with sundial-dealer (2026-10-23): the describe, the picklist decoder, the cache
+// read helpers and the role-projected full read. One copy each.
+import { getRawDescribe, getQueryableFields, decodeValidForIndices, buildPicklistEntry, EXCLUDED_FIELD_TYPES } from "../../lib/sf-describe.js";
+import {
+  sanitizeSearchTerm,
+  phonePattern,
+  searchWords,
+  searchOrExpr,
+  SEARCH_MAX_WORDS,
+  applyEnforceToQuery,
+  fetchCacheRange,
+  POSTGREST_PAGE_SIZE,
+  LIST_CONTROL_COLUMNS,
+  buildListSelect,
+  projectListRow,
+  getCacheColumns,
+  SEARCH_FIELDS,
+} from "../../lib/cache-read.js";
+import { readFullRecord } from "../../lib/full-read.js";
+// Tests and other callers import these from here; they predate the move.
+export { phonePattern, searchWords, searchOrExpr, SEARCH_MAX_WORDS, SEARCH_FIELDS, EXCLUDED_FIELD_TYPES };
 import { resolveIdentity } from "../../lib/identity.js";
-import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
+import { getSupabaseClient } from "../../lib/supabase.js";
 // ACCESS MODEL SHADOW (D-064 Phase 2). Off by default: with ACCESS_MODEL_MODE unset,
 // createShadow() returns a no-op whose methods do nothing, so every call site below is
 // inert and this file behaves exactly as it did before Phase 2. See shadow.js for why it
@@ -74,12 +94,8 @@ import { COST_FIELDS, COSTING_READ, stripCost } from "../../lib/cost-gate.js";
 // fails this Lambda at cold start rather than serving unfiltered data at request time.
 import {
   fieldsFor,
-  selectListFor,
-  projectRecord,
   projectRow,
   listColumnsFor,
-  editableFor,
-  MANIFEST_VERSION,
 } from "../../lib/field-manifest/index.js";
 
 // --- Object allowlist (the security spine) ---------------------------------
@@ -144,8 +160,6 @@ const OBJECT_ALLOWLIST = {
 // rejected rather than turned into a filter around garbage. The per-path
 // escapers still run — this refuses absurd input outright.
 const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
-
-const SF_API_VERSION = "v60.0";
 
 // Ordered source fields that populate each object's `created_date` cache column —
 // the list-ordering key (newest first). FIRST non-empty value wins (a COALESCE):
@@ -226,14 +240,8 @@ function resolveEnforceFilter(objectKey, access) {
     : rowFilter(objectKey, access);
 }
 
-// Apply the row filter to a PostgREST query builder. Both halves, always: dropping the
-// or-group would hand a dealer their own people and hide every Harmon employee.
-function applyEnforceToQuery(q, enforce) {
-  if (!enforce || enforce.deny) return q;
-  for (const { column, value } of enforce.cache) q = q.eq(column, value);
-  if (enforce.cacheOr) q = q.or(enforce.cacheOr);
-  return q;
-}
+// applyEnforceToQuery (the row filter on a PostgREST builder) lives in lib/cache-read.js
+// since 2026-10-23 — the dealer shell applies the same filter with the same function.
 
 // --- Related-records parent filter (?parentId=) -----------------------------
 // Powers a record's related lists: GET /sf/solar?parentId=<customerSfId> returns
@@ -278,65 +286,9 @@ const PARENT_FILTER = {
 // Salesforce fields for the Sales-Rep live path. Only allowlisted here; anything
 // else (po/user) has no name search.
 const SEARCH_CAP = 200;
-// Phone / email / address columns joined the search on 2026-09-29 (Harmon: "we can only
-// find people by name"). Phone columns are matched on DIGITS when the term looks like a
-// number (see phonePattern) so "602-555-0100" finds "(602) 555-0100".
-export const SEARCH_FIELDS = {
-  customer: {
-    // company_name (D-081, 2026-10-07): the Bill To picker finds "SunRun" by its company name.
-    cache: ["first_name", "last_name", "name", "company_name", "primary_email", "primary_phone", "alternate_contact_phone", "alternate_contact_email", "street", "city", "postal_code"],
-    phone: ["primary_phone", "alternate_contact_phone"],
-    sf: ["First_Name__c", "Last_Name__c", "Name", "Company_Name__c", "Primary_Email__c", "Primary_Phone__c", "Alternate_Contact_Phone__c", "Alternate_Contact_Email__c", "Street__c", "City__c", "Postal_Code__c"],
-  },
-  // Solar / roofing search the address, phone and email snapshots too (2026-10-07 — the
-  // placeholder promised "Project, Customer, or Address"); a column the cache lacks is skipped.
-  solar: {
-    cache: ["project_name", "customer_name_at_creation", "first_name", "last_name", "address_at_creation", "address", "primary_phone_at_creation", "primary_email_at_creation"],
-    phone: ["primary_phone_at_creation"],
-    sf: ["Project_Name__c", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
-  },
-  roofing: {
-    cache: ["project_name", "customer_name_at_creation", "first_name", "last_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
-    phone: ["primary_phone_at_creation"],
-    sf: ["Project_Name__c", "Customer_Name_at_Creation__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"], // rep path unused for roofing
-  },
-  // Service (D-072). Jobs search by job number, customer snapshot, AND the partner's
-  // work-order number - "SunRun calls with THEIR number" is a named requirement
-  // (Billing_Reference__c is an External ID for the same reason). Estimates add the
-  // template name so the template picker is a search; the price book searches
-  // name + item code + description.
-  // D-081 amendment 2 (2026-10-16): an estimate is found by its payer's name too, as an invoice is.
-  estimate: {
-    cache: ["name", "customer_name_at_creation", "template_name", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation", "bill_to_name"],
-    phone: ["primary_phone_at_creation"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Template_Name__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c", "Bill_To_Name__c"],
-  },
-  job: {
-    cache: ["name", "customer_name_at_creation", "billing_reference", "address_at_creation", "primary_phone_at_creation", "primary_email_at_creation"],
-    phone: ["primary_phone_at_creation"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Billing_Reference__c", "Address_at_Creation__c", "Primary_Phone_at_Creation__c", "Primary_Email_at_Creation__c"],
-  },
-  pricebookitem: {
-    cache: ["name", "item_code", "description"],
-    sf: ["Name", "Item_Code__c", "Description__c"],
-  },
-  serviceinvoice: {
-    cache: ["name", "billing_reference", "bill_to_name", "customer_name_at_creation"],
-    sf: ["Name", "Billing_Reference__c", "Bill_To_Name__c"],
-  },
-  servicepayment: {
-    cache: ["name", "reference"],
-    sf: ["Name", "Reference__c"],
-  },
-  serviceplan: {
-    cache: ["name", "plan_code"],
-    sf: ["Name", "Plan_Code__c"],
-  },
-  membership: {
-    cache: ["name", "customer_name_at_creation", "primary_email_at_creation"],
-    sf: ["Name", "Customer_Name_at_Creation__c", "Primary_Email_at_Creation__c"],
-  },
-};
+// SEARCH_FIELDS (each object's searchable cache columns / SOQL fields) lives in
+// lib/cache-read.js since 2026-10-23 — the dealer shell searches customers by the same
+// columns. Re-exported below.
 
 // --- List projection (?fields=list) ----------------------------------------
 // The cache columns a LIST SCREEN renders, per object (2026-10-05, D-079 Change 3).
@@ -431,73 +383,8 @@ export function applyListProjection(row, columns) {
   return out;
 }
 
-// Sanitize a raw ?q= term. Returns a cleaned term (>= 2 chars) or null. Escapes by
-// RESTRICTING to name-safe characters — drops every ILIKE/SOQL metacharacter
-// (% _ " ( ) , \ / etc.), so neither an ILIKE wildcard nor a SOQL/PostgREST break
-// can be injected. Apostrophe is KEPT (O'Brien) and is escaped per-path: SOQL via
-// soqlEscapeString, and the cache path double-quotes the ILIKE value.
-function sanitizeSearchTerm(q) {
-  if (q == null) return null;
-  // `@` `+` `_` `#` `/` stay (an email, a "+1" phone, a unit number); the PostgREST
-  // reserved characters (quotes, commas, parentheses, backslash) and everything else
-  // become spaces. Before 2026-09-29 `@` was stripped too, which is why an email
-  // address never matched anything.
-  const cleaned = String(q)
-    .replace(/[^A-Za-z0-9 .&'@+_#/-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length >= 2 ? cleaned : null;
-}
-
-/**
- * A phone typed any which way → an ILIKE pattern over the digits (2026-09-29):
- * "(602) 555-0100", "602.555.0100", "6025550100", "+1 602 555 0100" all become
- * "%602%555%0100%", which matches however the number was stored. Seven digits (no
- * area code) → "%555%0100%". Fewer than seven digits, or mostly letters → null.
- */
-export function phonePattern(term) {
-  const raw = String(term ?? "");
-  const digits = raw.replace(/\D/g, "");
-  const letters = raw.replace(/[^A-Za-z]/g, "");
-  if (digits.length < 7 || letters.length > 1) return null;
-  const d = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-  if (d.length === 10) return `%${d.slice(0, 3)}%${d.slice(3, 6)}%${d.slice(6)}%`;
-  if (d.length === 7) return `%${d.slice(0, 3)}%${d.slice(3)}%`;
-  const chunks = [];
-  for (let i = 0; i < d.length; i += 3) chunks.push(d.slice(i, i + 3));
-  return `%${chunks.join("%")}%`;
-}
-/**
- * The words of a search, each one to be matched on its own (2026-10-07, Harmon: "search
- * misses customers / jobs for an address"). "123 Main St Phoenix" used to be matched as
- * ONE substring, which no customer row holds (street and city are separate columns) and
- * no job row holds either (its address snapshot has commas: "123 Main St, Phoenix, AZ").
- * Now every word must appear in SOME searchable column: "123" in the street, "Phoenix"
- * in the city. One-character words are noise ("N" in "123 N Main") and are dropped; at
- * most 6 words count.
- */
-export const SEARCH_MAX_WORDS = 6;
-export function searchWords(term) {
-  const words = String(term ?? "").split(" ").map((w) => w.trim()).filter((w) => w.length >= 2);
-  return (words.length ? words : [String(term ?? "").trim()].filter(Boolean)).slice(0, SEARCH_MAX_WORDS);
-}
-
-/**
- * The PostgREST filter for a search: EVERY word ILIKE SOME column, OR (when the whole
- * term reads as a phone number) a phone column ILIKE the digit pattern. One word is the
- * flat OR-group it always was; the phone alternative sits beside the word group so
- * "(602) 555-0100" — which splits into "602" and "555-0100" — still finds a number
- * stored as "6025550100".
- */
-export function searchOrExpr(cols, term, phoneCols = []) {
-  const words = searchWords(term);
-  const wordGroup = (w) => cols.map((c) => `${c}.ilike."%${w}%"`).join(",");
-  const phone = phonePattern(term);
-  const phoneParts = phone ? phoneCols.filter((c) => cols.includes(c)).map((c) => `${c}.ilike."${phone}"`) : [];
-  if (words.length <= 1) return [wordGroup(words[0] ?? term), ...phoneParts].join(",");
-  const all = `and(${words.map((w) => `or(${wordGroup(w)})`).join(",")})`;
-  return [all, ...phoneParts].join(",");
-}
+// Search (sanitizeSearchTerm, phonePattern, searchWords, searchOrExpr) lives in
+// lib/cache-read.js since 2026-10-23 — shared with sundial-dealer, re-exported below.
 
 // First non-empty source value for a record (the COALESCE), or null.
 function resolveCreatedDate(record, sources) {
@@ -528,16 +415,6 @@ const MAX_LIMIT = 5000;
 // (OFFSET is hard-capped at 2000) and that path writes every row it returns into
 // the cache, so the raised cap is deliberately CACHE-PATH ONLY.
 const SF_LIVE_MAX_LIMIT = 500;
-
-// PostgREST (Supabase) enforces a per-request row ceiling — the project's "Max
-// Rows" API setting, 1000 by default — and SILENTLY TRUNCATES past it: a request
-// for 5000 rows comes back 206 with 1000 rows and no error. Raising our own
-// MAX_LIMIT alone would therefore have shipped a page size the cache layer quietly
-// ignored. fetchCacheRange() below splits any read larger than this into
-// consecutive .range() sub-requests, so the endpoint returns the full page whatever
-// the dashboard setting happens to be. Raising "Max Rows" in the Supabase dashboard
-// collapses this back to a single round trip; it does not change correctness.
-const POSTGREST_PAGE_SIZE = 1000;
 
 // --- Read-time cache freshness ---------------------------------------------
 // The rule lives in ./freshness.js (D-079): while the incremental sync is healthy for
@@ -717,92 +594,9 @@ function extractRoute(event) {
   return { kind: "none", objectKey: null, id: null };
 }
 
-// --- Salesforce describe (module-scope cached per object, WITH TTL) --------
-// rawDescribeCache holds the FULL describe JSON (including each field's
-// picklistValues). getQueryableFields derives its trimmed name/type list from
-// the same cached describe, and the picklist metadata route reads picklistValues
-// straight from it — so both paths share a single describe fetch per object.
-//
-// TTL (D-045): the describe reflects per-integration-user FLS and the field set.
-// A warm container that cached an OLD describe would keep missing a newly-added
-// field or a newly-FLS-granted field (matching the write Lambda's stale-describe
-// bug — the Utility_Password__c report). A short TTL bounds staleness to minutes
-// without a redeploy; a refresh also clears the derived trimmed-field cache so it
-// rebuilds from the fresh describe. A 401 still forces an immediate refresh.
-const DESCRIBE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const rawDescribeCache = new Map(); // sfObject -> { meta, at }
-const describeCache = new Map(); // sfObject -> { fields:[{name,type}] } (derived)
-export const EXCLUDED_FIELD_TYPES = new Set(["address", "location", "base64"]);
-
-async function getRawDescribe(sfObject) {
-  const cached = rawDescribeCache.get(sfObject);
-  if (cached && Date.now() - cached.at < DESCRIBE_TTL_MS) return cached.meta;
-
-  async function run(forceRefresh) {
-    const { access_token, instance_url } = await getSalesforceToken({
-      forceRefresh,
-    });
-    const url = `${instance_url}/services/data/${SF_API_VERSION}/sobjects/${sfObject}/describe`;
-    return fetch(url, { headers: { Authorization: `Bearer ${access_token}` } });
-  }
-
-  let resp = await run(false);
-  if (resp.status === 401) resp = await run(true);
-  if (!resp.ok) {
-    throw new Error(`describe ${sfObject} failed (${resp.status})`);
-  }
-
-  const meta = await resp.json();
-  rawDescribeCache.set(sfObject, { meta, at: Date.now() });
-  // Invalidate the derived trimmed-field cache so it rebuilds from this fresh
-  // describe (otherwise a newly-added field would still be missing from queries).
-  describeCache.delete(sfObject);
-  return meta;
-}
-
-// Returns ALL queryable fields (name/type) for the object — no arbitrary cap.
-// The SELECT list is narrowed to cache-backed fields later, in buildCacheSelect.
-async function getQueryableFields(sfObject) {
-  if (describeCache.has(sfObject)) return describeCache.get(sfObject);
-
-  const meta = await getRawDescribe(sfObject);
-  const fields = (meta.fields || [])
-    .filter((f) => !EXCLUDED_FIELD_TYPES.has(f.type))
-    .map((f) => ({ name: f.name, type: f.type }));
-
-  const result = { fields };
-  describeCache.set(sfObject, result);
-  return result;
-}
-
-// --- Cache column introspection (module-scope cached) ----------------------
-let openApiSpecPromise = null;
-async function getOpenApiSpec() {
-  if (!openApiSpecPromise) {
-    openApiSpecPromise = (async () => {
-      const cfg = await getSupabaseConfig();
-      const resp = await fetch(`${cfg.url}/rest/v1/`, {
-        headers: {
-          apikey: cfg.serviceRoleKey,
-          Authorization: `Bearer ${cfg.serviceRoleKey}`,
-        },
-      });
-      if (!resp.ok) throw new Error(`OpenAPI fetch failed (${resp.status})`);
-      return resp.json();
-    })();
-  }
-  return openApiSpecPromise;
-}
-
-const cacheColumnsCache = new Map();
-async function getCacheColumns(table) {
-  if (cacheColumnsCache.has(table)) return cacheColumnsCache.get(table);
-  const spec = await getOpenApiSpec();
-  const def = spec?.definitions?.[table] || spec?.components?.schemas?.[table];
-  const cols = new Set(def?.properties ? Object.keys(def.properties) : []);
-  cacheColumnsCache.set(table, cols);
-  return cols;
-}
+// The Salesforce describe (getRawDescribe / getQueryableFields, 5-minute TTL) lives in
+// lib/sf-describe.js, and getCacheColumns in lib/cache-read.js, since 2026-10-23 —
+// shared with sundial-dealer.
 
 // --- SF record -> cache row mapping ----------------------------------------
 // Derive a cache column name from a Salesforce field. Reference (lookup) fields
@@ -903,130 +697,9 @@ async function getExistingCacheVersion(supabase, table, sfId, tenantId) {
   return data?.cache_version ?? 0;
 }
 
-// --- LIST/SEARCH response projection (6 MB Lambda payload cap) -------------
-// Lambda hard-caps a response payload at 6,291,556 bytes. Past it the runtime
-// never delivers the response at all — it logs
-//   LAMBDA_RUNTIME Failed to post handler success response. Http response code: 413.
-//   {"errorType":"RequestEntityTooLarge"}
-// and API Gateway turns that into a 502. Note the cap applies to the SERIALIZED
-// RESPONSE OBJECT, not the body string: the body is a JSON string nested inside
-// {statusCode, headers, body}, so every quote in it is escaped a second time.
-// Measured on solar, that envelope adds ~9% on top of the body.
-//
-// Two reductions are applied to LIST and SEARCH rows only. Neither touches the
-// single-record read (the detail view legitimately needs every column) or the
-// live-Salesforce fallback paths.
-//
-// 1. Drop long-text columns (below). Cheap, but small: `notes` is only ~1.4% of
-//    the solar payload.
-// 2. Drop NULL-valued keys. This is the one that matters — 34.8% of the solar
-//    payload was `"column":null` spelled out for absent values. Measured, solar
-//    limit=5000: 6.14 MB payload (413) -> 4.04 MB. Dropping long text ALONE lands
-//    at 6.02 MB, still over the 6.00 MB cap, so it does not fix this on its own.
-//
-// Omitting nulls is safe because an absent key and a null key behave identically
-// under `??`, `||` and optional chaining. (Until 2026-10-14 mapSfRecordToCacheRow
-// also skipped nulls — which is why a field cleared in Salesforce never cleared in
-// the cache. It now writes them; this projection still drops them from the RESPONSE
-// only, never from what is written to the cache.)
-//
-// The projection is applied ONLY when building the response array — never to the
-// rows the freshness partition reads, and never to what is written back to the
-// cache, so `notes` stays cached and intact for the detail view.
-const LIST_CONTROL_COLUMNS = [
-  "sf_id",
-  "client_sf_id",
-  "tenant_id",
-  "created_date",
-  "last_synced_at",
-  "is_stale",
-  "cache_version",
-];
-
-// A long-text column the list/board/filter UIs never read. Verified against the
-// harmon-crm frontend: the only `notes` references live in the DETAIL configs
-// (customer-detail-config.ts / solar-detail-config.ts) and SolarProjectDetailPage,
-// all of which read the single-record or ?full=true path — not the list.
-// Re-check that grep before widening this rule.
-function isExcludedListColumn(col) {
-  if (LIST_CONTROL_COLUMNS.includes(col)) return false; // control columns are never dropped
-  return col === "notes" || col.endsWith("_notes") || col.includes("findings");
-}
-
-// Explicit PostgREST select list for LIST/SEARCH reads: every cache column except
-// the excluded long-text ones. Falls back to "*" when column introspection came
-// back empty, so a failed OpenAPI fetch degrades to today's behavior rather than
-// selecting nothing.
-function buildListSelect(columnSet) {
-  if (!columnSet || columnSet.size === 0) return "*";
-  const cols = [];
-  for (const col of columnSet) {
-    if (!isExcludedListColumn(col)) cols.push(col);
-  }
-  // Belt-and-braces: guarantee the control columns the freshness partition and
-  // pagination depend on are present even if the exclusion rule ever changes.
-  for (const c of LIST_CONTROL_COLUMNS) {
-    if (columnSet.has(c) && !cols.includes(c)) cols.push(c);
-  }
-  return cols.length > 0 ? cols.join(",") : "*";
-}
-
-// Project ONE row for a list/search response: drop nulls and any excluded column.
-// Refreshed rows are re-checked for excluded columns because they are built from
-// Salesforce by mapSfRecordToCacheRow (which knows nothing about this projection)
-// rather than read through buildListSelect.
-function projectListRow(row) {
-  const out = {};
-  for (const key of Object.keys(row)) {
-    const value = row[key];
-    if (value === null || value === undefined) continue;
-    if (isExcludedListColumn(key)) continue;
-    out[key] = value;
-  }
-  return out;
-}
-
-// Read `limit` rows starting at `offset` from a cache table, transparently
-// splitting the read into POSTGREST_PAGE_SIZE-sized .range() sub-requests so the
-// caller always gets the page size it asked for (see POSTGREST_PAGE_SIZE for why).
-//
-// `makeQuery(withCount)` must return a FRESH query builder each call — a
-// supabase-js builder is single-use — with all filters/ordering applied but NO
-// .range(). The exact `total` is requested on the FIRST sub-request only: it is a
-// separate server-side COUNT, so asking for it once per sub-request would multiply
-// the cost for a number that cannot change within one read.
-//
-// Stops early when a sub-request returns fewer rows than asked (end of data), and
-// surfaces the first error rather than a partial page, matching the previous
-// single-request behavior.
-async function fetchCacheRange(makeQuery, offset, limit) {
-  const rows = [];
-  let total = null;
-  let start = offset;
-  let remaining = limit;
-  let first = true;
-
-  while (remaining > 0) {
-    const take = Math.min(remaining, POSTGREST_PAGE_SIZE);
-    const { data, count, error } = await makeQuery(first).range(
-      start,
-      start + take - 1
-    );
-    if (error) return { rows, total, error };
-    if (first && count != null) total = count;
-
-    const batch = data || [];
-    rows.push(...batch);
-    first = false;
-
-    // Short read == no more matching rows past this point.
-    if (batch.length < take) break;
-    start += batch.length;
-    remaining -= batch.length;
-  }
-
-  return { rows, total, error: null };
-}
+// The LIST/SEARCH response projection (buildListSelect / projectListRow, the 6 MB
+// payload rules) and fetchCacheRange live in lib/cache-read.js since 2026-10-23 —
+// shared with sundial-dealer.
 
 // Upsert cache rows in bounded batches. A fully-stale 5000-row page would
 // otherwise be one ~4 MB PostgREST request; chunking keeps each write ordinary.
@@ -1105,33 +778,22 @@ async function handleSingleReadFull(ctx) {
     return jsonResponse(404, cors, { error: "not_found", code: "RECORD_NOT_FOUND" });
   }
 
-  // Every queryable field (compound/base64 already excluded by getQueryableFields).
-  // We do NOT narrow to cache-backed columns — returning the fields the cache
-  // does not store is the entire purpose of full mode.
-  const { fields } = await getQueryableFields(sfObject);
-
-  // §4.3: for a sales role the SELECT carries ONLY the manifest's read set. Not "select
-  // everything then strip" — data a role may not see should never leave Salesforce. A
-  // strip-after-fetch would hold the hidden values in Lambda memory, in any log line
-  // that dumped the record, and in every future code path that forgot to strip.
-  // Returns null for tenant scope, which keeps that query character-for-character.
-  const allowed = selectListFor(objectKey, access, fields.map((f) => f.name));
-  const selectList = (allowed ?? fields.map((f) => f.name)).join(", ");
-
-  // The row filter is the only restriction now (§7.4). A record outside it yields
-  // 0 rows -> 404, identical to a cross-tenant miss and to a record that does not
-  // exist -- which is the point (§3.1).
-  const accessClause = enforce ? ` AND ${enforce.soql}` : "";
-  const soql =
-    `SELECT ${selectList} FROM ${sfObject} ` +
-    `WHERE Id = '${soqlEscapeString(id)}' ` +
-    `AND Client__c = '${soqlEscapeString(tenantId)}'` +
-    accessClause +
-    ` LIMIT 1`;
-  const records = await sfQuery(soql);
+  // The role-projected read itself is lib/full-read.js (2026-10-23): the dealer shell
+  // reads its customer and solar through the SAME function, so "which fields may this
+  // role see" has one implementation. §4.3: the SELECT carries only the manifest's read
+  // set; the row filter (the only restriction since §7.4) is ANDed after the tenant
+  // clause, so a record outside it is 0 rows -> 404, identical to a cross-tenant miss.
+  const result = await readFullRecord({
+    objectKey,
+    sfObject,
+    id,
+    tenantId,
+    access,
+    accessClause: enforce ? enforce.soql : null,
+  });
 
   // Missing or cross-tenant -> 404.
-  if (!records || records.length === 0) {
+  if (!result) {
     // SHADOW: nothing in hand to evaluate, so this is the one branch that probes the
     // cache — a record the TEMP guard hides but the new model would serve is a widening,
     // and 404-vs-404 is the only place it could hide.
@@ -1148,48 +810,18 @@ async function handleSingleReadFull(ctx) {
     });
   }
 
-  // Return the raw Salesforce record verbatim — no cache mapping, no cache write.
-  // It contains business fields only (never tokens/secrets) and is returned only
-  // to the authenticated, tenant-matched caller. Strip the Salesforce `attributes`
-  // envelope (object type + internal record URL) so `record` is pure field data.
-  const { attributes, ...record } = records[0];
   // SHADOW: full mode selects the role's readable fields, which always include
   // Sales_Rep__c / Dealer__c / Client__c for the objects that carry them — the new
   // decision is an in-memory check with no second fetch of any kind.
-  await ctx.shadow.single({ path: "single.full", served: true, record, enforced: !!enforce });
-  // Belt and braces behind the narrowed SELECT: the query already fetched only these,
-  // so this is a no-op — and if it ever is not, the response is still right.
-  const projected = projectRecord(objectKey, access, record);
-  const editable = editableFor(objectKey, access);
-
-  // §4.3: the RENDERABLE set, stated explicitly rather than left to be inferred.
-  //
-  // The client used to decide "may I render this field?" by asking whether the key was
-  // present on the record. That works today and is one schema change away from not
-  // working, because presence is a property of the PAYLOAD, not a statement of intent:
-  //
-  //   - `Id` and `Client__c` are ALWAYS retained (they are the record key and the
-  //     tenant control field), so any section that ever lists one of them would render
-  //     for a role that can see nothing else in it. No section does today -- checked,
-  //     all 14 customer and 18 solar sections -- which is luck, not design.
-  //   - anything that later fills in nulls for missing fields (a cache shim, a mapper,
-  //     a defensive `?? null`) silently turns "hidden" into "visible" with no code
-  //     change on either side and no error anywhere.
-  //
-  // Sending the list removes the inference. `null` means tenant scope: no restriction,
-  // render everything, exactly as before.
-  const visibleSet = fieldsFor(objectKey, access);
-  const visible = visibleSet ? [...visibleSet.read].sort() : null;
+  await ctx.shadow.single({ path: "single.full", served: true, record: result.record, enforced: !!enforce });
   return jsonResponse(200, cors, {
     source: "salesforce",
     full: true,
-    record: projected,
+    record: result.record,
     // §4.3. `visible` is the set the client may RENDER; `editable` the subset it may
     // offer an input for. The client reflects both and decides neither. `null` on
     // either means tenant scope — no restriction, existing behaviour unchanged.
-    //
-    // Both are needed: read is not edit, and a field can be renderable-but-read-only.
-    access: { visible, editable, manifestVersion: MANIFEST_VERSION },
+    access: result.access,
   });
 }
 
@@ -2099,32 +1731,8 @@ async function listColdCacheFallback(ctx) {
   });
 }
 
-// Decode a Salesforce dependent-picklist "validFor" base64 string into the list
-// of controlling-value indices this dependent value is valid for.
-//
-// validFor is a base64-encoded bitmap. Within each decoded byte the bits are
-// packed MSB-first (big-endian bit order): controlling index i lives in
-// byte (i >> 3), at bit mask (0x80 >> (i & 7)). The dependent value is valid for
-// controlling index i exactly when that bit is set:
-//     bytes[i >> 3] & (0x80 >> (i & 7))  !== 0
-//
-// Missing/empty validFor -> valid for NO controlling value (returns []). The
-// controlling field's picklistValues order defines what each index means.
-function decodeValidForIndices(validFor) {
-  if (!validFor) return []; // no bitmap -> valid for nothing
-  let bytes;
-  try {
-    bytes = Buffer.from(validFor, "base64");
-  } catch {
-    return []; // unparseable -> treat as valid for nothing
-  }
-  const indices = [];
-  const bitCount = bytes.length * 8;
-  for (let i = 0; i < bitCount; i++) {
-    if (bytes[i >> 3] & (0x80 >> (i & 7))) indices.push(i);
-  }
-  return indices;
-}
+// decodeValidForIndices and buildPicklistEntry live in lib/sf-describe.js since
+// 2026-10-23 — the dealer shell decodes the same picklists with the same functions.
 
 // --- PICKLIST metadata read ------------------------------------------------
 // Returns the ordered picklist values for an allowlisted object's field, sourced
@@ -2247,67 +1855,6 @@ async function handlePicklistRead(ctx) {
   // implying this route is settled.
   await shadow.meta({ path: "meta.picklist" });
   return jsonResponse(200, cors, body);
-}
-
-// Build the normalized BATCH entry for one picklist/multipicklist field. Reuses
-// the SAME validFor decoder (decodeValidForIndices) as the single-field endpoint.
-// For a dependent field whose controller is itself a picklist, returns the
-// decoded controlling-value -> dependent-values map; otherwise controllingField
-// and dependencies are null. (Self-contained so the single-field endpoint stays
-// unchanged.)
-function buildPicklistEntry(fieldDef, meta) {
-  // Values in Salesforce-defined order (do NOT sort). Inactive values are
-  // included but flagged active:false so the edit UI can show or hide them.
-  const values = (fieldDef.picklistValues || []).map((pv) => ({
-    label: pv.label,
-    value: pv.value,
-    active: pv.active === true,
-    defaultValue: pv.defaultValue === true,
-  }));
-
-  let controllingField = null;
-  let dependencies = null;
-
-  const controllerName = fieldDef.controllerName || null;
-  if (controllerName) {
-    const controller = (meta.fields || []).find(
-      (f) => f.name.toLowerCase() === controllerName.toLowerCase()
-    );
-    const controllerIsPicklist =
-      !!controller &&
-      (controller.type === "picklist" || controller.type === "multipicklist");
-
-    if (controllerIsPicklist) {
-      // Controlling field's picklistValues define the index order the validFor
-      // bitmaps refer to. Index i == controllingValues[i].
-      const controllingValues = (controller.picklistValues || []).map(
-        (pv) => pv.value
-      );
-      const map = {};
-      for (const cv of controllingValues) map[cv] = []; // seed groups in SF order
-      for (const pv of fieldDef.picklistValues || []) {
-        for (const i of decodeValidForIndices(pv.validFor)) {
-          const cv = controllingValues[i];
-          if (cv === undefined) continue; // bit past controlling range -> ignore
-          map[cv].push({ label: pv.label, value: pv.value });
-        }
-      }
-      controllingField = controller.name; // canonical API name
-      dependencies = map;
-    } else {
-      // Controller exists but isn't a picklist (e.g. a checkbox). Expose the
-      // controller name so the UI knows the field is dependent; no value map.
-      controllingField = controller ? controller.name : controllerName;
-      dependencies = null;
-    }
-  }
-
-  return {
-    type: fieldDef.type, // "picklist" | "multipicklist"
-    controllingField, // null, or the controlling field API name if dependent
-    values, // SF-defined order, includes active flag
-    dependencies, // null, or { <controllingValue>: [ {label,value}, ... ], ... }
-  };
 }
 
 // --- BATCH PICKLIST metadata read ------------------------------------------

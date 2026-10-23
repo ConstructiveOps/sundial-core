@@ -766,6 +766,7 @@ The same predicate is materialized for RLS (§5.2) so the mentions picker and th
 | New Customer | ✔ | ✔ | ✔ (stamped, §2.3) |
 | Customer files: list / download / upload | ✔ | ✔ | ✔ on visible records only (`assertVisibleRecord` added to `list-files`, `upload-file`, `list-related-files`) |
 | Customer files: delete | ✔ | ✔ | ✘ |
+| Dealer shell — `GET /dealer/customers`, `GET /dealer/customers/{id}` (`dealer.read`, `sundial-dealer`, 2026-10-23) | ✔ | ✔ | ✔ **rows by the customer row filter only**; the customer's solar is read THROUGH the customer (by `Sundial_Customer__c`, never its own `Dealer__c` / `Sales_Rep__c` — D-086, the same rule as `record_visible_for` v4); fields per the customer and solar manifests. The gate is always on (not behind `ACCESS_MODEL_MODE`) |
 | Solar files: any | ✔ | ✔ | ✘ 403 (all four file Lambdas, including `list-related-files` which is ungated today) |
 | Copy files to Solar | ✔ | ✔ | ✘ |
 | Manage Users | Super Admin only | — | — |
@@ -773,6 +774,8 @@ The same predicate is materialized for RLS (§5.2) so the mentions picker and th
 
 Actions are keyed (`budget.recalc`, `files.solar.list`, …) in one table in `lib/access.js`; each Lambda
 calls `canAction` and nothing else. Client buttons render from `user.access.actions`.
+
+`dealer.read` is the one action that opens a whole *surface* to the sales scopes rather than one operation on one record. It grants no rows: the list is `rowFilter("customer")` on `sundial_dealer_customer_view`, a detail read is the `?full=true` read with that filter ANDed in, and a record outside it is 404. The one widening it carries is the decided one — a customer's solar is visible through the customer — and it is bound in the SOQL to that customer id.
 
 ### 3.7 Emails and notifications
 

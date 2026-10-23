@@ -945,6 +945,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-auth-proxy` | GET /auth/me, POST /auth/forgot (public — the reset link Sundial sends itself, 2026-09-22) |
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
+| `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1121,6 +1122,94 @@ caller gets **403**, not 404. They are refused by the action gate before any rec
 considered, and get the same answer for every id — so there is no oracle, and 403 is the
 honest answer. A **sales** role still 404s there, because their refusal DOES depend on
 which record was asked for.
+
+---
+
+## Dealer shell — `GET /dealer/customers[/{id}]` (dealer module step 3, 2026-10-23) — `sundial-dealer`
+
+The backend of the portal's `/dealer` shell: what a **Sales Dealer** or **Sales Rep** works
+from. One record per customer — the `Sundial_Customer__c` they can see under their existing
+row filter, plus the `Sundial_Solar__c` whose `Sundial_Customer__c` points at it. The Solar
+is visible **through** the Customer, whatever the Solar's own `Dealer__c` / `Sales_Rep__c`
+say (D-086's rule, applied here to record reads).
+
+**Access, every request:** the verified JWT → `dealer.read` (tenant, dealer, own; a
+technician, a dealer-less rep or an inactive dealer's rep is **403 `ACTION_FORBIDDEN`**
+before anything is read). The gate is **always on** — not behind `ACCESS_MODEL_MODE`.
+Then `rowFilter("customer")`, ANDed first; field visibility from the manifests, exactly as
+`GET /sf/{object}` and `?full=true` (the same code: `lib/cache-read.js`, `lib/full-read.js`).
+
+### `GET /dealer/customers`
+
+| Param | Meaning |
+|---|---|
+| `q` | Search — the Sales list's word search over the customer's name / company / email / phone / address columns (`SEARCH_FIELDS.customer`, every word must match some column; a phone matches on digits) |
+| `stage` | A journey step **key** (`appointment-set`, `permitting`, … — `lib/dealer-journey.js` `JOURNEY`). Matches the deals whose LEADING stage is that step's value or an off-path value anchored to it: the customer's stage when it has no solar, the solar's when it does. Off-path values drawn at the deal's floor (Hold, Cancelled, Closed Lost, …), unknown values and blanks match no step. Unknown key → **400 `INVALID_STAGE`** |
+| `limit` | Page size, default **50**, max **200** |
+| `offset` | Start row, default 0 |
+| `sort` | `column:asc|desc` from the customer sort allowlist (`lib/caller-filters.js`), NULLS LAST then `sf_id`; default `created_date` desc. Off the list → **400 `INVALID_SORT`** |
+
+Service-only customers (`Customer_Type__c` = Service and nothing else) are excluded, as on
+the Sales page. Read from `sundial_dealer_customer_view` (`sql/sundial_dealer_customer_view.sql`
+— the customer cache with its leading solar beside it), served as the cache stands; the
+D-079 sync keeps it current and this list does not re-fetch stale rows.
+
+```json
+{
+  "source": "cache", "count": 50, "total": 3511, "limit": 50, "offset": 0, "hasMore": true,
+  "records": [
+    {
+      "sf_id": "a1P…", "name": "…", "first_name": "…", "stage": "Sold", "status": "Opportunity", "…": "the role's list columns (manifest listColumns), nulls and long text dropped",
+      "solar": { "sf_id": "a1S…", "stage": "Permitting", "project_name": "…" },
+      "journey": { "stage": "permitting", "source": "solar", "index": 15, "offPath": null }
+    }
+  ]
+}
+```
+
+`solar` is `null` without a project; its `stage` / `project_name` pass through the **solar**
+manifest. `journey` is `lib/dealer-journey.js` `journeyFor` over what the role can see:
+`stage` is the JOURNEY key the deal is on (null when it is on no step), `index` where it is
+drawn, `offPath` `{ value, anchor, tone: info|warn|stop }` for an off-path value (`anchor`
+null = drawn at the deal's floor: Audit with a solar, New without). Errors: **403**
+`ACTION_FORBIDDEN` / `MODULE_FORBIDDEN`, **400** as above, **503 `DEALER_VIEW_MISSING`**
+(the view SQL has not been run), **500**.
+
+### `GET /dealer/customers/{id}`
+
+**404 `RECORD_NOT_FOUND`** unless the customer passes the row filter (one SOQL: the shared
+full read with the filter ANDed in — missing, another tenant's and another rep's / dealer's
+are indistinguishable). A malformed id is 404 without a query.
+
+```json
+{
+  "customer": { "Id": "a1P…", "Client__c": "…", "Stage__c": "Sold", "…": "every field the customer manifest lets this role read" },
+  "solar": { "Id": "a1S…", "Stage__c": "Permitting", "…": "every field the solar manifest lets this role read" },
+  "solarCount": 2,
+  "access": {
+    "customer": { "visible": ["…"], "editable": ["…"] },
+    "solar": { "visible": ["…"] },
+    "manifestVersion": "customer:…/roofing:…/solar:…"
+  },
+  "picklists": {
+    "customer": { "Stage__c": { "type": "picklist", "controllingField": "Status__c", "values": [], "dependencies": {} }, "Status__c": { } },
+    "solar": { "Stage__c": { } }
+  },
+  "journey": { "stage": "permitting", "source": "solar", "index": 15, "offPath": null }
+}
+```
+
+- `solar` — found by `Sundial_Customer__c = :id AND Client__c = :tenant` (never by its own
+  dealer / rep); several → the **most recently created** (the first non-empty of
+  `Sunbase_Created_Date__c`, `Contract_Date__c`, `CreatedDate`, newest first — the view's
+  rule) and `solarCount` says how many. Read with the solar manifest and bound to this
+  customer id. `null` (and `access.solar` `null`) without one. Read-only here.
+- `access.*.visible` / `editable` — `null` means tenant scope, no restriction (§4.3).
+- `picklists` — from the describe, limited to the fields the role may read; a dependent
+  picklist carries its `controllingField` + `dependencies` map (`lib/sf-describe.js`).
+
+Wire script: `scripts/wire-dealer-routes.ps1` (resources `/dealer/customers` +
+`/dealer/customers/{id}`, GET + OPTIONS, invoke permission `apigw-dealer` on `…/*/*/dealer/*`).
 
 ---
 

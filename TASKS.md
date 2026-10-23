@@ -4,6 +4,16 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-23 — The `/dealer` shell's backend, `sundial-dealer` (dealer module step 3 of 9) — BUILT, NOT DEPLOYED
+
+- [x] `lambdas/sundial-dealer` (list + detail), `lib/dealer-journey.js`, `sql/sundial_dealer_customer_view.sql`, `dealer.read`, shared code moved to `lib/` (cache-read, sf-describe, full-read, caller-filters), wire script, matrix checks, docs. Suite 1,747 / 1,747
+- [ ] **TIM: run `sql/sundial_dealer_customer_view.sql`** in the Supabase SQL editor (until then the list answers 503 `DEALER_VIEW_MISSING`). Re-run it whenever a column is added to `sundial_customer_cache`, or the dealer list will not carry it
+- [ ] **TIM: create the `sundial-dealer` Lambda** in the console with the same role and environment as `sundial-sf-query` (Node 22.x, handler `index.handler`, `sundial-lambda-execution-role`, 30 s; copy sf-query's env vars), then `.\deploy.ps1 sundial-dealer`
+- [ ] **TIM: `.\scripts\wire-dealer-routes.ps1`** (creates `/dealer/customers` + `/{id}`, GET + OPTIONS, and deploys the stage)
+- [ ] **TIM: redeploy `sundial-sf-query`** (`.\deploy.ps1 sundial-sf-query`) — same behaviour, now built from the shared `lib/` code; and **`sundial-auth-proxy`** (`.\deploy.ps1 sundial-auth-proxy`) so `/auth/me` advertises `dealer.read`
+- [ ] Then `node scripts/verify-access-matrix.mjs` — every `dealer:` line `ok`
+- [ ] **harmon-crm (step 4+):** the `/dealer` shell itself
+
 ## 2026-10-23 — Per-comment privacy (D-086, dealer module step 1 of 9) — BUILT, NOT DEPLOYED
 
 - [x] `sql/sundial_access_p11_comment_privacy.sql`; `sundial-comment-notify` private skip + dealer links; `lib/intake-comment.js` private system lines; both verify scripts; docs. Suite 1,701 / 1,701

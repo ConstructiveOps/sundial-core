@@ -4,6 +4,21 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-23 — Commission-PO amount updates do not stick (27 projects) — INVESTIGATED, FIX PLANNED, NOT BUILT
+
+Full write-up: `docs/integrations/acumatica-commission-po-runbook.md` → "2026-10-23 — Why amount updates do not stick". Probe: `scripts/probe-commission-po-update.mjs`.
+
+- [x] Read-only investigation of SOL-10125 / SOL-10061 / SOL-10130: every failed update is on an **Open, Hold = false** PO; the only update ever proven (Step 7) was On Hold. Best-supported cause: **(a) Open POs silently ignore API detail edits unless put On Hold first** — not yet proven
+- [x] Found: **Harmon is fixing these POs by hand** 40 s – 2 min after each failed push (no Sundial process running then; values = our error's "expected", or commission − the real frozen M1)
+- [x] ~~Acumatica answering IIS 406 to every request since ~07:30 UTC 2026-10-23~~ — cleared on its own the same morning; plain reads work
+- [x] `--all-failed` over all 27 (2026-10-23): every M1 but two is Closed + received + billed; every Open PO has nothing received and nothing On Hold; **every Open PO already holds the ruled amount** (Harmon fixed them by hand) except SOL-10134 M2 016998, one cent over (4,663.75 vs 4,663.74 — Harmon's call)
+- [ ] **A. Log the update PUT body + echo** (no behaviour change) — answers "does the echo show the old amount"
+- [ ] **B. Sandbox hand-proof, new runbook Step 10:** plain PUT on an Open PO vs Hold → PUT → release; the release action's exact name; whether it re-triggers approval
+- [x] **TIM ruled 2026-10-23: M2 = commission − the REAL (frozen) M1** — D-057 amendment 1. Not built yet; ships with C + D
+- [ ] **C + D (only after B confirms):** Hold → amount → release, verified at each step, a failure left On Hold; WITH the guard "refuse if the PO's amount ≠ the amount we last wrote" (else the next push overwrites Harmon's corrections) and the frozen-M1 rule
+- [ ] **E. Clear the 27** through the fixed engine, one at a time: each should read "already right" → Salesforce write-back of the stored amount + status, no Acumatica PUT
+- [ ] **Tell Harmon** their hand corrections are seen and will be respected by the fix — and ask who is making them
+
 ## 2026-10-22 — The backend reads the dealer (D-085 amendment 1, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
 
 - [x] `lib/dealer-terms.js` (`resolveDealerTerms`, 10 tests): dealer → its terms; else pre-2026-09-04 → the picklist; else `DEALER_MISSING`
@@ -19,7 +34,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **TIM: vendor ids for Invictus Energy and Sunlink Energy** (`verify-dealer-vendor-coverage.mjs`, 2026-10-22: the only active external dealers without one; Heavenly Power 02118, Property Upgrades 01995, Suzuki Solar 02050 exist and are Active in Acumatica). SOL-10141 (Invictus) is waiting on it
 - [ ] **TIM: the one post-cutover Solar record with no dealer whose Customer has one** — set its `Dealer__c` from the Customer (the new create path prevents more). And the 13 post-cutover Solar records with a rep but no dealer: their reps have no `Dealer__c` — set it on the rep (`Sundial_User__c`), and the next rep save re-stamps the deal
 - [ ] **TIM: 6 pre-cutover Solar records where the dealer and the picklist disagree on internal vs external** (SOL-5733, SOL-6179, SOL-6200, SOL-8767, SOL-9396, SOL-9603 — none calculated or pushed yet). Their budget line follows the dealer (the rule), their redline formula still follows the picklist (v9 keeps pre-9/4 redlines). Correct whichever is wrong before calculating them
-- [ ] **Re-push pass:** `node scripts/list-failed-commission-pos.mjs` — 32 Failed on 2026-10-22. 6 are an unmapped sales company (after deploy the dealer ones become `vendor_missing` until the vendor id is set). ⚠️ **26 are NOT a dealer problem:** "PO … was updated but no longer matches the expected shape: UnitCost is X, expected Y" — the amount PUT returns 200 but the re-read shows the old amount (e.g. SOL-10125 M2: 11,868 vs 12,508). That is the update path in `updateCommissionPo`, pre-existing; investigate before re-pushing those, a re-push will fail the same way
+- [ ] **Re-push pass** (the 26 update mismatches: see the 2026-10-23 section above — do not re-push them until that fix lands): `node scripts/list-failed-commission-pos.mjs` — 32 Failed on 2026-10-22. 6 are an unmapped sales company (after deploy the dealer ones become `vendor_missing` until the vendor id is set). ⚠️ **26 are NOT a dealer problem:** "PO … was updated but no longer matches the expected shape: UnitCost is X, expected Y" — the amount PUT returns 200 but the re-read shows the old amount (e.g. SOL-10125 M2: 11,868 vs 12,508). That is the update path in `updateCommissionPo`, pre-existing; investigate before re-pushing those, a re-push will fail the same way
 - [ ] **Next Salesforce package (metadata only):** `Commission_Redline_PPW__c` inline help text on BOTH objects → "Blank when the deal has no dealer (set the Sales Rep); deals created before 2026-09-04 use the legacy sales-company rates." (it still says "Blank if the sales company is not set"; v9 kept every attribute identical to v8 by spec)
 
 ## 2026-10-22 — Dealer terms on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — DEPLOYED (Tim, 2026-10-22)

@@ -1938,6 +1938,24 @@ neater code and a duplicate payment the first time anything went wrong halfway.
 `PO_GATE.enabled` stays `false`. The remaining blocker is the hand-proof, whose duplicate
 check and freeze test did not land on 2026-08-24 — see the runbook's §Results.
 
+### Amendment 1 (2026-10-23, Tim): a frozen M1 moves M2 — M2 = commission − the REAL M1
+
+**Ruling.** When M1 is frozen (Closed, Completed, or anything received against it) at an
+amount other than the rule's M1 (`min(50 %, 2,500)`), **M2 = commission − the amount M1
+actually holds**, not commission − the rule's M1. The dealer is paid the commission in
+total, whatever M1 froze at. Rounded to the cent; an M2 that would go negative is refused,
+never written.
+
+**Why.** It is what Harmon's accounting has been doing by hand: on 2026-10-23 every one of
+the 27 projects whose update had failed already held exactly this amount in Acumatica
+(SOL-10061: M1 froze at 2,195, M2 = 4,138 − 2,195 = 1,943; SOL-10124: M1 186, M2 441.75).
+The engine's old arithmetic would have moved those M2s away from the commission total —
+SOL-10061 by +126.
+
+**Status.** Ruled, **not yet built** — the engine still computes M2 from the rule's M1 and
+reports the difference. It ships with the commission-PO update fix (runbook
+`acumatica-commission-po-runbook.md` → 2026-10-23, items C + D).
+
 ## D-058: The Acumatica secret is a pointer, not a tenant — and no doc may name the tenant it holds
 
 **Date:** 2026-08-24

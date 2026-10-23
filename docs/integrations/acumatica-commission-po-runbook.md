@@ -357,6 +357,147 @@ sitting at $9,999 against R261065.** Do it before the next run, and again after.
 
 ---
 
+## 2026-10-23 — Why amount updates do not stick: investigation and fix plan (NOT IMPLEMENTED)
+
+**Read-only.** Nothing was written to Acumatica or Salesforce. Tools:
+`scripts/probe-commission-po-update.mjs <SOL-…>` (one project's POs, every header and
+line field) and `--all-failed` (one line per PO for every project with the mismatch).
+
+### The symptom
+
+26 of the 32 `Failed` projects carry `PO … was updated but no longer matches the expected
+shape: UnitCost is X, expected Y`: `updateCommissionPo` PUT `{ id, Details: [{ id, UnitCost,
+OrderQty: 1, Requested?, Promised? }] }`, got a 2xx, and the verifying re-read showed the
+**old** amount.
+
+### What the evidence shows (SOL-10125, SOL-10061, SOL-10130)
+
+| Project | PO | Status / Hold | Error said (re-read → wanted) | Holds now | PO last modified | Our run |
+|---|---|---|---|---|---|---|
+| SOL-10125 R261137 | M1 016938 | Closed, received (QtyOnReceipts 1, Completed) | frozen 2,500 | 2,500 | 10-13 15:01 | — |
+| | M2 016939 | **Open, Hold false**, QtyOnReceipts 0 | 11,868 → 12,508 | **12,508** | **10-16 18:32:43** | ended 18:32:01 |
+| SOL-10061 R261123 | M1 016793 | Closed, received | frozen 2,195 (rule M1 2,069) | 2,195 | 09-28 | — |
+| | M2 016794 | **Open, Hold false**, QtyOnReceipts 0 | 1,745 → 2,069 | **1,943** | **10-22 17:49:20** | ended 17:48:27 |
+| SOL-10130 R261142 | M1 016965 | **Open, Hold false** | 2,007 → 1,899.75 (+ Requested 10-07 → 10-21) | **1,899.75**, Promised 10-21, **Requested still 10-07** | **10-21 15:12:30** | ended 15:10:54 |
+| | M2 016966 | **Open, Hold false** | 2,007 → 1,899.75 | **1,899.75** | **10-21 15:12:47** | ended 15:10:54 |
+
+Five things follow:
+
+1. **Every PO that "failed to update" is `Open` with `Hold = false`.** The only update this
+   engine has ever seen persist is runbook Step 7 (2026-08-24, PO 016442), and that PO was
+   **On Hold** — the step 8 transcript prints `status: On Hold` for it.
+2. **The re-read returned the exact previous amount** (11,868 / 1,745 / 2,007) — the value
+   our own create wrote — not a price-list or item cost. Nothing recalculated it; the edit
+   was simply not there.
+3. **Each PO was changed again 40 s – 2 min AFTER our run ended**, and no Sundial Lambda
+   ran at those times (`sundial-acumatica-budget-push` / `sundial-acumatica-push`
+   CloudWatch, ±70 s: zero events). The values written then are the "expected" figure from
+   our error message (SOL-10125, SOL-10130 — and on 016965 only `Promised` moved, not
+   `Requested`, the way a person editing one date would) or, on SOL-10061, **commission −
+   the real frozen M1** (4,138 − 2,195 = 1,943), the "difference belongs in M2" arithmetic
+   our engine reports but does not do. **Someone at Harmon is correcting these POs by hand
+   in Acumatica after reading the error.** That explains today's amounts; it does not
+   explain why our PUT was ignored.
+4. **The PUT body and echo were never logged** — the update path writes no log line
+   (only the create does), so CloudWatch cannot say whether the echo already showed the
+   old amount. Question 2 of the investigation is unanswerable from existing logs.
+5. Lines report `OrderType = RO` (the header says `Type = Normal`; RO is Normal's internal
+   code — consistent, not a finding).
+
+### Ranked diagnosis
+
+| | Hypothesis | Evidence | Verdict |
+|---|---|---|---|
+| **1** | **(a) An Open, not-on-Hold PO silently ignores detail edits through the API unless it is put On Hold first** | All 26 are Open/Hold=false; the one proven update was On Hold; 2xx + untouched line is the API's known silent-discard behaviour (D24: an unknown AttributeID also returns 200 and is dropped); a person CAN change the same POs in the UI | **Best supported. Not proven.** |
+| 2 | (c) the header-id / line-id pairing does not address the line | Same body shape persisted in Step 7; the ids sent come from the read in the same run and each PO has exactly one line | Unlikely — but unlogged, so not excluded |
+| 3 | (b) UnitCost is recalculated after the PUT (vendor/item price, triggered by sending `OrderQty`) | The re-read value is the exact old manual amount, not a price; hand edits stick | Weak |
+| — | (d) people editing the POs afterwards | Timestamps + values above | **True, but a consequence of the failure, not its cause** — and a new risk for any fix (below) |
+
+**The one piece of evidence that confirms (a):** in the **sandbox**, take an Open,
+Hold=false commission PO and send the engine's exact update PUT — re-read unchanged; then
+PUT `{ id, Hold: true }`, re-read On Hold, send the same PUT — re-read changed. (If the first
+PUT's **echo** already shows the old amount, the edit is discarded at save, which is (a) or
+(c); if the echo shows the new amount and the re-read the old, something reverts it after
+save, which is neither.)
+
+### Received / billed?
+
+**Update, later 2026-10-23 — all 27 checked.** Acumatica answers again (a plain read worked
+by mid-morning; the 406 cleared on its own). `--all-failed` now reads every project whose
+update failed (27 of 33 Failed — one more than yesterday's count) and grades each PO against
+Tim's ruling (D-057 amendment 1, below):
+
+- **Every M1 except SOL-10063's and SOL-10130's is `Closed`, received and billed** (QtyOnReceipts
+  1, Completed) — paid; never touched.
+- **Every M2, and the two open M1s, is `Open`, Hold false, nothing received** (QtyOnReceipts
+  0, Completed false). Nothing is On Hold.
+- **Every Open PO already holds the amount the ruling says** — 28 of the 29 to the cent; the
+  exception is SOL-10134 M2 **016998**, 4,663.75 against 4,663.74 (commission 7,163.74 −
+  2,500), one cent over. Harmon has corrected all of them by hand; the latest
+  correction was today (SOL-10066 M2 016814, 2026-10-23 16:26 UTC).
+- Three "wanted" figures in the error text are now stale because the commission changed
+  after that push (SOL-10063 M1 wanted 2,026, now correctly 2,500 on a 6,128 commission;
+  SOL-10064 M2 wanted 2,489, now correctly 2,478 on 4,978 − 2,500). The error text is a
+  record of that run, not of what is owed today.
+
+**So the backlog needs no Acumatica write at all** (bar one cent on SOL-10134, which is
+Harmon's call). What is out of date is Salesforce: the stored
+`Commission_PO_Mn_Amount__c` and the `Failed` status. Item E becomes a Salesforce write-back.
+
+Of the six POs read first: the three `Closed` M1s are **received and billed** (QtyOnReceipts 1,
+Completed; Closed = received + billed) — the freeze rule already never touches them. The
+four Open M2/M1s have **QtyOnReceipts 0, Completed false** — nothing received. **The other 20
+projects are unchecked:** Acumatica's front end began answering every request with an IIS
+`406` page at ~07:30 UTC 2026-10-23, after two `$custom` audit-column requests (500, then
+406). No retry loop was run. Re-run `node scripts/probe-commission-po-update.mjs --all-failed`
+once a plain read answers again; **any PO with QtyOnReceipts > 0 or Completed = true must be
+treated as frozen** whatever its status says.
+
+### The fix — proposed, not built
+
+**A. Instrument first** (no behaviour change): log the update PUT body (amount, date, ids)
+and the echo's `UnitCost` / `Status` / `Hold`; no secrets in it. Deploy, then the next failure
+answers question 2.
+
+**B. Sandbox hand-proof (new Step 10 of this runbook)** — the confirming test above, plus:
+the exact name of the release action on this endpoint (`ReleaseFromHold` / `RemoveHold` —
+read the endpoint's action list, do not guess), whether Hold → release re-triggers an
+**approval map** (Pending Approval would block payment), and whether a PO that has been
+**printed / emailed to the vendor** may be put on hold.
+
+**C. Engine change, only if B confirms (a)** — for an `Open`, `Hold = false` PO:
+1. PUT `{ id, Hold: true }` → re-read: must be `On Hold`, amount unchanged.
+2. PUT the amount (today's body) → re-read: amount and dates as sent.
+3. Release with the action from B → re-read: `Open` (or the pre-hold status), amount still as sent.
+4. A failure after step 1 **leaves the PO On Hold** and fails loudly naming it — On Hold
+   cannot be received or billed, so the failure state is safe; a person releases it.
+   `On Hold` POs skip steps 1 and 3 (today's path, already proven).
+
+**D. Two guards that must ship WITH C, or C makes things worse:**
+1. **Do not overwrite a hand edit.** If the PO's current amount ≠ the amount we last wrote
+   (`Commission_PO_Mn_Amount__c`), someone changed it in Acumatica → refuse
+   (`edited_in_acumatica`), never PUT. Without this, the first push after C would replace
+   Harmon's corrections — on SOL-10061 it would move M2 from the correct 1,943 to 2,069 and
+   **overpay the dealer 126**. If current = what we want now, write the stored amount back
+   and mark it fine with no Acumatica write.
+2. **A frozen M1 at a different amount moves M2 by the difference** — **RULED 2026-10-23
+   (Tim, D-057 amendment 1): M2 = commission − the amount M1 actually holds**, the
+   arithmetic Harmon has been applying by hand. The engine today computes commission −
+   rule-M1 and only *reports* the difference; C changes that. An M2 that would go negative
+   is refused, never written.
+
+**E. Then the re-push pass:** `--all-failed` to snapshot (done 2026-10-23: every Open PO already
+holds the ruled amount), then clear the 27 one at a time. Under the D1 guard with the ruled
+arithmetic each reads "already right" and needs only the stored amount written back to
+Salesforce and the status cleared — no Acumatica PUT. Do it through the fixed engine, not by
+hand-editing Salesforce, so the write-back is the engine's own and verified.
+
+**Risks.** Toggling Hold on a live PO (approval re-trigger; a vendor-facing document
+changing state); a race with a person editing the same PO (the guard in D1 is the defence);
+receipts/bills on POs (treat QtyOnReceipts > 0 or Completed as frozen — none of the 27's Open
+POs had any on 2026-10-23); a repeat of the 406 outage (it followed two `$custom` audit-column
+reads — do not repeat those).
+
 ## What to paste back
 
 ```

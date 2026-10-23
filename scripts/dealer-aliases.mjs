@@ -1,10 +1,13 @@
 // Loader for docs/integrations/dealer-aliases.csv — the reviewed dealer-name aliases.
 // D-064 amendment A2. Backfill-only.
 //
-// ⚠️ THIS LIVES IN scripts/, NOT lib/, ON PURPOSE. `lib/` is the shared layer bundled
-// into every Lambda zip; nothing at runtime resolves a dealer by name, and shipping a
-// name-matching helper into the Lambdas would invite exactly that. Both backfill
-// scripts import it from here.
+// ⚠️ THIS LOADER LIVES IN scripts/, NOT lib/, ON PURPOSE. It reads the CSV from disk,
+// which a Lambda bundle cannot. ONE runtime caller resolves a dealer by name since D-085
+// am. 1 (2026-10-22): the Aurora auto-create, which turns a dealer partner's name into a
+// Sundial_Dealer__c — exact Name first, then this file — and it reads the GENERATED copy
+// lib/dealer-aliases.js (scripts/generate-dealer-aliases.mjs; lib/dealer-aliases.test.js
+// fails a stale one). Nothing else at runtime should match dealers by name: a deal's
+// dealer comes from its rep (A1). The backfill scripts import this loader directly.
 //
 // THE FILE IS THE DECISION. A row in the CSV means a human looked at two spellings and
 // judged them one organization. The script never infers a merge -- it reports

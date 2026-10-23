@@ -227,10 +227,27 @@ request, no Harmon-side qualification. The signed-agreement email flags them
 ("This customer was AUTO-CREATED…") and names the dealer. `Sold - Pending Review` is
 the queue that review should work from.
 
-**Two fields and one picklist value are still missing** (TASKS.md):
-`Aurora_Dealer_Name__c`, `Aurora_Import_Notes__c`, and the `Lead_Source__c` value
-`Aurora - Third-Party Dealer`. Until they exist the import still succeeds — the
-values are simply not written, and the gap is reported in the email.
+**The Sundial dealer (D-085 am. 1, 2026-10-22).** The auto-created customer gets a
+`Dealer__c` — its commission terms (redline, internal flag, PO vendor) come from it, and a
+deal created after 2026-09-04 with no dealer has none. The Aurora **partner** name (never an
+owner's personal name or a raw id) is matched to a `Sundial_Dealer__c` in the tenant:
+**exact Name** first, then `docs/integrations/dealer-aliases.csv` (through its generated
+copy `lib/dealer-aliases.js`) and an exact match on the canonical name. Two rows with one
+name, or none, is **unresolved**: `Dealer__c` stays null, the email warns, and the notes
+carry a `Dealer (unresolved): …` line — never a guess. Fix by creating the dealer or adding
+the spelling to the CSV, then set the dealer (or a Sales Rep) on the customer.
+`Aurora_Dealer_Name__c` still records Aurora's own name for the partner.
+
+**Lead source names the dealer.** `Lead_Source__c` = the resolved dealer's Name, else the raw
+partner name; nothing when there is no partner. Written in the org's spelling when the
+picklist has the value; written as-is when the describe says the picklist is **unrestricted**
+(Tim is unrestricting it); otherwise skipped with a warning and a notes line, because a
+restricted picklist would reject the insert. The single generic `Aurora - Third-Party
+Dealer` tag is gone.
+
+**Two fields are still to create** if missing (TASKS.md): `Aurora_Dealer_Name__c`,
+`Aurora_Import_Notes__c`. Until they exist the import still succeeds — the values are
+simply not written, and the gap is reported in the email.
 
 ## Operating notes
 

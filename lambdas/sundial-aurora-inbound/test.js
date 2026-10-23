@@ -47,7 +47,11 @@ const TENANT_SF_ID = "a1W7y000007AszBEAS";
 const ctx = {
   hasTrackingFields: true,
   hasDealerFields: true, // Aurora_Dealer_Name__c + Aurora_Import_Notes__c
-  hasDealerLeadSource: false, // the org has no "Aurora - Third-Party Dealer" value
+  // Lead_Source__c (D-085 am. 1): the values the org's picklist has, and whether it is
+  // restricted. Tim is unrestricting it; the default here is the org as it is today.
+  leadSourceValues: ["Referral", "Web"],
+  leadSourceRestricted: true,
+  dealerRows: [], // Sundial_Dealer__c rows the tenant has
   hasDealerStatusValue: true, // Status__c has "Customer"
   hasDealerStageValue: true, // Stage__c has "Sold - Pending Review"
   stageValueCasing: "Sold - Pending Review", // how the ORG spells it
@@ -157,7 +161,9 @@ function projectFixture(over = {}) {
 function resetCtx() {
   ctx.hasTrackingFields = true;
   ctx.hasDealerFields = true;
-  ctx.hasDealerLeadSource = false;
+  ctx.leadSourceValues = ["Referral", "Web"];
+  ctx.leadSourceRestricted = true;
+  ctx.dealerRows = [];
   ctx.hasDealerStatusValue = true;
   ctx.hasDealerStageValue = true;
   ctx.stageValueCasing = "Sold - Pending Review";
@@ -207,6 +213,13 @@ mock.module("../../lib/salesforce.js", {
     sfQuery: async (soql) => {
       ctx.soqlSeen.push(soql);
       if (/FROM Sundial_Tenant__c/.test(soql)) return ctx.tenantRows;
+      // D-085 am. 1: the dealer lookup, tenant-scoped, by Name IN (...). Salesforce's `=`
+      // and IN ignore case — the fake does too, so the code's exact check is what's tested.
+      if (/FROM Sundial_Dealer__c/.test(soql)) {
+        if (!soql.includes(`Client__c = '${TENANT_SF_ID}'`)) return [];
+        const wanted = [...soql.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1].toLowerCase());
+        return ctx.dealerRows.filter((d) => wanted.includes(d.Name.toLowerCase()));
+      }
       // A lookup by Id (provider-id resolution or the post-create re-read) is a
       // different question from "who owns this Aurora project id".
       if (/WHERE Id = /.test(soql)) return ctx.customerById ? [ctx.customerById] : [];
@@ -233,12 +246,9 @@ mock.module("../../lib/salesforce.js", {
         // case-insensitive and must write the org's canonical casing.
         { name: "State__c", type: "picklist",
           picklistValues: ["AZ", "CA", "Il", "NV", "TX"].map((v) => ({ value: v })) },
-        { name: "Lead_Source__c", type: "picklist",
-          picklistValues: [
-            { value: "Referral" },
-            { value: "Web" },
-            ...(ctx.hasDealerLeadSource ? [{ value: "Aurora - Third-Party Dealer" }] : []),
-          ] },
+        { name: "Lead_Source__c", type: "picklist", restrictedPicklist: ctx.leadSourceRestricted,
+          picklistValues: ctx.leadSourceValues.map((value) => ({ value })) },
+        { name: "Dealer__c", type: "reference" },
         // Status__c defaults to "Lead" in the real org — that's why the import
         // sets it explicitly.
         { name: "Status__c", type: "picklist",
@@ -1155,16 +1165,17 @@ test("state matching is case-insensitive and writes the org's canonical casing",
   assert.equal(ctx.upserts[0].fields.State__c, "Il");
 });
 
-test("Lead_Source value missing from the org -> skipped, warned, and noted", async () => {
+test("Lead_Source: restricted picklist without the dealer's value -> skipped, warned, and noted", async () => {
   resetCtx();
-  unmatched(); // hasDealerLeadSource is false by default (matches the real org)
+  unmatched(); // restricted, no "Sunny Solar Group" value — today's org
   ctx.customerById = createdCustomer();
 
   await handler(sqsEvent());
   const f = ctx.upserts[0].fields;
-  assert.equal(f.Lead_Source__c, undefined);
-  assert.match(f.Aurora_Import_Notes__c, /Lead source \(not in picklist\): Aurora - Third-Party Dealer/);
-  assert.match(ctx.emails[0].warnings.join(" "), /no "Aurora - Third-Party Dealer" value/);
+  assert.equal(f.Lead_Source__c, undefined, "an unknown value would fail a restricted insert");
+  assert.match(f.Aurora_Import_Notes__c, /Lead source \(not in picklist\): Sunny Solar Group/);
+  assert.match(ctx.emails[0].warnings.join(" "), /no "Sunny Solar Group" value and the picklist is restricted/);
+  assert.ok(!JSON.stringify(f).includes("Aurora - Third-Party Dealer"), "the generic tag is gone");
 });
 
 test("Status/Stage values missing from the org -> skipped, warned, and noted", async () => {
@@ -1214,14 +1225,112 @@ test("Status/Stage match the org's canonical casing, like State__c does", async 
     "write the org's spelling, not ours");
 });
 
-test("Lead_Source value present in the org -> written", async () => {
+test("Lead_Source value present in the org -> written in the org's casing", async () => {
   resetCtx();
-  ctx.hasDealerLeadSource = true;
+  ctx.leadSourceValues = ["Referral", "SUNNY SOLAR GROUP"];
   unmatched();
   ctx.customerById = createdCustomer();
 
   await handler(sqsEvent());
-  assert.equal(ctx.upserts[0].fields.Lead_Source__c, "Aurora - Third-Party Dealer");
+  assert.equal(ctx.upserts[0].fields.Lead_Source__c, "SUNNY SOLAR GROUP");
+});
+
+test("Lead_Source UNRESTRICTED -> the partner name is written as-is", async () => {
+  resetCtx();
+  ctx.leadSourceRestricted = false;
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  assert.equal(ctx.upserts[0].fields.Lead_Source__c, "Sunny Solar Group");
+});
+
+// ---------------------------------------------------------------------------
+// D-085 am. 1 — the auto-created customer gets a Sundial_Dealer__c
+// ---------------------------------------------------------------------------
+
+test("exact dealer Name match -> Dealer__c written, Lead_Source is the dealer's Name", async () => {
+  resetCtx();
+  ctx.leadSourceRestricted = false;
+  ctx.dealerRows = [{ Id: "a0YsunnyDEALER0001", Name: "Sunny Solar Group" }];
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  const f = ctx.upserts[0].fields;
+  assert.equal(f.Dealer__c, "a0YsunnyDEALER0001");
+  assert.equal(f.Aurora_Dealer_Name__c, "Sunny Solar Group", "Aurora's own name still written");
+  assert.equal(f.Lead_Source__c, "Sunny Solar Group");
+  const q = ctx.soqlSeen.find((x) => /FROM Sundial_Dealer__c/.test(x));
+  assert.ok(q.includes(`Client__c = '${TENANT_SF_ID}'`), "tenant-scoped");
+});
+
+test("a case-only near-miss is NOT an exact match — Dealer__c stays blank", async () => {
+  resetCtx();
+  ctx.dealerRows = [{ Id: "a0YsunnyDEALER0001", Name: "SUNNY SOLAR GROUP" }];
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  assert.equal(ctx.upserts[0].fields.Dealer__c, undefined);
+});
+
+test("the alias CSV resolves a variant spelling to the canonical dealer", async () => {
+  resetCtx();
+  ctx.leadSourceRestricted = false;
+  ctx.aurora.partners = [{ id: PARTNER_ID, name: "Blue Sky" }]; // dealer-aliases.csv: Blue Sky -> Blue Sky Solar
+  ctx.dealerRows = [{ Id: "a0YblueSKYDEALER01", Name: "Blue Sky Solar" }];
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  const f = ctx.upserts[0].fields;
+  assert.equal(f.Dealer__c, "a0YblueSKYDEALER01");
+  assert.equal(f.Aurora_Dealer_Name__c, "Blue Sky", "the raw partner name is kept");
+  assert.equal(f.Lead_Source__c, "Blue Sky Solar", "the RESOLVED dealer's Name");
+});
+
+test("unresolved dealer -> Dealer__c null, a warning, and a line in the import notes — never a guess", async () => {
+  resetCtx();
+  ctx.leadSourceRestricted = false;
+  ctx.dealerRows = [{ Id: "a0Yother000000001", Name: "Sunny Solar" }]; // close, not equal
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  const res = await handler(sqsEvent());
+  assert.deepEqual(res.batchItemFailures, [], "an unresolved dealer must not fail a signed sale");
+  const f = ctx.upserts[0].fields;
+  assert.equal(f.Dealer__c, undefined);
+  assert.equal(f.Lead_Source__c, "Sunny Solar Group", "the raw partner name when unresolved");
+  assert.match(f.Aurora_Import_Notes__c, /Dealer \(unresolved\): Aurora partner "Sunny Solar Group" matches no Sundial dealer/);
+  assert.match(ctx.emails[0].warnings.join(" "), /matches no Sundial dealer/);
+});
+
+test("two dealers with the same Name -> unresolved, not picked", async () => {
+  resetCtx();
+  ctx.dealerRows = [{ Id: "a0Y1", Name: "Sunny Solar Group" }, { Id: "a0Y2", Name: "Sunny Solar Group" }];
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  assert.equal(ctx.upserts[0].fields.Dealer__c, undefined);
+  assert.match(ctx.emails[0].warnings.join(" "), /2 Sundial dealers are named "Sunny Solar Group"/);
+});
+
+test("no partner (owner's name only) -> no dealer lookup at all, and no Lead_Source", async () => {
+  resetCtx();
+  ctx.leadSourceRestricted = false;
+  ctx.dealerRows = [{ Id: "a0Yowen", Name: "Owen Owner" }];
+  ctx.aurora.project = projectFixture({ partner_id: null });
+  unmatched();
+  ctx.customerById = createdCustomer();
+
+  await handler(sqsEvent());
+  const f = ctx.upserts[0].fields;
+  assert.equal(f.Aurora_Dealer_Name__c, "Owen Owner");
+  assert.equal(f.Dealer__c, undefined, "a person's name is not a dealer organization");
+  assert.equal(f.Lead_Source__c, undefined);
+  assert.equal(ctx.soqlSeen.filter((x) => /FROM Sundial_Dealer__c/.test(x)).length, 0);
 });
 
 test("dealer fields not created yet -> import still succeeds, values just aren't written", async () => {

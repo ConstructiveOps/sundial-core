@@ -1,90 +1,77 @@
-// Check the D4 dealer->vendor map against the LIVE Salesforce picklist and the live
-// record population.
+// Check every ACTIVE dealer's commission-PO vendor — in Salesforce and in Acumatica.
 //
-//   node scripts/verify-dealer-vendor-coverage.mjs
+//   node scripts/verify-dealer-vendor-coverage.mjs [tenantSlug]     (default: harmon)
 //
-// Read-only. Answers two questions the CSV cannot answer about itself:
+// Read-only. Since D-085 amendment 1 a commission PO is paid to the DEALER's
+// Acumatica_Vendor_ID__c (lib/dealer-terms.js); the sales-company picklist + CSV map only
+// serve deals created before 2026-09-04 with no dealer. So the questions are now about
+// dealers, not picklist values:
 //
-//   1. Which Sales Company picklist values have NO vendor? Every one of those is a deal
-//      whose commission PO will fail loudly at creation time. Failing loudly is correct
-//      (D4 — never guess a vendor), but it is only useful if someone knows the list in
-//      advance rather than discovering it one job at a time.
-//   2. How many EXISTING records carry each of those values? That turns "N gaps" into
-//      "N deals blocked", which is the number worth acting on.
+//   1. Which active (external) dealers have NO vendor ID? Their POs refuse vendor_missing.
+//   2. Which vendor IDs are NOT IN ACUMATICA, or are Inactive there? Their POs refuse
+//      vendor_not_in_acumatica — the same GET the PO engine makes before every create
+//      (lib/acumatica-vendor-check.js), so this report and the engine cannot disagree.
+//   3. How many Solar records does each gap block? "N gaps" becomes "N deals".
 //
-// It also reports CSV keys that are not picklist values at all. Those are harmless —
-// a key nothing can match costs nothing — but they are usually one of two things worth
-// knowing about: an intentional alias for a spelling that was retired, or a vendor
-// matched from the export that never became a picklist option.
-import { sfQuery, describeObject } from "../lib/salesforce.js";
-import { DEALER_VENDOR_ROWS, lookupDealerVendor } from "../lib/acumatica-dealer-vendors.js";
+// Internal dealers (Is_Internal__c) need no vendor — their commission is payroll (D16) —
+// and are listed only so a vendor ID set on one by mistake is visible.
+import { sfQuery, soqlEscapeString } from "../lib/salesforce.js";
+import { checkAcumaticaVendor } from "../lib/acumatica-vendor-check.js";
 
-const SF_OBJECT = "Sundial_Solar__c";
-const FIELD = "Sales_Company_Harmon_Solar_or_Third__c";
-
-const described = await describeObject(SF_OBJECT);
-const field = described.fields.find((f) => f.name === FIELD);
-if (!field) {
-  console.error(`${SF_OBJECT}.${FIELD} not found — has the field been renamed?`);
+const slug = process.argv[2] || "harmon";
+const tenant = (await sfQuery(`SELECT Id FROM Sundial_Tenant__c WHERE Name = '${soqlEscapeString(slug)}' LIMIT 1`))?.[0];
+if (!tenant) {
+  console.error(`No Sundial_Tenant__c named "${slug}".`);
   process.exit(1);
 }
+const T = soqlEscapeString(tenant.Id);
 
-const live = field.picklistValues.filter((p) => p.active).map((p) => p.value);
-const mapped = new Set(DEALER_VENDOR_ROWS.map((r) => r.salesCompany));
-
-console.log(`\n=== ${SF_OBJECT}.${FIELD} ===`);
-console.log(`  active picklist values : ${live.length}`);
-console.log(`  CSV rows               : ${mapped.size}`);
-
-const tally = { ok: 0, internal: 0, inactive: 0, unmapped: 0, blank: 0 };
-const unmapped = [];
-for (const v of live) {
-  const r = lookupDealerVendor(v);
-  const k = r.ok ? "ok" : r.reason;
-  tally[k]++;
-  if (!r.ok && (r.reason === "unmapped" || r.reason === "inactive")) unmapped.push([v, r.reason]);
-}
-console.log(`\n  resolution over the live picklist:`);
-console.log(`    resolves to an ACTIVE vendor : ${tally.ok}`);
-console.log(`    internal (no PO — correct)   : ${tally.internal}`);
-console.log(`    INACTIVE vendor  -> fails    : ${tally.inactive}`);
-console.log(`    UNMAPPED         -> fails    : ${tally.unmapped}`);
-
-const extra = [...mapped].filter((v) => !live.includes(v));
-if (extra.length) {
-  console.log(`\n  CSV keys that are NOT active picklist values (harmless, but check they are intended aliases): ${extra.length}`);
-  for (const v of extra) console.log(`    ${JSON.stringify(v)}`);
-}
-
-// --- The number that actually matters: how many records are affected ---------
-const grouped = await sfQuery(
-  `SELECT ${FIELD} c, COUNT(Id) n FROM ${SF_OBJECT} ` +
-    `WHERE ${FIELD} != null GROUP BY ${FIELD} ORDER BY COUNT(Id) DESC`
+const dealers = await sfQuery(
+  `SELECT Id, Name, Is_Internal__c, Acumatica_Vendor_ID__c, Acumatica_Vendor_Name__c FROM Sundial_Dealer__c ` +
+    `WHERE Client__c = '${T}' AND Active__c = true ORDER BY Name`
 );
 
-const counts = { ok: 0, internal: 0, inactive: 0, unmapped: 0 };
-const failing = [];
-for (const row of grouped) {
-  const r = lookupDealerVendor(row.c);
-  const k = r.ok ? "ok" : r.reason;
-  counts[k] = (counts[k] ?? 0) + row.n;
-  if (!r.ok && r.reason !== "internal") failing.push([row.c, row.n, r.reason]);
-}
+// Solar records per dealer — what a gap actually blocks.
+const counts = new Map();
+for (const r of await sfQuery(
+  `SELECT Dealer__c d, COUNT(Id) n FROM Sundial_Solar__c WHERE Client__c = '${T}' AND Dealer__c != null GROUP BY Dealer__c`
+)) counts.set(r.d, r.n);
 
-console.log(`\n=== existing ${SF_OBJECT} records, by PO-vendor resolution ===`);
-console.log(`  resolves to an active vendor : ${counts.ok}`);
-console.log(`  internal (no PO — correct)   : ${counts.internal}`);
-console.log(`  INACTIVE vendor -> would fail: ${counts.inactive}`);
-console.log(`  UNMAPPED        -> would fail: ${counts.unmapped}`);
-
-if (failing.length) {
-  console.log(`\n  ⚠ ${counts.inactive + counts.unmapped} records would fail commission-PO creation today:`);
-  for (const [c, n, why] of failing.sort((a, b) => b[1] - a[1])) {
-    console.log(`    ${String(n).padStart(4)}  ${why.toUpperCase().padEnd(9)} ${JSON.stringify(c)}`);
+console.log(`\n=== Active dealers in "${slug}": ${dealers.length} ===\n`);
+const missing = [];
+const notInAcumatica = [];
+const ok = [];
+for (const d of dealers) {
+  const n = counts.get(d.Id) ?? 0;
+  const vendorId = String(d.Acumatica_Vendor_ID__c ?? "").trim();
+  if (d.Is_Internal__c) {
+    console.log(`  INTERNAL  ${d.Name}${vendorId ? `  ⚠ has vendor ${vendorId} set — internal deals raise no PO, so it is unused` : ""}`);
+    continue;
   }
-  console.log(`\n  Fix: add each to docs/integrations/dealer-vendor-map.csv (Harmon supplies the`);
-  console.log(`  VendorID from the Acumatica vendor list), then:`);
-  console.log(`    node scripts/generate-dealer-vendors.mjs`);
+  if (!vendorId) { missing.push([d, n]); continue; }
+  const v = await checkAcumaticaVendor(vendorId);
+  if (v.ok) ok.push([d, n, v]);
+  else notInAcumatica.push([d, n, v]);
 }
+
+for (const [d, n, v] of ok) {
+  const nameNote = d.Acumatica_Vendor_Name__c && d.Acumatica_Vendor_Name__c !== v.vendorName
+    ? `  (Sundial says "${d.Acumatica_Vendor_Name__c}")` : "";
+  console.log(`  ok        ${d.Name.padEnd(30)} ${v.vendorId}  ${v.vendorName} [${v.status}]${nameNote}  — ${n} Solar`);
+}
+
+if (missing.length) {
+  console.log(`\n  ⚠ ${missing.length} active dealer(s) with NO Acumatica_Vendor_ID__c — POs refuse vendor_missing:`);
+  for (const [d, n] of missing) console.log(`    ${d.Name.padEnd(30)} ${String(n).padStart(4)} Solar   ${d.Id}`);
+}
+if (notInAcumatica.length) {
+  console.log(`\n  ⚠ ${notInAcumatica.length} vendor ID(s) not usable in Acumatica — POs refuse ${notInAcumatica[0][2].reason}:`);
+  for (const [d, n, v] of notInAcumatica) console.log(`    ${d.Name.padEnd(30)} ${v.vendorId.padEnd(7)} ${String(n).padStart(4)} Solar   ${v.message}`);
+}
+if (!missing.length && !notInAcumatica.length) console.log("\n  Every active external dealer has a vendor that exists and is active in Acumatica.");
+
+console.log(`\nFix: Harmon finance creates / reactivates the vendor; Constructive Ops sets the`);
+console.log(`dealer's Acumatica_Vendor_ID__c. Then re-push the blocked jobs —`);
+console.log(`node scripts/list-failed-commission-pos.mjs lists the ones already refused.`);
 
 process.exitCode = 0; // report-only: gaps are information, not a build failure

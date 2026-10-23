@@ -261,6 +261,15 @@ that have no rep** (§2.4, A2) — once, offline, out of a reviewed alias CSV, n
    disagreement is resolved in the rep's favour, not merged.
 7. **A sales-company picklist value is never read to decide visibility**, on any path, in any Lambda.
    The only consumer stays the commission model (D19) and the PO vendor map (D-060).
+8. **A record's commercial terms — internal/external, redline, PO vendor — come from `Dealer__c`; the
+   sales-company picklists are read only for records created before 2026-09-04** (D-085 and its
+   amendment 1, 2026-10-22). One rule, `lib/dealer-terms.js` `resolveDealerTerms`, used by the budget
+   calc, the commission-PO engine and the SALESPERSO attribute: `Dealer__c` set → the dealer's
+   `Is_Internal__c` / `Acumatica_Vendor_ID__c` / `Name`; else the cutover date (the Customer's
+   `CreatedDate` when linked, the record's own otherwise, GMT date) before 2026-09-04 → the picklist,
+   unchanged; else **refused `DEALER_MISSING`** — never the picklist as a fallback. Invariant 6 now
+   holds across Create Project too: a rep-less Solar create that names its Customer takes the
+   Customer's `Dealer__c` (`sundial-sf-update`, logged `DEALER_FROM_CUSTOMER`).
 
 ### 2.3a The fields that decide visibility, and where each one comes from
 

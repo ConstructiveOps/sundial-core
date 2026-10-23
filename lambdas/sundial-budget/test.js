@@ -28,6 +28,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { calculateBudget, BudgetInputError } = require('./budgetCalc');
+
+// Either side of the D-085 dealer-terms cutover (the Customer's CreatedDate, GMT date).
+const PRE_CUTOVER = '2026-08-15T17:00:00.000+0000';
+const POST_CUTOVER = '2026-09-10T17:00:00.000+0000';
 const { buildWorkbook, snapshotKey } = require('./budgetWorkbook');
 
 const TOL = 0.011;
@@ -82,7 +86,15 @@ const REVISED = {
   Commission_Burden_Rate__c: 75,          // K12
   // Read through the Customer relationship: the setter (D17) and the domestic-content
   // election (D2/D3). This is a non-DC example, so the picklist is 'No'.
-  Sundial_Customer__r: { Setter__c: SETTER_ID, Domestic_Content_Eligible__c: 'No' },
+  Sundial_Customer__r: { Setter__c: SETTER_ID, Domestic_Content_Eligible__c: 'No', CreatedDate: PRE_CUTOVER },
+  // D-085 am. 1 — the dealer-terms rule. This fixture is a PICKLIST-era deal: no dealer,
+  // its Customer created before 2026-09-04, so the sales company above decides the deal
+  // type exactly as it did before the rule existed.
+  Name: 'SOL-FIXTURE',
+  CreatedDate: PRE_CUTOVER,
+  Sundial_Customer__c: 'a1P000000000FIXAAA',
+  Dealer__c: null,
+  Dealer__r: null,
 
   // ---- Adders. Selected in the cached example: Sub Panel, Structural,
   //      Bird Blocking, Software, Active Monitoring, LR Warranty, Referral.
@@ -540,6 +552,56 @@ it('D19: a BLANK sales company throws — it does not default to external', () =
   }
 });
 
+// ---------------------------------------------------------------------------
+// D-085 amendment 1 — the dealer-terms rule (lib/dealer-terms.js)
+// ---------------------------------------------------------------------------
+
+const POST_DEAL = { Sundial_Customer__r: { ...REVISED.Sundial_Customer__r, CreatedDate: POST_CUTOVER } };
+const withDealer = (name, isInternal) => ({
+  Dealer__c: 'a0Y000000000DLRAAA',
+  Dealer__r: { Name: name, Is_Internal__c: isInternal, Acumatica_Vendor_ID__c: isInternal ? null : '02118' },
+});
+
+it('D-085: a dealer decides the deal type — its flag, not the picklist', () => {
+  // The picklist says external; the dealer says internal. The dealer wins, on both
+  // sides of the cutover.
+  for (const when of [{}, POST_DEAL]) {
+    const r = calculateBudget({ ...REVISED, ...when, ...withDealer('Harmon Solar', true) });
+    assert.strictEqual(r.extras.dealType, 'internal');
+    assert.strictEqual(r.fields.Commission_Deal_Type__c, 'Internal');
+    assert.strictEqual(r.extras.dealerTermsSource, 'dealer');
+    assert.strictEqual(r.extras.salesCompany, 'Harmon Solar');
+    assert.ok(Math.abs(r.extras.internalCommissionAmt - 17112) < TOL);
+  }
+  // ...and a "Harmon Solar" picklist value cannot make a dealer deal internal.
+  const ext = calculateBudget({ ...REVISED, ...INTERNAL_DEAL, ...withDealer('Heavenly Power', false) });
+  assert.strictEqual(ext.extras.dealType, 'third_party');
+});
+
+it('D-085: a dealer deal with a BLANK picklist calculates — the picklist is not read', () => {
+  const r = calculateBudget({ ...REVISED, ...POST_DEAL, ...withDealer('Heavenly Power', false), Sales_Company_Harmon_Solar_or_Third__c: null });
+  assert.strictEqual(r.extras.dealType, 'third_party');
+  assert.ok(Math.abs(r.extras.thirdPartyCommissionAmt - 17112) < TOL);
+});
+
+it('D-085: post-cutover with no dealer is DEALER_MISSING — even with a picklist value', () => {
+  for (const company of ['Blue Sky Solar', 'Harmon Solar', null]) {
+    assert.throws(
+      () => calculateBudget({ ...REVISED, ...POST_DEAL, Sales_Company_Harmon_Solar_or_Third__c: company }),
+      (e) => e instanceof BudgetInputError && e.code === 'DEALER_MISSING' &&
+        /SOL-FIXTURE/.test(e.message) && /Sales Rep/.test(e.message),
+      `${company}: must refuse, naming the record and the Sales Rep`
+    );
+  }
+});
+
+it('D-085: SALES_COMPANY_MISSING remains, for the legacy path only', () => {
+  assert.throws(
+    () => calculateBudget({ ...REVISED, Sales_Company_Harmon_Solar_or_Third__c: '' }),
+    (e) => e.code === 'SALES_COMPANY_MISSING' && /before 2026-09-04/.test(e.message)
+  );
+});
+
 it('D19: a blank Commission_Total__c throws rather than posting a $0 commission', () => {
   // The realistic cause is the integration user missing Read FLS on the formula field,
   // which makes SOQL omit it entirely. Silently reading that as zero would produce a
@@ -583,7 +645,7 @@ it('D19: the snapshot rate cell multiplies out to the amount cell beside it', ()
 });
 
 it('D17: no setter on the Customer means no setter commission', () => {
-  const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { Setter__c: null, Domestic_Content_Eligible__c: 'No' } });
+  const r = calculateBudget({ ...REVISED, Sundial_Customer__r: { ...REVISED.Sundial_Customer__r, Setter__c: null } });
   assert.strictEqual(r.extras.setterCommissionAmt, 0);
   // Burden drops by 0.75 × 70 = 52.50, and the total by the 70 as well: 18081.50 − 122.50.
   assert.ok(Math.abs(r.fields.Commission_Burden_Amt__c - 363) < TOL);
@@ -594,6 +656,7 @@ it('D17: the setter is also readable from a flattened relationship key', () => {
   const flat = { ...REVISED };
   delete flat.Sundial_Customer__r;
   flat['Sundial_Customer__r.Setter__c'] = SETTER_ID;
+  flat['Sundial_Customer__r.CreatedDate'] = PRE_CUTOVER; // the dealer-terms rule reads it flat too
   const rFlat = calculateBudget(flat);
   assert.strictEqual(rFlat.extras.setterCommissionAmt, 70);
   // ...and with no Sundial_Customer__r at all, domestic content reads NO, not a throw.
@@ -662,6 +725,7 @@ it('DC reads the Customer picklist: only "Yes" wins, everything else is NO', () 
   // A record with no Customer relationship at all is NO, not a crash.
   const noCust = { ...REVISED };
   delete noCust.Sundial_Customer__r;
+  delete noCust.Sundial_Customer__c; // unlinked → the dealer-terms rule uses the record's own date
   const r = calculateBudget(noCust);
   assert.strictEqual(r.extras.domesticContent, false);
   assert.strictEqual(r.extras.dcRebateAmount, 0);

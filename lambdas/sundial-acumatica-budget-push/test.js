@@ -1001,6 +1001,9 @@ test("the worker SELECTs everything both downstream stages read", () => {
     "System_Size__c", "Sales_Company_Harmon_Solar_or_Third__c",
     "Commission_Deal_Type__c", "Internal_Rep_Commission_Amt__c",
     "Sales_Mgr_Commission_Amt__c", "Overhead_Commission_Amt__c",
+    // D-085 am. 1 — the dealer-terms rule (PO vendor + SALESPERSO).
+    "Dealer__c", "Dealer__r.Name", "Dealer__r.Is_Internal__c", "Dealer__r.Acumatica_Vendor_ID__c",
+    "CreatedDate", "Sundial_Customer__c", "Sundial_Customer__r.CreatedDate",
   ]) {
     assert.ok(names.includes(f), `${f} missing from the worker SELECT`);
   }
@@ -1008,6 +1011,32 @@ test("the worker SELECTs everything both downstream stages read", () => {
   for (const f of budgetFieldNames()) assert.ok(names.includes(f), `${f} dropped`);
   assert.equal(new Set(names).size, names.length, "duplicate field would break the SOQL");
   assert.ok(downstreamFieldNames().length > 0);
+});
+
+test("D-085 am. 1: both downstream stages get the SAME row, dealer fields included", async () => {
+  // The PO vendor and SALESPERSO must read one rule off one row — a stage handed a
+  // trimmed copy would refuse DEALER_TERMS_UNAVAILABLE, or worse, disagree.
+  const row = {
+    Dealer__c: "a0Y", Dealer__r: { Name: "Heavenly Power", Is_Internal__c: false, Acumatica_Vendor_ID__c: "02118" },
+    CreatedDate: "2026-09-10T16:00:00.000+0000", Sundial_Customer__c: null,
+  };
+  const seen = [];
+  await runDownstreamStages("a0X1", "R261065", row, {
+    syncCommissionPos: async (_id, values) => { seen.push(values); return { ok: true, status: "Both Raised" }; },
+    syncProjectAttributes: async (_p, values) => { seen.push(values); return { ok: true, action: "synced" }; },
+  });
+  assert.equal(seen.length, 2);
+  for (const v of seen) assert.equal(v.Dealer__r.Acumatica_Vendor_ID__c, "02118");
+});
+
+test("D-085 am. 1: a dealer refusal from the PO stage IS a push problem", async () => {
+  for (const reason of ["dealer_missing", "vendor_missing", "vendor_not_in_acumatica"]) {
+    const r = await runDownstreamStages("a0X1", "R261065", {}, {
+      syncCommissionPos: async () => ({ ok: false, reason, message: `${reason}: fix it` }),
+      syncProjectAttributes: async () => ({ ok: true, action: "synced" }),
+    });
+    assert.match(r.note ?? "", new RegExp(reason), `${reason} must reach Budget_Push_Error__c`);
+  }
 });
 
 test("a clean run reports no problem and CLEARS the error field", async () => {

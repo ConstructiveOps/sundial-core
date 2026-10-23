@@ -40,6 +40,7 @@ import { registerFileMetadata } from "../../lib/file-access.js";
 // esbuild provides the named-import interop when bundling.
 import { calculateBudget } from "./budgetCalc.js";
 import { buildWorkbook, snapshotKey } from "./budgetWorkbook.js";
+import { dealerTermsFieldNames } from "../../lib/dealer-terms.js";
 
 const XLSX_MIME =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
@@ -74,7 +75,8 @@ const INPUT_FIELDS = [
   "Name", "Project_Name__c", "Panel_Type__c", "Contract_Amount__c", "Dealer_Fee__c",
   "System_Size__c", "Module_STC_Wattage__c", "Module_Cost_Per_Watt__c",
   // Commissions — D19 redline model. The REP commission arrives in DOLLARS from the
-  // Commission_Total__c formula field and is routed by the sales company; the two
+  // Commission_Total__c formula field and is routed by the dealer-terms rule (D-085
+  // am. 1 — Dealer__r.Is_Internal__c, else the pre-cutover sales company); the two
   // rep-PPW inputs (Sales_Rep_Commission_PPW__c, Internal_Rep_Commission_PPW__c) are
   // RETIRED and deliberately NOT selected here. They still exist on the object for
   // history — do not re-add them expecting the calc to read them, because it does not.
@@ -82,7 +84,12 @@ const INPUT_FIELDS = [
   // FLS: the integration user needs READ on Commission_Total__c. Without it SOQL
   // silently omits the field and the calc throws COMMISSION_TOTAL_UNAVAILABLE, which is
   // the intended failure — a missing grant must not read as a $0 commission.
-  "Commission_Total__c", "Sales_Company_Harmon_Solar_or_Third__c",
+  "Commission_Total__c",
+  // Dealer__c, Dealer__r.Name / Is_Internal__c / Acumatica_Vendor_ID__c, CreatedDate,
+  // Sundial_Customer__c, Sundial_Customer__r.CreatedDate and the legacy
+  // Sales_Company_Harmon_Solar_or_Third__c — from the helper, so this SELECT cannot be
+  // short of a field the rule reads.
+  ...dealerTermsFieldNames("Sundial_Solar__c"),
   // Mgr + Overhead are still stored separately and summed by the calc into one SLMC
   // line (D10) — the Acumatica attribute sync splits them apart again.
   "Sales_Mgr_Commission_PPW__c", "Overhead_Commission_PPW__c",
@@ -122,6 +129,9 @@ const INPUT_FIELDS = [
   ...ADDER_COST_BASES.map((b) => `Adder_${b}_Cost__c`),
   ...[1, 2, 3, 4, 5].flatMap((n) => [`NS_Adder_${n}_Description__c`, `NS_Adder_${n}_Markup_Percent__c`, `NS_Adder_${n}_Material_Cost__c`, `NS_Adder_${n}_Labor_Hours__c`]),
 ];
+
+/** Exported for the field-list test only. */
+export { INPUT_FIELDS };
 
 async function recalcOne(recordId, source, tenantId) {
   // Read the single record's input fields (org-standard SF token via lib/salesforce.js).
@@ -274,8 +284,9 @@ export const handler = async (event) => {
       // Budget_Calc_Error__c, but a 500/"server_error" would send the person who
       // pressed the button looking for an outage instead of at the empty field.
       //
-      // This is the common case now, not an edge: D19 rejects a blank sales company,
-      // and most Solar records do not have one set yet.
+      // This is the common case now, not an edge: D19 rejects a blank sales company on a
+      // pre-cutover deal, and D-085 am. 1 rejects a post-cutover deal with no dealer
+      // (DEALER_MISSING — the message names the record and says to set the Sales Rep).
       if (err?.name === "BudgetInputError") {
         await markError(recordId, err);
         return jsonResponse(422, cors, {

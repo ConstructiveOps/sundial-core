@@ -18,6 +18,7 @@
 
 import { sfQuery, soqlEscapeString, sfUpsertRecord } from "../../lib/salesforce.js";
 import { AuroraError, listPartners, getUser } from "../../lib/aurora.js";
+import { resolveDealerAlias } from "../../lib/dealer-aliases.js";
 
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const EXTERNAL_ID_FIELD = "Aurora_Project_ID__c";
@@ -26,10 +27,11 @@ export const EXTERNAL_ID_FIELD = "Aurora_Project_ID__c";
 export const F_DEALER_NAME = "Aurora_Dealer_Name__c";
 export const F_IMPORT_NOTES = "Aurora_Import_Notes__c";
 
-// The Lead_Source__c value that marks a dealer-originated import. The org's
-// picklist does NOT contain it today (it has ~200 partner-specific values but no
-// generic Aurora one), so the field is skipped with a warning until Tim adds it.
-export const DEALER_LEAD_SOURCE = "Aurora - Third-Party Dealer";
+// Lead_Source__c on an auto-created customer is the DEALER — the resolved
+// Sundial_Dealer__c Name, else the raw Aurora partner name (D-085 am. 1, 2026-10-22).
+// The single generic "Aurora - Third-Party Dealer" tag is gone: it told Harmon a deal came
+// from "a dealer" and not which one. The org's picklist already carries ~200
+// partner-specific values, and Tim is unrestricting it — see buildLeadSource.
 
 // Where a SIGNED deal lands in the pipeline. Aurora's `signed` status translates to
 // exactly these two values in Sundial (Tim, 2026-08-10) — for EVERY signed event,
@@ -131,6 +133,80 @@ async function partnerNameFor(partnerId) {
 }
 
 /**
+ * Resolve an Aurora partner's name to a Sundial_Dealer__c row in the tenant (D-085 am. 1).
+ *
+ * EXACT Name first (compared in code, because SOQL `=` ignores case), then the reviewed
+ * alias CSV (lib/dealer-aliases.js, generated from docs/integrations/dealer-aliases.csv)
+ * and an exact match on the canonical name it gives. NEVER a guess: two rows with one
+ * name, or no row at all, is unresolved, and the caller leaves Dealer__c null with a
+ * warning. Never throws — a dealer lookup must not fail a signed sale.
+ *
+ * Only a PARTNER name is looked up. An owner's personal name or a raw id is not a dealer
+ * organization, and matching one to a dealer row would be a guess.
+ *
+ * @returns {Promise<{ dealer: {Id: string, Name: string}|null, via: "name"|"alias"|null, warnings: string[] }>}
+ */
+export async function resolveSundialDealer(partnerName, tenantId) {
+  const warnings = [];
+  const name = cleanStr(partnerName);
+  if (!name) return { dealer: null, via: null, warnings };
+  const canonical = resolveDealerAlias(name);
+  const names = [...new Set([name, canonical].filter(Boolean))];
+  let rows;
+  try {
+    rows = await sfQuery(
+      `SELECT Id, Name FROM Sundial_Dealer__c WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+        `AND Name IN (${names.map((n) => `'${soqlEscapeString(n)}'`).join(", ")})`
+    );
+  } catch (e) {
+    warnings.push(`Could not look up a Sundial dealer for Aurora partner "${name}": ${e?.message || e} — Dealer__c left blank.`);
+    return { dealer: null, via: null, warnings };
+  }
+  for (const [want, via] of [[name, "name"], [canonical, "alias"]]) {
+    if (!want) continue;
+    const hits = (rows || []).filter((r) => cleanStr(r?.Name) === want);
+    if (hits.length === 1) return { dealer: { Id: hits[0].Id, Name: hits[0].Name }, via, warnings };
+    if (hits.length > 1) {
+      warnings.push(`${hits.length} Sundial dealers are named "${want}" — Dealer__c left blank rather than picking one. Merge or rename the duplicates, then set the dealer on the customer.`);
+      return { dealer: null, via: null, warnings };
+    }
+  }
+  warnings.push(
+    `Aurora partner "${name}" matches no Sundial dealer in this tenant (exact Name or dealer-aliases.csv) — ` +
+      "Dealer__c left blank. Create the dealer, or add the spelling to docs/integrations/dealer-aliases.csv, " +
+      "then set the dealer (or a Sales Rep) on the customer: a deal with no dealer has no commission terms."
+  );
+  return { dealer: null, via: null, warnings };
+}
+
+/**
+ * Lead_Source__c for an auto-created customer (D-085 am. 1). The value is the resolved
+ * dealer's Name, else the raw partner name. Written as the org spells it when the
+ * picklist has it; written as-is when the describe says the picklist is UNRESTRICTED
+ * (Tim is unrestricting it); otherwise today's match-or-skip — skipped, warned, noted —
+ * because a restricted picklist rejects an unknown value and would fail the insert.
+ *
+ * @returns {{ value: string|null, warning: string|null, note: string|null }}
+ */
+export function buildLeadSource(wanted, schema) {
+  const raw = cleanStr(wanted);
+  if (!raw) return { value: null, warning: null, note: null };
+  if (!schema.has("Lead_Source__c")) {
+    return { value: null, warning: "Salesforce has no field Lead_Source__c — value not written.", note: null };
+  }
+  const matched = matchPicklist(raw, schema.picklistValues("Lead_Source__c"));
+  if (matched) return { value: matched, warning: null, note: null };
+  // Unknown restriction = restricted: the safe reading of a describe we cannot see.
+  const restricted = typeof schema.isRestricted === "function" ? schema.isRestricted("Lead_Source__c") !== false : true;
+  if (!restricted) return { value: raw, warning: null, note: null };
+  return {
+    value: null,
+    warning: `Lead_Source__c has no "${raw}" value and the picklist is restricted — left unset. Add the value, or unrestrict the picklist (TASKS.md).`,
+    note: `Lead source (not in picklist): ${raw}`,
+  };
+}
+
+/**
  * Work out who the dealer is.
  *
  * Preference order, best evidence first:
@@ -142,7 +218,8 @@ async function partnerNameFor(partnerId) {
  * 403 on these endpoints (not provisioned for our key) simply degrades to raw ids
  * plus a warning. The ids always land in the import notes either way.
  *
- * @returns {Promise<{ name: string|null, warnings: string[] }>}
+ * @returns {Promise<{ name: string|null, source: "partner"|"owner"|"raw"|null, warnings: string[] }>}
+ *   `source` says what KIND of name it is — only a "partner" name is a dealer organization.
  */
 export async function resolveDealer(project) {
   const warnings = [];
@@ -152,7 +229,7 @@ export async function resolveDealer(project) {
   if (partnerId) {
     try {
       const name = await partnerNameFor(partnerId);
-      if (name) return { name, warnings };
+      if (name) return { name, source: "partner", warnings };
       warnings.push(
         `Aurora partner_id ${partnerId} is not in the tenant's partner list — dealer name unresolved.`
       );
@@ -171,7 +248,7 @@ export async function resolveDealer(project) {
       const name = [cleanStr(user?.first_name), cleanStr(user?.last_name)]
         .filter(Boolean)
         .join(" ");
-      if (name) return { name, warnings };
+      if (name) return { name, source: "owner", warnings };
     } catch (e) {
       warnings.push(
         e instanceof AuroraError && e.notProvisioned
@@ -188,7 +265,7 @@ export async function resolveDealer(project) {
       `Dealer name could not be resolved; recorded the raw Aurora id "${raw}" instead.`
     );
   }
-  return { name: raw, warnings };
+  return { name: raw, source: raw ? "raw" : null, warnings };
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -257,7 +334,9 @@ export function buildImportNotes({ project, agreementId, receivedAt, extras = []
  * @param {string} args.receivedAt
  * @param {string} args.tenantId     - Client__c
  * @param {string|null} args.dealerName
- * @param {object} args.schema       - { has(name), picklistValues(name) }
+ * @param {{Id: string, Name: string}|null} [args.sundialDealer] - resolveSundialDealer's row
+ * @param {string|null} [args.leadSourceName] - the dealer's Name, else the raw partner name
+ * @param {object} args.schema       - { has(name), picklistValues(name), isRestricted(name) }
  * @returns {{ fields: object, warnings: string[] }}
  */
 export function buildCustomerFields({
@@ -267,6 +346,9 @@ export function buildCustomerFields({
   receivedAt,
   tenantId,
   dealerName,
+  sundialDealer = null,
+  leadSourceName = null,
+  noteLines = [],
   schema,
 }) {
   const warnings = [];
@@ -318,24 +400,20 @@ export function buildCustomerFields({
     }
   }
 
-  // Lead source marks these as dealer-originated — but only if the org actually has
-  // the value; an invalid picklist entry would fail the insert.
-  const leadSource = matchPicklist(
-    DEALER_LEAD_SOURCE,
-    schema.picklistValues("Lead_Source__c")
-  );
-  if (leadSource) {
-    set("Lead_Source__c", leadSource);
-  } else {
-    warnings.push(
-      `Lead_Source__c has no "${DEALER_LEAD_SOURCE}" value in this org — left unset. Add the picklist value (see TASKS.md) to tag dealer-originated deals.`
-    );
-    noteExtras.push(`Lead source (not in picklist): ${DEALER_LEAD_SOURCE}`);
-  }
+  // Lead source NAMES THE DEALER (D-085 am. 1): the resolved dealer, else the partner.
+  const lead = buildLeadSource(sundialDealer?.Name ?? leadSourceName, schema);
+  if (lead.value) set("Lead_Source__c", lead.value);
+  if (lead.warning) warnings.push(lead.warning);
+  if (lead.note) noteExtras.push(lead.note);
+  noteExtras.push(...noteLines);
 
   set("Active__c", true);
   set("Client__c", tenantId);
+  // Aurora's own name for the dealer, kept as before — the raw evidence.
   set(F_DEALER_NAME, dealerName);
+  // The Sundial dealer (D-085 am. 1): the deal's commercial terms come from it. Unresolved
+  // stays null — the warning (from resolveSundialDealer) goes in the notes too.
+  if (sundialDealer?.Id) set("Dealer__c", sundialDealer.Id);
 
   // Pipeline position — identical to what a matched customer gets on `signed`,
   // via the one shared helper so the two paths can't drift.
@@ -369,6 +447,15 @@ export async function createCustomerFromAuroraProject({
 }) {
   const tenantId = await resolveTenantId();
   const dealer = await resolveDealer(project);
+  const partnerName = dealer.source === "partner" ? dealer.name : null;
+  const sundial = partnerName
+    ? await resolveSundialDealer(partnerName, tenantId)
+    : {
+        dealer: null, via: null,
+        warnings: dealer.name
+          ? [`"${dealer.name}" is not an Aurora partner name (no partner on the project), so no Sundial dealer was looked up — Dealer__c left blank.`]
+          : [],
+      };
 
   const { fields, warnings } = buildCustomerFields({
     project,
@@ -377,7 +464,10 @@ export async function createCustomerFromAuroraProject({
     receivedAt,
     tenantId,
     dealerName: dealer.name,
+    sundialDealer: sundial.dealer,
+    leadSourceName: partnerName,
     schema,
+    noteLines: sundial.warnings.map((w) => `Dealer (unresolved): ${w}`),
   });
 
   const result = await sfUpsertRecord(
@@ -391,6 +481,7 @@ export async function createCustomerFromAuroraProject({
     id: result.id,
     created: result.created,
     dealerName: dealer.name,
-    warnings: [...dealer.warnings, ...warnings],
+    dealerId: sundial.dealer?.Id ?? null,
+    warnings: [...dealer.warnings, ...sundial.warnings, ...warnings],
   };
 }

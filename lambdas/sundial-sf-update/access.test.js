@@ -54,6 +54,7 @@ function reset() {
   ctx.userLookup = { Id: REP_B, Dealer__c: DEALER_B };
   ctx.jobBefore = null;
   ctx.payers = [];
+  ctx.customerDealers = {}; // Sundial_Customer__c Id -> its Dealer__c (D-085 am. 1)
   process.env.ACCESS_MODEL_MODE = "enforce";
 }
 
@@ -78,6 +79,12 @@ mock.module("../../lib/salesforce.js", {
       // D-081: the job's Bill To as it is, and the paying-customer read (tenant-scoped).
       if (/SELECT Id, Bill_To_Type__c, Bill_To_Customer__c FROM Sundial_Service_Job__c/.test(soql)) {
         return ctx.jobBefore ? [ctx.jobBefore] : [];
+      }
+      // D-085 am. 1: the Customer's dealer on a rep-less Solar create (tenant-scoped).
+      if (/^SELECT Id, Dealer__c FROM Sundial_Customer__c/.test(soql)) {
+        const id = soql.match(/Id = '([^']+)'/)?.[1];
+        if (!soql.includes(`Client__c = '${TENANT}'`) || !(id in (ctx.customerDealers || {}))) return [];
+        return [{ Id: id, Dealer__c: ctx.customerDealers[id] }];
       }
       if (/Company_Name__c.* FROM Sundial_Customer__c/.test(soql)) {
         const id = soql.match(/Id = '([^']+)'/)?.[1];
@@ -105,6 +112,7 @@ const DESCRIBE_FIELDS = [
   { name: "Client__c", updateable: true, createable: true },
   { name: "Sales_Rep__c", updateable: true, createable: true },
   { name: "Dealer__c", updateable: true, createable: true },
+  { name: "Sundial_Customer__c", updateable: true, createable: true },
   { name: "Stage__c", updateable: true, createable: true },
   { name: "First_Name__c", updateable: true, createable: true },
   { name: "Last_Name__c", updateable: true, createable: true },
@@ -392,6 +400,74 @@ test("TENANT create: an unknown rep is refused, and nothing is written", async (
   assert.equal(res.statusCode, 400);
   assert.equal(JSON.parse(res.body).code, "INVALID_SALES_REP");
   assert.equal(ctx.writes.length, 0, "refused before the create, not after");
+});
+
+// ---------------------------------------------------------------------------
+// §2.3 invariant 6 across Create Project (D-085 am. 1, 2026-10-22)
+// ---------------------------------------------------------------------------
+// A rep-less dealer deal must keep its dealer when it becomes a Solar project — after
+// 2026-09-04 a Solar record with no dealer has no commercial terms at all.
+
+test("TENANT Solar create with a Customer and NO rep takes the Customer's dealer, and logs it", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.customerDealers = { [CUST_1]: DEALER_B };
+  const res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1 }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B);
+  const q = ctx.soqlSeen.find((x) => /FROM Sundial_Customer__c/.test(x));
+  assert.ok(q.includes(`Client__c = '${TENANT}'`), "the Customer read is tenant-scoped");
+  assert.ok(ctx.warns.some((w) => w.includes("DEALER_FROM_CUSTOMER")), "logged like DEALER_DERIVED_OVERRIDE");
+});
+
+test("a BLANK rep in the body counts as no rep — the Create Project map's shape", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.customerDealers = { [CUST_1]: DEALER_B };
+  for (const blank of [null, ""]) {
+    ctx.writes = [];
+    const res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1, Sales_Rep__c: blank }));
+    assert.equal(res.statusCode, 201);
+    assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B, `rep ${JSON.stringify(blank)} must not null the dealer`);
+  }
+  assert.equal(ctx.soqlSeen.filter((q) => /FROM Sundial_User__c/.test(q)).length, 0, "no rep lookup");
+});
+
+test("the Customer's dealer overrides a Dealer__c in the body, and the override is logged", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.customerDealers = { [CUST_1]: DEALER_B };
+  const res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1, Dealer__c: DEALER }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B);
+  const note = JSON.parse(ctx.warns.find((w) => w.includes("DEALER_FROM_CUSTOMER")));
+  assert.equal(note.overridden, true);
+  assert.equal(note.supplied, DEALER);
+});
+
+test("a Customer with no dealer (or outside the tenant) leaves the body exactly as it was", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.customerDealers = { [CUST_1]: null };
+  let res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1 }));
+  assert.equal(res.statusCode, 201);
+  assert.ok(!("Dealer__c" in ctx.writes[0].body), "nothing invented");
+  ctx.writes = [];
+  ctx.customerDealers = {}; // not found in this tenant
+  res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1, Dealer__c: DEALER }));
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER, "never cleared");
+});
+
+test("the REP-carrying Solar create is unchanged: the rep's dealer wins, the Customer is not read", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  ctx.customerDealers = { [CUST_1]: DEALER };
+  const res = await handler(postEvent("solar", { Sundial_Customer__c: CUST_1, Sales_Rep__c: REP_B }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.writes[0].body.Dealer__c, DEALER_B, "A1: from the rep");
+  assert.equal(ctx.soqlSeen.filter((q) => /FROM Sundial_Customer__c/.test(q)).length, 0);
+});
+
+test("a rep-less CUSTOMER create does not read any customer (the rule is Solar-only)", async () => {
+  ctx.identity = identityFor("Admin", { dealer: null });
+  const res = await handler(postEvent("customer", { First_Name__c: "New" }));
+  assert.equal(res.statusCode, 201);
+  assert.equal(ctx.soqlSeen.filter((q) => /^SELECT Id, Dealer__c FROM Sundial_Customer__c/.test(q)).length, 0);
 });
 
 test("SALES-scope create is UNCHANGED — stamped from the token, no rep lookup", async () => {

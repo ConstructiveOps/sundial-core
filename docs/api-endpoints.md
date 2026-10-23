@@ -576,7 +576,9 @@ Acumatica returns **200 and silently discards** an `AttributeID` the project's t
 ```
 The Lambda also sets `Budget_Calc_Status__c = 'Calculated'`, `Budget_Last_Calculated__c`, and `Latest_Budget_File_Path__c` on the record. On failure it flips `Budget_Calc_Status__c = 'Error'` with `Budget_Calc_Error__c` and returns 500.
 
-**Errors:** 401 (no/invalid token), 403 (`NO_SUNDIAL_USER` / `USER_INACTIVE` / `NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 400 (`MISSING_RECORD_ID`), 500 (`server_error`).
+**Errors:** 401 (no/invalid token), 403 (`NO_SUNDIAL_USER` / `USER_INACTIVE` / `NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 400 (`MISSING_RECORD_ID`), 500 (`server_error`), and **422 `invalid_input`** with a `code` for bad record data (`Budget_Calc_Status__c = 'Error'` too): `DEALER_MISSING` (D-085 am. 1 — created on/after 2026-09-04 with no `Dealer__c`; the message names the record and says to set the Sales Rep), `DEALER_TERMS_UNAVAILABLE` (dealer or date unreadable), `SALES_COMPANY_MISSING` (pre-cutover, no dealer, blank sales company), `COMMISSION_TOTAL_UNAVAILABLE`, `BURDEN_RATE_IMPLAUSIBLE`, `PPW_PRICE_IMPLAUSIBLE`, `NS_MARKUP_IMPLAUSIBLE`.
+
+**Commission POs (the budget push's Stage B, D-085 am. 1).** Not an HTTP error — written to `Commission_PO_Status__c = 'Failed'` / `Commission_PO_Error__c` and `Budget_Push_Error__c`: `dealer_missing`, `vendor_missing`, `vendor_internal`, `vendor_not_in_acumatica`, `vendor_lookup_failed`, `dealer_terms_unavailable`, and the legacy `vendor_unmapped` / `vendor_inactive` / `vendor_blank`. `internal_deal` / `no_commission` are `None`, not failures.
 
 **Other recalc trigger (not an HTTP route):** the same Lambda also runs from the `Sundial_Budget_Recalc__e` platform event via the EventBridge/SQS relay (field-change Flow). See `docs/integrations/budget-recalc-relay.md` and the Flow in `salesforce/flows/`. Calc-in-Lambda rationale: D-038.
 
@@ -1075,6 +1077,8 @@ Under `ACCESS_MODEL_MODE=enforce`, every read and write endpoint answers to
 | An action the role may not perform | **403** `ACTION_FORBIDDEN` | A capability, not a record |
 | A picklist for a field the role may not read | **404** `FIELD_NOT_FOUND` | Same oracle reasoning as a record |
 | A single-credential integration the caller's **tenant** is not enabled for (D-078) | **403** `INTEGRATION_NOT_ENABLED` | About the tenant, not the record or the role: Acumatica, Aurora. Answered before any read, so it is the same for every id |
+
+**Dealer stamping on create (`POST /sf/{object}`, tenant scope).** A body with `Sales_Rep__c` gets `Dealer__c` from the rep (A1; `400 INVALID_SALES_REP` for an unknown rep; `DEALER_DERIVED_OVERRIDE` logged when it replaces a body value). **`POST /sf/solar` with `Sundial_Customer__c` and no (or a blank) `Sales_Rep__c`** gets the Customer's `Dealer__c` (D-085 am. 1, tenant-scoped read, logged `DEALER_FROM_CUSTOMER`); a Customer with no dealer leaves the body as sent.
 
 ⚠️ One deliberate exception: on the **record-addressed file routes**, a `none`-scope
 caller gets **403**, not 404. They are refused by the action gate before any record is

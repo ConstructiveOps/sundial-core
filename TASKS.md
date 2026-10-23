@@ -4,15 +4,33 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## 2026-10-22 — Dealer terms on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — PACKAGE BUILT, NOT DEPLOYED
+## 2026-10-22 — The backend reads the dealer (D-085 amendment 1, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
+
+- [x] `lib/dealer-terms.js` (`resolveDealerTerms`, 10 tests): dealer → its terms; else pre-2026-09-04 → the picklist; else `DEALER_MISSING`
+- [x] `sundial-budget`: deal type through the rule; `DEALER_MISSING` 422 names the record and says to set the Sales Rep; `SALES_COMPANY_MISSING` legacy-only
+- [x] `sundial-acumatica-commission-po`: vendor = the dealer's; `vendor_missing` / `dealer_missing` / `vendor_internal`; `vendor_not_in_acumatica` (GET Vendor before every create, `lib/acumatica-vendor-check.js`); CSV map only for the legacy source; `PO_NUMBER_FIELDS` unchanged
+- [x] `lib/acumatica-attributes.js`: SALESPERSO = the dealer's Name (free text in Acumatica — D24 step 8 — so no value list to match); omitted for a post-cutover deal with no dealer
+- [x] `sundial-acumatica-budget-push`: the worker SELECTs the dealer-terms fields; both stages get the same row
+- [x] `sundial-sf-update`: a rep-less `POST /sf/solar` with `Sundial_Customer__c` takes the Customer's dealer (`DEALER_FROM_CUSTOMER`)
+- [x] `sundial-aurora-inbound`: auto-create writes `Dealer__c` (exact Name, then `dealer-aliases.csv` via the generated `lib/dealer-aliases.js`) and `Lead_Source__c` = the dealer; the generic "Aurora - Third-Party Dealer" tag dropped
+- [x] `scripts/verify-dealer-vendor-coverage.mjs` rewritten for dealers; `scripts/list-failed-commission-pos.mjs` new. Suite 1,650 / 1,650
+- [ ] **TIM: deploy** (PowerShell, from `C:\Users\TimMurphy\Projects\sundial-core`): `.\deploy.ps1 sundial-budget`, `.\deploy.ps1 sundial-acumatica-budget-push` (it bundles the commission-PO engine, which has no Lambda of its own), `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-aurora-inbound`
+- [ ] **TIM: unrestrict `Sundial_Customer__c.Lead_Source__c`** (Setup → the field → uncheck "Restrict picklist to the values defined in the value set"). Until then a dealer name the picklist lacks is skipped with a warning, as before
+- [ ] **TIM: vendor ids for Invictus Energy and Sunlink Energy** (`verify-dealer-vendor-coverage.mjs`, 2026-10-22: the only active external dealers without one; Heavenly Power 02118, Property Upgrades 01995, Suzuki Solar 02050 exist and are Active in Acumatica). SOL-10141 (Invictus) is waiting on it
+- [ ] **TIM: the one post-cutover Solar record with no dealer whose Customer has one** — set its `Dealer__c` from the Customer (the new create path prevents more). And the 13 post-cutover Solar records with a rep but no dealer: their reps have no `Dealer__c` — set it on the rep (`Sundial_User__c`), and the next rep save re-stamps the deal
+- [ ] **TIM: 6 pre-cutover Solar records where the dealer and the picklist disagree on internal vs external** (SOL-5733, SOL-6179, SOL-6200, SOL-8767, SOL-9396, SOL-9603 — none calculated or pushed yet). Their budget line follows the dealer (the rule), their redline formula still follows the picklist (v9 keeps pre-9/4 redlines). Correct whichever is wrong before calculating them
+- [ ] **Re-push pass:** `node scripts/list-failed-commission-pos.mjs` — 32 Failed on 2026-10-22. 6 are an unmapped sales company (after deploy the dealer ones become `vendor_missing` until the vendor id is set). ⚠️ **26 are NOT a dealer problem:** "PO … was updated but no longer matches the expected shape: UnitCost is X, expected Y" — the amount PUT returns 200 but the re-read shows the old amount (e.g. SOL-10125 M2: 11,868 vs 12,508). That is the update path in `updateCommissionPo`, pre-existing; investigate before re-pushing those, a re-push will fail the same way
+- [ ] **Next Salesforce package (metadata only):** `Commission_Redline_PPW__c` inline help text on BOTH objects → "Blank when the deal has no dealer (set the Sales Rep); deals created before 2026-09-04 use the legacy sales-company rates." (it still says "Blank if the sales company is not set"; v9 kept every attribute identical to v8 by spec)
+
+## 2026-10-22 — Dealer terms on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — DEPLOYED (Tim, 2026-10-22)
 
 - [x] `salesforce/v9-dealer-terms/` (generate / verify 81 checks / zip): 4 dealer fields, Customer + Solar `Commission_Redline_PPW__c` and `Sales_Rep_Name__c` replaced, `Dealer_Display_Name__c`, permission set `Sundial_Dealer_Terms`
 - [x] `scripts/backfill-dealer-terms.mjs` (dry run by default, canary first) and `scripts/probe-dealer-terms-cutover.mjs` (run 2026-10-22: 91 Customer + 18 Solar redlines go number → blank)
 - [ ] **TIM: decide the 91 + 18 before deploying.** All 91 Customers are rep-less, so there is no dealer to derive. Either accept blank commission on them until a rep is assigned, or set `Dealer__c` on them (D-064 invariant 6). The probe lists every Id
-- [ ] **TIM: deploy** `salesforce/v9-dealer-terms.zip` (Check Only first), assign **Sundial Dealer Terms** to the integration user, then **straight away** `node scripts/backfill-dealer-terms.mjs` → `--apply`
+- [x] **TIM: deploy** `salesforce/v9-dealer-terms.zip`, assign **Sundial Dealer Terms**, backfill — done (the dealer rows carry their redlines, read 2026-10-22)
 - [ ] **TIM: full cache resync** of `customer` then `solar` (`{ "mode": "full", "object": "customer" }`) — `sales_rep_name` changed by formula, so no modstamp moved. Then `node scripts/check-cache-formula-coverage.mjs`
 - [ ] **TIM: vendors the CSV cannot place.** 8 CSV rows reach no dealer (rep names: Dennis Alessandro, Thomas Kopp, Daniel Reese, Ben Wollschlager; plus Desert Sun Systems, Volt Energy, SunbaseData Admin, and "Mr. Clutch Solar", whose dealer is reached through its "Mr Clutch Solar" row anyway). Active dealers left without a vendor: Invictus Energy, Sunlink Energy (+ the two ZZ fixtures; Harmon Solar is internal, correctly blank)
-- [ ] **Lambdas still read the Solar picklist for post-cutover deals:** `sundial-budget` (internal vs external line, `budgetCalc.js` `SALES_COMPANY_FIELD`), `sundial-acumatica-commission-po` (`lookupDealerVendor`), `lib/acumatica-attributes.js` (`SALESPERSO`). Move them to `Dealer__r.Is_Internal__c` / `Dealer__r.Acumatica_Vendor_ID__c` for deals created on/after 2026-09-04 (D-085)
+- [x] **Lambdas still read the Solar picklist for post-cutover deals** — done in D-085 amendment 1 (section above), deploy pending
 
 ## 2026-10-22 — Dealer module step 0 of 9: field visibility from Harmon's sheet (`feature/dealer-visibility`) — APPLIED TO THE WORKBOOKS + MANIFEST, NOT DEPLOYED
 

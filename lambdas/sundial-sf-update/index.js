@@ -1123,7 +1123,53 @@ async function handleCreate({ entry, tenantId, fields, describe, cors, objectKey
     const dealerDef = (describe.fields || []).find(
       (f) => f.name.toLowerCase() === "dealer__c" && f.createable === true
     );
-    if (repKey && dealerDef) {
+    const repBlank = !repKey || payload[repKey] === null || String(payload[repKey]).trim() === "";
+    const customerKey = Object.keys(payload).find((k) => k.toLowerCase() === "sundial_customer__c");
+
+    // §2.3 INVARIANT 6 ACROSS CREATE PROJECT (D-085 am. 1, 2026-10-22). A Solar record
+    // created from a Customer with NO rep in the body takes the CUSTOMER's dealer. Without
+    // this a rep-less dealer deal (an Aurora dealer origination, D-049) lost its dealer at
+    // Create Project — the portal's map copies the rep (blank) and not the dealer — and
+    // from 2026-09-04 a Solar record with no dealer has no commercial terms: the budget
+    // refuses DEALER_MISSING and no commission PO can be raised. One record was in that
+    // state on 2026-10-22.
+    //
+    // A blank rep in the body counts as no rep: that is the shape the Create Project map
+    // sends for a rep-less customer, and deriving "null dealer from null rep" below would
+    // erase the very dealer this exists to keep. The Customer's dealer WINS over a
+    // Dealer__c in the body (same rule as the rep path: the dealer is never an independent
+    // input when there is a source for it), logged when they differ. A Customer with NO
+    // dealer changes nothing — the body is left exactly as it was, so this can only add a
+    // dealer, never clear one. The read is TENANT-SCOPED; a Customer outside the caller's
+    // tenant yields nothing, and the body is again left as it was.
+    if (objectKey === "solar" && repBlank && customerKey && payload[customerKey] && dealerDef) {
+      const custRows = await sfQuery(
+        `SELECT Id, Dealer__c FROM Sundial_Customer__c ` +
+          `WHERE Id = '${soqlEscapeString(String(payload[customerKey]).trim())}' ` +
+          `AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`
+      );
+      const fromCustomer = custRows?.[0]?.Dealer__c ?? null;
+      if (fromCustomer) {
+        const dealerKey =
+          Object.keys(payload).find((k) => k.toLowerCase() === "dealer__c") ?? dealerDef.name;
+        const supplied = dealerKey in payload ? payload[dealerKey] ?? null : undefined;
+        console.warn(
+          JSON.stringify({
+            accessNote: "DEALER_FROM_CUSTOMER",
+            message:
+              "Dealer__c on the new Solar record was taken from its Customer (no Sales_Rep__c " +
+              "in the body; §2.3 invariant 6 across Create Project).",
+            object: objectKey,
+            create: true,
+            customer: custRows[0].Id,
+            supplied: supplied ?? null,
+            derived: fromCustomer,
+            overridden: supplied !== undefined && supplied !== fromCustomer,
+          })
+        );
+        payload[dealerKey] = fromCustomer;
+      }
+    } else if (repKey && dealerDef) {
       const derived = await dealerForNewRep({
         repValue: payload[repKey],
         tenantId,

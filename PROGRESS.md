@@ -1,5 +1,18 @@
 # Sundial — Progress Log
 
+## 2026-10-22 — The backend reads the dealer, one rule everywhere (D-085 amendment 1, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
+
+- **`lib/dealer-terms.js` `resolveDealerTerms`.** `Dealer__c` set → `source "dealer"` (`Is_Internal__c`, `Acumatica_Vendor_ID__c`, `Name`). Else the cutover date (the Customer's `CreatedDate` when linked, else the record's own; GMT date, like the formula's `DATEVALUE`) before 2026-09-04 → `source "legacy"` (the picklist, unchanged). Else `DEALER_MISSING`. A dealer id with no readable row, or no readable date, is `DEALER_TERMS_UNAVAILABLE` — never silently "legacy". `dealerTermsFieldNames(object)` is the one SELECT list.
+- **`sundial-budget`:** routes Internal / External through the rule. `DEALER_MISSING` is a 422 whose message names the record and says to set the Sales Rep; `SALES_COMPANY_MISSING` is legacy-only. `budgetCalc.js` (CommonJS) `require`s the ESM helper — Node 24 and esbuild both handle it (bundle checked).
+- **`sundial-acumatica-commission-po`:** `resolveCommissionVendor` — the dealer's vendor id, refusing `vendor_missing` / `vendor_internal` / `dealer_missing`; the D4 CSV only for the legacy source. Before any CREATE, `lib/acumatica-vendor-check.js` GETs the Vendor: missing or Inactive → `vendor_not_in_acumatica` (names the id), no answer → `vendor_lookup_failed`. Update-only runs skip the check (the re-read already verifies the vendor). `PO_NUMBER_FIELDS` untouched; a test pins one M1 ever.
+- **SALESPERSO** = the rule's `salesCompanyName`. The attribute is free text in Acumatica (hand-proof step 8, D24), so a dealer Name needs no value list; no legacy fallback was needed. Omitted (not `""`) for a post-cutover deal with no dealer.
+- **`sundial-acumatica-budget-push`:** `downstreamFieldNames()` adds the PO engine's dealer fields (deduped); both stages get the same row.
+- **`sundial-sf-update`:** a tenant-scope `POST /sf/solar` with `Sundial_Customer__c` and no or a blank `Sales_Rep__c` takes the Customer's `Dealer__c` (tenant-scoped read, `DEALER_FROM_CUSTOMER` log, wins over a body value; a Customer with no dealer changes nothing). The blank-rep case mattered: the Create Project map sends a blank rep for a rep-less customer, which the old path turned into a null dealer.
+- **`sundial-aurora-inbound`:** the auto-created customer gets `Dealer__c` from the Aurora **partner** name — exact Name (compared in code; SOQL `=` ignores case), then `dealer-aliases.csv`; duplicates or no match → null + warning + a notes line. `Lead_Source__c` = the dealer's Name (else the partner name), written when the picklist has it or is unrestricted, else match-or-skip. The aliases reach the Lambda through a generated `lib/dealer-aliases.js` (`scripts/generate-dealer-aliases.mjs`, staleness test) — the CSV stays the source.
+- **Scripts:** `verify-dealer-vendor-coverage.mjs` rewritten for dealers (run: Heavenly Power, Property Upgrades, Suzuki Solar OK in Acumatica; Invictus, Sunlink and the 2 ZZ dealers have no vendor id). `list-failed-commission-pos.mjs` new (run: 32 Failed — 26 an amount-update re-read mismatch unrelated to dealers, 6 unmapped).
+- **Read-only probes, 2026-10-22:** 6 pre-cutover Solar records where dealer and picklist disagree on internal (none calculated); post-cutover Solar: 20 dealer = Customer's, 18 neither, 1 Solar-null-Customer-set, 13 with a rep whose user has no dealer.
+- Suite **1,650 / 1,650**.
+
 ## 2026-10-22 — Dealer terms live on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
 
 - **Package `salesforce/v9-dealer-terms/`** (same shape as v3: `generate.mjs`, `verify.mjs`, objects, package.xml, zip via `scripts/build-zips.mjs`):

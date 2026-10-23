@@ -187,6 +187,9 @@ async function resolveCustomerSchema() {
     missingOptional: missing,
     allFields: byLower,
     picklistValues,
+    // Whether the org rejects a value not in the picklist (describe `restrictedPicklist`).
+    // Lead_Source__c is written as the dealer's name when this is false (D-085 am. 1).
+    isRestricted: (name) => byLower.get(String(name).toLowerCase())?.restrictedPicklist === true,
     partnerPicklistValues: picklistValues("Financing_Partner__c"),
     selectFields: [...CUSTOMER_BASE_FIELDS, ...present],
   };

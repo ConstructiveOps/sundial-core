@@ -53,9 +53,21 @@
 // not a bad row, it is Harmon paying a dealer twice; a wrong vendor is paying the wrong
 // company. So every write here is create-then-verify-by-re-read (the D20 pattern), and
 // every refusal is loud.
+//
+// ---------------------------------------------------------------------------
+// WHICH VENDOR — the dealer, since D-085 amendment 1 (2026-10-22)
+// ---------------------------------------------------------------------------
+// The vendor comes from lib/dealer-terms.js: a deal with a Dealer__c is paid to
+// Dealer__r.Acumatica_Vendor_ID__c; only a deal created before 2026-09-04 with no dealer
+// still goes through the D4 CSV map (lookupDealerVendor) by its sales-company picklist.
+// A post-cutover deal with no dealer is refused (dealer_missing) — never the picklist.
+// And before ANY create, the vendor id is looked up in Acumatica (vendor_not_in_acumatica)
+// — a typo in a dealer's vendor id must not become a PO to whoever owns that id.
 
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { lookupDealerVendor } from "../../lib/acumatica-dealer-vendors.js";
+import { resolveDealerTerms, dealerTermsFieldNames } from "../../lib/dealer-terms.js";
+import { checkAcumaticaVendor } from "../../lib/acumatica-vendor-check.js";
 import { sfUpdateRecord } from "../../lib/salesforce.js";
 
 const PO_ENTITY = "PurchaseOrder";
@@ -482,18 +494,68 @@ export function planCommissionPos(values) {
     };
   }
 
-  const vendor = lookupDealerVendor(values?.Sales_Company_Harmon_Solar_or_Third__c);
-  if (!vendor.ok) {
-    return { ok: false, reason: `vendor_${vendor.reason}`, message: vendor.message };
-  }
+  const vendor = resolveCommissionVendor(values);
+  if (!vendor.ok) return vendor;
 
   return {
     ok: true,
     vendorId: vendor.vendorId,
     vendorName: vendor.vendorName,
+    vendorSource: vendor.source,
     acumaticaProjectId,
     milestones,
   };
+}
+
+/**
+ * Who gets paid — the dealer-terms rule (D-085 am. 1), WITHOUT writing anything.
+ *
+ * Dealer source: `Dealer__r.Acumatica_Vendor_ID__c`, refusing `vendor_internal` (an
+ * internal dealer — belt-and-braces behind the `internal_deal` gate, exactly like the CSV
+ * map's internal row) and `vendor_missing` (no vendor id on the dealer yet).
+ * Legacy source: the D4 CSV map by picklist value, its four refusals unchanged.
+ * Neither: `dealer_missing`, or `dealer_terms_unavailable` when the SELECT is short.
+ *
+ * @returns {{ok:true, vendorId, vendorName, source}|{ok:false, reason, message}}
+ */
+export function resolveCommissionVendor(values) {
+  const terms = resolveDealerTerms(values, { object: "Sundial_Solar__c" });
+  if (!terms.ok) {
+    return { ok: false, reason: terms.code === "DEALER_MISSING" ? "dealer_missing" : "dealer_terms_unavailable", message: terms.message };
+  }
+
+  if (terms.source === "legacy") {
+    const vendor = lookupDealerVendor(terms.salesCompany);
+    if (!vendor.ok) return { ok: false, reason: `vendor_${vendor.reason}`, message: vendor.message };
+    return { ok: true, vendorId: vendor.vendorId, vendorName: vendor.vendorName, source: "legacy" };
+  }
+
+  if (terms.isInternal) {
+    return {
+      ok: false, reason: "vendor_internal",
+      message:
+        `Dealer "${terms.dealerName}" is INTERNAL (Is_Internal__c): internal commissions are payroll, ` +
+        "not POs (D16). Reaching vendor resolution at all means Commission_Deal_Type__c says " +
+        "3rd Party while the dealer says internal — recalculate the budget so the two agree.",
+    };
+  }
+  if (!terms.vendorId) {
+    return {
+      ok: false, reason: "vendor_missing",
+      message:
+        `Dealer "${terms.dealerName}" has no Acumatica_Vendor_ID__c, so there is no vendor to raise ` +
+        "a commission PO against. Ask Harmon finance for the dealer's Acumatica vendor, set it on " +
+        "the dealer record, then re-push.",
+    };
+  }
+  // vendorName is the dealer's here; Acumatica's own name for the vendor arrives with the
+  // existence check in syncCommissionPos.
+  return { ok: true, vendorId: terms.vendorId, vendorName: terms.dealerName, source: "dealer" };
+}
+
+/** The fields resolveCommissionVendor reads — for the budget-push worker's SELECT. */
+export function commissionVendorFieldNames() {
+  return dealerTermsFieldNames("Sundial_Solar__c");
 }
 
 /**
@@ -748,11 +810,12 @@ export function commissionPoStatus(results, numbers) {
  *
  * @param {string} recordId - the Sundial_Solar__c id
  * @param {object} values - its field values, including the two Q13 dates
- * @param {{now?: () => string, update?: Function}} [deps] - injected for tests
+ * @param {{now?: () => string, update?: Function, checkVendor?: Function}} [deps] - injected for tests
  */
 export async function syncCommissionPos(recordId, values, deps = {}) {
   const now = deps.now ?? (() => new Date().toISOString());
   const update = deps.update ?? sfUpdateRecord;
+  const checkVendor = deps.checkVendor ?? checkAcumaticaVendor;
   const F = PO_WRITEBACK_FIELDS;
 
   // Checked HERE as well as inside create/update, and not redundantly: without this the
@@ -779,8 +842,21 @@ export async function syncCommissionPos(recordId, values, deps = {}) {
   const numbers = { M1: storedOrderNbr(values, "M1"), M2: storedOrderNbr(values, "M2") };
   const results = [];
 
-  for (const milestone of ["M1", "M2"]) {
-    const step = planMilestone(values, milestone, plan);
+  // THE VENDOR MUST EXIST IN ACUMATICA before anything is CREATED (D-085 am. 1). Asked
+  // once per run, and only when a create is planned: an update re-reads its PO and
+  // verifyCommissionPo already compares the vendor on it. Refused the same way as every
+  // other plan failure — Failed on the record, the vendor id named in the error.
+  const steps = ["M1", "M2"].map((m) => planMilestone(values, m, plan));
+  if (steps.some((st) => st.action === "create")) {
+    const v = await checkVendor(plan.vendorId);
+    if (!v.ok) {
+      await update("Sundial_Solar__c", recordId, { [F.status]: "Failed", [F.error]: v.message });
+      return { ok: false, reason: v.reason, message: v.message, results: [] };
+    }
+  }
+
+  for (const step of steps) {
+    const milestone = step.milestone;
     if (step.action === "skip_zero") {
       results.push({ ok: true, action: "skip_zero", milestone, amount: step.amount });
       continue;

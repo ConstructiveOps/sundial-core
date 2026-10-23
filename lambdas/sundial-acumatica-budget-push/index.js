@@ -48,6 +48,7 @@ import {
   syncCommissionPos,
   PO_NUMBER_FIELDS,
   MILESTONE_DATE_FIELDS,
+  commissionVendorFieldNames,
 } from "../sundial-acumatica-commission-po/index.js";
 import {
   syncProjectAttributes,
@@ -501,14 +502,21 @@ export function budgetFieldNames() {
  * rename over there cannot leave this SELECT quietly short. A missing field would not
  * throw: it would arrive as undefined, and the PO engine would read "no stored OrderNbr"
  * and raise a SECOND purchase order. That is the failure this list prevents.
+ *
+ * The dealer-terms fields (D-085 am. 1 — Dealer__c, Dealer__r.Name / Is_Internal__c /
+ * Acumatica_Vendor_ID__c, CreatedDate, Sundial_Customer__r.CreatedDate, the legacy
+ * picklist) arrive through BOTH stages' lists: the PO vendor and SALESPERSO read the same
+ * rule off the same row. Missing, they would refuse loudly (DEALER_TERMS_UNAVAILABLE)
+ * rather than fall back to the picklist — but the push would still have failed.
  */
 export function downstreamFieldNames() {
-  return [
+  return [...new Set([
     ...attributeFieldNames(),
     "Acumatica_Project_ID__c",
     ...Object.values(PO_NUMBER_FIELDS),
     ...Object.values(MILESTONE_DATE_FIELDS),
-  ];
+    ...commissionVendorFieldNames(),
+  ])];
 }
 
 /** Everything the worker must SELECT: budget mapping + both downstream stages. */

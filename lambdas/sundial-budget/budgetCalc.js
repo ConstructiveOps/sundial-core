@@ -17,7 +17,9 @@
  *
  *  1. THE REP COMMISSION IS READ, NOT COMPUTED (D19 — the redline model). It comes in
  *     dollars from the `Commission_Total__c` FORMULA field and is routed to the
- *     third-party or internal budget line by `Sales_Company_Harmon_Solar_or_Third__c`.
+ *     third-party or internal budget line by the DEALER-TERMS RULE (lib/dealer-terms.js,
+ *     D-085 am. 1): the dealer's `Is_Internal__c` when `Dealer__c` is set, the legacy
+ *     `Sales_Company_Harmon_Solar_or_Third__c` only for a pre-2026-09-04 deal with no dealer.
  *     Both rep-PPW input fields are RETIRED, and with them D16's which-PPW-is-populated
  *     deal-type rule. Management is still stored as two fields but SUMMED into one cost
  *     line (D10). Setter is still gated on the CUSTOMER's Setter__c, read through the
@@ -36,6 +38,10 @@
  *
  * Salesforce percent fields arrive as whole numbers (75 means 75%) — divided by 100 here.
  */
+
+// The dealer-terms rule (D-085 amendment 1). lib/ is ESM; Node and esbuild both load it
+// from this CommonJS file.
+const { resolveDealerTerms } = require('../../lib/dealer-terms.js');
 
 // ---------------------------------------------------------------------------
 // Constants that are NOT Salesforce fields
@@ -77,8 +83,9 @@ const DEAL_TYPE_PICKLIST = {
 // ---------------------------------------------------------------------------
 
 /**
- * The deal-type discriminator. On Sundial_Solar__c this holds either `Harmon Solar`
- * (internal) or one of ~55 dealer names (external). It REPLACES D16's
+ * The LEGACY deal-type discriminator — read only through resolveDealerTerms, and only for
+ * a deal created before 2026-09-04 with no Dealer__c. Holds either `Harmon Solar`
+ * (internal) or one of ~55 dealer names (external). It replaced D16's
  * "whichever PPW field is populated is the deal type" rule.
  */
 const SALES_COMPANY_FIELD = 'Sales_Company_Harmon_Solar_or_Third__c';
@@ -377,47 +384,58 @@ function calculateBudget(rec) {
   //     as inputs. Nothing in this file reads them and handler.js no longer selects
   //     them. The fields stay on both objects for history.
   //  2. D16's "whichever PPW is populated decides the deal type" discriminator is GONE.
-  //     Deal type is the sales-company field, full stop — a better discriminator,
-  //     because it is a thing a human deliberately sets rather than a side effect of
-  //     which of two numbers happens to be non-zero. There is consequently no
-  //     "both populated" ambiguity left to detect.
-  const salesCompany = String(rec[SALES_COMPANY_FIELD] ?? '').trim();
-
-  // FAIL LOUDLY on a blank sales company. The formula already refuses to guess (blank
-  // company → null redline → null Commission_Total), so carrying on would post a zero
-  // commission with no visible reason.
+  //     Deal type is the DEALER's `Is_Internal__c` (D-085 am. 1; the sales-company
+  //     picklist for a pre-cutover deal with no dealer) — a thing a human deliberately
+  //     sets rather than a side effect of which of two numbers happens to be non-zero.
+  //     There is consequently no "both populated" ambiguity left to detect.
   //
-  // Be aware this is not a rare edge today: 3,697 of 4,474 Solar records have no sales
-  // company set. That is the guard working, not a bug — but it does mean the field has
-  // to be populated before a record can be recalculated.
-  if (salesCompany === '') {
+  // ONE rule, shared with the PO engine and the attribute sync (lib/dealer-terms.js), so
+  // the budget line, the PO vendor and SALESPERSO cannot disagree about whose deal it is.
+  const terms = resolveDealerTerms(rec, { object: 'Sundial_Solar__c' });
+  if (!terms.ok) {
+    // DEALER_MISSING: a post-cutover deal with no dealer has no terms. The picklist is
+    // NOT a fallback — that is the rule. DEALER_TERMS_UNAVAILABLE: the SELECT is short.
+    throw new BudgetInputError(terms.message, terms.code);
+  }
+  const salesCompany = terms.source === 'dealer' ? terms.dealerName : terms.salesCompany;
+
+  // LEGACY PATH ONLY: FAIL LOUDLY on a blank sales company. The formula already refuses
+  // to guess (blank company → null redline → null Commission_Total), so carrying on would
+  // post a zero commission with no visible reason. A dealer deal never reaches this — its
+  // dealer Name is never blank.
+  if (terms.source === 'legacy' && salesCompany === '') {
     throw new BudgetInputError(
-      `${SALES_COMPANY_FIELD} is blank. The D19 redline model needs the deal type ` +
-        `(INTERNAL when it is "${INTERNAL_SALES_COMPANY}", EXTERNAL for any dealer) both to ` +
-        'pick a redline and to route the commission to the right Acumatica line. Set the ' +
-        'sales company on the record, then recalculate.',
+      `${SALES_COMPANY_FIELD} is blank on a deal created before 2026-09-04 with no dealer. ` +
+        `The D19 redline model needs the deal type (INTERNAL when it is "${INTERNAL_SALES_COMPANY}", ` +
+        'EXTERNAL for any dealer) both to pick a redline and to route the commission to the ' +
+        'right Acumatica line. Set the sales company on the record, then recalculate.',
       'SALES_COMPANY_MISSING'
     );
   }
 
-  // INTERNAL is an equality test; EXTERNAL is everything else, so a new dealer name
-  // needs no change here. Case-insensitive to match the Salesforce formula, where `=`
-  // on text ignores case.
-  const isInternal = salesCompany.toLowerCase() === INTERNAL_SALES_COMPANY.toLowerCase();
+  // Dealer: the flag. Legacy: INTERNAL is an equality test on "Harmon Solar" (case-
+  // insensitive, like the formula) and EXTERNAL is everything else, so a new dealer name
+  // needs no change here. Both decided inside resolveDealerTerms.
+  const isInternal = terms.isInternal;
   const dealType = isInternal ? 'internal' : 'third_party';
 
-  // A blank Commission_Total__c with a NON-blank sales company should be impossible —
-  // the formula only blanks when the company is blank or watts are zero. The likeliest
-  // real cause is the integration user lacking Read FLS on the formula, in which case
-  // SOQL silently omits it and a $0 commission would look entirely plausible. Refuse.
+  // A blank Commission_Total__c with terms resolved: the formula blanks when the system
+  // size is zero, when a post-cutover dealer's rate is blank, or when a PRE-cutover deal
+  // has a dealer but no sales company (its redline still reads the picklist — v9). The
+  // other real cause is the integration user lacking Read FLS on the formula, in which
+  // case SOQL silently omits it and a $0 commission would look entirely plausible. Refuse.
   const repCommissionRaw = rec[COMMISSION_TOTAL_FIELD];
   if (isBlank(repCommissionRaw)) {
+    const whose = terms.source === 'dealer'
+      ? `its dealer is "${salesCompany}"`
+      : `${SALES_COMPANY_FIELD} is "${salesCompany}"`;
     throw new BudgetInputError(
-      `${COMMISSION_TOTAL_FIELD} is blank while ${SALES_COMPANY_FIELD} is "${salesCompany}". ` +
-        'The formula only returns blank when the sales company is blank or the system size ' +
-        'is zero, so check System_Size__c — and check that the integration user has Read ' +
-        'access to the formula field, because a missing FLS grant reads as blank here and ' +
-        'would otherwise post a zero commission.',
+      `${COMMISSION_TOTAL_FIELD} is blank while ${whose}. ` +
+        'The formula returns blank when the system size is zero, when the dealer has no ' +
+        'redline (Redline_PPW__c / Redline_LightReach_PPW__c), or when a deal created before ' +
+        '2026-09-04 has no sales company — so check those, and check that the integration ' +
+        'user has Read access to the formula field, because a missing FLS grant reads as ' +
+        'blank here and would otherwise post a zero commission.',
       'COMMISSION_TOTAL_UNAVAILABLE'
     );
   }
@@ -887,6 +905,8 @@ function calculateBudget(rec) {
     // pushed budget can see WHY the commission landed on the line it did without
     // re-reading the record.
     salesCompany,
+    // Which side of the dealer-terms rule decided it: 'dealer' or 'legacy'.
+    dealerTermsSource: terms.source,
     redlineCommissionAmt: r2(repCommission),
     redlineCommissionPPW: repCommissionPPW,
     thirdPartyCommissionAmt: r2(thirdPartyComm),

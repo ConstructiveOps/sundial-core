@@ -14,6 +14,30 @@ captured 2026-08-22. Everything below is judged against it.
 
 ---
 
+## Since 2026-10-22 — the vendor is the dealer's (D-085 amendment 1)
+
+The engine pays `Dealer__r.Acumatica_Vendor_ID__c` for any deal with a `Dealer__c`
+(`lib/dealer-terms.js`); the D4 CSV map is read only for a deal created before 2026-09-04 with
+no dealer, and a later deal with no dealer is refused. Before every **create** it GETs the
+Vendor (`VendorID eq '…'`, `lib/acumatica-vendor-check.js`). The refusals a re-push can now
+write to `Commission_PO_Error__c` (status `Failed`):
+
+| Reason | Means | Fix |
+|---|---|---|
+| `dealer_missing` | post-cutover deal, no `Dealer__c` | set the Sales Rep on the customer and project |
+| `vendor_missing` | the dealer has no `Acumatica_Vendor_ID__c` | Harmon finance names the vendor; set it on the dealer |
+| `vendor_internal` | the dealer is internal but the budget says 3rd Party | recalculate the budget |
+| `vendor_not_in_acumatica` | the vendor id does not exist, or is Inactive | correct the id / reactivate the vendor |
+| `vendor_lookup_failed` | Acumatica did not answer the check | retry |
+| `vendor_unmapped` / `vendor_inactive` / `vendor_blank` | legacy path (D4 map) | as before |
+
+**Work lists:** `node scripts/verify-dealer-vendor-coverage.mjs` (active dealers without a
+usable vendor) and `node scripts/list-failed-commission-pos.mjs [--csv out.csv]` (every
+Failed project, grouped by the line that failed). **2026-10-22: 32 Failed** — 26 are the
+pre-existing "updated but no longer matches" re-read mismatch (an amount PUT that Acumatica
+accepted without changing the line; not a vendor problem, see TASKS.md), 6 an unmapped
+sales company. Re-push after fixing; `PO_NUMBER_FIELDS` keeps it idempotent.
+
 ## Step 0 — before you start
 
 This is the **third** of three blockers, and as of 2026-08-24 the **only one left**:

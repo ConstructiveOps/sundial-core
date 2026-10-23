@@ -3702,3 +3702,19 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **Not yet followed by the Lambdas:** `sundial-budget` (internal vs external line), `sundial-acumatica-commission-po` (vendor) and `lib/acumatica-attributes.js` (`SALESPERSO`) still read the Solar picklist for every record. For post-cutover deals they must read `Dealer__r.Is_Internal__c` / `Dealer__r.Acumatica_Vendor_ID__c` — TASKS.md. Until then a post-cutover deal's redline follows its dealer while its budget line and PO vendor follow the picklist.
 - The Solar `Commission_Total*` formulas, which inline the redline, are estimated at ~4,150 of 5,000 compiled bytes (tight). A further term on the redline should be measured first; splitting a formula field does not reduce its compiled size.
 - `sales_rep_name` is a cache column; a formula change moves no modstamp, so the deploy is followed by a full resync of `customer` and `solar`.
+
+### D-085 amendment 1 — the backend reads the dealer, one rule everywhere (2026-10-22)
+
+**Context.** v9 is deployed; the three Lambdas named above still routed by picklist.
+
+**Decision.**
+1. **One rule, `lib/dealer-terms.js` `resolveDealerTerms`:** `Dealer__c` set → the dealer's `Is_Internal__c`, `Acumatica_Vendor_ID__c` and `Name`; else the cutover date (the Customer's `CreatedDate` when the record has one, else its own, GMT date) before 2026-09-04 → the legacy picklist, unchanged; else **refusal `DEALER_MISSING`**. A post-cutover record never reads a picklist. Unreadable dealer or date → `DEALER_TERMS_UNAVAILABLE`, never "legacy".
+2. **Its users:** the budget calc's internal/external line (`DEALER_MISSING` 422; `SALES_COMPANY_MISSING` legacy-only); the commission-PO vendor (`vendor_missing`, `dealer_missing`, `vendor_internal`; the CSV map only on the legacy source); SALESPERSO (the dealer's Name — free text in Acumatica, so no value list).
+3. **A vendor must exist before a PO is created:** a GET of the Acumatica Vendor before every create; missing or Inactive → `vendor_not_in_acumatica`.
+4. **Invariant 6 across Create Project:** a rep-less Solar create naming its Customer takes the Customer's dealer (`sundial-sf-update`).
+5. **Aurora dealer originations get a `Dealer__c`** — exact Name, then the reviewed alias CSV, never a guess — and `Lead_Source__c` names the dealer. The alias CSV now has one runtime reader, through a generated `lib/dealer-aliases.js`.
+
+**Consequences.**
+- A pre-cutover record WITH a dealer takes the dealer's flag and vendor while its redline still reads the picklist (rule step 1 is date-blind, as specified). 6 uncalculated Solar records disagreed on 2026-10-22 (TASKS.md).
+- Post-cutover deals with no dealer stop at the budget and the PO; so do dealers with no vendor id (Invictus Energy, Sunlink Energy today).
+- `access-model.md` §2.3 invariant 8 states the rule.

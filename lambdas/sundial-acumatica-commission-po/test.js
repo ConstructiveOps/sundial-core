@@ -19,7 +19,16 @@ const ctx = {
   puts: [],
   createBehaviour: "insert",
   nextNbr: 20001,
+  vendors: {},       // VendorID -> { name, status } the fake Acumatica knows (D-085 am. 1)
+  vendorReads: [],
+  vendorLookupFails: false,
 };
+
+const DEFAULT_VENDORS = () => ({
+  "01736": { name: "Blue Sky Solar LLC", status: "Active" },
+  "02118": { name: "Heavenly Power LLC", status: "Active" },
+  "01863": { name: "Derek Anderson", status: "Inactive" },
+});
 
 /**
  * Raw PO in Acumatica's shape, with the specimen's derived defaults applied.
@@ -72,6 +81,14 @@ function rawPo({ orderNbr, vendorId, description, project, amount, status = "Ope
 mock.module("../../lib/acumatica.js", {
   namedExports: {
     getAcumaticaEntity: async (_entity, query) => {
+      // The vendor existence check (lib/acumatica-vendor-check.js) filters Vendor by id.
+      if (_entity === "Vendor") {
+        const id = /VendorID eq '([^']*)'/.exec(query?.$filter ?? "")?.[1];
+        ctx.vendorReads.push(id);
+        if (ctx.vendorLookupFails) return { ok: false, status: 503, data: null, text: "down" };
+        const v = ctx.vendors[id];
+        return { ok: true, status: 200, data: v ? [{ VendorID: { value: id }, VendorName: { value: v.name }, Status: { value: v.status } }] : [] };
+      }
       // The engine only ever filters by OrderNbr.
       const m = /OrderNbr eq '([^']*)'/.exec(query?.$filter ?? "");
       const nbr = m ? m[1] : null;
@@ -152,7 +169,7 @@ const {
   UPDATABLE_STATUSES, FROZEN_STATUSES, COMMISSION_PROJECT_TASK, COMMISSION_INVENTORY_ID,
   PO_NUMBER_FIELDS, MILESTONE_DATE_FIELDS, milestoneDate, datePart,
   PO_WRITEBACK_FIELDS, PO_STATUSES, commissionPoStatus, syncCommissionPos,
-  RECORDED_HEADER_FIELDS,
+  RECORDED_HEADER_FIELDS, resolveCommissionVendor, commissionVendorFieldNames,
 } = mod;
 
 async function withGate(state, fn) {
@@ -170,6 +187,9 @@ function reset() {
   ctx.puts = [];
   ctx.createBehaviour = "insert";
   ctx.nextNbr = 20001;
+  ctx.vendors = DEFAULT_VENDORS();
+  ctx.vendorReads = [];
+  ctx.vendorLookupFails = false;
   sfWrites.length = 0;
 }
 
@@ -187,6 +207,24 @@ const VALUES = {
   // The two Q13 dates, unset — which is the ORDINARY state on a first budget push.
   Audit_Date_and_DateTime__c: null,
   Scheduled_Install_Date__c: null,
+  // D-085 am. 1: a PICKLIST-era job — no dealer, its Customer created before 2026-09-04 —
+  // so the vendor still comes from the D4 CSV map by sales company.
+  Name: "SOL-R261078",
+  CreatedDate: "2026-08-01T16:00:00.000+0000",
+  Sundial_Customer__c: "a1P000000000CUSAAA",
+  Sundial_Customer__r: { CreatedDate: "2026-08-01T16:00:00.000+0000" },
+  Dealer__c: null,
+  Dealer__r: null,
+};
+
+/** The same job sold after the cutover by a dealer (Heavenly Power, vendor 02118). */
+const POST_CUTOVER = { Sundial_Customer__r: { CreatedDate: "2026-09-10T16:00:00.000+0000" } };
+const DEALER_DEAL = {
+  ...VALUES,
+  ...POST_CUTOVER,
+  Sales_Company_Harmon_Solar_or_Third__c: null,
+  Dealer__c: "a0Y000000000HVNAAA",
+  Dealer__r: { Name: "Heavenly Power", Is_Internal__c: false, Acumatica_Vendor_ID__c: "02118" },
 };
 
 /** The same job, with both milestones dated. */
@@ -296,6 +334,50 @@ test("an INACTIVE vendor refuses per D4", () => {
   const p = planCommissionPos({ ...VALUES, Sales_Company_Harmon_Solar_or_Third__c: "Derek Anderson" });
   assert.equal(p.ok, false);
   assert.equal(p.reason, "vendor_inactive");
+});
+
+// ---------------------------------------------------------------------------
+// D-085 am. 1 — the vendor is the DEALER's (lib/dealer-terms.js)
+// ---------------------------------------------------------------------------
+
+test("a dealer deal is paid to the dealer's Acumatica_Vendor_ID__c — the CSV is not read", () => {
+  const p = planCommissionPos(DEALER_DEAL);
+  assert.equal(p.ok, true);
+  assert.equal(p.vendorId, "02118");
+  assert.equal(p.vendorSource, "dealer");
+  // A picklist value the CSV maps to a DIFFERENT vendor changes nothing.
+  assert.equal(planCommissionPos({ ...DEALER_DEAL, Sales_Company_Harmon_Solar_or_Third__c: "Blue Sky Solar" }).vendorId, "02118");
+  // And a pre-cutover deal with a dealer takes the dealer too (the rule's step 1).
+  assert.equal(planCommissionPos({ ...DEALER_DEAL, Sundial_Customer__r: VALUES.Sundial_Customer__r }).vendorId, "02118");
+});
+
+test("vendor_missing: the dealer has no Acumatica_Vendor_ID__c", () => {
+  const p = planCommissionPos({ ...DEALER_DEAL, Dealer__r: { ...DEALER_DEAL.Dealer__r, Acumatica_Vendor_ID__c: null } });
+  assert.equal(p.ok, false);
+  assert.equal(p.reason, "vendor_missing");
+  assert.match(p.message, /Heavenly Power/);
+});
+
+test("vendor_internal: an internal DEALER is refused even when the deal type says 3rd Party", () => {
+  const p = planCommissionPos({ ...DEALER_DEAL, Dealer__r: { Name: "Harmon Solar", Is_Internal__c: true, Acumatica_Vendor_ID__c: "09999" } });
+  assert.equal(p.ok, false);
+  assert.equal(p.reason, "vendor_internal", "belt-and-braces behind the internal_deal gate");
+  // ...and the front door still comes first.
+  assert.equal(planCommissionPos({ ...DEALER_DEAL, Commission_Deal_Type__c: "Internal" }).reason, "internal_deal");
+});
+
+test("dealer_missing: post-cutover with no dealer — the picklist is NOT a fallback", () => {
+  const p = planCommissionPos({ ...VALUES, ...POST_CUTOVER });
+  assert.equal(p.ok, false);
+  assert.equal(p.reason, "dealer_missing");
+  assert.match(p.message, /SOL-R261078/);
+  assert.match(p.message, /Sales Rep/);
+});
+
+test("the vendor field list is the dealer-terms rule's", () => {
+  assert.ok(commissionVendorFieldNames().includes("Dealer__r.Acumatica_Vendor_ID__c"));
+  assert.ok(commissionVendorFieldNames().includes("Sundial_Customer__r.CreatedDate"));
+  assert.equal(resolveCommissionVendor(DEALER_DEAL).source, "dealer");
 });
 
 test("a v1-calculated record refuses — same marker the budget push uses", () => {
@@ -1044,5 +1126,76 @@ test("the gate CLOSED means syncCommissionPos writes NOTHING, to either system",
     assert.equal(r.reason, "gate_closed");
     assert.equal(ctx.puts.length, 0);
     assert.equal(sfWrites.length, 0, "the gate being shut is not a fact about the job");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D-085 am. 1 — vendor_not_in_acumatica: the vendor must exist before a CREATE
+// ---------------------------------------------------------------------------
+
+test("a dealer deal raises both POs against the dealer's vendor, after checking it exists", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await sync({ ...DEALER_DEAL, Audit_Date_and_DateTime__c: "2026-09-12" });
+    assert.equal(r.status, "Both Raised");
+    assert.deepEqual(ctx.vendorReads, ["02118"], "looked up once per run, by the dealer's id");
+    assert.ok(ctx.orders.every((o) => o.VendorID.value === "02118"));
+  });
+});
+
+test("vendor_not_in_acumatica: an unknown vendor id creates NOTHING and names the id", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await sync({ ...DEALER_DEAL, Dealer__r: { ...DEALER_DEAL.Dealer__r, Acumatica_Vendor_ID__c: "02119" } });
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, "vendor_not_in_acumatica");
+    assert.equal(ctx.puts.length, 0, "no PO without a real vendor");
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_Status__c, "Failed");
+    assert.match(f.Commission_PO_Error__c, /02119/);
+  });
+});
+
+test("vendor_not_in_acumatica: an INACTIVE vendor refuses too — on the legacy path as well", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.vendors["01736"].status = "Inactive"; // the CSV says Active; Acumatica now says otherwise
+    const r = await sync(DATED);
+    assert.equal(r.reason, "vendor_not_in_acumatica");
+    assert.match(writtenFields().Commission_PO_Error__c, /01736.*Inactive/);
+    assert.equal(ctx.puts.length, 0);
+  });
+});
+
+test("an Acumatica outage on the vendor check refuses rather than raising blind", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.vendorLookupFails = true;
+    const r = await sync(DEALER_DEAL);
+    assert.equal(r.reason, "vendor_lookup_failed");
+    assert.equal(ctx.puts.length, 0);
+  });
+});
+
+test("updates only (both POs already raised) skip the vendor check — the re-read verifies the vendor", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(rawPo({ orderNbr: "016102", vendorId: "02118", description: commissionPoDescription("M1", "R261078"), project: "R261078", amount: 2500 }));
+    ctx.orders.push(rawPo({ orderNbr: "016103", vendorId: "02118", description: commissionPoDescription("M2", "R261078"), project: "R261078", amount: 4814 }));
+    const r = await sync({ ...DEALER_DEAL, Commission_PO_M1_Number__c: "016102", Commission_PO_M2_Number__c: "016103" });
+    assert.equal(r.status, "Both Raised");
+    assert.deepEqual(ctx.vendorReads, []);
+  });
+});
+
+test("PO_NUMBER_FIELDS idempotency is unchanged on the dealer path: a stored M1 is updated, never re-raised", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(rawPo({ orderNbr: "016102", vendorId: "02118", description: commissionPoDescription("M1", "R261078"), project: "R261078", amount: 2500 }));
+    const r = await sync({ ...DEALER_DEAL, Commission_PO_M1_Number__c: "016102" });
+    assert.equal(r.status, "Both Raised");
+    const m1s = ctx.orders.filter((o) => o.Description.value === commissionPoDescription("M1", "R261078"));
+    assert.equal(m1s.length, 1, "exactly one M1, ever");
+    assert.deepEqual(PO_NUMBER_FIELDS, { M1: "Commission_PO_M1_Number__c", M2: "Commission_PO_M2_Number__c" });
   });
 });

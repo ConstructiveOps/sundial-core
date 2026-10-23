@@ -215,6 +215,11 @@ All Sundial custom objects use the `Sundial_` prefix (e.g., `Sundial_User__c`, `
 | `Sundial_Membership__c` | One row per customer × plan × Stripe subscription (D-073); `Stripe_Subscription_Id__c` = idempotency key |
 | `Sundial_PO__c` | Purchase orders mirrored to Acumatica |
 | `Sundial_PO_Credit__c` | Credit and return tracking against POs (solves the Acumatica gap) |
+| `Sundial_Dealer__c` | A selling organization within a tenant (D-064); deals get `Dealer__c` from their rep. Carries the dealer's terms: redlines, internal flag, Acumatica vendor (D-085) |
+
+### Dealer terms (D-085, 2026-10-22, package `salesforce/v9-dealer-terms/`)
+
+**For a deal created on/after 2026-09-04 (the Customer's `CreatedDate`, both objects), the commission redline is the dealer's:** `Dealer__r.Redline_LightReach_PPW__c` when Customer `Financing_Partner__c = "Lightreach"`, else `Dealer__r.Redline_PPW__c`; a linked Solar record takes its Customer's redline. No dealer or a blank rate ⇒ blank, never a default. **The legacy sales-company picklists (`Sales_Company__c` / `Dealer_Name__c` on Customer, `Sales_Company_Harmon_Solar_or_Third__c` on Solar) are read only for records created before that date and are never consulted for later ones** — not as a fallback. `Acumatica_Vendor_ID__c` on the dealer is the commission-PO vendor (set by Constructive Ops; seeded by `scripts/backfill-dealer-terms.mjs`). The budget, commission-PO and `SALESPERSO` paths still read the Solar picklist — moving them to `Dealer__r.Is_Internal__c` / `Acumatica_Vendor_ID__c` for post-cutover deals is open in TASKS.md.
 
 ### Snapshot Pattern
 

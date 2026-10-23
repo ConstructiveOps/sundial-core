@@ -1,5 +1,28 @@
 # Sundial — Progress Log
 
+## 2026-10-22 — Dealer terms live on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
+
+- **Package `salesforce/v9-dealer-terms/`** (same shape as v3: `generate.mjs`, `verify.mjs`, objects, package.xml, zip via `scripts/build-zips.mjs`):
+  - `Sundial_Dealer__c`: `Redline_PPW__c`, `Redline_LightReach_PPW__c` (Currency 14,4), `Acumatica_Vendor_ID__c` (Text 20), `Acumatica_Vendor_Name__c` (Text 80).
+  - Customer + Solar: `Commission_Redline_PPW__c` replaced. A deal created on/after 2026-09-04 takes the dealer's rate; earlier deals keep the legacy picklist rates. Every other attribute is carried over from v8's files.
+  - `Sales_Rep_Name__c` coalesces with the legacy text fields. The live name-join is kept as-is (`+`, its spacing).
+  - New `Dealer_Display_Name__c` ("Dealer (based on Sales Rep)").
+  - Permission set `Sundial_Dealer_Terms`: Read on every new field, Edit on the four dealer fields so the backfill can write them.
+- **Live describe, 2026-10-22:**
+  - The org's Customer redline has an `Invictus Energy` branch on `Sales_Company__c` that the repo's v8 lacks. It can never be true: that picklist holds only Harmon Solar / Third-Party Dealer, active and inactive. 55 Customers carry `Constructive Solar`, which is not in the picklist; they stay "external".
+  - `Lightreach` (Customer `Financing_Partner__c`) and `LightReach` (Solar `Sales_Type_Partner__c`) are both correct API values.
+  - The live `Sales_Rep_Name__c` uses `+`, not `&`. Its description cannot be read (no Tooling access), so the deploy writes a new one.
+- **`verify.mjs`, 81 checks.** It uses a small formula parser rather than v3's regex transpiler, because the formulas now need dates, AND / NOT, relationship paths and a cross-object formula.
+  - Parity: the LIVE formulas (captured from the describe) and the new ones are evaluated over the same grid. 120 Customer and 125 Solar pre-cutover cases match.
+  - A mutation run (a legacy rate changed, the no-dealer NULL removed) fails 4 checks.
+- **Compiled size:** worst estimate is Solar `Commission_Total_PPW__c` at 4,149 of 5,000, so the legacy branch is not split out. Splitting would not shrink the compiled size anyway, because Salesforce inlines referenced formulas.
+- **`scripts/probe-dealer-terms-cutover.mjs`** (read-only), run 2026-10-22. On deploy, **91 Customer** redlines go number → blank (none has a rep; 68 are Harmon Solar), and **18 Solar**. 2 Customers go blank → number. There are 0 LightReach disagreements between Solar and its Customer.
+- **`scripts/backfill-dealer-terms.mjs`**: dry run by default, canary first, fills only blank fields.
+  - A dry run against the live dealers (new-field reads stubbed out) gives all 59 dealers rates and 37 of them vendors.
+  - 8 CSV rows reach no dealer.
+  - Harmon Solar (internal) and Derek Anderson (inactive vendor) are deliberately left blank.
+- **Not deployed.** Nothing changed in any Lambda. Three of them still read the Solar picklist (TASKS.md).
+
 ## 2026-10-22 — Dealer module step 0: field visibility from Harmon's dealer-portal sheet (`feature/dealer-visibility`)
 
 - **`scripts/apply-dealer-visibility.mjs`** applies `docs/Dealer Portal Field Visibility from Harmon.xlsx` (Ralph's sheet; the file name has spaces; it lives only in sundial-core) to the `Sales Rep` / `Sales Dealer` columns of `docs/Sundial_Customer__c_Field_Design.xlsx` and `docs/Sundial_Solar_Fields_by_Section.xlsx`. Rules, in `docs/access-model.md` §4.1a:

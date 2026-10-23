@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  D-085: FLS on every field v9-dealer-terms ADDS, for the Sundial integration user.
+  Assign this to the integration user, OR merge these entries into the integration
+  permission set it already holds.
+
+  The four Sundial_Dealer__c fields are readable AND editable: the terms are seeded by
+  scripts/backfill-dealer-terms.mjs, which writes as the integration user. The two
+  Dealer_Display_Name__c formulas are read-only by definition.
+  The two MODIFIED fields (Commission_Redline_PPW__c, Sales_Rep_Name__c) keep the FLS
+  they already have and are deliberately absent.
+-->
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>Sundial Dealer Terms</label>
+    <description>D-085: field access for the dealer's commercial terms (redlines, Acumatica vendor) and the Dealer (based on Sales Rep) formula, for the Sundial integration user.</description>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Redline_PPW__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Redline_LightReach_PPW__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Acumatica_Vendor_ID__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>Sundial_Dealer__c.Acumatica_Vendor_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Sundial_Customer__c.Dealer_Display_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Sundial_Solar__c.Dealer_Display_Name__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+</PermissionSet>

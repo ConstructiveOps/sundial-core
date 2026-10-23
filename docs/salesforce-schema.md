@@ -43,6 +43,12 @@ Examples:
 - `Client__c` — Lookup → `Sundial_Tenant__c`, **required**, delete constraint Restrict. Tenant isolation key, same role as on every other Sundial object (D-034/D-035).
 - `Is_Internal__c` — Checkbox, default false. True for Harmon Solar. **Informational only — it grants nothing.** Scope comes from `Access_Level__c` alone, so an internal dealer's rep is an `own`-scope user exactly like an external dealer's rep.
 - `Active__c` — Checkbox, **default false**. An inactive dealer's users resolve to scope `none` and see **nothing** — the same answer as a null dealer, deliberately (fail closed). Defaults to false so a dealer created by hand starts with no access and is switched on as a decision.
+- **The dealer's commercial terms (D-085, 2026-10-22, package `salesforce/v9-dealer-terms/`):**
+  - `Redline_PPW__c` — Currency(14,4), "Redline $/W". The commission redline for every financing partner except LightReach.
+  - `Redline_LightReach_PPW__c` — Currency(14,4), "Redline $/W (LightReach)".
+  - `Acumatica_Vendor_ID__c` — Text(20). The vendor the commission POs are raised against; set by Constructive Ops once Harmon finance creates it. Left blank on the internal dealer and while a vendor is inactive.
+  - `Acumatica_Vendor_Name__c` — Text(80), informational.
+  - Read by `Commission_Redline_PPW__c` on Customer (and through it on Solar) for deals created on/after 2026-09-04. A blank rate is a blank redline, never a default. Seeded by `scripts/backfill-dealer-terms.mjs` (Harmon Solar 2.20 / 2.10, Invictus Energy 1.75 / 1.65, everyone else 1.85 / 1.65).
 
 **Relationships:**
 - `Dealer__c` on `Sundial_User__c`, `Sundial_Customer__c`, `Sundial_Solar__c`, `Sundial_Roofing__c`, `Sundial_Commercial__c` — all optional lookups, all `deleteConstraint = Restrict`.
@@ -71,7 +77,9 @@ Dealer__c := Sales_Rep__r.Dealer__c
 
 stamped by the server on create and **re-stamped on any `Sales_Rep__c` change**. The re-stamp is the half that is easy to omit: stamping only on create leaves a reassigned deal carrying the *old* rep's dealer — shared with an organization that no longer sells it — and nothing surfaces it, because the record looks correct to everyone except the people who should no longer see it.
 
-**The sales-company picklists are not an ownership source.** `Sundial_Customer__c.Dealer_Name__c`, `Sundial_Customer__c.Sales_Company__c` and `Sundial_Solar__c.Sales_Company_Harmon_Solar_or_Third__c` stay exactly what D19 made them — the commission discriminator — and nothing on a read path consults them. `Dealer_Name__c` is populated on **13 of 31,637** customers and does not contain "Harmon Solar" at all; deriving ownership from it would leave essentially every customer invisible to dealer scope.
+**The commission redline follows the dealer for deals created on/after 2026-09-04 (D-085).** `Commission_Redline_PPW__c` on Customer reads `Dealer__r.Redline_LightReach_PPW__c` / `Dealer__r.Redline_PPW__c` (no dealer ⇒ blank). On Solar it reads its Customer's redline when the Customer was created on/after the cutover. Records created before it keep the legacy picklist rates. `Dealer_Display_Name__c` ("Dealer (based on Sales Rep)") shows `Dealer__r.Name` on both objects. `Sales_Rep_Name__c` coalesces the lookup's name with the legacy text (Customer `Sunbase_Sales_Rep__c` → `Dealer_Name__c`; Solar `Sales_Representative__c` → `Third_Party_Sales_Representative__c` → the sales company).
+
+**The sales-company picklists are not an ownership source.** `Sundial_Customer__c.Dealer_Name__c`, `Sundial_Customer__c.Sales_Company__c` and `Sundial_Solar__c.Sales_Company_Harmon_Solar_or_Third__c` stay what D19 made them — the commission discriminator, **for records created before 2026-09-04 only** (D-085) — and nothing on a read path consults them. `Dealer_Name__c` is populated on **13 of 31,637** customers and does not contain "Harmon Solar" at all; deriving ownership from it would leave essentially every customer invisible to dealer scope.
 
 **A sales role can never write either field.** `Sales_Rep__c` and `Dealer__c` are on the protected list (§3.4): a PATCH naming one is rejected outright, not ignored.
 
@@ -662,6 +670,8 @@ per dealer per tenant; 57 exist for Harmon, 5 active.
 | `Active__c` | Checkbox | **The off switch.** A sales user whose dealer is inactive resolves to scope `none` — they authenticate and see nothing (§2.1). Deactivating a dealer is how their people's access is turned off, so it must apply to EXISTING users, not only new ones |
 | `Is_Internal__c` | Checkbox | Marks Harmon's own dealer. Carried on the AccessContext and **grants nothing** — an internal rep is still `own` scope |
 | `Client__c` | Lookup(`Sundial_Tenant__c`) | Tenant isolation, as on every object |
+| `Redline_PPW__c` / `Redline_LightReach_PPW__c` | Currency(14,4) | The dealer's commission redlines (D-085): the redline of every deal created on/after 2026-09-04 |
+| `Acumatica_Vendor_ID__c` / `Acumatica_Vendor_Name__c` | Text(20) / Text(80) | The commission-PO vendor (D-085). Not yet read by `sundial-acumatica-commission-po` |
 
 ### `Dealer__c` — the lookup, on five objects
 

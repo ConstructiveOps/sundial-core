@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  v9 DEALER TERMS (D-085). 6 NEW fields + 4 MODIFIED formula fields + 1 permission set.
+  NOT purely additive: Commission_Redline_PPW__c and Sales_Rep_Name__c are REPLACED on
+  both objects. See README.md for the order (backfill the dealer terms straight after).
+
+  Build the zip with the builder, never by hand:
+      node scripts/build-zips.mjs v9-dealer-terms
+  Workbench -> Migration -> Deploy -> Single Package. CHECK ONLY FIRST - it compiles the
+  formulas and the v3 Commission_Total / Commission_Total_PPW fields that inline them.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Dealer__c.Redline_PPW__c</members>
+        <members>Sundial_Dealer__c.Redline_LightReach_PPW__c</members>
+        <members>Sundial_Dealer__c.Acumatica_Vendor_ID__c</members>
+        <members>Sundial_Dealer__c.Acumatica_Vendor_Name__c</members>
+        <members>Sundial_Customer__c.Commission_Redline_PPW__c</members>
+        <members>Sundial_Customer__c.Sales_Rep_Name__c</members>
+        <members>Sundial_Customer__c.Dealer_Display_Name__c</members>
+        <members>Sundial_Solar__c.Commission_Redline_PPW__c</members>
+        <members>Sundial_Solar__c.Sales_Rep_Name__c</members>
+        <members>Sundial_Solar__c.Dealer_Display_Name__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Dealer_Terms</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

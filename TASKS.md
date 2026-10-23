@@ -4,6 +4,16 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-22 — Dealer terms on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — PACKAGE BUILT, NOT DEPLOYED
+
+- [x] `salesforce/v9-dealer-terms/` (generate / verify 81 checks / zip): 4 dealer fields, Customer + Solar `Commission_Redline_PPW__c` and `Sales_Rep_Name__c` replaced, `Dealer_Display_Name__c`, permission set `Sundial_Dealer_Terms`
+- [x] `scripts/backfill-dealer-terms.mjs` (dry run by default, canary first) and `scripts/probe-dealer-terms-cutover.mjs` (run 2026-10-22: 91 Customer + 18 Solar redlines go number → blank)
+- [ ] **TIM: decide the 91 + 18 before deploying.** All 91 Customers are rep-less, so there is no dealer to derive. Either accept blank commission on them until a rep is assigned, or set `Dealer__c` on them (D-064 invariant 6). The probe lists every Id
+- [ ] **TIM: deploy** `salesforce/v9-dealer-terms.zip` (Check Only first), assign **Sundial Dealer Terms** to the integration user, then **straight away** `node scripts/backfill-dealer-terms.mjs` → `--apply`
+- [ ] **TIM: full cache resync** of `customer` then `solar` (`{ "mode": "full", "object": "customer" }`) — `sales_rep_name` changed by formula, so no modstamp moved. Then `node scripts/check-cache-formula-coverage.mjs`
+- [ ] **TIM: vendors the CSV cannot place.** 8 CSV rows reach no dealer (rep names: Dennis Alessandro, Thomas Kopp, Daniel Reese, Ben Wollschlager; plus Desert Sun Systems, Volt Energy, SunbaseData Admin, and "Mr. Clutch Solar", whose dealer is reached through its "Mr Clutch Solar" row anyway). Active dealers left without a vendor: Invictus Energy, Sunlink Energy (+ the two ZZ fixtures; Harmon Solar is internal, correctly blank)
+- [ ] **Lambdas still read the Solar picklist for post-cutover deals:** `sundial-budget` (internal vs external line, `budgetCalc.js` `SALES_COMPANY_FIELD`), `sundial-acumatica-commission-po` (`lookupDealerVendor`), `lib/acumatica-attributes.js` (`SALESPERSO`). Move them to `Dealer__r.Is_Internal__c` / `Dealer__r.Acumatica_Vendor_ID__c` for deals created on/after 2026-09-04 (D-085)
+
 ## 2026-10-22 — Dealer module step 0 of 9: field visibility from Harmon's sheet (`feature/dealer-visibility`) — APPLIED TO THE WORKBOOKS + MANIFEST, NOT DEPLOYED
 
 - [x] `scripts/apply-dealer-visibility.mjs`: sheet ("unlisted = unchanged") + rule 7 Solar adder mirror + `OVERRIDES`; applied; manifests regenerated; workbooks copied to harmon-crm `docs/` (access-model §4.1a). Suite 1,608 / 1,608

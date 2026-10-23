@@ -66,6 +66,7 @@ import {
   canAction,
   OBJECT_ACCESS,
   DENY,
+  TENANT_ACCESS_LEVELS,
 } from "../../lib/access.js";
 import { COST_FIELDS, COSTING_READ, stripCost } from "../../lib/cost-gate.js";
 // FIELD MANIFEST (D-064 Phase 4, §4.3/§4.4). Imported at module scope on purpose: the
@@ -2372,6 +2373,35 @@ async function handlePicklistsRead(ctx) {
 // no cache-mapping to reason about. (The sundial_user_cache is columnar per the
 // object's fields; a bespoke display-name projection isn't worth a cache round-trip
 // here.)
+
+// The levels the portal labels as staff on a comment's author (harmon-crm
+// isStaffAuthor): the tenant-scope levels plus Technician, whose scope is `tech` but
+// who is Harmon staff all the same. Derived from TENANT_ACCESS_LEVELS so a level added
+// to the scope table is staff here too, with no second list to drift.
+export const STAFF_ACCESS_LEVELS = Object.freeze([...TENANT_ACCESS_LEVELS, "Technician"]);
+
+/**
+ * One Sundial_User__c record -> one GET /sf/users row. Name falls back to Email, then
+ * Id, when the name fields are empty. supabaseUserId is null for a user with no
+ * Supabase id set yet (the user is still returned).
+ *
+ * `staff` is a boolean on purpose: sales roles call this route (the @-mention list),
+ * and the level NAME would tell a rep who the Admins are. Access_Level__c is read only
+ * to compute it and is never returned. No other (sensitive) fields are returned.
+ */
+export function toUserRow(r) {
+  const name =
+    [r.First_Name__c, r.Last_Name__c].filter(Boolean).join(" ").trim() ||
+    r.Email__c ||
+    r.Id;
+  return {
+    id: r.Id,
+    name,
+    supabaseUserId: r.Supabase_User_Id__c ?? null,
+    staff: STAFF_ACCESS_LEVELS.includes(r.Access_Level__c),
+  };
+}
+
 async function handleUsersRead(ctx) {
   const { tenantId, cors, shadow, enforce } = ctx;
   const sfObject = OBJECT_ALLOWLIST.user.sfObject; // "Sundial_User__c"
@@ -2390,24 +2420,14 @@ async function handleUsersRead(ctx) {
   // the query is character-for-character what it was.
   const accessClause = enforce ? ` AND (${enforce.soql})` : "";
   const soql =
-    `SELECT Id, First_Name__c, Last_Name__c, Email__c, Supabase_User_Id__c FROM ${sfObject} ` +
+    `SELECT Id, First_Name__c, Last_Name__c, Email__c, Supabase_User_Id__c, Access_Level__c FROM ${sfObject} ` +
     `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
     `AND Active__c = true` +
     accessClause +
     ` ORDER BY Last_Name__c, First_Name__c`;
   const records = await sfQuery(soql);
 
-  // Compact projection: id + display name + Supabase auth id. Name falls back to
-  // Email, then Id, when the name fields are empty. supabaseUserId is null for a
-  // user with no Supabase id set yet (the user is still returned). No other
-  // (sensitive) fields are returned.
-  const users = (records || []).map((r) => {
-    const name =
-      [r.First_Name__c, r.Last_Name__c].filter(Boolean).join(" ").trim() ||
-      r.Email__c ||
-      r.Id;
-    return { id: r.Id, name, supabaseUserId: r.Supabase_User_Id__c ?? null };
-  });
+  const users = (records || []).map(toUserRow);
 
   // SHADOW: the §3.5 union. The served SOQL is left EXACTLY as it was — the new count
   // comes from sundial_user_cache (which carries dealer_sf_id and access_level since

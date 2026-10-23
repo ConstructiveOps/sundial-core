@@ -260,6 +260,23 @@ The Solar Projects page's stage columns and PM / Sales Rep option counts **and**
 
 **Implementation** — `public.sundial_solar_pipeline(p_client_sf_id, p_filters, p_narrow, p_terminal_terms, p_not_terminal)` (`sql/sundial_solar_pipeline.sql`), the same grants as the customer one (EXECUTE revoked from `PUBLIC`, `anon`, `authenticated`; granted to `service_role`), static SQL, unknown keys raise. Index: `sql/2026-10-06_solar_pipeline_indexes.sql`. **Same API Gateway resource** as customer (`/sf/{object}/pipeline` — no wiring change). Log line `{"pipeline":"solar",…}`.
 
+#### `GET /sf/users`
+
+**Lambda:** `sundial-sf-query` (`handleUsersRead`)
+**Purpose:** the caller's tenant's ACTIVE `Sundial_User__c` records, for lookup dropdowns (Sales Rep) and the @-mention list. Direct Salesforce read (not cache), tenant-filtered on `Client__c` from the token; a sales scope gets the §3.5 union (`userFilter`), `none` is `403`.
+
+**Response shape (200):**
+```json
+{
+  "users": [
+    { "id": "a1O7y00000ABCDEAAA", "name": "Pat Lee", "supabaseUserId": "8f3c…", "staff": true }
+  ]
+}
+```
+
+- `name` — First + Last, else Email, else Id. `supabaseUserId` — `null` until the user has a login.
+- `staff` (2026-10-23, additive) — `true` when `Access_Level__c` is a tenant-scope level (`TENANT_ACCESS_LEVELS` in `lib/access.js`: Executive, Admin, Manager) or `Technician`; `false` otherwise, including blank. The portal's `isStaffAuthor` reads it when present and falls back when absent, so Lambda and portal deploy in either order. **The level name is never returned** — sales roles call this route and must not learn who is an Admin.
+
 #### `GET /sf/{object}/{id}`
 
 **Lambda:** `sundial-sf-query`

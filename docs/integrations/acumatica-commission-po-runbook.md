@@ -357,7 +357,7 @@ sitting at $9,999 against R261065.** Do it before the next run, and again after.
 
 ---
 
-## 2026-10-23 — Why amount updates do not stick: investigation and fix plan (NOT IMPLEMENTED)
+## 2026-10-23 — Why amount updates do not stick: investigation and fix plan (BUILT later the same day — see "The fix as built" below; not deployed)
 
 **Read-only.** Nothing was written to Acumatica or Salesforce. Tools:
 `scripts/probe-commission-po-update.mjs <SOL-…>` (one project's POs, every header and
@@ -497,6 +497,65 @@ changing state); a race with a person editing the same PO (the guard in D1 is th
 receipts/bills on POs (treat QtyOnReceipts > 0 or Completed as frozen — none of the 27's Open
 POs had any on 2026-10-23); a repeat of the 406 outage (it followed two `$custom` audit-column
 reads — do not repeat those).
+
+### The fix as built (2026-10-23, `feature/dealer-terms`, NOT DEPLOYED) — D-057 am. 2
+
+| Plan item | Built as |
+|---|---|
+| **A. Logging** | Every update PUT logs `commission-po UPDATE {step} M{n} nbr= po= line= amount= date= hold=` and `commission-po UPDATE-ECHO … http= unitCost= status= hold=` (the PUT now asks `$expand=Details`, so the echo carries the line). Ids and amounts only. |
+| **B. Sandbox proof** | `scripts/probe-po-hold-update.mjs` — Step 10 below. **Release-from-hold has no action name**: the Default/25.200.001 swagger has no PurchaseOrder hold/release action (`PutOnHold` / `ReleaseFromHold` are Subcontract's). `Hold` is a BooleanValue field, so both steps are `{ id, Hold }` PUTs. |
+| **C. Hold → amount → release** | `updateCommissionPo`, behind **`HOLD_UPDATE_GATE = { enabled: false }`**. Open PO + gate open: hold → re-read On Hold, amount unmoved → amount PUT → verify, still On Hold → release → re-read back to the pre-hold status. A failure names its `step`; after the hold the PO is **left On Hold**. Release landing in `Pending Approval` = `approvalReentered`. On Hold POs and gate-closed always get the single PUT. |
+| **D1. Manual-edit guard** | Always on. Live ≠ stored → `reconciled` (= ruled) or `manually_set` (≠ ruled), no Acumatica write either way. The Manually Set marker in `Commission_PO_Error__c` is read back by the next run; clear the error to release it. Status `Manually Set` is not in the picklist yet → `Frozen` + a note (`MANUALLY_SET_PICKLIST.deployed`). |
+| **D2. Frozen M1** | Frozen = off `Open`/`On Hold` **or** `QtyOnReceipts` / `ReceivedAmount` > 0 / Completed / Cancelled on the line. M2 = commission − M1's live amount; ≤ 0 → `skip_m2_covered_by_m1`. A frozen M1 no longer marks the record Frozen. |
+| **E. Clearing the 27** | `{ reconcilePos: true }` on `sundial-acumatica-budget-push` + `scripts/reconcile-commission-pos.mjs` — below. |
+
+**Dry run over all 33 Failed projects** (`--local`, 2026-10-23, read-only): every one of the 27
+update-mismatch projects has its amount adopted with **zero Acumatica writes** — **15 →
+Both Raised**; **12 → still Failed, now for `dealer_missing`** (created after the 2026-09-04
+cutover with no `Dealer__c`: SOL-10050 / 10051 / 10062 / 10063 / 10070 / 10071 / 10124 / 10130 /
+10132 / 10133 / 10134 / 10136 — their amounts are right, but the next push refuses until a dealer
+is set, so the record says that instead of the stale October text); SOL-10134's M2 is the one
+`manually_set` (4,663.75 vs 4,663.74). The other 6 (SOL-10052 / 10072 / 10137 / 10140 / 10141 /
+9871) never had POs raised — `needs_push`, untouched.
+
+### Clearing the Failed records — `scripts/reconcile-commission-pos.mjs`
+
+```
+node scripts/reconcile-commission-pos.mjs --local            # dry run in-process (works before deploy)
+node scripts/reconcile-commission-pos.mjs                    # dry run via the deployed Lambda
+node scripts/reconcile-commission-pos.mjs --apply            # writes Salesforce: ONE canary, re-read, then the rest
+node scripts/reconcile-commission-pos.mjs SOL-10125 --apply  # just these
+```
+
+Never writes to Acumatica. `--apply` writes only the six commission-PO fields; the canary
+aborts if anything else on the record moved (budget push status/error, finalized flag,
+commission, Created stamps) — the sign a Flow reacted.
+
+## Step 10 — the hold proof (SANDBOX ONLY), before opening `HOLD_UPDATE_GATE`
+
+**There is no sandbox secret today** (2026-10-23): `sundial/acumatica/connected-app` is LIVE
+(`client_id` ends `@Harmon Electric`) and `sundial/acumatica/api` holds placeholders. **Do not
+repoint `connected-app`.** Create a separate secret, e.g. **`sundial/acumatica/sandbox`**, in
+us-west-1, with the same five keys as `connected-app` — `base_url`, `client_id` (ends
+`@<sandbox tenant>`, e.g. `@BizRun Tenant`), `client_secret`, `username`, `password` — for a
+sandbox connected app with API access. Then pick an Open, not-on-Hold, one-line PO in the
+sandbox that nobody minds changing, and:
+
+```
+$env:SUNDIAL_ACUMATICA_SECRET_NAME = "sundial/acumatica/sandbox"
+node scripts/probe-po-hold-update.mjs --tenant "BizRun Tenant" --po <OrderNbr>          # checks + plan
+node scripts/probe-po-hold-update.mjs --tenant "BizRun Tenant" --po <OrderNbr> --apply  # the four PUTs
+Remove-Item Env:SUNDIAL_ACUMATICA_SECRET_NAME
+```
+
+The script refuses unless the variable is set, the credential's tenant equals `--tenant`, and
+that tenant is not the one the deployed pointer holds. It prints the endpoint's PurchaseOrder
+actions, then status / hold / amount after: (1) the engine's plain update, (2) `Hold = true`,
+(3) the update again, (4) `Hold = false`, and a verdict. **Open the gate only on "Hypothesis
+(a) CONFIRMED and the hold path works"** — `HOLD_UPDATE_GATE.enabled = true` in
+`lambdas/sundial-acumatica-commission-po/index.js`, its pinning test updated in the same diff.
+A plain PUT that sticks means the October cause is elsewhere: leave the gate shut, paste the
+output back. `SUNDIAL_ACUMATICA_SECRET_NAME` is for scripts only — never on a Lambda.
 
 ## What to paste back
 

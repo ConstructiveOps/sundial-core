@@ -49,6 +49,7 @@ import {
   PO_NUMBER_FIELDS,
   MILESTONE_DATE_FIELDS,
   commissionVendorFieldNames,
+  commissionPoFieldNames,
 } from "../sundial-acumatica-commission-po/index.js";
 import {
   syncProjectAttributes,
@@ -516,6 +517,10 @@ export function downstreamFieldNames() {
     ...Object.values(PO_NUMBER_FIELDS),
     ...Object.values(MILESTONE_DATE_FIELDS),
     ...commissionVendorFieldNames(),
+    // The stored PO amounts and the error text (2026-10-23): the manual-edit guard compares
+    // the live PO with what Sundial last wrote. Missing, every PO reads "differs" and is
+    // never updated again.
+    ...commissionPoFieldNames(),
   ])];
 }
 
@@ -948,6 +953,7 @@ async function projectIdForRecord(recordId) {
 //   1. Async worker self-invoke  -> event.__worker === true       (handleWorker)
 //   2. Dry-run write (direct)    -> event.dryRunWrite === true    (handleDryRunWrite)
 //   3. Attribute-only (direct)   -> event.attributesSync === true (runAttributeOnlySync)
+//   3b. PO reconcile (direct)    -> event.reconcilePos === true  (runCommissionPoReconcile)
 //   4. API Gateway HTTP request  -> event.requestContext etc.     (handleHttp*)
 //   5. Direct payload (reconcile) -> { recordId | acumaticaProjectId } (handleReconcile)
 // The reconcile path is UNCHANGED from before; HTTP + worker are the write path.
@@ -986,6 +992,10 @@ export const handler = async (event) => {
   // reconcile and dry-run payloads next to it.
   if (event && event.attributesSync === true) {
     return runAttributeOnlySync(event.recordId, event.tenantId ?? null);
+  }
+  // Same trust level: operator-only, driven by scripts/reconcile-commission-pos.mjs.
+  if (event && event.reconcilePos === true) {
+    return runCommissionPoReconcile(event.recordId, { tenantId: event.tenantId ?? null, dryRun: event.dryRun !== false });
   }
   if (isHttpEvent(event)) {
     return isAttributesSyncRoute(event) ? handleAttributesSyncHttp(event) : handleHttp(event);
@@ -1361,6 +1371,74 @@ export async function runDownstreamStages(recordId, acumaticaProjectId, values, 
     // has always been.
     note: problems.length === 0 ? null : `Budget lines pushed OK. ${problems.join(" | ")}`.slice(0, 32000),
   };
+}
+
+// ===========================================================================
+// COMMISSION-PO RECONCILE — { reconcilePos: true, recordId, dryRun? } (2026-10-23)
+// ===========================================================================
+//
+// Clears a Failed commission-PO record WITHOUT re-pushing its budget. Built for the 27
+// October failures, every one of which already held the right amount in Acumatica
+// (Harmon fixed them by hand) while Salesforce still held the old amount and `Failed`.
+//
+// It runs the PO stage alone in reconcile mode (syncCommissionPos `reconcileOnly`): no
+// create, no PUT, no vendor check — only reads, and the Salesforce write-back of what
+// the reads prove: the live amount adopted, the status set back to M1 Raised / Both
+// Raised (or Frozen / Manually Set), the error cleared. A milestone that would need an
+// Acumatica write reads `needs_push`, and then the record's status is left as it was.
+//
+// DRY RUN BY DEFAULT: only `dryRun: false` writes to Salesforce. The dry run returns the
+// exact field maps it would have written.
+
+/**
+ * @param {string} recordId - Sundial_Solar__c id
+ * @param {{tenantId?: string|null, dryRun?: boolean}} [opts]
+ */
+export async function runCommissionPoReconcile(recordId, opts = {}, deps = {}) {
+  const query = deps.sfQuery ?? sfQuery;
+  const runPos = deps.syncCommissionPos ?? syncCommissionPos;
+  const dryRun = opts.dryRun !== false;
+  if (!recordId || !/^[a-zA-Z0-9]{15,18}$/.test(String(recordId))) {
+    return { ok: false, error: "bad_record_id", code: "BAD_RECORD_ID" };
+  }
+  try {
+    // A field named twice is a MALFORMED_QUERY, so dedupe (the dealer-terms set may carry Name).
+    const fields = [...new Set(["Name", ...workerFieldNames()])];
+    const soql =
+      `SELECT ${fields.join(", ")} FROM ${SOLAR_SF_OBJECT} ` +
+      `WHERE Id = '${soqlEscapeString(recordId)}'` +
+      (opts.tenantId ? ` AND Client__c = '${soqlEscapeString(opts.tenantId)}'` : "") +
+      ` LIMIT 1`;
+    const rows = await query(soql);
+    if (!rows || rows.length === 0) return { ok: false, error: "record_not_found", code: "RECORD_NOT_FOUND" };
+
+    const writes = [];
+    const update = dryRun
+      ? async (obj, id, fieldMap) => { writes.push(fieldMap); return { ok: true }; }
+      : async (obj, id, fieldMap) => { writes.push(fieldMap); return (deps.sfUpdateRecord ?? sfUpdateRecord)(obj, id, fieldMap); };
+    const result = await runPos(recordId, rows[0], { reconcileOnly: true, update });
+    return {
+      mode: dryRun ? "reconcile_pos_dry_run" : "reconcile_pos",
+      recordId,
+      name: rows[0].Name ?? null,
+      before: {
+        status: rows[0].Commission_PO_Status__c ?? null,
+        M1: rows[0].Commission_PO_M1_Amount__c ?? null,
+        M2: rows[0].Commission_PO_M2_Amount__c ?? null,
+      },
+      ok: result.ok,
+      status: result.status ?? null,
+      reason: result.reason ?? null,
+      results: (result.results ?? []).map((r) => ({
+        milestone: r.milestone, action: r.action, ok: r.ok, orderNbr: r.orderNbr ?? null,
+        amount: r.amount ?? r.currentAmount ?? null, absorbed: r.absorbed === true, message: r.message ?? null,
+      })),
+      writes,
+    };
+  } catch (err) {
+    console.error("commission-po reconcile error:", err?.message || String(err));
+    return { ok: false, error: "server_error", message: err?.message || String(err) };
+  }
 }
 
 // ===========================================================================

@@ -63,6 +63,19 @@
 // A post-cutover deal with no dealer is refused (dealer_missing) — never the picklist.
 // And before ANY create, the vendor id is looked up in Acumatica (vendor_not_in_acumatica)
 // — a typo in a dealer's vendor id must not become a PO to whoever owns that id.
+//
+// ---------------------------------------------------------------------------
+// UPDATING AN EXISTING PO — three rules from 2026-10-23 (D-057 amendments 1 and 2)
+// ---------------------------------------------------------------------------
+// 1. NEVER OVERWRITE A HAND EDIT. If the PO's live amount differs from what Sundial last
+//    wrote (Commission_PO_M{n}_Amount__c), nothing is written to Acumatica: a live amount
+//    equal to the ruled one is adopted (`reconciled` — the PO is right, Salesforce was
+//    behind); any other is adopted and reported (`manually_set`). Always on.
+// 2. A FROZEN M1 MOVES M2. Frozen = off UPDATABLE_STATUSES, or anything received /
+//    completed on the line even on an Open PO. Then M2 = commission − M1's LIVE amount.
+// 3. AN OPEN PO IS PUT ON HOLD TO BE EDITED — behind HOLD_UPDATE_GATE, closed until the
+//    sandbox proof (scripts/probe-po-hold-update.mjs) shows a plain PUT to an Open PO is
+//    discarded and Hold → PUT → release is not. Every update PUT is logged with its echo.
 
 import { getAcumaticaEntity, putAcumaticaEntity } from "../../lib/acumatica.js";
 import { lookupDealerVendor } from "../../lib/acumatica-dealer-vendors.js";
@@ -118,6 +131,50 @@ export const M1_CAP = 2500;
  * duplicate payment, not a reporting glitch.
  */
 export const PO_GATE = { enabled: true };
+
+/**
+ * THE HOLD-UPDATE GATE (2026-10-23). CLOSED until the sandbox proof passes.
+ *
+ * Every amount update that "failed" in October was on an Open, Hold = false PO, and the
+ * only update ever proven to stick (runbook Step 7) was on an On Hold one. The likely
+ * cause: Acumatica accepts a detail edit to an Open PO with a 200 and silently discards
+ * it. Not proven — scripts/probe-po-hold-update.mjs proves or disproves it, against a
+ * SANDBOX secret only.
+ *
+ * Open, an update to an Open PO goes Hold = true → amount → verify → Hold = false →
+ * verify; a failure at any step leaves the PO On Hold (it cannot be received or billed
+ * there) and the outcome names the step. Closed, an Open PO gets today's single PUT —
+ * now logged, so the next failure shows what Acumatica echoed. An On Hold PO always gets
+ * the single PUT: that path is the proven one.
+ *
+ * Same mechanism as PO_GATE: a repo constant, so opening it is a reviewed diff. A test
+ * pins the committed value. Flip it only after the probe's three steps come back as
+ * expected — see the runbook, "2026-10-23 — Why amount updates do not stick".
+ */
+export const HOLD_UPDATE_GATE = { enabled: false };
+
+/**
+ * How a PO is put on and taken off hold: the `Hold` FIELD, by PUT.
+ *
+ * The Default/25.200.001 endpoint has NO hold / release action on PurchaseOrder — its
+ * swagger (read 2026-10-23) lists `PutOnHold` / `ReleaseFromHold` for Subcontract only,
+ * and PurchaseOrder has just the generic custom-action route. `Hold` is a BooleanValue on
+ * the PurchaseOrder entity, so the hold and the release are both `{ id, Hold }` PUTs, each
+ * verified by re-read like everything else here. If the probe shows the field is not
+ * honoured, this is what changes — not the gate.
+ */
+export const HOLD_FIELD = "Hold";
+
+/**
+ * "Manually Set" — the PO's amount was changed in Acumatica and Sundial will not overwrite it.
+ *
+ * ⚠️ NOT YET A VALUE OF THE RESTRICTED PICKLIST. Commission_PO_Status__c is restricted, so
+ * writing an undeployed value fails the whole update. Until the next Salesforce package
+ * adds it (metadata note: TASKS.md → "Next Salesforce package"), the record shows `Frozen` and the
+ * error text says it is Manually Set. Flip `deployed` in the same change that deploys it.
+ */
+export const MANUALLY_SET_STATUS = "Manually Set";
+export const MANUALLY_SET_PICKLIST = { deployed: false };
 
 /**
  * Q13, answered 2026-08-24 — which date each milestone PO CARRIES.
@@ -371,8 +428,34 @@ export function normalizePurchaseOrder(raw) {
       taxCategory: av(d?.TaxCategory),
       warehouseId: av(d?.WarehouseID),
       lineType: av(d?.LineType),
+      // What has happened to the line downstream (Default/25.200.001 PurchaseOrderDetail).
+      // Any of these makes the PO frozen whatever its header Status says — see frozenReason.
+      qtyOnReceipts: av(d?.QtyOnReceipts),
+      receivedAmount: av(d?.ReceivedAmount),
+      completed: av(d?.Completed),
+      cancelled: av(d?.Cancelled),
     })),
   };
+}
+
+/**
+ * Why this PO may not be changed, or null when it may.
+ *
+ * The header Status first, deny-by-default (UPDATABLE_STATUSES). Then the LINE, because a
+ * receipt is money moving: a line with anything received against it, or marked Completed
+ * or Cancelled, is frozen even on an `Open` PO (2026-10-23). `QtyOnReceipts` is the
+ * received quantity on the Default/25.200.001 endpoint; `ReceivedAmount` is the same
+ * fact in money, checked too so a partial receipt in either shape is caught.
+ */
+export function frozenReason(po) {
+  if (!UPDATABLE_STATUSES.includes(po?.status)) return `is ${po?.status}`;
+  for (const line of po.lines ?? []) {
+    if (numOf(line.qtyOnReceipts) > 0) return `has ${numOf(line.qtyOnReceipts)} received against its line (status ${po.status})`;
+    if (numOf(line.receivedAmount) > 0) return `has ${round2(numOf(line.receivedAmount))} received against its line (status ${po.status})`;
+    if (line.completed === true) return `has its line marked Completed (status ${po.status})`;
+    if (line.cancelled === true) return `has its line marked Cancelled (status ${po.status})`;
+  }
+  return null;
 }
 
 /** Read one PO by its order number, with lines. Never cached — guids come from here. */
@@ -464,7 +547,7 @@ export function verifyCommissionPo(po, { vendorId, acumaticaProjectId, milestone
  * @param {object} values - Sundial_Solar__c field values
  * @returns {{ok:true, vendorId, vendorName, milestones}|{ok:false, reason, message}}
  */
-export function planCommissionPos(values) {
+export function planCommissionPos(values, { requireVendor = true } = {}) {
   const dealType = String(values?.Commission_Deal_Type__c ?? "").trim();
   if (dealType === "") {
     return {
@@ -495,7 +578,12 @@ export function planCommissionPos(values) {
   }
 
   const vendor = resolveCommissionVendor(values);
-  if (!vendor.ok) return vendor;
+  if (!vendor.ok) {
+    // A reconcile never creates and never PUTs, so it never needs the vendor: it plans
+    // without one and carries the refusal as `vendorProblem` for the record to show.
+    if (!requireVendor) return { ok: true, vendorId: null, vendorProblem: vendor, acumaticaProjectId, milestones };
+    return vendor;
+  }
 
   return {
     ok: true,
@@ -643,11 +731,93 @@ export async function createCommissionPo({ vendorId, acumaticaProjectId, milesto
 }
 
 /**
- * Update an EXISTING milestone PO's amount, subject to the freeze rule.
+ * The marker a Manually Set outcome leaves in Commission_PO_Error__c — and how the next
+ * run recognises it.
+ *
+ * WHY A MARKER IS NEEDED. The guard adopts the hand-edited amount into
+ * Commission_PO_M{n}_Amount__c, so on the NEXT push "live = stored" again and the guard
+ * alone would no longer see the edit — the push after that would overwrite it. The
+ * promise "Sundial will not overwrite" has to outlive the run that made it, so the error
+ * text carries it and the next run reads it back: a PO still holding the amount the
+ * marker names stays Manually Set. It ends when the commission rule comes round to that
+ * amount (reconciled), or when somebody clears Commission_PO_Error__c on purpose.
+ */
+export function manualSetMessage(orderNbr, milestone, amount, ruledAmount) {
+  return `PO ${orderNbr} (${milestone}) edited in Acumatica to ${amount}; Sundial will not overwrite ` +
+    `(the commission rule gives ${ruledAmount}).`;
+}
+const MANUAL_MARKER = /PO (\S+) \((M[12])\) edited in Acumatica to (-?[\d.]+); Sundial will not overwrite/g;
+
+/** { [orderNbr]: amount } for every Manually Set marker in a stored error text. */
+export function manualSetMarkers(errorText) {
+  const out = {};
+  for (const m of String(errorText ?? "").matchAll(MANUAL_MARKER)) out[m[1]] = round2(Number(m[3]));
+  return out;
+}
+
+/**
+ * One log line per PUT on the update path, and one for what Acumatica echoed.
+ *
+ * Ids and amounts only — never the response text of a success, never a credential (none
+ * reaches this layer). Added 2026-10-23: the update path logged nothing, so when 26 updates
+ * "did not stick" CloudWatch could not say whether Acumatica's own echo already showed the
+ * old amount.
+ */
+function logUpdatePut(step, milestone, orderNbr, body, put) {
+  const d = body.Details?.[0];
+  const sent = [
+    `po=${body.id}`,
+    d ? `line=${d.id}` : null,
+    d?.UnitCost ? `amount=${d.UnitCost.value}` : null,
+    d?.Promised ? `date=${d.Promised.value}` : null,
+    body[HOLD_FIELD] ? `hold=${body[HOLD_FIELD].value}` : null,
+  ].filter(Boolean).join(" ");
+  console.log(`commission-po UPDATE ${step} ${milestone} nbr=${orderNbr} ${sent}`);
+  const echoLine = put.data?.Details?.[0];
+  console.log(
+    `commission-po UPDATE-ECHO ${step} ${milestone} nbr=${orderNbr} http=${put.status} ` +
+      `unitCost=${av(echoLine?.UnitCost) ?? "(no line in echo)"} status=${av(put.data?.Status) ?? "?"} hold=${av(put.data?.Hold) ?? "?"}` +
+      (put.ok ? "" : ` error=${JSON.stringify(String(put.text || "").slice(0, 200))}`)
+  );
+}
+
+async function putPo(step, milestone, orderNbr, body) {
+  // $expand=Details so the echo carries the line — the evidence the old path never kept.
+  const put = await putAcumaticaEntity(PO_ENTITY, body, { $expand: "Details" });
+  logUpdatePut(step, milestone, orderNbr, body, put);
+  return put;
+}
+
+/**
+ * Update an EXISTING milestone PO's amount, subject to the freeze rule and the
+ * manual-edit guard.
+ *
+ * Order of the checks, and why:
+ *   1. FROZEN (status off the allow-list, or anything received / completed on the line) —
+ *      never written, the live amount reported so M2 can absorb an M1 difference.
+ *   2. MANUAL-EDIT GUARD (always on, whatever the gates say). The live amount is compared
+ *      with what Sundial last wrote (`storedAmount` = Commission_PO_M{n}_Amount__c). If
+ *      they differ, somebody changed the PO in Acumatica, and:
+ *        - live = the ruled amount → `reconciled`: the PO is right, Salesforce is behind;
+ *          adopt the live amount, write nothing to Acumatica;
+ *        - live ≠ the ruled amount → `manually_set`: adopt it, write nothing, say so.
+ *      A blank stored amount counts as "differs" — no record of what we wrote is no
+ *      licence to overwrite. A `manualAmount` (a marker from a previous Manually Set run,
+ *      see manualSetMarkers) still matching the live amount keeps it Manually Set.
+ *   3. Nothing to change → `unchanged`.
+ *   4. The write: one PUT on an On Hold PO (proven) or with HOLD_UPDATE_GATE closed;
+ *      Hold → amount → release on an Open PO with the gate open.
  *
  * @param {string} orderNbr - the number stored on the Salesforce record (never a scan)
+ * @param {number} amount - what the commission rule says this PO should hold
+ * @param {number|null} storedAmount - Commission_PO_M{n}_Amount__c (null when blank)
+ * @param {number|null} [manualAmount] - a previous run's Manually Set amount for this PO
+ * @param {boolean} [reconcileOnly] - never write to Acumatica; report `needs_push` instead
  */
-export async function updateCommissionPo({ orderNbr, amount, vendorId, acumaticaProjectId, milestone, milestoneDate = null }) {
+export async function updateCommissionPo({
+  orderNbr, amount, storedAmount = null, manualAmount = null, vendorId, acumaticaProjectId, milestone,
+  milestoneDate = null, reconcileOnly = false,
+}) {
   if (!PO_GATE.enabled) {
     return { ok: false, action: "update_blocked", reason: "PO_GATE is closed" };
   }
@@ -663,16 +833,24 @@ export async function updateCommissionPo({ orderNbr, amount, vendorId, acumatica
     };
   }
 
-  // FREEZE RULE (§6). A released PO has been acted on downstream; the difference belongs
-  // in M2, not in a quiet edit of a document someone has already worked from.
-  if (!UPDATABLE_STATUSES.includes(po.status)) {
+  const current = round2(numOf(po.lines[0]?.unitCost));
+  const wanted = round2(numOf(amount));
+
+  // FREEZE RULE (§6). A released PO — or one with anything received against it — has been
+  // acted on downstream. M1's difference is absorbed by M2 (D-057 am. 1, done in
+  // syncCommissionPos); M2's is a human's.
+  const frozen = frozenReason(po);
+  if (frozen) {
     return {
-      ok: false, action: "frozen", orderNbr, milestone, status: po.status,
-      currentAmount: round2(numOf(po.lines[0]?.unitCost)),
-      requestedAmount: round2(numOf(amount)),
+      ok: false, action: "frozen", orderNbr, milestone, status: po.status, frozenBecause: frozen,
+      currentAmount: current, requestedAmount: wanted, settled: current === wanted,
       message:
-        `PO ${orderNbr} is ${po.status} and cannot be changed (§6). The difference between ` +
-        `${round2(numOf(po.lines[0]?.unitCost))} and ${round2(numOf(amount))} belongs in M2.`,
+        `PO ${orderNbr} ${frozen} and cannot be changed (§6). ` +
+        (current === wanted
+          ? `It holds ${current}, what the commission rule gives.`
+          : milestone === "M1"
+          ? `The difference between ${current} and ${wanted} belongs in M2.`
+          : `It holds ${current}; the commission rule gives ${wanted}. The difference cannot be paid through this PO — a person decides.`),
     };
   }
 
@@ -680,8 +858,23 @@ export async function updateCommissionPo({ orderNbr, amount, vendorId, acumatica
     return { ok: false, action: "update_refused", orderNbr, milestone, message: `PO ${orderNbr} has ${po.lines.length} detail lines; expected exactly 1. Not guessing which to update.` };
   }
 
-  const current = round2(numOf(po.lines[0].unitCost));
-  const wanted = round2(numOf(amount));
+  // MANUAL-EDIT GUARD — always on (2026-10-23, Tim: the engine never overwrites a PO amount
+  // that differs from what Sundial last wrote).
+  const stored = storedAmount == null || storedAmount === "" ? null : round2(numOf(storedAmount));
+  const base = { orderNbr, milestone, poId: po.id, milestoneDate: po.lines[0].promised, previousStoredAmount: stored };
+  if (current !== wanted && manualAmount != null && round2(numOf(manualAmount)) === current) {
+    return { ok: true, action: "manually_set", ...base, amount: current, ruledAmount: wanted, message: manualSetMessage(orderNbr, milestone, current, wanted) };
+  }
+  if (stored === null || current !== stored) {
+    if (current === wanted) {
+      return {
+        ok: true, action: "reconciled", ...base, amount: current,
+        message: `PO ${orderNbr} (${milestone}) already holds ${current}, the ruled amount; Salesforce had ${stored ?? "nothing"} stored. Adopted, nothing written to Acumatica.`,
+      };
+    }
+    return { ok: true, action: "manually_set", ...base, amount: current, ruledAmount: wanted, message: manualSetMessage(orderNbr, milestone, current, wanted) };
+  }
+
   // The milestone date can move on its own — an install gets rescheduled without the
   // commission changing a cent — so it is a second, independent reason to write. A blank
   // milestone date is NOT a reason to clear a date already on the PO: Harmon may have set
@@ -693,6 +886,15 @@ export async function updateCommissionPo({ orderNbr, amount, vendorId, acumatica
     return { ok: true, action: "unchanged", orderNbr, milestone, amount: wanted, poId: po.id, milestoneDate: po.lines[0].promised };
   }
 
+  if (reconcileOnly) {
+    return {
+      ok: false, action: "needs_push", orderNbr, milestone, currentAmount: current, requestedAmount: wanted,
+      message:
+        `PO ${orderNbr} (${milestone}) holds ${current}` + (current !== wanted ? `; the commission rule gives ${wanted}` : "") +
+        (dateChanged ? `; its date should be ${whenWanted}` : "") + ". Reconcile writes nothing to Acumatica — a budget push makes this change.",
+    };
+  }
+
   // Address BOTH the header and the line by guid, from the read we just did. Same
   // discipline as the budget push: guids come from this run, never from storage.
   const detail = { id: po.lines[0].id, UnitCost: { value: wanted }, OrderQty: { value: 1 } };
@@ -700,21 +902,84 @@ export async function updateCommissionPo({ orderNbr, amount, vendorId, acumatica
     detail.Requested = { value: whenWanted };
     detail.Promised = { value: whenWanted };
   }
-  const put = await putAcumaticaEntity(PO_ENTITY, { id: po.id, Details: [detail] });
-  if (!put.ok) {
-    return { ok: false, action: "update_failed", orderNbr, milestone, status: put.status, error: (put.text || "").slice(0, 300) };
+  const verifyArgs = { vendorId, acumaticaProjectId, milestone, amount: wanted, milestoneDate: whenWanted };
+  const done = (after, via) => ({
+    ok: true, action: "updated", via, orderNbr, milestone, amount: wanted, previousAmount: current,
+    poId: after.id, milestoneDate: after.lines[0].promised, previousMilestoneDate: po.lines[0].promised,
+  });
+
+  if (po.status === "On Hold" || !HOLD_UPDATE_GATE.enabled) {
+    const put = await putPo("amount", milestone, orderNbr, { id: po.id, Details: [detail] });
+    if (!put.ok) {
+      return { ok: false, action: "update_failed", step: "amount", orderNbr, milestone, status: put.status, error: (put.text || "").slice(0, 300) };
+    }
+    const after = await readPurchaseOrder(orderNbr);
+    const mismatches = verifyCommissionPo(after, verifyArgs);
+    if (mismatches.length > 0) {
+      return { ok: false, action: "update_unverified", step: "amount", orderNbr, milestone, mismatches, message: `PO ${orderNbr} was updated but no longer matches the expected shape: ${mismatches.join("; ")}.` };
+    }
+    return done(after, "single_put");
   }
 
-  const after = await readPurchaseOrder(orderNbr);
-  const mismatches = verifyCommissionPo(after, { vendorId, acumaticaProjectId, milestone, amount: wanted, milestoneDate: whenWanted });
-  if (mismatches.length > 0) {
-    return { ok: false, action: "update_unverified", orderNbr, milestone, mismatches, message: `PO ${orderNbr} was updated but no longer matches the expected shape: ${mismatches.join("; ")}.` };
+  return updateViaHold({ po, orderNbr, milestone, detail, verifyArgs, current, done });
+}
+
+/**
+ * Hold → amount → release, verified after each step (HOLD_UPDATE_GATE open, Open PO).
+ *
+ * A failure after the hold LEAVES THE PO ON HOLD and says so: On Hold cannot be received
+ * or billed, so it is the safe place to stop, and a person releases it once they have
+ * looked. Nothing here tries to undo a step — an undo is one more write that can fail.
+ */
+async function updateViaHold({ po, orderNbr, milestone, detail, verifyArgs, current, done }) {
+  const fail = (action, step, extra) => ({ ok: false, action, step, orderNbr, milestone, ...extra });
+
+  // 1. Hold.
+  let put = await putPo("hold", milestone, orderNbr, { id: po.id, [HOLD_FIELD]: { value: true } });
+  if (!put.ok) {
+    return fail("update_failed", "hold", { status: put.status, error: (put.text || "").slice(0, 300),
+      message: `PO ${orderNbr} (${milestone}): putting it On Hold was refused (${put.status}). Nothing was changed.` });
   }
-  return {
-    ok: true, action: "updated", orderNbr, milestone, amount: wanted, previousAmount: current,
-    poId: after.id, milestoneDate: after.lines[0].promised,
-    previousMilestoneDate: po.lines[0].promised,
-  };
+  let after = await readPurchaseOrder(orderNbr);
+  if (after?.status !== "On Hold") {
+    return fail("update_unverified", "hold", {
+      message: `PO ${orderNbr} (${milestone}): asked to put it On Hold, but it reads ${after?.status ?? "missing"}. The amount was not sent.` });
+  }
+  if (round2(numOf(after.lines[0]?.unitCost)) !== current) {
+    return fail("update_unverified", "hold", {
+      message: `PO ${orderNbr} (${milestone}) is now On Hold, but its amount moved from ${current} to ${after.lines[0]?.unitCost} while we worked — someone else is editing it. Left On Hold; nothing else written.` });
+  }
+
+  // 2. The amount (and dates).
+  put = await putPo("amount", milestone, orderNbr, { id: po.id, Details: [detail] });
+  if (!put.ok) {
+    return fail("update_failed", "amount", { status: put.status, error: (put.text || "").slice(0, 300),
+      message: `PO ${orderNbr} (${milestone}): the amount update was refused (${put.status}). The PO is LEFT ON HOLD at ${current} — release it in Acumatica after checking.` });
+  }
+  after = await readPurchaseOrder(orderNbr);
+  const mismatches = verifyCommissionPo(after, verifyArgs);
+  if (after && after.status !== "On Hold") mismatches.push(`status is ${after.status}, expected On Hold`);
+  if (mismatches.length > 0) {
+    return fail("update_unverified", "amount", { mismatches,
+      message: `PO ${orderNbr} (${milestone}) was put On Hold and updated, but the re-read does not match: ${mismatches.join("; ")}. Left On Hold — check it in Acumatica.` });
+  }
+
+  // 3. Release, back to the status it had before we held it.
+  put = await putPo("release", milestone, orderNbr, { id: po.id, [HOLD_FIELD]: { value: false } });
+  if (!put.ok) {
+    return fail("update_failed", "release", { status: put.status, error: (put.text || "").slice(0, 300), amountWritten: verifyArgs.amount,
+      message: `PO ${orderNbr} (${milestone}) now holds ${verifyArgs.amount} (verified), but releasing the hold was refused (${put.status}). It is STILL ON HOLD — release it in Acumatica.` });
+  }
+  after = await readPurchaseOrder(orderNbr);
+  const released = verifyCommissionPo(after, verifyArgs);
+  if (after && after.status !== po.status) released.push(`status is ${after.status}, expected ${po.status}`);
+  if (released.length > 0) {
+    return fail("update_unverified", "release", { mismatches: released, amountWritten: verifyArgs.amount,
+      approvalReentered: after?.status === "Pending Approval",
+      message: `PO ${orderNbr} (${milestone}) was updated to ${verifyArgs.amount}, but after releasing the hold: ${released.join("; ")}.` +
+        (after?.status === "Pending Approval" ? " Releasing sent it back for APPROVAL — it cannot be received until someone approves it." : "") });
+  }
+  return done(after, "hold");
 }
 
 /**
@@ -774,17 +1039,33 @@ export const PO_WRITEBACK_FIELDS = Object.freeze({
   error: "Commission_PO_Error__c",
 });
 
-/** The five values Commission_PO_Status__c is restricted to. */
+/** The five values Commission_PO_Status__c is restricted to TODAY (Manually Set is pending). */
 export const PO_STATUSES = Object.freeze(["None", "M1 Raised", "Both Raised", "Failed", "Frozen"]);
+
+/** The status a Manually Set outcome writes — Frozen until the picklist value exists. */
+export function manuallySetStatus() {
+  return MANUALLY_SET_PICKLIST.deployed ? MANUALLY_SET_STATUS : "Frozen";
+}
+
+/**
+ * Is this outcome a frozen PO whose amount still needs a person?
+ *
+ * A frozen PO already holding what the rule gives (`settled`) is a normal resting state.
+ * So is a frozen M1 whose difference M2 has absorbed (`absorbed`, D-057 am. 1). Only a
+ * frozen PO whose money is still wrong is worth the Frozen label.
+ */
+const frozenNeedsPerson = (r) => r.action === "frozen" && !r.settled && !r.absorbed;
 
 /**
  * Reduce a run's per-milestone outcomes to the single picklist value.
  *
- * Precedence is FAILED > FROZEN > raised-count, and the order is the point. A run where
- * M1 froze and M2 failed is a run somebody has to look at, so it reads `Failed`; a run
- * where a PO froze and nothing failed is a normal, expected resting state and reads
- * `Frozen` rather than being filed under failure — filing it under failure is how people
- * learn to ignore failures.
+ * Precedence is FAILED > FROZEN > MANUALLY SET > raised-count, and the order is the point.
+ * A run where M1 froze and M2 failed is a run somebody has to look at, so it reads
+ * `Failed`; a run where a PO froze at the wrong amount and nothing failed is an expected
+ * resting state and reads `Frozen` rather than being filed under failure — filing it under
+ * failure is how people learn to ignore failures. A Manually Set PO is a person's decision
+ * Sundial is respecting, lower than both. A frozen M1 that M2 absorbed, or a reconciled
+ * PO, is neither — the run reads by what was raised (2026-10-23).
  *
  * @param {Array<{ok:boolean, action:string}>} results
  * @param {{M1?:string|null, M2?:string|null}} numbers - order numbers known AFTER the run
@@ -792,10 +1073,46 @@ export const PO_STATUSES = Object.freeze(["None", "M1 Raised", "Both Raised", "F
 export function commissionPoStatus(results, numbers) {
   const list = results ?? [];
   if (list.some((r) => !r.ok && r.action !== "frozen")) return "Failed";
-  if (list.some((r) => r.action === "frozen")) return "Frozen";
+  if (list.some(frozenNeedsPerson)) return "Frozen";
+  if (list.some((r) => r.action === "manually_set")) return manuallySetStatus();
   if (numbers?.M1 && numbers?.M2) return "Both Raised";
   if (numbers?.M1) return "M1 Raised";
   return "None";
+}
+
+/**
+ * Everything syncCommissionPos reads off the Sundial_Solar__c row — for the worker's and
+ * the reconcile path's SELECT. The stored AMOUNTS and the error text are here because the
+ * manual-edit guard compares against them: missing, every PO would read "differs" and
+ * nothing would ever be updated again.
+ */
+export function commissionPoFieldNames() {
+  return [...new Set([
+    "Acumatica_Project_ID__c", "Commission_Deal_Type__c", "Sales_Rep_Commission_Amt__c",
+    PO_WRITEBACK_FIELDS.M1.number, PO_WRITEBACK_FIELDS.M1.amount,
+    PO_WRITEBACK_FIELDS.M2.number, PO_WRITEBACK_FIELDS.M2.amount,
+    PO_WRITEBACK_FIELDS.status, PO_WRITEBACK_FIELDS.error,
+    ...Object.values(MILESTONE_DATE_FIELDS),
+    ...commissionVendorFieldNames(),
+  ])];
+}
+
+/**
+ * M2 once M1 has run — the frozen-M1 rule (D-057 am. 1, 2026-10-23, Tim).
+ *
+ * When M1 is frozen (off the allow-list, or anything received), M2 = the commission minus
+ * the amount M1 ACTUALLY HOLDS, read live from Acumatica this run — never the rule's M1.
+ * The dealer is paid the commission in total, whatever M1 froze at. Otherwise the rule's
+ * split stands.
+ *
+ * @returns {{amount:number, basis:"rule"|"frozen_m1", m1Live?:number}}
+ */
+export function m2AmountAfter(m1Result, milestones) {
+  if (m1Result?.action === "frozen") {
+    const m1Live = round2(numOf(m1Result.currentAmount));
+    return { amount: round2(milestones.total - m1Live), basis: "frozen_m1", m1Live };
+  }
+  return { amount: milestones.m2, basis: "rule" };
 }
 
 /**
@@ -806,16 +1123,25 @@ export function commissionPoStatus(results, numbers) {
  * attempted, so an M2 failure — or a Lambda timeout between the two — cannot lose the
  * fact that M1 was raised. Batching all eight fields into one tidy update at the end
  * would be neater code and a duplicate payment the first time anything went wrong
- * halfway.
+ * halfway. (M1 also has to RUN first now: M2's amount depends on what M1 holds.)
+ *
+ * RECONCILE MODE (`deps.reconcileOnly`, the budget-push `{ reconcilePos: true }` payload,
+ * 2026-10-23): the same decisions with every Acumatica write removed — no create, no PUT,
+ * no vendor check. What it CAN do is what the 27 October failures need: adopt a live
+ * amount that is already right (`reconciled`) or hand-set (`manually_set`), and clear the
+ * status. A milestone that would need a write reads `needs_push`, and then the status and
+ * error are left exactly as they were — a reconcile only ever settles a record it can
+ * settle completely.
  *
  * @param {string} recordId - the Sundial_Solar__c id
- * @param {object} values - its field values, including the two Q13 dates
- * @param {{now?: () => string, update?: Function, checkVendor?: Function}} [deps] - injected for tests
+ * @param {object} values - its field values (commissionPoFieldNames())
+ * @param {{now?: () => string, update?: Function, checkVendor?: Function, reconcileOnly?: boolean}} [deps]
  */
 export async function syncCommissionPos(recordId, values, deps = {}) {
   const now = deps.now ?? (() => new Date().toISOString());
   const update = deps.update ?? sfUpdateRecord;
   const checkVendor = deps.checkVendor ?? checkAcumaticaVendor;
+  const reconcileOnly = deps.reconcileOnly === true;
   const F = PO_WRITEBACK_FIELDS;
 
   // Checked HERE as well as inside create/update, and not redundantly: without this the
@@ -826,7 +1152,12 @@ export async function syncCommissionPos(recordId, values, deps = {}) {
     return { ok: false, reason: "gate_closed", message: "PO_GATE is closed — no commission POs were attempted and nothing was written to Salesforce.", results: [] };
   }
 
-  const plan = planCommissionPos(values);
+  const plan = planCommissionPos(values, { requireVendor: !reconcileOnly });
+  if (!plan.ok && reconcileOnly) {
+    // Nothing a reconcile can settle (no project, no commission, a pre-v2 budget …):
+    // reported, and the record left exactly as it was.
+    return { ok: false, reason: plan.reason, message: plan.message, status: null, results: [] };
+  }
   if (!plan.ok) {
     // Two different kinds of "no". An internal deal or a zero commission is the system
     // working correctly and must not look like a failure on the record; the rest are
@@ -840,14 +1171,17 @@ export async function syncCommissionPos(recordId, values, deps = {}) {
   }
 
   const numbers = { M1: storedOrderNbr(values, "M1"), M2: storedOrderNbr(values, "M2") };
+  const markers = manualSetMarkers(values?.[F.error]);
   const results = [];
 
   // THE VENDOR MUST EXIST IN ACUMATICA before anything is CREATED (D-085 am. 1). Asked
   // once per run, and only when a create is planned: an update re-reads its PO and
   // verifyCommissionPo already compares the vendor on it. Refused the same way as every
-  // other plan failure — Failed on the record, the vendor id named in the error.
-  const steps = ["M1", "M2"].map((m) => planMilestone(values, m, plan));
-  if (steps.some((st) => st.action === "create")) {
+  // other plan failure — Failed on the record, the vendor id named in the error. A
+  // reconcile never creates, so it never asks.
+  const m1Step = planMilestone(values, "M1", plan);
+  const m2Planned = planMilestone(values, "M2", plan);
+  if (!reconcileOnly && (m1Step.action === "create" || m2Planned.action === "create")) {
     const v = await checkVendor(plan.vendorId);
     if (!v.ok) {
       await update("Sundial_Solar__c", recordId, { [F.status]: "Failed", [F.error]: v.message });
@@ -855,13 +1189,12 @@ export async function syncCommissionPos(recordId, values, deps = {}) {
     }
   }
 
-  for (const step of steps) {
+  const runStep = async (step) => {
     const milestone = step.milestone;
-    if (step.action === "skip_zero") {
-      results.push({ ok: true, action: "skip_zero", milestone, amount: step.amount });
-      continue;
+    if (step.action === "skip_zero") return { ok: true, action: "skip_zero", milestone, amount: step.amount };
+    if (step.action === "create" && reconcileOnly) {
+      return { ok: false, action: "needs_push", milestone, message: `${milestone} has no PO yet. Reconcile never creates one — a budget push does.` };
     }
-
     const args = {
       vendorId: plan.vendorId,
       acumaticaProjectId: plan.acumaticaProjectId,
@@ -869,33 +1202,79 @@ export async function syncCommissionPos(recordId, values, deps = {}) {
       amount: step.amount,
       milestoneDate: step.milestoneDate,
     };
-    const r = step.action === "update"
-      ? await updateCommissionPo({ ...args, orderNbr: step.orderNbr })
-      : await createCommissionPo(args);
-    results.push(r);
+    return step.action === "update"
+      ? updateCommissionPo({
+        ...args, orderNbr: step.orderNbr, reconcileOnly,
+        storedAmount: values?.[F[milestone].amount] ?? null,
+        manualAmount: markers[step.orderNbr] ?? null,
+      })
+      : createCommissionPo(args);
+  };
 
-    if (r.ok) {
-      numbers[milestone] = r.orderNbr;
-      const f = F[milestone];
+  const record = async (r) => {
+    results.push(r);
+    if (r.ok && r.orderNbr) {
+      numbers[r.milestone] = r.orderNbr;
+      const f = F[r.milestone];
       // `created` is stamped on the create only. On an update it would stop meaning
       // "when this PO was raised" and start meaning "when we last touched it", which is
-      // a different fact and one nothing needs.
+      // a different fact and one nothing needs. A reconciled / Manually Set PO stores the
+      // LIVE amount — the one Acumatica holds.
       await update("Sundial_Solar__c", recordId, {
         [f.number]: r.orderNbr,
         [f.amount]: r.amount,
         ...(r.action === "created" ? { [f.created]: now() } : {}),
       });
     }
+  };
+
+  // M1 first: its live amount decides M2's when it is frozen.
+  const m1 = await runStep(m1Step);
+  await record(m1);
+
+  const m2 = m2AmountAfter(m1, plan.milestones);
+  if (m2.basis === "frozen_m1") m1.absorbed = m2.amount >= 0;
+  if (m2.basis === "frozen_m1" && m2.amount <= 0) {
+    // M1 froze at the whole commission or more. Nothing for M2 to pay — and if an M2 PO
+    // already exists, or M1 paid MORE than the commission, a person has money to sort out.
+    const overpaid = m2.amount < 0;
+    const hasM2 = Boolean(numbers.M2);
+    results.push({
+      ok: !overpaid && !hasM2, action: "skip_m2_covered_by_m1", milestone: "M2", amount: m2.amount, m1Live: m2.m1Live,
+      message:
+        `M1 is frozen at ${m2.m1Live}, ${overpaid ? "MORE than" : "the whole of"} the ${plan.milestones.total} commission, so M2 pays nothing` +
+        (overpaid ? ` — the dealer has been overpaid ${round2(-m2.amount)}` : "") +
+        (hasM2 ? `. M2 PO ${numbers.M2} exists and was not touched — it should not pay anything; a person decides what happens to it.` : "."),
+    });
+  } else {
+    await record(await runStep({ ...m2Planned, amount: m2.amount }));
+  }
+
+  const notes = results.filter((r) => (!r.ok && r.action !== "frozen") || frozenNeedsPerson(r) || r.action === "manually_set");
+  const problems = notes.map((r) => r.message || r.reason || `${r.milestone}: ${r.action}`);
+
+  // A reconcile that could not settle every milestone leaves the record's status alone.
+  if (reconcileOnly && results.some((r) => r.action === "needs_push")) {
+    return { ok: false, reason: "needs_push", message: problems.join("\n"), status: null, numbers, results };
+  }
+
+  // A reconcile that settled the POs of a deal whose vendor no longer resolves (D-085 am. 1:
+  // a post-cutover deal with no dealer): the amounts are right now, but the next push will
+  // refuse — so the record says Failed with THAT reason, not the stale one it replaced.
+  if (plan.vendorProblem) {
+    const msg = `${plan.vendorProblem.message} (PO amounts were reconciled from Acumatica; the next budget push refuses until this is fixed.)`;
+    await update("Sundial_Solar__c", recordId, { [F.status]: "Failed", [F.error]: [msg, ...problems].join("\n") });
+    return { ok: false, reason: plan.vendorProblem.reason, message: msg, status: "Failed", numbers, results };
   }
 
   const status = commissionPoStatus(results, numbers);
-  const problems = results
-    .filter((r) => !r.ok || r.action === "frozen")
-    .map((r) => r.message || r.reason || `${r.milestone}: ${r.action}`);
+  if (status === "Frozen" && !MANUALLY_SET_PICKLIST.deployed && results.some((r) => r.action === "manually_set") && !results.some(frozenNeedsPerson)) {
+    problems.push(`(${MANUALLY_SET_STATUS}: Commission_PO_Status__c shows Frozen until the "${MANUALLY_SET_STATUS}" picklist value is deployed.)`);
+  }
   await update("Sundial_Solar__c", recordId, {
     [F.status]: status,
     [F.error]: problems.length > 0 ? problems.join("\n") : null,
   });
 
-  return { ok: problems.length === 0, status, numbers, results };
+  return { ok: !results.some((r) => (!r.ok && r.action !== "frozen") || frozenNeedsPerson(r)), status, numbers, results };
 }

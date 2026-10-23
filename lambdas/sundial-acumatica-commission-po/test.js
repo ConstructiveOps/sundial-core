@@ -22,6 +22,13 @@ const ctx = {
   vendors: {},       // VendorID -> { name, status } the fake Acumatica knows (D-085 am. 1)
   vendorReads: [],
   vendorLookupFails: false,
+  // The 2026-10-23 bug, acted out: an Open (not On Hold) PO answers a detail edit with 200
+  // and keeps its old amount. Off by default so every older test sees an obedient API.
+  openDiscardsEdits: false,
+  failStep: null,         // "hold" | "amount" | "release" — that PUT returns 500
+  holdIgnored: false,     // a Hold PUT 200s but the PO stays as it was
+  releaseStatus: "Open",  // where a release lands ("Pending Approval" = approval re-entered)
+  putQueries: [],
 };
 
 const DEFAULT_VENDORS = () => ({
@@ -95,13 +102,24 @@ mock.module("../../lib/acumatica.js", {
       const rows = ctx.orders.filter((o) => o.OrderNbr.value === nbr);
       return { ok: true, status: 200, data: rows };
     },
-    putAcumaticaEntity: async (_entity, body) => {
+    putAcumaticaEntity: async (_entity, body, query) => {
       ctx.puts.push(body);
+      ctx.putQueries.push(query ?? null);
 
       // UPDATE — has a header id.
       if (body.id) {
         const po = ctx.orders.find((o) => o.id === body.id);
         if (!po) return { ok: false, status: 404, text: "not found" };
+        const step = body.Hold ? (body.Hold.value ? "hold" : "release") : "amount";
+        if (ctx.failStep === step) return { ok: false, status: 500, data: null, text: `${step} refused` };
+        if (body.Hold) {
+          if (!ctx.holdIgnored) {
+            po.Hold = { value: body.Hold.value };
+            po.Status = { value: body.Hold.value ? "On Hold" : ctx.releaseStatus };
+          }
+          return { ok: true, status: 200, data: po, text: "" };
+        }
+        if (ctx.openDiscardsEdits && po.Status?.value === "Open") return { ok: true, status: 200, data: po, text: "" };
         for (const d of body.Details ?? []) {
           const line = po.Details.find((x) => x.id === d.id);
           if (!line) return { ok: false, status: 404, text: "line not found" };
@@ -170,6 +188,8 @@ const {
   PO_NUMBER_FIELDS, MILESTONE_DATE_FIELDS, milestoneDate, datePart,
   PO_WRITEBACK_FIELDS, PO_STATUSES, commissionPoStatus, syncCommissionPos,
   RECORDED_HEADER_FIELDS, resolveCommissionVendor, commissionVendorFieldNames,
+  HOLD_UPDATE_GATE, HOLD_FIELD, MANUALLY_SET_PICKLIST, MANUALLY_SET_STATUS, frozenReason,
+  manualSetMarkers, manualSetMessage, m2AmountAfter, commissionPoFieldNames,
 } = mod;
 
 async function withGate(state, fn) {
@@ -190,6 +210,11 @@ function reset() {
   ctx.vendors = DEFAULT_VENDORS();
   ctx.vendorReads = [];
   ctx.vendorLookupFails = false;
+  ctx.openDiscardsEdits = false;
+  ctx.failStep = null;
+  ctx.holdIgnored = false;
+  ctx.releaseStatus = "Open";
+  ctx.putQueries = [];
   sfWrites.length = 0;
 }
 
@@ -603,7 +628,7 @@ test("a re-push UPDATES by guid and never raises a second PO", async () => {
     const nbr = created.orderNbr;
 
     ctx.puts = [];
-    const updated = await updateCommissionPo({ orderNbr: nbr, amount: 2400, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+    const updated = await updateCommissionPo({ orderNbr: nbr, amount: 2400, storedAmount: 2500, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
     assert.equal(updated.ok, true);
     assert.equal(updated.action, "updated");
     assert.equal(updated.previousAmount, 2500);
@@ -622,7 +647,7 @@ test("an update with the same amount writes nothing", async () => {
     reset();
     const created = await createCommissionPo({ vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1", amount: 2500 });
     ctx.puts = [];
-    const again = await updateCommissionPo({ orderNbr: created.orderNbr, amount: 2500, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+    const again = await updateCommissionPo({ orderNbr: created.orderNbr, amount: 2500, storedAmount: 2500, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
     assert.equal(again.ok, true);
     assert.equal(again.action, "unchanged");
     assert.equal(ctx.puts.length, 0);
@@ -742,7 +767,7 @@ test("an On Hold PO is still updatable — status is lifecycle state, not a deri
   await withPoEnabled(async () => {
     reset();
     ctx.orders.push(rawPo({ orderNbr: "016102", vendorId: "01736", description: commissionPoDescription("M1", "R261078"), project: "R261078", amount: 2500, status: "On Hold" }));
-    const r = await updateCommissionPo({ orderNbr: "016102", amount: 2600, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
+    const r = await updateCommissionPo({ orderNbr: "016102", amount: 2600, storedAmount: 2500, vendorId: "01736", acumaticaProjectId: "R261078", milestone: "M1" });
     assert.equal(r.ok, true);
     assert.equal(r.action, "updated");
   });
@@ -910,7 +935,7 @@ test("a rescheduled install updates the PO even though the amount has not moved"
     });
     ctx.puts = [];
     const moved = await updateCommissionPo({
-      orderNbr: created.orderNbr, amount: 4814, vendorId: "01736",
+      orderNbr: created.orderNbr, amount: 4814, storedAmount: 4814, vendorId: "01736",
       acumaticaProjectId: "R261078", milestone: "M2", milestoneDate: "2026-11-02",
     });
     assert.equal(moved.ok, true);
@@ -930,7 +955,7 @@ test("an unchanged amount AND an unchanged date write nothing at all", async () 
     });
     ctx.puts = [];
     const again = await updateCommissionPo({
-      orderNbr: created.orderNbr, amount: 2500, vendorId: "01736",
+      orderNbr: created.orderNbr, amount: 2500, storedAmount: 2500, vendorId: "01736",
       acumaticaProjectId: "R261078", milestone: "M1", milestoneDate: "2026-09-04",
     });
     assert.equal(again.action, "unchanged");
@@ -949,7 +974,7 @@ test("a BLANK milestone date never clears a date already on the PO", async () =>
     });
     ctx.puts = [];
     const r = await updateCommissionPo({
-      orderNbr: created.orderNbr, amount: 2500, vendorId: "01736",
+      orderNbr: created.orderNbr, amount: 2500, storedAmount: 2500, vendorId: "01736",
       acumaticaProjectId: "R261078", milestone: "M1", milestoneDate: null,
     });
     assert.equal(r.action, "unchanged");
@@ -1055,7 +1080,7 @@ test("a re-push updates both POs and never raises a third", async () => {
   await withPoEnabled(async () => {
     reset();
     await sync(DATED);
-    const after = { ...DATED, Commission_PO_M1_Number__c: "020001", Commission_PO_M2_Number__c: "020002" };
+    const after = { ...DATED, Commission_PO_M1_Number__c: "020001", Commission_PO_M2_Number__c: "020002", Commission_PO_M1_Amount__c: 2500, Commission_PO_M2_Amount__c: 4814 };
     sfWrites.length = 0;
 
     // The commission has grown: M1 is already at the cap so the whole delta lands in M2.
@@ -1094,7 +1119,10 @@ test("an unmapped dealer writes Failed and the message that names the fix", asyn
   });
 });
 
-test("a frozen M1 reports Frozen and the delta, and still refreshes M2", async () => {
+test("a frozen M1 at the rule's amount: M2 takes the balance and the record reads Both Raised", async () => {
+  // Superseded 2026-10-23 (D-057 am. 1): a frozen M1 used to stamp the record Frozen with
+  // "the difference belongs in M2" — and then never put it there. M2 now absorbs it, so a
+  // frozen M1 is a normal resting state, not something for a person.
   await withPoEnabled(async () => {
     reset();
     // M1 already raised and since Completed; M2 already raised and still Open.
@@ -1102,17 +1130,17 @@ test("a frozen M1 reports Frozen and the delta, and still refreshes M2", async (
     ctx.orders.push(rawPo({ orderNbr: "016103", vendorId: "01736", description: commissionPoDescription("M2", "R261078"), project: "R261078", amount: 4814, status: "Open", when: "2026-10-15" }));
     const r = await sync({
       ...DATED,
-      Sales_Rep_Commission_Amt__c: 9000, // M1 stays capped at 2500, M2 becomes 6500
-      Commission_PO_M1_Number__c: "016102",
-      Commission_PO_M2_Number__c: "016103",
+      Sales_Rep_Commission_Amt__c: 9000, // M1 stays at 2500, M2 becomes 6500
+      Commission_PO_M1_Number__c: "016102", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016103", Commission_PO_M2_Amount__c: 4814,
     });
-    assert.equal(r.status, "Frozen");
+    assert.equal(r.status, "Both Raised");
+    assert.equal(r.ok, true);
     const f = writtenFields();
-    assert.equal(f.Commission_PO_Status__c, "Frozen");
-    assert.match(f.Commission_PO_Error__c, /belongs in M2/);
-    // The frozen M1 does not stop M2 from being brought up to date — which is precisely
-    // where §6 says the difference goes.
+    assert.equal(f.Commission_PO_Status__c, "Both Raised");
+    assert.equal(f.Commission_PO_Error__c, null);
     assert.equal(normalizePurchaseOrder(ctx.orders[1]).lines[0].unitCost, 6500);
+    assert.equal(normalizePurchaseOrder(ctx.orders[0]).lines[0].unitCost, 2500, "the frozen M1 is never touched");
   });
 });
 
@@ -1197,5 +1225,559 @@ test("PO_NUMBER_FIELDS idempotency is unchanged on the dealer path: a stored M1 
     const m1s = ctx.orders.filter((o) => o.Description.value === commissionPoDescription("M1", "R261078"));
     assert.equal(m1s.length, 1, "exactly one M1, ever");
     assert.deepEqual(PO_NUMBER_FIELDS, { M1: "Commission_PO_M1_Number__c", M2: "Commission_PO_M2_Number__c" });
+  });
+});
+
+// ===========================================================================
+// 2026-10-23 — the update fix: logging, Hold → PUT → release, the two guards
+// (runbook "2026-10-23 — Why amount updates do not stick"; D-057 amendments 1 + 2)
+// ===========================================================================
+
+const M1_DESC = commissionPoDescription("M1", "R261078");
+const M2_DESC = commissionPoDescription("M2", "R261078");
+const po = (orderNbr, milestone, amount, opts = {}) =>
+  rawPo({ orderNbr, vendorId: "01736", description: milestone === "M1" ? M1_DESC : M2_DESC, project: "R261078", amount, ...opts });
+const upd = (orderNbr, milestone, amount, extra = {}) =>
+  updateCommissionPo({ orderNbr, milestone, amount, vendorId: "01736", acumaticaProjectId: "R261078", ...extra });
+const unitCost = (i) => normalizePurchaseOrder(ctx.orders[i]).lines[0].unitCost;
+const statusOf = (i) => ctx.orders[i].Status.value;
+const holdPuts = () => ctx.puts.filter((p) => p.Hold).map((p) => p.Hold.value);
+
+async function withHoldGate(state, fn) {
+  const prior = HOLD_UPDATE_GATE.enabled;
+  HOLD_UPDATE_GATE.enabled = state;
+  try { return await fn(); } finally { HOLD_UPDATE_GATE.enabled = prior; }
+}
+async function withManualPicklist(state, fn) {
+  const prior = MANUALLY_SET_PICKLIST.deployed;
+  MANUALLY_SET_PICKLIST.deployed = state;
+  try { return await fn(); } finally { MANUALLY_SET_PICKLIST.deployed = prior; }
+}
+async function captureLogs(fn) {
+  const lines = [];
+  const orig = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try { await fn(); } finally { console.log = orig; }
+  return lines;
+}
+
+test("committed values: the hold gate is CLOSED, Hold is a field, Manually Set is not deployed yet", () => {
+  // Opening the gate is Tim's reviewed diff after scripts/probe-po-hold-update.mjs passes.
+  assert.equal(HOLD_UPDATE_GATE.enabled, false);
+  // Default/25.200.001 has no PurchaseOrder hold/release ACTION (swagger read 2026-10-23).
+  assert.equal(HOLD_FIELD, "Hold");
+  // Commission_PO_Status__c is restricted: writing an undeployed value fails the update.
+  assert.equal(MANUALLY_SET_PICKLIST.deployed, false);
+  assert.equal(MANUALLY_SET_STATUS, "Manually Set");
+  assert.ok(!PO_STATUSES.includes("Manually Set"), "not in the deployed picklist yet");
+});
+
+// --- A. Logging -----------------------------------------------------------
+
+test("A: the update PUT is logged with ids and amount, and the echo with what Acumatica returned", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016939", "M2", 11868));
+    const lines = await captureLogs(() => upd("016939", "M2", 12508, { storedAmount: 11868 }));
+    const sent = lines.find((l) => l.startsWith("commission-po UPDATE amount M2"));
+    const echo = lines.find((l) => l.startsWith("commission-po UPDATE-ECHO amount M2"));
+    assert.ok(sent, lines.join("\n"));
+    assert.match(sent, /nbr=016939 po=po-guid-016939 line=line-guid-016939 amount=12508/);
+    assert.match(echo, /http=200 unitCost=12508 status=Open hold=false/);
+    // The echo is only evidence if it carries the line.
+    assert.deepEqual(ctx.putQueries[0], { $expand: "Details" });
+  });
+});
+
+test("A: with the hold gate closed an Open PO still gets today's single PUT — and the discard is caught and logged", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.openDiscardsEdits = true;
+    ctx.orders.push(po("016939", "M2", 11868));
+    let r;
+    const lines = await captureLogs(async () => { r = await upd("016939", "M2", 12508, { storedAmount: 11868 }); });
+    assert.equal(ctx.puts.length, 1);
+    assert.equal(holdPuts().length, 0, "no Hold toggling while the gate is closed");
+    assert.equal(r.ok, false);
+    assert.equal(r.action, "update_unverified");
+    assert.equal(r.step, "amount");
+    assert.match(r.message, /UnitCost is 11868, expected 12508/);
+    // The question CloudWatch could not answer in October: did the echo already show the old amount?
+    assert.match(lines.find((l) => l.includes("UPDATE-ECHO")), /unitCost=11868/);
+  });
+});
+
+// --- C. Hold → amount → release -----------------------------------------------
+
+test("C gate open: an Open PO is held, updated, released — and the edit sticks", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.openDiscardsEdits = true;
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.ok, true, r.message);
+    assert.equal(r.action, "updated");
+    assert.equal(r.via, "hold");
+    assert.deepEqual(holdPuts(), [true, false], "hold first, release last");
+    assert.equal(ctx.puts.length, 3);
+    assert.equal(unitCost(0), 12508);
+    assert.equal(statusOf(0), "Open", "back where it started");
+  }));
+});
+
+test("C gate open: an On Hold PO gets the single proven PUT and is left On Hold", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.orders.push(po("016442", "M1", 2400, { status: "On Hold" }));
+    const r = await upd("016442", "M1", 2500, { storedAmount: 2400 });
+    assert.equal(r.action, "updated");
+    assert.equal(r.via, "single_put");
+    assert.deepEqual(holdPuts(), [], "never released — someone else put it on hold");
+    assert.equal(statusOf(0), "On Hold");
+  }));
+});
+
+test("C step hold refused: nothing else is sent and the outcome names the step", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.failStep = "hold";
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.ok, false);
+    assert.equal(r.action, "update_failed");
+    assert.equal(r.step, "hold");
+    assert.equal(ctx.puts.length, 1);
+    assert.equal(unitCost(0), 11868);
+  }));
+});
+
+test("C step hold not honoured (200, still Open): the amount is never sent", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.holdIgnored = true;
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.action, "update_unverified");
+    assert.equal(r.step, "hold");
+    assert.match(r.message, /reads Open/);
+    assert.equal(ctx.puts.length, 1);
+  }));
+});
+
+test("C step amount refused: the PO is LEFT ON HOLD and the message says so", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.failStep = "amount";
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.action, "update_failed");
+    assert.equal(r.step, "amount");
+    assert.match(r.message, /LEFT ON HOLD/);
+    assert.equal(statusOf(0), "On Hold", "On Hold cannot be received or billed — the safe place to stop");
+    assert.deepEqual(holdPuts(), [true], "no release after a failed amount");
+  }));
+});
+
+test("C step release refused: amount written and verified, PO still On Hold, outcome names release", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.failStep = "release";
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.ok, false);
+    assert.equal(r.action, "update_failed");
+    assert.equal(r.step, "release");
+    assert.equal(r.amountWritten, 12508);
+    assert.match(r.message, /STILL ON HOLD/);
+    assert.equal(unitCost(0), 12508);
+    assert.equal(statusOf(0), "On Hold");
+  }));
+});
+
+test("C release re-enters approval: reported as such, not as success", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.releaseStatus = "Pending Approval";
+    ctx.orders.push(po("016939", "M2", 11868));
+    const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+    assert.equal(r.ok, false);
+    assert.equal(r.step, "release");
+    assert.equal(r.approvalReentered, true);
+    assert.match(r.message, /APPROVAL/);
+  }));
+});
+
+// --- D.1 The manual-edit guard ----------------------------------------------
+
+test("D1: live ≠ stored and live = ruled → reconciled: adopted, nothing written to Acumatica", async () => {
+  for (const gate of [false, true]) {
+    await withPoEnabled(() => withHoldGate(gate, async () => {
+      reset();
+      // SOL-10125: the engine wrote 11,868, Harmon typed 12,508, which is what the rule gives.
+      ctx.orders.push(po("016939", "M2", 12508));
+      const r = await upd("016939", "M2", 12508, { storedAmount: 11868 });
+      assert.equal(r.ok, true);
+      assert.equal(r.action, "reconciled", `gate ${gate}`);
+      assert.equal(r.amount, 12508);
+      assert.equal(r.previousStoredAmount, 11868);
+      assert.equal(ctx.puts.length, 0);
+    }));
+  }
+});
+
+test("D1: live ≠ stored and live ≠ ruled → manually_set: NOT overwritten, gate open or closed", async () => {
+  for (const gate of [false, true]) {
+    await withPoEnabled(() => withHoldGate(gate, async () => {
+      reset();
+      // SOL-10134: one cent over the rule.
+      ctx.orders.push(po("016998", "M2", 4663.75));
+      const r = await upd("016998", "M2", 4663.74, { storedAmount: 4500 });
+      assert.equal(r.ok, true);
+      assert.equal(r.action, "manually_set", `gate ${gate}`);
+      assert.equal(r.amount, 4663.75, "the LIVE amount is what gets stored");
+      assert.equal(r.ruledAmount, 4663.74);
+      assert.equal(r.message, "PO 016998 (M2) edited in Acumatica to 4663.75; Sundial will not overwrite (the commission rule gives 4663.74).");
+      assert.equal(ctx.puts.length, 0);
+    }));
+  }
+});
+
+test("D1: a BLANK stored amount is no licence to overwrite", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016939", "M2", 9000));
+    const r = await upd("016939", "M2", 12508, { storedAmount: null });
+    assert.equal(r.action, "manually_set");
+    assert.equal(ctx.puts.length, 0);
+    reset();
+    ctx.orders.push(po("016939", "M2", 12508));
+    assert.equal((await upd("016939", "M2", 12508, { storedAmount: null })).action, "reconciled");
+  });
+});
+
+test("D1: the Manually Set marker survives the adoption — the NEXT run still does not overwrite", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016998", "M2", 4663.75));
+    // Run 2: stored now equals live (adopted last run) — the guard alone would let it through.
+    const err = manualSetMessage("016998", "M2", 4663.75, 4663.74);
+    assert.deepEqual(manualSetMarkers(`something else\n${err}`), { "016998": 4663.75 });
+    const r = await upd("016998", "M2", 4663.74, { storedAmount: 4663.75, manualAmount: 4663.75 });
+    assert.equal(r.action, "manually_set");
+    assert.equal(ctx.puts.length, 0);
+    // With the marker cleared (a person cleared Commission_PO_Error__c), the update goes ahead.
+    const go = await upd("016998", "M2", 4663.74, { storedAmount: 4663.75, manualAmount: null });
+    assert.equal(go.action, "updated");
+    assert.equal(unitCost(0), 4663.74);
+  });
+});
+
+test("D1 through sync: the marker in Commission_PO_Error__c is read back on the next push", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016997", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016998", "M2", 4663.75));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 7163.74,
+      Commission_PO_M1_Number__c: "016997", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016998", Commission_PO_M2_Amount__c: 4663.75, // adopted last run
+      Commission_PO_Error__c: manualSetMessage("016998", "M2", 4663.75, 4663.74),
+    });
+    assert.equal(ctx.puts.length, 0);
+    assert.equal(r.results.find((x) => x.milestone === "M2").action, "manually_set");
+  });
+});
+
+test("D1 through sync: reconcile clears the error and puts the status back to Both Raised", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    // SOL-10125 exactly: commission 15,008; M1 Closed at the 2,500 cap; M2 hand-fixed to 12,508.
+    ctx.orders.push(po("016938", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016939", "M2", 12508));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 15008,
+      Commission_PO_M1_Number__c: "016938", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016939", Commission_PO_M2_Amount__c: 11868,
+      Commission_PO_Status__c: "Failed",
+      Commission_PO_Error__c: "PO 016939 was updated but no longer matches the expected shape: UnitCost is 11868, expected 12508.",
+    });
+    assert.equal(r.status, "Both Raised");
+    assert.equal(ctx.puts.length, 0);
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_M2_Amount__c, 12508);
+    assert.equal(f.Commission_PO_Status__c, "Both Raised");
+    assert.equal(f.Commission_PO_Error__c, null);
+  });
+});
+
+test("D1 through sync: Manually Set writes Frozen + the marker until the picklist value is deployed", async () => {
+  const values = {
+    ...VALUES, Sales_Rep_Commission_Amt__c: 7163.74,
+    Commission_PO_M1_Number__c: "016997", Commission_PO_M1_Amount__c: 2500,
+    Commission_PO_M2_Number__c: "016998", Commission_PO_M2_Amount__c: 4663.74,
+  };
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016997", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016998", "M2", 4663.75));
+    const r = await sync(values);
+    assert.equal(r.status, "Frozen");
+    assert.equal(ctx.puts.length, 0);
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_M2_Amount__c, 4663.75);
+    assert.match(f.Commission_PO_Error__c, /PO 016998 \(M2\) edited in Acumatica to 4663\.75; Sundial will not overwrite/);
+    assert.match(f.Commission_PO_Error__c, /shows Frozen until the "Manually Set" picklist value is deployed/);
+  });
+  await withPoEnabled(() => withManualPicklist(true, async () => {
+    reset();
+    ctx.orders.push(po("016997", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016998", "M2", 4663.75));
+    const r = await sync(values);
+    assert.equal(r.status, "Manually Set");
+    assert.doesNotMatch(writtenFields().Commission_PO_Error__c, /picklist value is deployed/);
+  }));
+});
+
+// --- D.2 The frozen-M1 rule ---------------------------------------------------
+
+test("D2: m2AmountAfter — a frozen M1's LIVE amount, never the rule's M1", () => {
+  const ms = computeCommissionMilestones(4138);
+  assert.deepEqual(m2AmountAfter({ action: "frozen", currentAmount: 2195 }, ms), { amount: 1943, basis: "frozen_m1", m1Live: 2195 });
+  assert.deepEqual(m2AmountAfter({ action: "updated", amount: 2069 }, ms), { amount: 2069, basis: "rule" });
+  assert.deepEqual(m2AmountAfter({ action: "manually_set", amount: 2000 }, ms), { amount: 2069, basis: "rule" }, "the ruling is about FROZEN M1s");
+});
+
+test("D2 (SOL-10061): M1 frozen at 2,195 → M2 = 4,138 − 2,195 = 1,943; Harmon's hand fix is reconciled, not undone", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016793", "M1", 2195, { status: "Closed" }));
+    ctx.orders.push(po("016794", "M2", 1943));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 4138,
+      Commission_PO_M1_Number__c: "016793", Commission_PO_M1_Amount__c: 2195,
+      Commission_PO_M2_Number__c: "016794", Commission_PO_M2_Amount__c: 1745,
+    });
+    assert.equal(r.status, "Both Raised");
+    assert.equal(ctx.puts.length, 0, "the old rule would have moved M2 to 2,069 and overpaid 126");
+    assert.equal(writtenFields().Commission_PO_M2_Amount__c, 1943);
+    assert.equal(r.results.find((x) => x.milestone === "M2").action, "reconciled");
+  });
+});
+
+test("D2: M2 still on the old arithmetic (live = stored = 2,069) is UPDATED to commission − real M1", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016793", "M1", 2195, { status: "Closed" }));
+    ctx.orders.push(po("016794", "M2", 2069));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 4138,
+      Commission_PO_M1_Number__c: "016793", Commission_PO_M1_Amount__c: 2195,
+      Commission_PO_M2_Number__c: "016794", Commission_PO_M2_Amount__c: 2069,
+    });
+    assert.equal(r.status, "Both Raised");
+    assert.equal(unitCost(1), 1943);
+  });
+});
+
+test("D2: an Open M1 with a RECEIPT is frozen — status alone does not decide", async () => {
+  for (const lineOverrides of [
+    { QtyOnReceipts: { value: 1 } },
+    { ReceivedAmount: { value: 2195 } },
+    { Completed: { value: true } },
+  ]) {
+    await withPoEnabled(async () => {
+      reset();
+      ctx.orders.push(po("016793", "M1", 2195, { lineOverrides }));
+      const one = await upd("016793", "M1", 2069, { storedAmount: 2195 });
+      assert.equal(one.action, "frozen", JSON.stringify(lineOverrides));
+      assert.match(one.frozenBecause, /status Open/);
+      assert.equal(ctx.puts.length, 0, "nothing is written to a PO with money moved against it");
+
+      reset();
+      ctx.orders.push(po("016793", "M1", 2195, { lineOverrides }));
+      ctx.orders.push(po("016794", "M2", 2069));
+      const r = await sync({
+        ...VALUES, Sales_Rep_Commission_Amt__c: 4138,
+        Commission_PO_M1_Number__c: "016793", Commission_PO_M1_Amount__c: 2195,
+        Commission_PO_M2_Number__c: "016794", Commission_PO_M2_Amount__c: 2069,
+      });
+      assert.equal(unitCost(1), 1943, "M2 absorbs the received M1's real amount");
+      assert.equal(r.status, "Both Raised");
+    });
+  }
+});
+
+test("D2: frozenReason — header status first, then the line", () => {
+  const n = (opts) => normalizePurchaseOrder(po("1", "M1", 100, opts));
+  assert.equal(frozenReason(n({})), null);
+  assert.equal(frozenReason(n({ status: "On Hold" })), null);
+  assert.equal(frozenReason(n({ status: "Closed" })), "is Closed");
+  assert.match(frozenReason(n({ lineOverrides: { QtyOnReceipts: { value: 1 } } })), /1 received/);
+  assert.match(frozenReason(n({ lineOverrides: { Cancelled: { value: true } } })), /Cancelled/);
+});
+
+test("D2: M1 frozen at the whole commission → M2 skipped by name; benign with no M2 PO", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016934", "M1", 2500, { status: "Closed" }));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 2500,
+      Commission_PO_M1_Number__c: "016934", Commission_PO_M1_Amount__c: 2500,
+    });
+    const m2 = r.results.find((x) => x.milestone === "M2");
+    assert.equal(m2.action, "skip_m2_covered_by_m1");
+    assert.equal(m2.ok, true);
+    assert.equal(r.status, "M1 Raised");
+    assert.equal(ctx.orders.length, 1, "no M2 PO is raised");
+  });
+});
+
+test("D2: M1 frozen ABOVE the commission → M2 skipped, Failed, the overpayment named; an existing M2 untouched", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016934", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016935", "M2", 300));
+    const r = await sync({
+      ...VALUES, Sales_Rep_Commission_Amt__c: 2400,
+      Commission_PO_M1_Number__c: "016934", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016935", Commission_PO_M2_Amount__c: 300,
+    });
+    const m2 = r.results.find((x) => x.milestone === "M2");
+    assert.equal(m2.action, "skip_m2_covered_by_m1");
+    assert.equal(m2.ok, false);
+    assert.equal(r.status, "Failed");
+    assert.equal(ctx.puts.length, 0);
+    assert.match(writtenFields().Commission_PO_Error__c, /overpaid 100.*M2 PO 016935 exists and was not touched/s);
+  });
+});
+
+test("a frozen M2 at the ruled amount is settled; at a different amount it is Frozen for a person", async () => {
+  const values = (m2Live) => ({
+    ...VALUES, Sales_Rep_Commission_Amt__c: 7314,
+    Commission_PO_M1_Number__c: "016102", Commission_PO_M1_Amount__c: 2500,
+    Commission_PO_M2_Number__c: "016103", Commission_PO_M2_Amount__c: m2Live,
+  });
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016102", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016103", "M2", 4814, { status: "Closed" }));
+    assert.equal((await sync(values(4814))).status, "Both Raised");
+
+    reset();
+    ctx.orders.push(po("016102", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016103", "M2", 4000, { status: "Closed" }));
+    const r = await sync(values(4000));
+    assert.equal(r.status, "Frozen");
+    assert.match(writtenFields().Commission_PO_Error__c, /PO 016103 is Closed.*holds 4000; the commission rule gives 4814/);
+  });
+});
+
+// --- Reconcile mode (budget-push { reconcilePos: true }) ----------------------
+
+test("reconcile: settles what it can with ZERO Acumatica writes and no vendor check", async () => {
+  await withPoEnabled(() => withHoldGate(true, async () => {
+    reset();
+    ctx.orders.push(rawPo({ orderNbr: "016938", vendorId: "02118", description: M1_DESC, project: "R261078", amount: 2500, status: "Closed" }));
+    ctx.orders.push(rawPo({ orderNbr: "016939", vendorId: "02118", description: M2_DESC, project: "R261078", amount: 12508 }));
+    const r = await syncCommissionPos("a0X000000000001AAA", {
+      ...DEALER_DEAL, Sales_Rep_Commission_Amt__c: 15008,
+      Commission_PO_M1_Number__c: "016938", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016939", Commission_PO_M2_Amount__c: 11868,
+      Commission_PO_Status__c: "Failed",
+    }, { now: NOW, reconcileOnly: true });
+    assert.equal(r.status, "Both Raised");
+    assert.equal(ctx.puts.length, 0);
+    assert.deepEqual(ctx.vendorReads, []);
+    assert.equal(writtenFields().Commission_PO_Error__c, null);
+  }));
+});
+
+test("reconcile: a PO that needs a real write reads needs_push and the record's status is left alone", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016102", "M1", 2500));
+    ctx.orders.push(po("016103", "M2", 4000));
+    const r = await syncCommissionPos("a0X000000000001AAA", {
+      ...VALUES, Sales_Rep_Commission_Amt__c: 7314,
+      Commission_PO_M1_Number__c: "016102", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016103", Commission_PO_M2_Amount__c: 4000, // ours, stale: rule says 4814
+    }, { now: NOW, reconcileOnly: true });
+    assert.equal(r.reason, "needs_push");
+    assert.equal(r.results.find((x) => x.milestone === "M2").action, "needs_push");
+    assert.equal(ctx.puts.length, 0);
+    const f = writtenFields();
+    assert.ok(!("Commission_PO_Status__c" in f), "a partial reconcile does not restamp the status");
+  });
+});
+
+test("reconcile never creates — a missing PO is needs_push", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await syncCommissionPos("a0X000000000001AAA", DATED, { now: NOW, reconcileOnly: true });
+    assert.equal(r.reason, "needs_push");
+    assert.equal(ctx.orders.length, 0);
+    assert.equal(ctx.puts.length, 0);
+  });
+});
+
+test("commissionPoFieldNames includes the stored amounts and the error text the guards read", () => {
+  const names = commissionPoFieldNames();
+  for (const f of ["Commission_PO_M1_Amount__c", "Commission_PO_M2_Amount__c", "Commission_PO_Error__c",
+    "Commission_PO_M1_Number__c", "Commission_PO_M2_Number__c", "Sales_Rep_Commission_Amt__c", ...commissionVendorFieldNames()]) {
+    assert.ok(names.includes(f), f);
+  }
+});
+
+test("status precedence: Failed > Frozen > Manually Set > raised; absorbed / settled frozen POs do not count", () => {
+  const ms = { ok: true, action: "manually_set" };
+  assert.equal(commissionPoStatus([ms], { M1: "a", M2: "b" }), "Frozen", "Manually Set falls back to Frozen until deployed");
+  assert.equal(commissionPoStatus([{ ok: false, action: "frozen", absorbed: true }, { ok: true, action: "updated" }], { M1: "a", M2: "b" }), "Both Raised");
+  assert.equal(commissionPoStatus([{ ok: false, action: "frozen", settled: true }], { M1: "a", M2: "b" }), "Both Raised");
+  assert.equal(commissionPoStatus([{ ok: false, action: "frozen" }, ms], { M1: "a", M2: "b" }), "Frozen");
+  assert.equal(commissionPoStatus([{ ok: false, action: "update_failed" }, ms], { M1: "a" }), "Failed");
+  assert.equal(commissionPoStatus([{ ok: true, action: "reconciled" }], { M1: "a", M2: "b" }), "Both Raised");
+});
+
+test("reconcile: a post-cutover deal with no dealer still has its PO amounts adopted, and reads Failed with the DEALER reason", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016660", "M1", 2500, { status: "Closed" }));
+    ctx.orders.push(po("016661", "M2", 12489));
+    const r = await syncCommissionPos("a0X000000000001AAA", {
+      ...VALUES, ...POST_CUTOVER, Sales_Company_Harmon_Solar_or_Third__c: null, Sales_Rep_Commission_Amt__c: 14989,
+      Commission_PO_M1_Number__c: "016660", Commission_PO_M1_Amount__c: 2500,
+      Commission_PO_M2_Number__c: "016661", Commission_PO_M2_Amount__c: 12588,
+      Commission_PO_Error__c: "PO 016661 was updated but no longer matches the expected shape: UnitCost is 12588, expected 12489.",
+    }, { now: NOW, reconcileOnly: true });
+    assert.equal(r.reason, "dealer_missing");
+    assert.equal(ctx.puts.length, 0);
+    const f = writtenFields();
+    assert.equal(f.Commission_PO_M2_Amount__c, 12489, "the right amount is adopted anyway");
+    assert.equal(f.Commission_PO_Status__c, "Failed");
+    assert.match(f.Commission_PO_Error__c, /PO amounts were reconciled from Acumatica; the next budget push refuses/);
+    assert.doesNotMatch(f.Commission_PO_Error__c, /no longer matches/, "the stale October text is gone");
+  });
+});
+
+test("reconcile: a plan refusal it cannot settle leaves the record untouched (a push would write Failed)", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    const r = await syncCommissionPos("a0X000000000001AAA", { ...DATED, Acumatica_Project_ID__c: null }, { now: NOW, reconcileOnly: true });
+    assert.equal(r.reason, "no_acumatica_project");
+    assert.equal(sfWrites.length, 0);
+    reset();
+    await sync({ ...DATED, Acumatica_Project_ID__c: null });
+    assert.equal(writtenFields().Commission_PO_Status__c, "Failed", "the push path is unchanged");
+  });
+});
+
+test("a frozen PO already at the ruled amount does not claim a difference", async () => {
+  await withPoEnabled(async () => {
+    reset();
+    ctx.orders.push(po("016938", "M1", 2500, { status: "Closed" }));
+    const r = await upd("016938", "M1", 2500, { storedAmount: 2500 });
+    assert.equal(r.settled, true);
+    assert.match(r.message, /holds 2500, what the commission rule gives/);
+    assert.doesNotMatch(r.message, /difference/);
   });
 });

@@ -1956,6 +1956,47 @@ SOL-10061 by +126.
 reports the difference. It ships with the commission-PO update fix (runbook
 `acumatica-commission-po-runbook.md` → 2026-10-23, items C + D).
 
+### Amendment 2 (2026-10-23, Tim): the engine never overwrites a hand edit; Open POs are held to be edited (built, not deployed)
+
+**Rulings.** (1) When M1 is frozen, M2 = commission − M1's **live** amount read from
+Acumatica that run (amendment 1, now built). (2) **The engine never overwrites a PO amount
+that differs from what Sundial last wrote.**
+
+**What the code does** (`sundial-acumatica-commission-po`):
+
+1. **Manual-edit guard, always on.** Before any update the live line amount is compared with
+   `Commission_PO_M{n}_Amount__c`. Different and equal to the ruled amount → `reconciled`
+   (the PO is right, Salesforce was behind: adopt, clear the error, M1 Raised / Both Raised).
+   Different and not the ruled amount → `manually_set`: adopt, write nothing, status
+   **Manually Set** — a new picklist value for the next package; until it exists the record
+   shows `Frozen` and the error says so. The error text is the durable marker
+   (`PO {n} (M{n}) edited in Acumatica to {amount}; Sundial will not overwrite`): once the
+   amount is adopted the guard alone would no longer see the edit, so the next run reads the
+   marker back. Clearing `Commission_PO_Error__c` is how a person releases it. A blank stored
+   amount counts as "differs".
+2. **Frozen includes received.** A PO is frozen off `UPDATABLE_STATUSES` **or** when its line
+   shows anything received (`QtyOnReceipts`, `ReceivedAmount`) or is Completed / Cancelled —
+   even on an `Open` PO. A frozen M1 is absorbed by M2 and no longer marks the record
+   `Frozen`; M1 frozen at ≥ the commission skips M2 by name (`skip_m2_covered_by_m1`), Failed
+   if M1 overpaid or an M2 PO exists.
+3. **Open POs are put on hold to be edited — behind `HOLD_UPDATE_GATE`, committed closed.**
+   Gate open: `Hold = true` → amount → verify → `Hold = false` → verify; any failure leaves
+   the PO On Hold (it cannot be received or billed there) with the step named. Gate closed:
+   today's single PUT, now logged with Acumatica's echo. **Hold is a field, not an action**:
+   the Default/25.200.001 swagger (read 2026-10-23) has no PurchaseOrder hold / release
+   action — `PutOnHold` / `ReleaseFromHold` exist for Subcontract only.
+4. **A reconcile path** (`{ reconcilePos: true }` on the budget-push Lambda,
+   `scripts/reconcile-commission-pos.mjs`) runs the same decisions with every Acumatica write
+   removed — for the 27 October failures, every one of which already held the right amount.
+
+**Why the gate and not just the fix.** The cause — Acumatica discarding detail edits to an
+Open PO — is the best-supported hypothesis, not a proven one. Toggling Hold on a live,
+vendor-facing document is a real change; it opens after `scripts/probe-po-hold-update.mjs`
+shows it on a sandbox. The guards do not wait for that: they only ever write *less*.
+
+**Accepted.** A Manually Set M1 (Open, hand-edited) does not move M2 — the ruling is about
+frozen M1s. The marker lives in free text until a per-milestone field exists.
+
 ## D-058: The Acumatica secret is a pointer, not a tenant — and no doc may name the tenant it holds
 
 **Date:** 2026-08-24
@@ -2004,6 +2045,17 @@ write to live no matter what any document says.
 Both 2026-08-24 hand-proof runs are retroactively certified — BizRun, confirmed in both
 UIs. The check itself moves from "a formality at the top of a runbook" to the one step that
 cannot be skipped, and it is now one line instead of a call to a nonexistent entity.
+
+### Amendment 1 (2026-10-23): a script-only override, so a sandbox proof can run while the pointer holds live
+
+The pointer was repointed at live (its `client_id` reads `@Harmon Electric`, checked
+2026-10-23) and no sandbox secret exists (`sundial/acumatica/api` is a placeholder). The hold
+proof must run on a sandbox, and the pointer must not move to make that happen.
+`lib/acumatica.js` therefore reads **`SUNDIAL_ACUMATICA_SECRET_NAME`** when set
+(`acumaticaSecretName()`), else the pointer. **Scripts only — never set on a Lambda**, so
+repointing stays a one-secret change. A script that writes still proves its tenant from the
+credential (`acumaticaTenant()`) and refuses the pointer's own tenant —
+`scripts/probe-po-hold-update.mjs` does both.
 
 ## D-059: Attribute writes are verified by re-read, and match Harmon's number formatting
 

@@ -1372,3 +1372,69 @@ test("the push worker writes the SAME three fields from the SAME mapping", async
   assert.deepEqual(fromWorker, fromRoute);
   assert.equal(fromWorker.Attribute_Sync_Status__c, "Synced");
 });
+
+// ===========================================================================
+// 2026-10-23 — commission-PO reconcile + the guard's fields in the SELECT
+// ===========================================================================
+
+test("the worker SELECT carries the stored PO amounts and error text the manual-edit guard reads", () => {
+  const names = workerFieldNames();
+  for (const f of ["Commission_PO_M1_Amount__c", "Commission_PO_M2_Amount__c", "Commission_PO_Error__c", "Commission_PO_Status__c"]) {
+    assert.ok(names.includes(f), `${f} missing — every PO would read as hand-edited`);
+  }
+  assert.equal(new Set(names).size, names.length);
+});
+
+test("reconcilePos: DRY RUN by default — the would-be writes are returned, none sent", async () => {
+  const sent = [];
+  let gotDeps = null;
+  const r = await mod.runCommissionPoReconcile("a0X000000000001AAA", {}, {
+    sfQuery: async (soql) => {
+      assert.match(soql, /Commission_PO_M2_Amount__c/);
+      assert.equal(soql.split(/[ ,]+/).filter((t) => t === "Name").length, 1, "Name selected once");
+      return [{ Name: "SOL-10125", Commission_PO_Status__c: "Failed", Commission_PO_M2_Amount__c: 11868 }];
+    },
+    sfUpdateRecord: async (...a) => { sent.push(a); },
+    syncCommissionPos: async (id, values, deps) => {
+      gotDeps = deps;
+      await deps.update("Sundial_Solar__c", id, { Commission_PO_M2_Amount__c: 12508 });
+      await deps.update("Sundial_Solar__c", id, { Commission_PO_Status__c: "Both Raised", Commission_PO_Error__c: null });
+      return { ok: true, status: "Both Raised", results: [{ milestone: "M2", action: "reconciled", ok: true, orderNbr: "016939", amount: 12508 }] };
+    },
+  });
+  assert.equal(gotDeps.reconcileOnly, true, "the PO stage runs with every Acumatica write removed");
+  assert.equal(r.mode, "reconcile_pos_dry_run");
+  assert.equal(sent.length, 0, "a dry run writes nothing to Salesforce");
+  assert.equal(r.writes.length, 2);
+  assert.deepEqual(r.before, { status: "Failed", M1: null, M2: 11868 });
+  assert.equal(r.status, "Both Raised");
+  assert.equal(r.results[0].action, "reconciled");
+});
+
+test("reconcilePos: dryRun:false writes through to Salesforce", async () => {
+  const sent = [];
+  const r = await mod.runCommissionPoReconcile("a0X000000000001AAA", { dryRun: false }, {
+    sfQuery: async () => [{ Name: "SOL-10125" }],
+    sfUpdateRecord: async (...a) => { sent.push(a); return { ok: true }; },
+    syncCommissionPos: async (id, values, deps) => {
+      await deps.update("Sundial_Solar__c", id, { Commission_PO_Status__c: "Both Raised" });
+      return { ok: true, status: "Both Raised", results: [] };
+    },
+  });
+  assert.equal(r.mode, "reconcile_pos");
+  assert.equal(sent.length, 1);
+});
+
+test("reconcilePos: a bad id or a missing record is refused before anything runs", async () => {
+  const never = async () => { throw new Error("must not run"); };
+  assert.equal((await mod.runCommissionPoReconcile("nope'", {}, { syncCommissionPos: never })).code, "BAD_RECORD_ID");
+  const r = await mod.runCommissionPoReconcile("a0X000000000001AAA", {}, { sfQuery: async () => [], syncCommissionPos: never });
+  assert.equal(r.code, "RECORD_NOT_FOUND");
+});
+
+test("the handler routes { reconcilePos: true } to the reconcile, dry run unless dryRun:false", async () => {
+  // The default sfQuery mock returns no rows, so the route answers RECORD_NOT_FOUND — which
+  // proves it went to the reconcile (the budget reconcile would say no_project_id).
+  const r = await mod.handler({ reconcilePos: true, recordId: "a0X000000000001AAA" });
+  assert.equal(r.code, "RECORD_NOT_FOUND");
+});

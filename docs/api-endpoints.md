@@ -537,6 +537,14 @@ Acumatica returns **200 and silently discards** an `AttributeID` the project's t
 
 `tenantId` is optional and scopes the read when present. No token is involved, so this is an operator/back-office entry point at the same trust level as the `reconcile` and `dryRunWrite` payloads on the same function.
 
+##### Commission-PO reconcile (direct invoke, 2026-10-23)
+
+```json
+{ "reconcilePos": true, "recordId": "a1Q...", "tenantId": "<Sundial_Tenant__c Id>", "dryRun": true }
+```
+
+Runs ONLY the commission-PO stage, in reconcile mode, without re-pushing the budget: reads both POs, **never creates, never PUTs, never checks the vendor**. It adopts a live amount that is already right (`reconciled`) or hand-set (`manually_set`) into `Commission_PO_M{n}_Amount__c` and sets `Commission_PO_Status__c` / `Commission_PO_Error__c`. A milestone that needs an Acumatica write is `needs_push` and the record's status is left alone. **Dry run unless `dryRun: false`** — the dry run returns the field maps it would write (`writes`). Response: `{ mode: "reconcile_pos" | "reconcile_pos_dry_run", recordId, name, before, ok, status, reason, results[], writes[] }`; refusals `BAD_RECORD_ID`, `RECORD_NOT_FOUND`. Driven by `scripts/reconcile-commission-pos.mjs`.
+
 ##### Salesforce write-back
 
 `Attribute_Sync_Status__c`, `Attribute_Sync_Error__c` and `Attribute_Synced_At__c` (`salesforce/v5-attribute-sync-fields/`). **The budget push worker's Stage E writes the same three fields from the same mapping function**, so the two paths cannot describe the same outcome differently.
@@ -579,6 +587,17 @@ The Lambda also sets `Budget_Calc_Status__c = 'Calculated'`, `Budget_Last_Calcul
 **Errors:** 401 (no/invalid token), 403 (`NO_SUNDIAL_USER` / `USER_INACTIVE` / `NO_TENANT`), 404 (`RECORD_NOT_FOUND`, incl. cross-tenant), 400 (`MISSING_RECORD_ID`), 500 (`server_error`), and **422 `invalid_input`** with a `code` for bad record data (`Budget_Calc_Status__c = 'Error'` too): `DEALER_MISSING` (D-085 am. 1 — created on/after 2026-09-04 with no `Dealer__c`; the message names the record and says to set the Sales Rep), `DEALER_TERMS_UNAVAILABLE` (dealer or date unreadable), `SALES_COMPANY_MISSING` (pre-cutover, no dealer, blank sales company), `COMMISSION_TOTAL_UNAVAILABLE`, `BURDEN_RATE_IMPLAUSIBLE`, `PPW_PRICE_IMPLAUSIBLE`, `NS_MARKUP_IMPLAUSIBLE`.
 
 **Commission POs (the budget push's Stage B, D-085 am. 1).** Not an HTTP error — written to `Commission_PO_Status__c = 'Failed'` / `Commission_PO_Error__c` and `Budget_Push_Error__c`: `dealer_missing`, `vendor_missing`, `vendor_internal`, `vendor_not_in_acumatica`, `vendor_lookup_failed`, `dealer_terms_unavailable`, and the legacy `vendor_unmapped` / `vendor_inactive` / `vendor_blank`. `internal_deal` / `no_commission` are `None`, not failures.
+
+**Commission-PO update outcomes (2026-10-23, D-057 am. 2)** — per milestone in `downstream.commissionPos.results[]`, with `step` (`hold` / `amount` / `release`) on the update failures:
+
+| Outcome | Record status | Meaning |
+|---|---|---|
+| `reconciled` | M1 Raised / Both Raised | Live PO amount ≠ what Sundial last stored, but = the ruled amount: adopted, nothing written to Acumatica |
+| `manually_set` | `Manually Set` (shows `Frozen` until the picklist value is deployed) | Live amount ≠ stored and ≠ ruled: adopted, **never overwritten**; error carries `PO {n} (M{n}) edited in Acumatica to {amount}; Sundial will not overwrite …`, which the next run reads back. Clearing `Commission_PO_Error__c` releases it |
+| `frozen` | Frozen only if it still holds the wrong amount | Off `Open` / `On Hold`, **or anything received / Completed / Cancelled on the line** (`QtyOnReceipts`, `ReceivedAmount`). A frozen M1 is absorbed: M2 = commission − M1's live amount |
+| `skip_m2_covered_by_m1` | M1 Raised, or Failed if M1 overpaid / an M2 PO exists | M1 froze at ≥ the whole commission |
+| `update_failed` / `update_unverified` + `step` | Failed | `hold` refused or not honoured (nothing changed) · `amount` refused / not verified (**left On Hold**) · `release` refused / re-entered approval (`approvalReentered`; amount written) |
+| `needs_push` | unchanged | Reconcile only: this milestone needs an Acumatica write |
 
 **Other recalc trigger (not an HTTP route):** the same Lambda also runs from the `Sundial_Budget_Recalc__e` platform event via the EventBridge/SQS relay (field-change Flow). See `docs/integrations/budget-recalc-relay.md` and the Flow in `salesforce/flows/`. Calc-in-Lambda rationale: D-038.
 

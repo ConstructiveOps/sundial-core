@@ -1,5 +1,21 @@
 # Sundial — Progress Log
 
+## 2026-10-23 — Commission-PO updates: never overwrite a hand edit, frozen M1 moves M2, Open POs held to be edited (D-057 am. 2, `feature/dealer-terms`) — BUILT, NOT DEPLOYED, hold gate CLOSED
+
+- **Investigation first (read-only):** 27 Failed projects carried "PO … was updated but no longer matches". Every one was an Open, Hold = false PO; the one update ever proven (runbook Step 7) was On Hold. Harmon had corrected all 27 by hand in Acumatica; 28 of 29 Open POs already held the ruled amount (SOL-10134 one cent over). Probe: `scripts/probe-commission-po-update.mjs` (`--all-failed` grades each PO against the ruling).
+- **Tim's rulings:** M2 = commission − M1's LIVE amount when M1 is frozen (am. 1); the engine never overwrites a PO amount that differs from what Sundial last wrote (am. 2).
+- **`sundial-acumatica-commission-po`:**
+  - **Manual-edit guard, always on:** live ≠ `Commission_PO_M{n}_Amount__c` → `reconciled` (= ruled: adopted, status back to M1 Raised / Both Raised, error cleared) or `manually_set` (adopted, no write; status `Manually Set`, shown `Frozen` until the picklist value is deployed — `MANUALLY_SET_PICKLIST`). The marker in `Commission_PO_Error__c` is read back by the next run (`manualSetMarkers`).
+  - **Frozen** = off `Open`/`On Hold` **or** a receipt on the line (`QtyOnReceipts`, `ReceivedAmount`, Completed, Cancelled — `frozenReason`). M2 = commission − M1 live (`m2AmountAfter`); ≤ 0 → `skip_m2_covered_by_m1`. A frozen M1 that M2 absorbed no longer marks the record Frozen.
+  - **`HOLD_UPDATE_GATE` (committed closed):** open, an Open PO goes Hold → amount → verify → release → verify; failures name the `step` and leave the PO On Hold; release into Pending Approval = `approvalReentered`. Hold is set as a FIELD: the Default/25.200.001 swagger has no PurchaseOrder hold / release action (Subcontract only).
+  - **Logging:** every update PUT and its echo (`commission-po UPDATE` / `UPDATE-ECHO`, `$expand=Details`), ids and amounts only.
+  - Reconcile mode (`reconcileOnly`): no create, no PUT, no vendor check; a vendor refusal still adopts the amounts and leaves the record Failed with that reason.
+- **`sundial-acumatica-budget-push`:** the worker SELECT adds `commissionPoFieldNames()` (stored amounts, status, error — without them every PO would read hand-edited); new direct payload `{ reconcilePos: true, recordId, dryRun }` (`runCommissionPoReconcile`, dry run unless `dryRun: false`).
+- **`lib/acumatica.js`:** `SUNDIAL_ACUMATICA_SECRET_NAME` override (`acumaticaSecretName()`, scripts only) and `acumaticaTenant()` — D-058 am. 1. `connected-app` is LIVE; no sandbox secret exists.
+- **Scripts:** `probe-po-hold-update.mjs` (sandbox-only four-step proof; refuses the live pointer and a placeholder secret before any request — checked), `reconcile-commission-pos.mjs` (dry run default, `--apply` canary-first, `--local`).
+- **Dry run, 2026-10-23, all 33 Failed (read-only):** 15 → Both Raised; 12 → amounts adopted, still Failed for `dealer_missing` (post-cutover, no `Dealer__c`); SOL-10134 Manually Set; 6 never had POs (`needs_push`). Zero Acumatica writes.
+- **Tests:** commission-PO 109 (was 76), budget-push 100. Docs: runbook (built table, clearing the Failed records, Step 10), api-endpoints (outcomes + payload), DECISIONS D-057 am. 2 / D-058 am. 1, CLAUDE.md, TASKS.
+
 ## 2026-10-22 — The backend reads the dealer, one rule everywhere (D-085 amendment 1, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
 
 - **`lib/dealer-terms.js` `resolveDealerTerms`.** `Dealer__c` set → `source "dealer"` (`Is_Internal__c`, `Acumatica_Vendor_ID__c`, `Name`). Else the cutover date (the Customer's `CreatedDate` when linked, else the record's own; GMT date, like the formula's `DATEVALUE`) before 2026-09-04 → `source "legacy"` (the picklist, unchanged). Else `DEALER_MISSING`. A dealer id with no readable row, or no readable date, is `DEALER_TERMS_UNAVAILABLE` — never silently "legacy". `dealerTermsFieldNames(object)` is the one SELECT list.

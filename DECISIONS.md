@@ -3788,3 +3788,25 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - A pre-cutover record WITH a dealer takes the dealer's flag and vendor while its redline still reads the picklist (rule step 1 is date-blind, as specified). 6 uncalculated Solar records disagreed on 2026-10-22 (TASKS.md).
 - Post-cutover deals with no dealer stop at the budget and the PO; so do dealers with no vendor id (Invictus Energy, Sunlink Energy today).
 - `access-model.md` §2.3 invariant 8 states the rule.
+
+## D-086: Per-comment privacy; a dealer or rep reads the public comments of their Customer and its Solar project (2026-10-23)
+
+**Amends D-064 A11 (solar comments closed to sales roles) and D-084 (system lines). Dealer module step 1 of 9.** Note: the request named this D-085, which was already Dealer terms (2026-10-22); recorded as the next free number.
+
+**Context.** Harmon wants dealers and reps to follow a deal in one feed — the Customer's comments and the linked Solar project's — and to post and @mention Harmon staff from it, while staff keep a way to write what dealers must not read. A11 answered the second need per OBJECT (no solar comments for sales roles at all), which also blocked the first.
+
+**Decision.**
+1. **Privacy is per comment:** `comments.is_private boolean not null default false`. A private comment is readable only by tenant- and tech-scope users. Only they may insert one; a dealer / rep posts public or nothing.
+2. **Solar is visible through its customer.** `record_visible_for()` v4: at `own` / `dealer` scope a solar record is visible when its customer (`sundial_solar_cache.sundial_customer_sf_id`) passes that scope's customer rule. One deal, one owner — the customer's rep and dealer, not the solar row's own copies. Tenant, tech and customer branches unchanged.
+3. **One read rule, `comment_readable_for(profile, object, id, is_private)`** = `record_visible_for` AND (public OR tenant / tech). The comments SELECT policy, the mentions INSERT policy and `mentionable_users()` (new 4-argument overload with `p_is_private`; the 3-argument one = public) all call it — so nobody can be @-mentioned on a comment they could not read, which keeps the mention email inside its scope.
+4. **One write path, `set_comment_private(comment, private)`** (definer, `authenticated` only): caller tenant / tech; comment in the caller's tenant on a record they can see; author tenant / tech — a dealer's or rep's own words can never be hidden from them (an author-less row is not toggleable). Still no UPDATE policy on `comments`.
+5. **`sundial-comment-notify`** skips a private comment for a dealer / rep / none recipient (no email, no bell, no push, not stamped); a recipient with no profile scope is asked through `comment_readable_for`, failing CLOSED. A dealer- or rep-scope recipient is linked to `/dealer/customers/{customerId}` whatever the comment's context (`context` may now be `dealer`).
+6. **D-084's system lines are written private** (`lib/intake-comment.js`): office bookkeeping, not conversation.
+7. **`comments` replica identity full**, so a Realtime UPDATE carries the new `is_private`.
+
+**Consequences.**
+- Existing solar comments were written under A11's promise and all default to public: on apply, a rep / dealer can read the existing staff comments on their own solar projects. `sql/sundial_access_p11_comment_privacy.sql` V5 counts them; its optional Part B makes every existing solar comment (and existing system line) private. **Tim / Harmon decide before running Part A.**
+- The two comments policies are `to authenticated` (not `{public}`), so anon keeps "200, 0 rows" without being granted the argument-taking `comment_readable_for` (A8).
+- A comment flipped to private is not delivered to a rep's open tab (RLS refuses the new row); it disappears on reload. They had already read it.
+- `scripts/verify-comment-rls.mjs` also stopped treating zz-tech as `none` scope — stale since p10.
+- The portal half (Private toggle + badge, picker privacy, UPDATE events, the dealer feed) is later dealer-module steps.

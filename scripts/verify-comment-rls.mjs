@@ -28,11 +28,17 @@
 //
 // IT ALSO SENDS REAL EMAIL. Every mention this script succeeds in creating fires the
 // AFTER INSERT trigger, which posts to sundial-comment-notify, which has EMAIL_FROM
-// set — so the two allowed mentions below each deliver a message. Both go to ZZ TEST
-// mailboxes (tim+zz-admin@ and tim+zz-rep-a1@), never to a live user, and that is a
-// property of the ZZ fixtures rather than of any check here. Deleting the comment
-// afterwards cascades the mention away but does not un-send the mail. Expect two
-// messages per green run.
+// set — so the three allowed mentions below each deliver a message. All go to ZZ TEST
+// mailboxes (tim+zz-admin@, tim+zz-rep-a1@ and, since D-086, tim+zz-exec@ for the
+// staff-on-a-private-comment mention), never to a live user, and that is a property of
+// the ZZ fixtures rather than of any check here. Deleting the comment afterwards
+// cascades the mention away but does not un-send the mail. Expect three messages per
+// green run.
+//
+// D-086 (2026-10-23, sql/sundial_access_p11_comment_privacy.sql): solar threads are
+// readable by a rep / dealer through the solar's customer again; private comments, the
+// is_private insert rule and set_comment_private() are §4b; the tech user is `tech`
+// scope (p10), no longer `none`.
 //
 // Usage:
 //   node scripts/verify-comment-rls.mjs
@@ -171,8 +177,12 @@ async function readThread(u, rec) {
   return { rows: data ?? [], error };
 }
 
-/** Exactly CommentThread.tsx's post, including the .select().single() read-back. */
-async function postComment(u, rec, note) {
+/**
+ * Exactly CommentThread.tsx's post, including the .select().single() read-back.
+ * `isPrivate` (D-086) is sent only when given, so the default-public path stays the
+ * client's original call shape.
+ */
+async function postComment(u, rec, note, { isPrivate } = {}) {
   assertZz(rec.id);
   const { data, error } = await u.client
     .from("comments")
@@ -183,6 +193,7 @@ async function postComment(u, rec, note) {
       author_id: u.uid,
       author_name: `ZZ ${u.slug}`,
       body: `${BODY_PREFIX} ${RUN_ID} — ${note}`,
+      ...(isPrivate === undefined ? {} : { is_private: isPrivate }),
     })
     .select()
     .single();
@@ -211,27 +222,45 @@ async function mentionsFeed(u) {
 /** Count only the rows THIS run created, so a busy tenant cannot skew a check. */
 const mine = (rows) => rows.filter((c) => (c.body || "").includes(RUN_ID));
 
+/** Whether `u` can read one comment by id (0 or 1 rows). */
+async function canRead(u, commentId) {
+  const { data, error } = await u.client.from("comments").select("id").eq("id", commentId);
+  return error ? -1 : (data ?? []).length;
+}
+
+/** The one write path for is_private (D-086). Returns the boolean, or the error text. */
+async function setPrivate(u, commentId, isPrivate) {
+  const { data, error } = await u.client.rpc("set_comment_private", { p_comment_id: commentId, p_private: isPrivate });
+  return error ? `error ${error.code || "?"} ${error.message}` : data;
+}
+
 // ---------------------------------------------------------------------------
 // Realtime
 // ---------------------------------------------------------------------------
 /**
- * Subscribe as `u` to INSERTs on one record, run `trigger`, and report whether an
- * event arrived. Realtime authorizes postgres_changes per subscriber under RLS, so
- * "delivered" and "not delivered" are both policy results — but a websocket that
- * never connects is an environment result, and is reported as SKIP, not FAIL.
+ * Subscribe as `u` to INSERTs (or, with `event`, UPDATEs) on one record, run `trigger`,
+ * and report whether an event arrived — and the last delivered `new` row, so a check
+ * can read what the event carried (D-086: an UPDATE must carry is_private). Realtime
+ * authorizes postgres_changes per subscriber under RLS, so "delivered" and "not
+ * delivered" are both policy results — but a websocket that never connects is an
+ * environment result, and is reported as SKIP, not FAIL.
  */
-async function realtimeProbe(u, rec, trigger, waitMs = 6000) {
+async function realtimeProbe(u, rec, trigger, waitMs = 6000, event = "INSERT") {
   const channel = u.client.channel(`zz-rls:${rec.object}:${rec.id}:${Math.random()}`);
   let delivered = false;
+  let lastRow = null;
 
   const subscribed = await new Promise((resolve) => {
     const timer = setTimeout(() => resolve(false), 10000);
     channel
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "comments", filter: `record_id=eq.${rec.id}` },
+        { event, schema: "public", table: "comments", filter: `record_id=eq.${rec.id}` },
         (payload) => {
-          if ((payload.new?.body || "").includes(RUN_ID)) delivered = true;
+          if ((payload.new?.body || "").includes(RUN_ID)) {
+            delivered = true;
+            lastRow = payload.new;
+          }
         }
       )
       .subscribe((status) => {
@@ -253,7 +282,7 @@ async function realtimeProbe(u, rec, trigger, waitMs = 6000) {
   await trigger();
   await new Promise((r) => setTimeout(r, waitMs));
   await u.client.removeChannel(channel);
-  return { subscribed: true, delivered };
+  return { subscribed: true, delivered, lastRow };
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +335,9 @@ async function main() {
   {
     const u = sessions["rep-a1"];
     check("rep-a1 reads comments on their OWN customer",   mine((await readThread(u, R.custA1)).rows).length, 1);
-    check("rep-a1 reads comments on their OWN solar",      mine((await readThread(u, R.solarA1)).rows).length, 1);
+    // D-086: solar is visible through its CUSTOMER (reverses A11 for public comments).
+    check("rep-a1 reads comments on their OWN solar (via the customer)", mine((await readThread(u, R.solarA1)).rows).length, 1);
+    check("rep-a1 reads 0 on ANOTHER DEALER'S solar",     mine((await readThread(u, R.solarB1)).rows).length, 0);
     check("rep-a1 reads 0 on ANOTHER REP'S customer",      mine((await readThread(u, R.custA2)).rows).length, 0);
     check("rep-a1 reads 0 on ANOTHER DEALER'S customer",   mine((await readThread(u, R.custB1)).rows).length, 0);
     check("rep-a1 reads 0 on a ROOFING record",            mine((await readThread(u, R.roofing)).rows).length, 0);
@@ -317,6 +348,8 @@ async function main() {
     const u = sessions["mgr-a"];
     check("mgr-a (dealer) reads rep-a1's customer",        mine((await readThread(u, R.custA1)).rows).length, 1);
     check("mgr-a (dealer) reads rep-a2's customer",        mine((await readThread(u, R.custA2)).rows).length, 1);
+    check("mgr-a (dealer) reads Dealer A's solar (D-086)", mine((await readThread(u, R.solarA1)).rows).length, 1);
+    check("mgr-a (dealer) reads 0 on Dealer B's solar",    mine((await readThread(u, R.solarB1)).rows).length, 0);
     check("mgr-a (dealer) reads 0 on Dealer B's customer", mine((await readThread(u, R.custB1)).rows).length, 0);
     check("mgr-a (dealer) reads 0 on roofing",             mine((await readThread(u, R.roofing)).rows).length, 0);
   }
@@ -330,11 +363,27 @@ async function main() {
   }
 
   // `none` scope: nothing, anywhere.
-  for (const slug of ["rep-nodealer", "rep-inactive-dealer", "tech"]) {
+  for (const slug of ["rep-nodealer", "rep-inactive-dealer"]) {
     const u = sessions[slug];
     let seen = 0;
     for (const rec of Object.values(R)) seen += mine((await readThread(u, rec)).rows).length;
     check(`${slug} (none) reads NOTHING anywhere`, seen, 0);
+  }
+
+  // `tech` scope (p10, D-072 am. 7): every customer thread in the tenant, no solar, no
+  // roofing. zz-tech is a Technician; this script listed it under `none` until D-086,
+  // which was stale from the day p10 was applied.
+  {
+    const u = sessions.tech;
+    let customers = 0;
+    let others = 0;
+    for (const rec of Object.values(R)) {
+      const n = mine((await readThread(u, rec)).rows).length;
+      if (rec.object === "customer") customers += n;
+      else others += n;
+    }
+    check("tech reads EVERY seeded customer thread", customers, Object.values(R).filter((r) => r.object === "customer").length);
+    check("tech reads 0 on solar / roofing", others, 0);
   }
 
   // =========================================================================
@@ -352,7 +401,12 @@ async function main() {
     checkDenied("rep-a1 CANNOT comment on a roofing record",        (await postComment(u, R.roofing, "should fail")).error);
   }
   checkDenied("rep-nodealer CANNOT comment anywhere", (await postComment(sessions["rep-nodealer"], R.custA1, "should fail")).error);
-  checkDenied("tech CANNOT comment anywhere",         (await postComment(sessions.tech, R.custA1, "should fail")).error);
+  {
+    const t = await postComment(sessions.tech, R.custA1, "tech on a customer");
+    if (t.error) fail("tech CAN comment on a customer (p10)", `${t.error.code} ${t.error.message}`);
+    else { track("tech", t.row); pass("tech CAN comment on a customer (p10)"); }
+  }
+  checkDenied("tech CANNOT comment on a solar record", (await postComment(sessions.tech, R.solarA1, "should fail")).error);
 
   // A rep cannot forge someone else's authorship even on a record they can see.
   {
@@ -390,8 +444,9 @@ async function main() {
     checkDenied("nobody can mention a same-dealer rep onto a record THEY cannot see",
       (await mention(u, carrier.id, sessions["rep-a2"].uid)).error);
 
-    // (d) A `none`-scope user can never be mentioned.
-    checkDenied("rep-a1 CANNOT mention a none-scope user", (await mention(u, carrier.id, sessions.tech.uid)).error);
+    // (d) A `none`-scope user can never be mentioned. (Was zz-tech — staff since p10,
+    //     and so mentionable on a customer.)
+    checkDenied("rep-a1 CANNOT mention a none-scope user", (await mention(u, carrier.id, sessions["rep-nodealer"].uid)).error);
   }
 
   // (e) Even ADMIN cannot mention a rep onto a record outside that rep's scope.
@@ -406,6 +461,57 @@ async function main() {
     const okIn = await mention(sessions.admin, seeded.custA1.id, sessions["rep-a1"].uid);
     if (okIn.error) fail("admin CAN mention rep-a1 on rep-a1's own record", `${okIn.error.code} ${okIn.error.message}`);
     else pass("admin CAN mention rep-a1 on rep-a1's own record");
+  }
+
+  // =========================================================================
+  // 4b. PRIVACY (D-086) — staff-only comments on a record a rep CAN see.
+  // =========================================================================
+  // Every refusal below is on rep-a1's OWN customer, which the reads above prove they
+  // can open — so a 0 is about the private flag and nothing else.
+  let privateRow = null;
+  {
+    const { row, error } = await postComment(sessions.admin, R.custA1, "PRIVATE staff note", { isPrivate: true });
+    if (error) fail("admin CAN write a PRIVATE comment", `${error.code || "?"} ${error.message}`);
+    else { privateRow = track("admin", row); pass("admin CAN write a PRIVATE comment", `is_private=${row.is_private}`); }
+  }
+  if (privateRow) {
+    check("admin reads the private comment",                           await canRead(sessions.admin, privateRow.id), 1);
+    check("tech (staff) reads the private comment",                    await canRead(sessions.tech, privateRow.id), 1);
+    check("rep-a1 reads 0 of a PRIVATE comment on their own customer", await canRead(sessions["rep-a1"], privateRow.id), 0);
+    check("mgr-a (dealer) reads 0 of it",                              await canRead(sessions["mgr-a"], privateRow.id), 0);
+    checkDenied("admin CANNOT mention rep-a1 on a PRIVATE comment",
+      (await mention(sessions.admin, privateRow.id, sessions["rep-a1"].uid)).error);
+    const exec = await mention(sessions.admin, privateRow.id, sessions.exec.uid);
+    if (exec.error) fail("admin CAN mention staff on a private comment", `${exec.error.code} ${exec.error.message}`);
+    else pass("admin CAN mention staff on a private comment");
+  }
+
+  // Only tenant / tech may WRITE a private comment.
+  checkDenied("rep-a1 CANNOT insert is_private = true",
+    (await postComment(sessions["rep-a1"], R.custA1, "rep private, should fail", { isPrivate: true })).error);
+  checkDenied("mgr-a (dealer) CANNOT insert is_private = true",
+    (await postComment(sessions["mgr-a"], R.custA1, "dealer private, should fail", { isPrivate: true })).error);
+
+  // The toggle: set_comment_private() is the only write path for is_private.
+  if (seeded.custA1) {
+    const id = seeded.custA1.id;
+    check("rep-a1 set_comment_private on a staff comment returns false", await setPrivate(sessions["rep-a1"], id, true), false);
+    check("admin set_comment_private(true) works",                       await setPrivate(sessions.admin, id, true), true);
+    check("…and rep-a1 then reads 0 of that comment",                    await canRead(sessions["rep-a1"], id), 0);
+    check("admin set_comment_private(false) works",                      await setPrivate(sessions.admin, id, false), true);
+    check("…and rep-a1 reads it again",                                  await canRead(sessions["rep-a1"], id), 1);
+  }
+  if (carrier) {
+    // A rep's own words can never be hidden from them, by anybody.
+    check("admin CANNOT make rep-a1's own comment private (false)", await setPrivate(sessions.admin, carrier.id, true), false);
+    check("rep-a1 still reads their own comment",                   await canRead(sessions["rep-a1"], carrier.id), 1);
+  }
+  // A plain UPDATE is still refused: there is no UPDATE policy (p1b), RLS filters it to 0 rows.
+  if (seeded.custA1) {
+    const { data, error } = await sessions.admin.client
+      .from("comments").update({ is_private: true }).eq("id", seeded.custA1.id).select();
+    if (error && !isRlsDenial(error)) fail("a direct UPDATE of is_private changes nothing (0 rows)", error.message);
+    else check("a direct UPDATE of is_private changes nothing (0 rows)", (data ?? []).length, 0);
   }
 
   // =========================================================================
@@ -486,6 +592,20 @@ async function main() {
     });
     if (!on.subscribed) skip("realtime: rep-a1 DOES get events on their own record", "channel never subscribed");
     else check("realtime: rep-a1 DOES get events on their own record", on.delivered, true);
+
+    // D-086: making a private comment PUBLIC reaches the rep's open thread as an UPDATE
+    // carrying the new is_private (replica identity full, p11 step 7).
+    if (privateRow) {
+      const upd = await realtimeProbe(u, R.custA1, async () => {
+        await setPrivate(sessions.admin, privateRow.id, false);
+      }, 6000, "UPDATE");
+      if (!upd.subscribed) skip("realtime: a comment made public reaches rep-a1 as an UPDATE with is_private=false", "channel never subscribed");
+      else check(
+        "realtime: a comment made public reaches rep-a1 as an UPDATE with is_private=false",
+        upd.delivered && upd.lastRow?.is_private === false,
+        true,
+      );
+    }
   }
 
   // =========================================================================

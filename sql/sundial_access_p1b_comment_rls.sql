@@ -620,6 +620,13 @@ create policy comments_delete_own
 -- NO UPDATE POLICY, as today. `authenticated` holds UPDATE on this table; with no
 -- policy it is inert. An update policy would let an author rewrite a comment's
 -- record_id and move it onto a record they can see. Do not add one.
+--
+-- AMENDED by sql/sundial_access_p11_comment_privacy.sql (D-086, 2026-10-23): still no
+-- UPDATE policy. The one column that changes after insert, `is_private`, is written
+-- ONLY by the SECURITY DEFINER function public.set_comment_private(), which checks
+-- the caller's scope, the tenant and the author itself and touches nothing else.
+-- p11 also replaces comments_select_visible / comments_insert_visible (now `to
+-- authenticated`, reading comment_readable_for) and mentions_insert_scoped.
 
 -- ---------------------------------------------------------------------------
 -- POLICIES — public.comment_mentions
@@ -1065,7 +1072,7 @@ rollback;
 -- ---------------------------------------------------------------------------
 -- V13 — **TIM ONLY** is not required for this one; it reads the catalog. §8's
 -- Phase-6 gate set, re-pointed at these tables per A5. The one-line summary of
--- everything above. EXPECT all six verdicts TRUE.
+-- everything above. EXPECT all seven verdicts TRUE (the is_private row only after p11).
 -- ---------------------------------------------------------------------------
 select 'comments SELECT policy names record_visible' as gate,
        exists (select 1 from pg_policies
@@ -1094,6 +1101,14 @@ select 'no UPDATE policy on comments or comment_mentions',
                     where schemaname='public'
                       and tablename in ('comments','comment_mentions')
                       and cmd='UPDATE')
+union all
+-- D-086 (p11): is_private's one write path. Before p11 is applied this row is FALSE;
+-- after it, a FALSE means the function is gone or anon can call it.
+select 'is_private written only by set_comment_private (definer, not anon)',
+       exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                where n.nspname='public' and p.proname='set_comment_private'
+                  and p.prosecdef
+                  and not has_function_privilege('anon', p.oid, 'EXECUTE'))
 union all
 select 'cache tables still revoked from authenticated (A4 intact)',
        not has_table_privilege('authenticated','public.sundial_customer_cache','SELECT');

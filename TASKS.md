@@ -4,6 +4,15 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-23 — Per-comment privacy (D-086, dealer module step 1 of 9) — BUILT, NOT DEPLOYED
+
+- [x] `sql/sundial_access_p11_comment_privacy.sql`; `sundial-comment-notify` private skip + dealer links; `lib/intake-comment.js` private system lines; both verify scripts; docs. Suite 1,701 / 1,701
+- [ ] **TIM / HARMON: decide on existing solar comments** before Part A — leave them public (reps read the staff comments on their own solar projects) or run the file's optional Part B (all existing solar comments + system lines private). Run V5 after Part A to see the count either way
+- [ ] **TIM: Supabase SQL editor** — `sql/sundial_access_p11_comment_privacy.sql` Part A (after `sql/2026-10-22_job_report_dates.sql`), then V1–V7 and V11; V8–V10 as yourself (`set role`)
+- [ ] **TIM: redeploy** `.\deploy.ps1 sundial-comment-notify`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-service-estimate` (the last two bundle `lib/intake-comment.js`). Order does not matter: the Lambdas retry without `is_private` until the SQL runs
+- [ ] **TIM: live proof** — `node scripts/verify-comment-scope.mjs` then `node scripts/verify-comment-rls.mjs` (ZZ users only; three ZZ mention emails per green run)
+- [ ] **harmon-crm (later dealer-module steps):** Private toggle + badge on Customer / Solar threads (`set_comment_private`), send `is_private` on insert, the picker's `mentionable_users(…, p_is_private)`, UPDATE events in the thread subscription (an unknown id on UPDATE = insert), the dealer portal's merged Customer + Solar feed with `context = 'dealer'`
+
 ## 2026-10-23 — Sales Rep / Dealer labels and order in the two field-design workbooks — DONE, NOT DEPLOYED
 
 - [x] Customer "Lead & Source": `Sales_Rep__c` → "Sales Rep (Required)" (label only, nothing enforced), moved above `Sales_Company__c`; new `Dealer_Display_Name__c` "Dealer (based on Sales Rep)", Formula (Text), read / read; `Dealer_Name__c` → "Legacy Dealer Name (Do Not Use)", bottom of the section. The Integration & System `Sales_Rep__c` row untouched

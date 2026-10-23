@@ -1260,7 +1260,50 @@ self-corrects at their first login. Zero users today.
 
 ### 5.3 Policies
 
-> **AMENDED 2026-08-28 — A11: SALES-ROLE COMMENTS ARE CUSTOMER-ONLY.**
+> **AMENDED 2026-10-23 — D-086: PER-COMMENT PRIVACY; SOLAR THROUGH ITS CUSTOMER.**
+> Supersedes A11 below for solar, and narrows every sales-role read by one flag.
+> Applied by `sql/sundial_access_p11_comment_privacy.sql`; rationale in DECISIONS.md D-086.
+>
+> - **`comments.is_private`** (default `false`). A private comment is readable only by
+>   tenant- and tech-scope users.
+> - **`record_visible_for()` v4:** at `own` / `dealer` scope a **solar** record is visible
+>   when **its customer** (`sundial_solar_cache.sundial_customer_sf_id`) passes that scope's
+>   customer rule — the customer's `sales_rep_sf_id` / `dealer_sf_id`, not the solar row's
+>   own. Customer, tenant and tech branches unchanged.
+> - **`comment_readable_for(profile, object, id, is_private)`** = `record_visible_for(…)`
+>   AND (not private OR the profile is tenant / tech). The ONE comment-read rule: the SELECT
+>   policy, the mentions INSERT policy, `mentionable_users()` and `sundial-comment-notify`'s
+>   private-comment check all ask it (or, in the Lambda, its known-scope shortcut).
+> - **`set_comment_private(comment, private)`** — the only writer of `is_private` after
+>   insert: caller tenant / tech, comment in the caller's tenant on a record they can see,
+>   **author** tenant / tech (a dealer's or rep's own words can never be hidden from them).
+>   Still no UPDATE policy.
+>
+> ```sql
+> -- comments (p11)
+> select : to authenticated — tenant_id = current tenant
+>          AND comment_readable_for(auth.uid(), record_object, record_id, is_private)
+> insert : to authenticated — tenant_id = current tenant AND author_id = auth.uid()
+>          AND record_visible(record_object, record_id)
+>          AND (is_private = false OR current_profile().access_scope in ('tenant','tech'))
+> delete : unchanged (author, tenant)
+> update : none — set_comment_private() is the write path for is_private
+> -- comment_mentions (p11)
+> insert : created by me on a comment I can see AND user_visible(mentioned)
+>          AND comment_readable_for(mentioned, record_object, record_id, c.is_private)
+> ```
+>
+> **Why the two comments policies are `to authenticated`.** `comment_readable_for` takes its
+> subject as an argument (the shape A8 revoked from anon), so anon must not execute it — and a
+> `{public}` policy that calls it would turn an anonymous read from "200, 0 rows" into a 42501.
+> Scoped to `authenticated`, no policy applies to anon and the anon surface is unchanged (p11 V8).
+>
+> **Existing solar comments become readable by the deal's rep / dealer** (every row defaults
+> public). p11 V5 counts them; its optional Part B marks them private if Harmon wants A11's
+> promise kept for what was written under it.
+
+> **AMENDED 2026-08-28 — A11: SALES-ROLE COMMENTS ARE CUSTOMER-ONLY.** *(Solar half
+> superseded by D-086 above.)*
 > `record_visible_for()` returns **false for `solar`** when the resolved scope is `own`
 > or `dealer`, so a rep or dealer manager cannot read, write or be @-mentioned into
 > comments on a Solar record — including their own. **Tenant scope is unchanged**; Harmon
@@ -1338,6 +1381,21 @@ re-opens anon, so re-run Part C after any drop.
 `postgres_changes` on `comments` filtered by `record_id` already honors RLS; a rep subscribed to a
 record they lose (reassignment) stops receiving events on their next `/auth/me` profile refresh
 because `record_visible` re-evaluates per event.
+
+**D-086 (2026-10-23): UPDATE events matter now.** `set_comment_private()` changes a row after
+insert, so p11 sets `alter table public.comments replica identity full` — the change record then
+carries the whole row, Realtime evaluates the SELECT policy (`comment_readable_for`) on the NEW row,
+and the subscriber gets the new `is_private`. Consequences for the portal's thread subscription
+(INSERT today) when it adds UPDATE:
+
+- staff see the Private badge move on every open tab;
+- a comment made **public** reaches a rep's open feed as an UPDATE of a row they had not seen —
+  the client treats an unknown id on UPDATE as an insert;
+- a comment made **private** is **not delivered** to a rep (RLS refuses the new row), so their open
+  tab keeps it until it reloads. Accepted: they had already read it; the flag governs what is read
+  next, not what was seen. A private comment is never *sent* to them.
+
+Proved live by `scripts/verify-comment-rls.mjs` (the private → public UPDATE reaching zz-rep-a1).
 
 ---
 

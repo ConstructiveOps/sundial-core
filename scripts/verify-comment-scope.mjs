@@ -1,19 +1,21 @@
 #!/usr/bin/env node
-// Live proof that D-064 A11 is enforced by RLS: sales-role comments are CUSTOMER-ONLY.
+// Live proof of the comment-scope rules at the database, as a real rep session:
+// D-086 per-comment privacy (which amends D-064 A11) and the mention rules around it.
 //
 //   node scripts/verify-comment-scope.mjs
 //
-// RUN THIS AFTER APPLYING sql/sundial_access_p8_comments_customer_only.sql. Before the
-// SQL is applied it is EXPECTED to fail checks 1-3 — that failure is the before-picture,
+// RUN THIS AFTER APPLYING sql/sundial_access_p11_comment_privacy.sql. Before the SQL is
+// applied it is EXPECTED to fail checks 1-6 (A11 still hides solar threads from the rep and
+// `is_private` / set_comment_private() do not exist) — that failure is the before-picture,
 // and the verdict at the bottom says so rather than leaving it looking broken.
 //
 // ---------------------------------------------------------------------------
-// WHY A LIVE SCRIPT AND NOT JUST THE SQL'S OWN V1-V8
+// WHY A LIVE SCRIPT AND NOT JUST THE SQL'S OWN V-BLOCKS
 // ---------------------------------------------------------------------------
-// V1-V8 run as YOU, in the SQL editor, and check the predicate by calling it directly.
-// That proves the FUNCTION returns the right answer. It does not prove the policies call
-// it, that they are attached to the tables the browser actually queries, or that a real
-// end-user JWT resolves to the profile the predicate keys on.
+// The V-blocks run as YOU, in the SQL editor, and check the predicate by calling it
+// directly. That proves the FUNCTION returns the right answer. It does not prove the
+// policies call it, that they are attached to the tables the browser actually queries, or
+// that a real end-user JWT resolves to the profile the predicate keys on.
 //
 // This script closes those gaps, and it is the only thing that can, because comments are
 // BROWSER-DIRECT (D-056): the portal talks to PostgREST itself with the user's own token.
@@ -21,38 +23,37 @@
 // key is used, and there is no Lambda in the middle to be blamed if it passes.
 //
 // ---------------------------------------------------------------------------
-// WHAT IT ASSERTS
+// WHAT IT ASSERTS (D-086)
 // ---------------------------------------------------------------------------
-//   0. SETUP   — the rep can SEE the solar record, and STAFF seeds a comment on it
-//   1. READ    — that seeded comment returns 0 ROWS for zz-rep-a1 (RLS filters, no error)
-//   2. WRITE   — the rep inserting a solar comment is REFUSED with 42501
-//   3. MENTION — STAFF mentioning the rep on a solar comment is REFUSED with 42501
-//   4. CONTROL — customer comments still read AND write for the same rep, same session
+//   0. SETUP   — the rep can SEE the solar record; staff seeds a PUBLIC solar comment and
+//                a PRIVATE comment on the solar's customer, and reads both back
+//   1. READ    — the rep reads the PUBLIC solar comment (solar is visible through its
+//                customer, D-086 reversing A11)
+//   2. PRIVATE — the rep reads 0 rows for the PRIVATE comment on their own customer
+//   3. WRITE   — the rep inserting is_private = true is REFUSED with 42501
+//   4. TOGGLE  — staff set_comment_private() works (and the rep then reads 0 rows of the
+//                flipped comment); the rep calling it returns false; staff cannot make a
+//                REP's comment private (false)
+//   5. MENTION — staff mentioning the rep on the PRIVATE comment is REFUSED with 42501;
+//                on the PUBLIC solar comment it is ALLOWED; the picker agrees
+//   6. CONTROL — public customer comments still read AND write for the same rep
 //
-// (3) is the one that matters most. `sundial-comment-notify` emails the COMMENT BODY to
-// whoever is mentioned, so if the mention row can exist, a rep who cannot open a solar
-// comment receives its contents by email — a worse leak than the tab being visible.
+// (5) is the one that matters most. `sundial-comment-notify` emails the COMMENT BODY to
+// whoever is mentioned, so if a mention row can exist on a private comment, a rep receives
+// by email what they cannot open.
 //
-// (4) is not decoration. Without it, 1-3 pass just as happily against a bad token, a
-// renamed table, or RLS refusing everything: three ways to get a green run with no
+// (6) is not decoration. Without it, 2, 3 and 5 pass just as happily against a bad token,
+// a renamed table, or RLS refusing everything: three ways to get a green run with no
 // access model at all.
 //
-// (0) exists because the FIRST version of this script passed checks 1 and 3 for the
-// wrong reasons, while asserting in a comment what it had not verified:
-//
-//   - it checked "0 rows" against a record carrying NO solar comments at all, so the
-//     read check would have gone green with RLS switched off entirely; and
-//   - it called the solar record "visible to this rep" while silently using a
-//     hard-coded fallback id, because cache rows key on `sf_id` and it read `Id`. Had
-//     the rep not been able to see that record, every solar refusal below would have
-//     been a refusal about the RECORD and none of them about comments.
-//
-// Both are now proven instead of assumed: visibility by a 200 from the read endpoint,
-// and the row's existence by staff reading back what staff just wrote.
+// (0) proves visibility by a 200 from the read endpoint and the rows' existence by staff
+// reading back what staff just wrote — a "0 rows" against a row that does not exist proves
+// nothing (the first version of this script did exactly that; see git history).
 //
 // ⚠️ WRITES: every insert targets the ZZ fixtures only, and each is deleted again in a
 // finally block. Per CLAUDE.md no live customer and no live user is touched, and the
-// passwords come from Secrets Manager rather than from any file.
+// passwords come from Secrets Manager rather than from any file. The allowed mention in
+// (5) fires sundial-comment-notify and emails the ZZ rep's mailbox — a ZZ address only.
 
 import { createClient } from '@supabase/supabase-js';
 import { readFileSync } from 'node:fs';
@@ -60,14 +61,25 @@ import { getSecret } from '../lib/secrets.js';
 
 // ZZ fixtures. Never substitute a live record or a live user — see CLAUDE.md.
 const CUSTOMER_ID = 'a1P7y00000AmyXCEAZ'; // ZZ PORTAL TEST — DO NOT USE
-const SOLAR_ID_FALLBACK = 'a1Q7y00000JWmkvEAD'; // the ZZ Solar twin used by the p8 V-blocks
+const SOLAR_ID_FALLBACK = 'a1Q7y00000JWmkvEAD'; // the ZZ Solar twin used by the p8 / p11 V-blocks
 const REP_EMAIL = 'tim+zz-rep-a1@constructiveoperations.com';
 const STAFF_EMAIL = 'tim+zz-admin@constructiveoperations.com';
+// The writes below may only ever land on these. assertZz() makes that mechanical.
+const ZZ_RECORDS = new Set([
+  CUSTOMER_ID, 'a1P7y00000ApR0PEAV', 'a1P7y00000ApR21EAF', 'a1P7y00000ApR3dEAF',
+  SOLAR_ID_FALLBACK, 'a1Q7y00000JWmo9EAD',
+]);
 
 /** PostgreSQL insufficient_privilege — what an RLS WITH CHECK refusal looks like. */
 const RLS_DENIED = '42501';
 
 const API = 'https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod';
+
+function assertZz(recordId) {
+  if (!ZZ_RECORDS.has(recordId)) {
+    throw new Error(`REFUSING to write to ${recordId} — not a ZZ PORTAL TEST record.`);
+  }
+}
 
 function env() {
   // The SAME url + ANON key the browser uses. The anon key is deliberate: a service key
@@ -117,6 +129,30 @@ async function tenantIdFor(token) {
   return id;
 }
 
+/** The portal's comment insert, with its .select().single() read-back. */
+async function post(actor, { object, id, body, isPrivate }, tenantId) {
+  assertZz(id);
+  return actor.sb
+    .from('comments')
+    .insert({
+      tenant_id: tenantId,
+      record_object: object,
+      record_id: id,
+      author_id: actor.userId,
+      author_name: 'ZZ D-086 probe',
+      body,
+      ...(isPrivate === undefined ? {} : { is_private: isPrivate }),
+    })
+    .select('id')
+    .single();
+}
+
+/** Rows of one comment id this actor can read (0 or 1). */
+async function readable(actor, commentId) {
+  const r = await actor.sb.from('comments').select('id').eq('id', commentId);
+  return { n: (r.data ?? []).length, error: r.error };
+}
+
 /**
  * Delete one probe row AS ITS AUTHOR and say what actually happened.
  *
@@ -141,163 +177,178 @@ async function main() {
   const { url, key } = env();
   const passwords = await getSecret('sundial/test-users');
 
-  console.log('D-064 A11 — sales-role comments are CUSTOMER-ONLY');
+  console.log('D-086 — per-comment privacy; dealer / rep read public Customer + Solar comments');
   console.log(`  supabase : ${url}`);
   console.log(`  as       : ${REP_EMAIL} (Sales Rep, own scope)\n`);
 
   const rep = await signIn(url, key, REP_EMAIL, passwords);
+  const staff = await signIn(url, key, STAFF_EMAIL, passwords);
   const tenantId = await tenantIdFor(rep.token);
 
   // A solar record the rep CAN see, so a refusal below is about the COMMENT rule and not
-  // about the record. Taken from the rep's own visible set where possible: a hard-coded
-  // id can silently become one they cannot see, which turns every solar assertion into a
-  // pass for the wrong reason.
+  // about the record. Cache rows key on `sf_id`.
   let solarId = SOLAR_ID_FALLBACK;
   const listed = await fetch(`${API}/sf/solar?limit=1`, {
     headers: { Authorization: `Bearer ${rep.token}` },
   })
     .then((r) => r.json())
     .catch(() => null);
-  // Cache rows key on `sf_id`. Reading `Id` here fell through to the hard-coded fallback
-  // without saying so, which is how the visibility claim went unverified the first time.
   const listedId = listed?.records?.[0]?.sf_id;
-  if (listedId) solarId = listedId;
+  if (listedId && ZZ_RECORDS.has(listedId)) solarId = listedId;
 
-  // HARD ASSERT, not a comment. If the rep cannot see this record, every solar refusal
-  // below is a refusal about the RECORD and proves nothing about the comment rule.
+  // HARD ASSERT, not a comment. If the rep cannot see this record, every solar check below
+  // is about the RECORD and proves nothing about the comment rule.
   const seen = await fetch(`${API}/sf/solar/${solarId}?full=true`, {
     headers: { Authorization: `Bearer ${rep.token}` },
   });
   if (seen.status !== 200) {
     console.log(`  ABORT: the rep cannot read solar ${solarId} (HTTP ${seen.status}).`);
-    console.log('         Every solar refusal below would be about the RECORD, not the');
-    console.log('         comment rule. Seed a visible solar twin and re-run:');
+    console.log('         Seed a visible solar twin and re-run:');
     console.log('         node scripts/seed-access-test-fixtures.mjs --apply');
     process.exit(2);
   }
 
-  console.log(`  solar rec: ${solarId}`);
+  // The solar's CUSTOMER — D-086 makes the solar visible through it, and the private
+  // comment goes on it. Read as staff: the full record carries the lookup for tenant scope.
+  const staffSolar = await fetch(`${API}/sf/solar/${solarId}?full=true`, {
+    headers: { Authorization: `Bearer ${staff.token}` },
+  })
+    .then((r) => r.json())
+    .catch(() => null);
+  const solarCustomerId = staffSolar?.record?.Sundial_Customer__c ?? null;
+  if (!solarCustomerId || !ZZ_RECORDS.has(solarCustomerId)) {
+    console.log(`  ABORT: solar ${solarId}'s customer (${solarCustomerId ?? 'unknown'}) is not a ZZ fixture.`);
+    console.log('         Re-seed: node scripts/seed-access-test-fixtures.mjs --apply');
+    process.exit(2);
+  }
+
+  console.log(`  solar rec: ${solarId} (customer ${solarCustomerId})`);
   console.log(`             HTTP ${seen.status} for this rep — so a refusal below is about`);
   console.log('             the COMMENT rule and not about the record');
   console.log(`  tenant   : ${tenantId}`);
   console.log();
 
-  // ---------------------------------------------------------------- 0. SETUP
-  //
-  // STAFF seeds a solar comment first, so that check 1's "0 rows" is a statement
-  // about RLS and not about an empty table. Without a row that DOES exist and IS
-  // hidden, the read check goes green with the access model switched off entirely.
-  const staff = await signIn(url, key, STAFF_EMAIL, passwords);
-  let staffCommentId = null;
+  let publicSolarId = null;
+  let privateCustId = null;
+  let repOwnId = null;
   let strayId = null;
 
   try {
-    const seeded = await staff.sb
-      .from('comments')
-      .insert({
-        tenant_id: tenantId,
-        record_object: 'solar',
-        record_id: solarId,
-        author_id: staff.userId,
-        author_name: 'ZZ A11 probe (staff)',
-        body: 'ZZ A11 scope probe — staff comment on a solar record',
-      })
-      .select('id')
-      .single();
+    // -------------------------------------------------------------- 0. SETUP
+    const pub = await post(staff, { object: 'solar', id: solarId, body: 'ZZ D-086 probe — staff PUBLIC solar comment' }, tenantId);
+    const priv = await post(staff, { object: 'customer', id: solarCustomerId, body: 'ZZ D-086 probe — staff PRIVATE customer comment', isPrivate: true }, tenantId);
+    publicSolarId = pub.data?.id ?? null;
+    privateCustId = priv.data?.id ?? null;
+    const staffSeesPub = publicSolarId ? await readable(staff, publicSolarId) : { n: 0 };
+    const staffSeesPriv = privateCustId ? await readable(staff, privateCustId) : { n: 0 };
+    check(
+      '0. SETUP    staff writes a PUBLIC solar comment and a PRIVATE customer comment, and reads both',
+      staffSeesPub.n === 1 && staffSeesPriv.n === 1,
+      pub.error || priv.error
+        ? `${(pub.error ?? priv.error).code}: ${(pub.error ?? priv.error).message}`
+        : `public ${publicSolarId} · private ${privateCustId}`,
+    );
 
-    if (seeded.error) {
-      // Tenant scope keeps FULL comments on Solar — A11 narrows sales roles only. So
-      // this is a real failure, not a permission working as intended, and every solar
-      // check below would be untestable without the row.
-      check(
-        '0. SETUP    staff can comment on a solar record (tenant scope is unchanged)',
-        false,
-        `${seeded.error.code}: ${seeded.error.message} — cannot seed the row the read`
-          + ' check needs, so checks 1 and 3 are being skipped rather than reported',
-      );
-    } else {
-      staffCommentId = seeded.data.id;
-      const staffSees = await staff.sb.from('comments').select('id').eq('id', staffCommentId);
-      check(
-        '0. SETUP    staff can comment on a solar record AND read it back',
-        !staffSees.error && (staffSees.data ?? []).length === 1,
-        staffSees.error
-          ? `${staffSees.error.code}: ${staffSees.error.message}`
-          : `comment ${staffCommentId} exists and is visible to staff`,
-      );
-
+    if (publicSolarId && privateCustId) {
       // ------------------------------------------------------------ 1. READ
-      const solarRead = await rep.sb
-        .from('comments')
-        .select('id')
-        .eq('record_object', 'solar')
-        .eq('record_id', solarId);
-
+      const r1 = await rep.sb.from('comments').select('id, is_private').eq('record_object', 'solar').eq('record_id', solarId);
+      const got1 = (r1.data ?? []).filter((c) => c.id === publicSolarId);
       check(
-        '1. READ     the rep sees 0 rows for a solar comment that DOES exist',
-        !solarRead.error && (solarRead.data ?? []).length === 0,
-        solarRead.error
-          ? `unexpected error ${solarRead.error.code}: ${solarRead.error.message}`
-          : `${(solarRead.data ?? []).length} row(s) — RLS FILTERS a select, it does`
-            + ' not error, so 0 rows against a row staff can see is the whole proof',
+        '1. READ     the rep reads the PUBLIC comment on their own solar (via the customer)',
+        !r1.error && got1.length === 1,
+        r1.error ? `${r1.error.code}: ${r1.error.message}` : `${got1.length} of 1 — D-086 reverses A11 for public comments`,
       );
 
-      // ------------------------------------------------------------ 3. MENTION
-      //
-      // The sharpest one. sundial-comment-notify emails the COMMENT BODY to whoever
-      // is mentioned, so if this row can exist, a rep who cannot open the comment
-      // receives its contents by email — a worse leak than the tab being visible.
-      const mention = await staff.sb
-        .from('comment_mentions')
-        .insert({ comment_id: staffCommentId, mentioned_user_id: rep.userId })
-        .select('id');
-
+      // ------------------------------------------------------------ 2. PRIVATE
+      const r2 = await readable(rep, privateCustId);
       check(
-        `3. MENTION  mentioning the rep on that solar comment is refused with ${RLS_DENIED}`,
-        mention.error?.code === RLS_DENIED,
-        mention.error
-          ? `got ${mention.error.code}: ${mention.error.message}`
-          : 'MENTION SUCCEEDED — sundial-comment-notify would email this rep the BODY',
+        '2. PRIVATE  the rep reads 0 rows for the PRIVATE comment on their own customer',
+        !r2.error && r2.n === 0,
+        r2.error ? `unexpected error ${r2.error.code}: ${r2.error.message}` : `${r2.n} row(s) against a row staff can read`,
+      );
+
+      // ------------------------------------------------------------ 5. MENTION (private / public)
+      // Before any toggle, while each comment's privacy is known.
+      const mPriv = await staff.sb.from('comment_mentions').insert({ comment_id: privateCustId, mentioned_user_id: rep.userId });
+      check(
+        `5. MENTION  staff mentioning the rep on the PRIVATE comment is refused with ${RLS_DENIED}`,
+        mPriv.error?.code === RLS_DENIED,
+        mPriv.error ? `got ${mPriv.error.code}: ${mPriv.error.message}` : 'MENTION SUCCEEDED — sundial-comment-notify would email this rep a private body',
+      );
+      const mPub = await staff.sb.from('comment_mentions').insert({ comment_id: publicSolarId, mentioned_user_id: rep.userId });
+      check(
+        '5. MENTION  staff mentioning the rep on the PUBLIC solar comment is allowed',
+        !mPub.error,
+        mPub.error ? `${mPub.error.code}: ${mPub.error.message}` : 'allowed (emails the ZZ rep mailbox)',
+      );
+      const pick = async (isPrivate) =>
+        staff.sb.rpc('mentionable_users', { p_object: 'customer', p_id: solarCustomerId, p_user_ids: [rep.userId], p_is_private: isPrivate });
+      const pickPriv = await pick(true);
+      const pickPub = await pick(false);
+      check(
+        '5. PICKER   mentionable_users agrees: the rep is out for a private comment, in for a public one',
+        !pickPriv.error && !pickPub.error && (pickPriv.data ?? []).length === 0 && (pickPub.data ?? []).length === 1,
+        pickPriv.error || pickPub.error
+          ? `${(pickPriv.error ?? pickPub.error).message}`
+          : `private ${(pickPriv.data ?? []).length} · public ${(pickPub.data ?? []).length}`,
+      );
+
+      // ------------------------------------------------------------ 4. TOGGLE
+      const repToggle = await rep.sb.rpc('set_comment_private', { p_comment_id: publicSolarId, p_private: true });
+      check(
+        '4. TOGGLE   the rep calling set_comment_private returns false',
+        !repToggle.error && repToggle.data === false,
+        repToggle.error ? `${repToggle.error.code}: ${repToggle.error.message}` : `returned ${repToggle.data}`,
+      );
+      const staffToggle = await staff.sb.rpc('set_comment_private', { p_comment_id: publicSolarId, p_private: true });
+      const afterToggle = await readable(rep, publicSolarId);
+      check(
+        '4. TOGGLE   staff set_comment_private(true) works, and the rep then reads 0 rows of it',
+        !staffToggle.error && staffToggle.data === true && afterToggle.n === 0,
+        staffToggle.error ? `${staffToggle.error.code}: ${staffToggle.error.message}` : `returned ${staffToggle.data}; rep reads ${afterToggle.n}`,
+      );
+      const staffBack = await staff.sb.rpc('set_comment_private', { p_comment_id: publicSolarId, p_private: false });
+      const afterBack = await readable(rep, publicSolarId);
+      check(
+        '4. TOGGLE   and back to public: the rep reads it again',
+        !staffBack.error && staffBack.data === true && afterBack.n === 1,
+        staffBack.error ? `${staffBack.error.code}: ${staffBack.error.message}` : `returned ${staffBack.data}; rep reads ${afterBack.n}`,
       );
     }
 
-    // -------------------------------------------------------------- 2. WRITE
-    const ins = await rep.sb
-      .from('comments')
-      .insert({
-        tenant_id: tenantId,
-        record_object: 'solar',
-        record_id: solarId,
-        author_id: rep.userId,
-        author_name: 'ZZ A11 probe',
-        body: 'ZZ A11 scope probe — should be refused',
-      })
-      .select('id');
-
-    strayId = ins.data?.[0]?.id ?? null;
+    // -------------------------------------------------------------- 3. WRITE
+    const ins = await post(rep, { object: 'customer', id: solarCustomerId, body: 'ZZ D-086 probe — private from a rep, should be refused', isPrivate: true }, tenantId);
+    strayId = ins.data?.id ?? null;
     check(
-      `2. WRITE    the rep inserting a solar comment is refused with ${RLS_DENIED}`,
+      `3. WRITE    the rep inserting is_private = true is refused with ${RLS_DENIED}`,
       ins.error?.code === RLS_DENIED,
-      ins.error
-        ? `got ${ins.error.code}: ${ins.error.message}`
-        : 'INSERT SUCCEEDED — the WITH CHECK policy is not in force',
+      ins.error ? `got ${ins.error.code}: ${ins.error.message}` : 'INSERT SUCCEEDED — the WITH CHECK policy is not in force',
     );
+
+    // -------------------------------------------------------------- 4. TOGGLE (a rep's own words)
+    const own = await post(rep, { object: 'customer', id: solarCustomerId, body: 'ZZ D-086 probe — rep public comment' }, tenantId);
+    repOwnId = own.data?.id ?? null;
+    if (repOwnId) {
+      const hide = await staff.sb.rpc('set_comment_private', { p_comment_id: repOwnId, p_private: true });
+      check(
+        "4. TOGGLE   staff CANNOT make a rep's own comment private (false)",
+        !hide.error && hide.data === false,
+        hide.error ? `${hide.error.code}: ${hide.error.message}` : `returned ${hide.data}`,
+      );
+    } else {
+      check("4. TOGGLE   staff CANNOT make a rep's own comment private (false)", false,
+        `could not create the rep's comment: ${own.error?.code}: ${own.error?.message}`);
+    }
   } finally {
-    // Roll back everything this script created, refused or not.
-    //
-    // ⚠️ EACH ROW IS DELETED BY ITS OWN AUTHOR. The delete policy is author-scoped, so
-    // staff deleting the REP's comment is refused — and PostgREST reports a refused
-    // DELETE as 0 rows affected, not as an error. The first version of this cleanup
-    // did exactly that, printed 'deleted', and left two probe comments on the ZZ twin
-    // that turned up in the next run as a phantom extra row.
-    //
-    // Hence `.select('id')` and a count on every delete: a cleanup that cannot report
-    // its own failure is how test data becomes permanent.
-    await purge(staff, staffCommentId, 'staff probe comment');
-    await purge(rep, strayId, 'wrongly-created rep comment');
+    // Each row is deleted by its OWN author (the delete policy is author-scoped, and a
+    // refused DELETE reports 0 rows, not an error — see purge()).
+    await purge(staff, publicSolarId, 'staff public solar comment');
+    await purge(staff, privateCustId, 'staff private customer comment');
+    await purge(rep, repOwnId, 'rep public comment');
+    await purge(rep, strayId, 'wrongly-created rep private comment');
   }
 
-  // ---------------------------------------------------------------- 4. CONTROL
+  // ---------------------------------------------------------------- 6. CONTROL
   const custRead = await rep.sb
     .from('comments')
     .select('id')
@@ -305,39 +356,27 @@ async function main() {
     .eq('record_id', CUSTOMER_ID);
 
   check(
-    '4. CONTROL  customer comments READ without error',
+    '6. CONTROL  customer comments READ without error',
     !custRead.error,
     custRead.error
       ? `${custRead.error.code}: ${custRead.error.message}`
       : `${(custRead.data ?? []).length} row(s) — the read path itself works`,
   );
 
-  const custIns = await rep.sb
-    .from('comments')
-    .insert({
-      tenant_id: tenantId,
-      record_object: 'customer',
-      record_id: CUSTOMER_ID,
-      author_id: rep.userId,
-      author_name: 'ZZ A11 probe',
-      body: 'ZZ A11 control — the rep MAY comment on a customer',
-    })
-    .select('id');
-
+  const custIns = await post(rep, { object: 'customer', id: CUSTOMER_ID, body: 'ZZ D-086 control — the rep MAY post a public customer comment' }, tenantId);
   try {
     check(
-      '4. CONTROL  customer comment INSERT succeeds for the same rep',
-      !custIns.error && !!custIns.data?.[0]?.id,
+      '6. CONTROL  public customer comment INSERT succeeds for the same rep',
+      !custIns.error && !!custIns.data?.id,
       custIns.error
-        ? `${custIns.error.code}: ${custIns.error.message} — A11 must narrow SOLAR ONLY`
-        : 'inserted, so the refusals above are about the object and nothing else',
+        ? `${custIns.error.code}: ${custIns.error.message}`
+        : 'inserted, so the refusals above are about privacy and nothing else',
     );
   } finally {
-    // Same author-scoped delete, same verification — see purge().
-    await purge(rep, custIns.data?.[0]?.id ?? null, 'control comment');
+    await purge(rep, custIns.data?.id ?? null, 'control comment');
   }
 
-  // ---------------------------------------------------------------- 5. MENTIONS
+  // ---------------------------------------------------------------- 7. MENTIONS (rep tags staff)
   //
   // The launch blocker of 2026-08-31: reps reported they could not @-mention Harmon
   // staff. Diagnosed to the CLIENT picker (`.slice(0, 6)` over a last-name-ordered list,
@@ -371,7 +410,7 @@ async function main() {
       .single();
 
     if (c5.error) {
-      check('5. MENTION  could not create the customer comment to tag on', false,
+      check('7. MENTION  could not create the customer comment to tag on', false,
         `${c5.error.code}: ${c5.error.message}`);
     } else {
       mentionComment = c5.data.id;
@@ -380,11 +419,11 @@ async function main() {
         .insert({ comment_id: mentionComment, mentioned_user_id: staffTarget.userId });
 
       check(
-        '5. MENTION  a rep CAN tag tenant-scope staff on their own customer record',
+        '7. MENTION  a rep CAN tag tenant-scope staff on their own customer record',
         !m5.error,
         m5.error
-          ? `${m5.error.code}: ${m5.error.message} — §3.5 and A11 both say this must work`
-          : 'allowed — A11 closes Solar comments, it does not close tagging staff',
+          ? `${m5.error.code}: ${m5.error.message} — §3.5 and D-086 both say this must work`
+          : 'allowed — reps tag Harmon staff from their feed (D-086)',
       );
 
       // Prove the row PERSISTED, not merely that the call returned no error. Read as the
@@ -394,7 +433,7 @@ async function main() {
         .select('id')
         .eq('comment_id', mentionComment);
       check(
-        '5. MENTION  the mention row actually persisted',
+        '7. MENTION  the mention row actually persisted',
         !seen.error && (seen.data ?? []).length === 1,
         seen.error
           ? `${seen.error.code}: ${seen.error.message}`
@@ -410,7 +449,7 @@ async function main() {
     }
   }
 
-  // ---------------------------------------------------------------- 6. PICKER SOURCE
+  // ---------------------------------------------------------------- 8. PICKER SOURCE
   //
   // The picker is fed by GET /sf/users (`api.listUsers()`), so if staff are missing from
   // THAT, no amount of client fixing helps. Asserted here because the reported symptom
@@ -425,7 +464,7 @@ async function main() {
   const noAuthId = pickerUsers.filter((u) => !u.supabaseUserId);
 
   check(
-    '6. PICKER   GET /sf/users includes tenant-scope staff for a sales role (§3.5)',
+    '8. PICKER   GET /sf/users includes tenant-scope staff for a sales role (§3.5)',
     picker.status === 200 && staffPresent,
     picker.status !== 200
       ? `HTTP ${picker.status}`
@@ -436,16 +475,17 @@ async function main() {
 
   // The rep must reach staff who are NOT in the first handful, since that is precisely
   // what the old cap hid. Counting past the old limit is what makes this a regression
-  // test rather than a restatement of check 6.
+  // test rather than a restatement of the first check 8.
   const staffIndex = pickerUsers.findIndex((u) => u.supabaseUserId === staffTarget.userId);
   check(
-    '6. PICKER   staff are reachable beyond the old 6-name cap',
+    '8. PICKER   staff are reachable beyond the old 6-name cap',
     staffIndex >= 0 && pickerUsers.length > 6,
     `the staff target sits at position ${staffIndex + 1} of ${pickerUsers.length}` +
       (staffIndex >= 6
         ? ' — INVISIBLE under the old .slice(0, 6), which is the bug this pins'
         : ' — inside the old cap, so this run does not exercise the truncation'),
   );
+
 
 
   // ---------------------------------------------------------------- verdict
@@ -455,13 +495,13 @@ async function main() {
     console.log('\nFAILED:');
     for (const f of failed) console.log(`  - ${f.name}`);
     console.log(
-      '\nIf 1-3 failed and 4 passed, the p8 SQL has not been applied yet — that is the\n' +
-        'expected before-picture. If 4 failed, fix that FIRST: the other three cannot be\n' +
+      '\nIf 1-5 failed and 6 passed, the p11 SQL has not been applied yet — that is the\n' +
+        'expected before-picture. If 6 failed, fix that FIRST: the others cannot be\n' +
         'trusted until the control passes.',
     );
     process.exit(1);
   }
-  console.log('\nA11 is enforced at the database, on the same path the browser uses.');
+  console.log('\nD-086 is enforced at the database, on the same path the browser uses.');
 }
 
 main().catch((e) => {

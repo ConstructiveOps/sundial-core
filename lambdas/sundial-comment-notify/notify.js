@@ -20,7 +20,7 @@
 
 import { getSupabaseClient } from "../../lib/supabase.js";
 import { isEmailConfigured, sendEmail } from "../../lib/email.js";
-import { buildMentionEmail, recordLabel, recordLink } from "./content.js";
+import { DEALER_SCOPES, buildMentionEmail, dealerRecordLink, recordLabel, recordLink } from "./content.js";
 import { CATEGORIES, createNotifier } from "../../lib/notify.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { createTenantSettings } from "../../lib/tenant-settings.js";
@@ -52,6 +52,8 @@ const LABEL_SOURCES = {
   solar: {
     table: "sundial_solar_cache",
     columns: ["customer_name_at_creation", "project_name", "address_at_creation"],
+    // The solar's customer: where a dealer / rep recipient is linked (D-086).
+    customerColumn: "sundial_customer_sf_id",
   },
   roofing: {
     table: "sundial_roofing_cache",
@@ -82,36 +84,43 @@ const TENANT_COLUMNS = ["client_sf_id", "tenant_id"];
  * any record id string, and another tenant's customer name must never reach a subject
  * line. A row with no tenant recorded is used as before.
  *
- * @returns {Promise<{ name: string|null, tenantSlug: string|null }>}
+ * @returns {Promise<{ name: string|null, tenantSlug: string|null, customerId: string|null }>}
  *   tenantSlug is set only when the row's `client_sf_id` EQUALS expectedTenantId.
+ *   customerId is the record's customer: the id itself for a customer, the cached
+ *   `sundial_customer_sf_id` for a solar (D-086), else null.
  */
 export async function lookupRecord(supabase, objectKey, recordId, expectedTenantId = null) {
-  const none = { name: null, tenantSlug: null };
-  const source = LABEL_SOURCES[String(objectKey ?? "").trim().toLowerCase()];
+  const key = String(objectKey ?? "").trim().toLowerCase();
+  const none = { name: null, tenantSlug: null, customerId: null };
+  const source = LABEL_SOURCES[key];
   if (!source || !recordId) return none;
+  const ownCustomer = key === "customer" ? recordId : null;
+  const extra = source.customerColumn ? [source.customerColumn] : [];
   try {
     let { data, error } = await supabase
       .from(source.table)
-      .select([...source.columns, ...TENANT_COLUMNS].join(","))
+      .select([...source.columns, ...extra, ...TENANT_COLUMNS].join(","))
       .eq("sf_id", recordId)
       .maybeSingle();
     if (error) {
       // The wider select must never cost the label: retry exactly the read this function
-      // made before the tenant columns were added.
+      // made before the tenant and customer columns were added.
       ({ data, error } = await supabase.from(source.table).select(source.columns.join(",")).eq("sf_id", recordId).maybeSingle());
     }
-    if (error || !data) return none;
+    if (error || !data) return { ...none, customerId: ownCustomer };
     const rowTenantId = typeof data.client_sf_id === "string" && data.client_sf_id.trim() !== "" ? data.client_sf_id.trim() : null;
     if (rowTenantId && expectedTenantId && rowTenantId !== expectedTenantId) return none;
     const sameTenant = rowTenantId != null && rowTenantId === expectedTenantId;
     const tenantSlug = sameTenant && typeof data.tenant_id === "string" && data.tenant_id.trim() !== "" ? data.tenant_id.trim() : null;
+    const linked = source.customerColumn ? data[source.customerColumn] : null;
+    const customerId = ownCustomer ?? (typeof linked === "string" && linked.trim() !== "" ? linked.trim() : null);
     for (const col of source.columns) {
       const v = data[col];
-      if (typeof v === "string" && v.trim() !== "") return { name: v.trim(), tenantSlug };
+      if (typeof v === "string" && v.trim() !== "") return { name: v.trim(), tenantSlug, customerId };
     }
-    return { name: null, tenantSlug };
+    return { name: null, tenantSlug, customerId };
   } catch {
-    return none; // a label is never worth failing a notification over
+    return { ...none, customerId: ownCustomer }; // a label is never worth failing a notification over
   }
 }
 
@@ -246,11 +255,22 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   }
 
   // --- 3) The comment ------------------------------------------------------
-  const { data: comment, error: commentErr } = await supabase
+  // `is_private` arrives with sql/sundial_access_p11_comment_privacy.sql (D-086). Until
+  // that runs the column does not exist and NO comment can be private, so the read is
+  // retried without it — a Lambda deployed first must not 502 every mention.
+  const COMMENT_COLUMNS = "id, tenant_id, record_id, record_object, author_id, author_name, body, context";
+  let { data: comment, error: commentErr } = await supabase
     .from(COMMENTS_TABLE)
-    .select("id, tenant_id, record_id, record_object, author_id, author_name, body, context")
+    .select(`${COMMENT_COLUMNS}, is_private`)
     .eq("id", mention.comment_id)
     .maybeSingle();
+  if (commentErr && /is_private/i.test(commentErr.message || "")) {
+    ({ data: comment, error: commentErr } = await supabase
+      .from(COMMENTS_TABLE)
+      .select(COMMENT_COLUMNS)
+      .eq("id", mention.comment_id)
+      .maybeSingle());
+  }
   if (commentErr) {
     console.error("comment-notify: comment lookup failed:", commentErr.message);
     return { status: 502, body: { error: "comment_lookup_failed", code: "DB_ERROR" } };
@@ -296,11 +316,14 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   // scopes it — but this path EMAILS A COMMENT BODY, so a cross-tenant mention would be
   // a data leak that no one ever sees. Only skips when both tenants are known AND
   // differ; a missing profile (user has never hit /auth/me) must not block a real alert.
+  // `access_scope` (server-owned, written by sundial-auth-proxy) decides the private-comment
+  // skip in 6c and which portal the link opens in 8.
   const { data: profile } = await supabase
     .from(PROFILES_TABLE)
-    .select("tenant_id")
+    .select("tenant_id, access_scope")
     .eq("id", mention.mentioned_user_id)
     .maybeSingle();
+  const recipientScope = typeof profile?.access_scope === "string" ? profile.access_scope.trim().toLowerCase() : null;
   if (comment.tenant_id && profile?.tenant_id && comment.tenant_id !== profile.tenant_id) {
     console.warn(
       `comment-notify: REFUSING cross-tenant mention ${mention.id} — comment tenant ` +
@@ -343,6 +366,40 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
     return skip("record_not_visible", { mentionId: mention.id });
   }
 
+  // --- 6c) A PRIVATE comment never reaches a dealer or a rep (D-086) ---------
+  // The insert policy already refuses this mention (comment_readable_for). Same second
+  // lock as 6b, and stricter, because a private body is exactly what must not leave:
+  //   dealer / own / none  → skip;  tenant / tech → on;
+  //   no profile scope (never signed in, or a pre-Phase-1 profile) → ask the database
+  //   the policy's own question, and skip on a "no" OR an error — fail CLOSED here,
+  //   unlike 6b, since the body is private by definition.
+  // No email, no bell, no push. Not stamped, so a replay reaches them if the comment is
+  // made public again.
+  if (comment.is_private === true) {
+    let allowed;
+    if (recipientScope === "tenant" || recipientScope === "tech") allowed = true;
+    else if (recipientScope) allowed = false;
+    else {
+      const { data: readable, error: readErr } = await supabase.rpc("comment_readable_for", {
+        p_profile_id: mention.mentioned_user_id,
+        p_object: comment.record_object,
+        p_id: comment.record_id,
+        p_is_private: true,
+      });
+      if (readErr) {
+        console.warn(`comment-notify: comment_readable_for failed for mention ${mention.id} (${readErr.message}) — private comment, skipping.`);
+      }
+      allowed = !readErr && readable === true;
+    }
+    if (!allowed) {
+      console.warn(
+        `comment-notify: REFUSING mention ${mention.id} — comment ${comment.id} is private and ` +
+          `${mention.mentioned_user_id} is ${recipientScope ?? "not known to be"} staff. Not stamped.`
+      );
+      return skip("private_comment", { mentionId: mention.id });
+    }
+  }
+
   // --- 7) Recipient address ------------------------------------------------
   const recipient = await lookupRecipientEmail(supabase, mention.mentioned_user_id);
   if (!recipient.ok) {
@@ -364,7 +421,12 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
   const commentTenantId = comment.tenant_id ?? profile?.tenant_id ?? null;
   const record = await lookupRecord(supabase, comment.record_object, comment.record_id, commentTenantId);
   const portalBase = await portalBaseFor(supabase, commentTenantId, record.tenantSlug, cfg);
-  const link = recordLink(portalBase ?? "", comment.record_object, comment.record_id, comment.context);
+  // A dealer or rep opens their own portal's customer page, whatever page the comment
+  // was written on (D-086); everyone else follows the comment's context.
+  const toDealer = DEALER_SCOPES.has(recipientScope);
+  const linkFor = (base) =>
+    toDealer ? dealerRecordLink(base, record.customerId) : recordLink(base, comment.record_object, comment.record_id, comment.context);
+  const link = linkFor(portalBase ?? "");
   const known = link.known;
   const url = portalBase ? link.url : null;
   if (!portalBase) {
@@ -373,7 +435,12 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
         `(sundial/brand portalUrl) — the alert goes out without a link.`
     );
   }
-  if (!known) {
+  if (!known && toDealer) {
+    console.warn(
+      `comment-notify: no customer for ${comment.record_object}/${comment.record_id} on comment ` +
+        `${comment.id} — linking the dealer-scope recipient to their customer list.`
+    );
+  } else if (!known) {
     // Loud, because it means a module shipped without an entry in RECORD_PATHS and
     // every alert for it is now pointing at the dashboard.
     console.warn(
@@ -400,7 +467,7 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
     kind: "comment",
     title: `${comment.author_name || "Someone"} mentioned you on ${label}`,
     body: comment.body,
-    url: recordLink("", comment.record_object, comment.record_id, comment.context).url,
+    url: linkFor("").url,
     recordType: comment.record_object,
     recordSfId: comment.record_id,
     dedupeKey: `mention:${mention.id}`,

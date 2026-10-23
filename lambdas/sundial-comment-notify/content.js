@@ -23,12 +23,40 @@ export const RECORD_PATHS = {
  * Where the comment was written decides which VIEW of the record the link opens
  * (2026-10-07, Harmon). A Customer's thread is shared by the Sales page and the Service
  * page; `comments.context` (sql/2026-10-07_comment_context.sql) says which one the
- * author was on. Only the customer has two views today; any other object, or no
- * context, falls through to RECORD_PATHS.
+ * author was on. Only the customer has more than one view today; any other object, or
+ * no context, falls through to RECORD_PATHS.
  */
 export const CONTEXT_PATHS = {
-  customer: { service: (id) => `/service/customers/${id}` },
+  customer: {
+    service: (id) => `/service/customers/${id}`,
+    // Posted from the dealer portal's merged Customer + Solar feed (D-086).
+    dealer: (id) => `/dealer/customers/${id}`,
+  },
 };
+
+/**
+ * Where a DEALER or REP is sent, whatever the comment's context (D-086): their own
+ * portal's customer page, which carries the merged Customer + Solar feed — never a staff
+ * route. Decided by the RECIPIENT's scope: a staff comment written on the Sales page
+ * still sends a rep to the dealer page. For a solar comment the id is the solar's
+ * customer (`sundial_customer_sf_id` in the cache).
+ */
+export const DEALER_SCOPES = new Set(["dealer", "own"]);
+export const DEALER_CUSTOMER_PATH = (id) => `/dealer/customers/${id}`;
+/** A dealer's fallback when the customer cannot be named: their customer list, not a staff page. */
+export const DEALER_FALLBACK_PATH = "/dealer/customers";
+
+/**
+ * The deep link for a recipient whose scope is dealer / own (D-086).
+ *
+ * @param {string} baseUrl
+ * @param {string|null} customerId - the record itself for a customer comment, the solar's customer for a solar one
+ * @returns {{ url: string, known: boolean }} `known:false` = the customer could not be named
+ */
+export function dealerRecordLink(baseUrl, customerId) {
+  if (!customerId) return { url: `${baseUrl}${DEALER_FALLBACK_PATH}`, known: false };
+  return { url: `${baseUrl}${DEALER_CUSTOMER_PATH(encodeURIComponent(customerId))}`, known: true };
+}
 
 /**
  * Where an unrecognized object key sends the reader.

@@ -96,6 +96,8 @@ function resetCtx() {
   ctx.emailConfigured = true;
   ctx.recordVisible = true;
   ctx.rpcError = null;
+  ctx.rpcErrors = {}; // fn -> message: one RPC fails, the others answer
+  ctx.commentReadable = null; // what comment_readable_for answers (D-086)
   ctx.rpcCalls = [];
   ctx.bells = [];
   ctx.selects = [];
@@ -143,7 +145,7 @@ function supabaseStub() {
         if (rec.op === "select") ctx.selects.push(table);
         // A table that lacks a column: PostgREST refuses the whole select that names it.
         const missing = ctx.missingColumns?.[table];
-        if (missing && rec.op === "select" && String(rec.cols ?? "").split(",").some((c) => missing.includes(c))) {
+        if (missing && rec.op === "select" && String(rec.cols ?? "").split(",").some((c) => missing.includes(c.trim()))) {
           return Promise.resolve({ data: null, error: { message: `column ${table}.${missing[0]} does not exist` } });
         }
         if (ctx.selectErrors[table] && rec.op === "select") {
@@ -194,6 +196,9 @@ function supabaseStub() {
     async rpc(fn, args) {
       ctx.rpcCalls.push({ fn, args });
       if (ctx.rpcError) return { data: null, error: { message: ctx.rpcError } };
+      if (ctx.rpcErrors[fn]) return { data: null, error: { message: ctx.rpcErrors[fn] } };
+      // D-086: the private-comment question, asked only when the recipient's scope is unknown.
+      if (fn === "comment_readable_for") return { data: ctx.commentReadable, error: null };
       return { data: ctx.recordVisible, error: null };
     },
     auth: {
@@ -818,13 +823,14 @@ test("D-078: a comment written against ANOTHER tenant's record id gets neither t
 test("D-078: lookupRecord — the slug only from a row of the SAME tenant; the label as before when the row has no tenant recorded", async () => {
   fresh();
   const sb = supabaseStub();
-  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "HOLLAND, DANA", tenantSlug: "harmon" });
-  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "someone-else"), { name: null, tenantSlug: null });
-  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID), { name: "HOLLAND, DANA", tenantSlug: null }, "no expected tenant → label only");
+  // customerId (D-086): a customer is its own customer.
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "HOLLAND, DANA", tenantSlug: "harmon", customerId: RECORD_ID });
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "someone-else"), { name: null, tenantSlug: null, customerId: null }, "another tenant's row names nothing, not even a customer");
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID), { name: "HOLLAND, DANA", tenantSlug: null, customerId: RECORD_ID }, "no expected tenant → label only");
   ctx.rows.sundial_customer_cache = [{ sf_id: RECORD_ID, customer_name: "LEGACY, ROW" }];
-  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "LEGACY, ROW", tenantSlug: null });
+  assert.deepEqual(await lookupRecord(sb, "customer", RECORD_ID, "harmon"), { name: "LEGACY, ROW", tenantSlug: null, customerId: RECORD_ID });
   assert.equal(await lookupRecordName(sb, "customer", RECORD_ID), "LEGACY, ROW", "the old helper still answers");
-  assert.deepEqual(await lookupRecord(sb, "service", RECORD_ID, "harmon"), { name: null, tenantSlug: null });
+  assert.deepEqual(await lookupRecord(sb, "service", RECORD_ID, "harmon"), { name: null, tenantSlug: null, customerId: null });
 });
 
 test("D-078: the email without a link — who, where and the full text, nothing dangling", () => {
@@ -847,4 +853,141 @@ test("D-078: a cache table WITHOUT the tenant columns costs nothing — the labe
   assert.deepEqual(ctx.selects.filter((t) => t === "sundial_customer_cache"), ["sundial_customer_cache", "sundial_customer_cache"], "the wide read, then the old narrow one");
   // The slug then comes from the user cache, and the link is still the primary tenant's.
   assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/customers/${RECORD_ID}`));
+});
+
+// ===========================================================================
+// D-086 — private comments never reach a dealer or a rep; their links open the
+// dealer portal's customer page
+// ===========================================================================
+
+const SOLAR_ID = "a1Q7y00000JWmkvEAD";
+const SOLAR_CUSTOMER = "a1P7y00000AmyXCEAZ";
+
+/** The recipient's server-owned scope, as sundial-auth-proxy writes it on profiles. */
+function recipientScope(scope) {
+  ctx.rows.profiles = [{ id: RECIPIENT, tenant_id: "harmon", access_scope: scope }];
+}
+
+function expectRefusedPrivate(res) {
+  assert.equal(res.statusCode, 200, "a skip, not an error — pg_net must not retry");
+  assert.equal(parse(res).sent, false);
+  assert.equal(parse(res).reason, "private_comment");
+  assert.equal(ctx.sent.length, 0, "NO EMAIL — the private body never leaves the Lambda");
+  assert.equal(ctx.bells.length, 0, "no bell, no push either");
+  assert.equal(ctx.rows.comment_mentions[0].notified_at, null, "not stamped: a replay reaches them if it is made public");
+}
+
+test("D-086: a PRIVATE comment mentioning a rep (own) or a dealer manager (dealer) is skipped — no email, no bell, not stamped", async () => {
+  for (const scope of ["own", "dealer", "none"]) {
+    fresh();
+    ctx.rows.comments = [baseComment({ is_private: true })];
+    recipientScope(scope);
+    expectRefusedPrivate(await handler(hookEvent()));
+  }
+});
+
+test("D-086: a PRIVATE comment still reaches staff — tenant and tech scope", async () => {
+  for (const scope of ["tenant", "tech"]) {
+    fresh();
+    ctx.rows.comments = [baseComment({ is_private: true })];
+    recipientScope(scope);
+    const res = await handler(hookEvent());
+    assert.equal(parse(res).sent, true, scope);
+    assert.equal(ctx.bells.length, 1, scope);
+    assert.equal(ctx.rpcCalls.some((c) => c.fn === "comment_readable_for"), false, "a known scope costs no extra RPC");
+  }
+});
+
+test("D-086: a PRIVATE comment and a recipient with NO profile scope — the database decides, and a 'no' or an error is a skip (fail closed)", async () => {
+  fresh();
+  ctx.rows.comments = [baseComment({ is_private: true })];
+  ctx.rows.profiles = []; // never signed in
+  ctx.commentReadable = false;
+  expectRefusedPrivate(await handler(hookEvent()));
+  const call = ctx.rpcCalls.find((c) => c.fn === "comment_readable_for");
+  assert.deepEqual(call.args, { p_profile_id: RECIPIENT, p_object: "customer", p_id: RECORD_ID, p_is_private: true });
+
+  fresh();
+  ctx.rows.comments = [baseComment({ is_private: true })];
+  ctx.rows.profiles = [];
+  ctx.rpcErrors = { comment_readable_for: "function does not exist" };
+  expectRefusedPrivate(await handler(hookEvent()));
+
+  fresh();
+  ctx.rows.comments = [baseComment({ is_private: true })];
+  ctx.rows.profiles = [];
+  ctx.commentReadable = true; // a never-signed-in staffer
+  assert.equal(parse(await handler(hookEvent())).sent, true);
+});
+
+test("D-086: a PUBLIC comment mentioning a rep still sends — and links to the dealer portal's customer page, whatever the context", async () => {
+  for (const context of [null, "sales", "service", "dealer"]) {
+    fresh();
+    ctx.rows.comments = [baseComment({ is_private: false, context })];
+    recipientScope("own");
+    const res = await handler(hookEvent());
+    assert.equal(parse(res).sent, true, String(context));
+    assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/dealer/customers/${RECORD_ID}`), ctx.sent[0].text);
+    assert.equal(ctx.bells[0].url, `/dealer/customers/${RECORD_ID}`);
+  }
+});
+
+test("D-086: a rep mentioned on a SOLAR comment is linked to the solar's CUSTOMER in the dealer portal", async () => {
+  fresh();
+  ctx.rows.comments = [baseComment({ record_object: "solar", record_id: SOLAR_ID })];
+  ctx.rows.sundial_solar_cache = [{ sf_id: SOLAR_ID, customer_name_at_creation: "HOLLAND, DANA", sundial_customer_sf_id: SOLAR_CUSTOMER, client_sf_id: "harmon", tenant_id: "harmon" }];
+  recipientScope("dealer");
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  assert.equal(parse(res).linkKnown, true);
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/dealer/customers/${SOLAR_CUSTOMER}`), ctx.sent[0].text);
+  assert.equal(ctx.bells[0].url, `/dealer/customers/${SOLAR_CUSTOMER}`);
+});
+
+test("D-086: a solar whose customer is not in the cache sends the rep to their customer list — never a staff page", async () => {
+  fresh();
+  ctx.rows.comments = [baseComment({ record_object: "solar", record_id: SOLAR_ID })];
+  ctx.rows.sundial_solar_cache = [{ sf_id: SOLAR_ID, customer_name_at_creation: "HOLLAND, DANA", client_sf_id: "harmon", tenant_id: "harmon" }];
+  recipientScope("own");
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  assert.equal(parse(res).linkKnown, false);
+  assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/dealer/customers`));
+  assert.ok(!ctx.sent[0].text.includes("/projects/solar/"), "a rep is never linked to the staff solar page");
+});
+
+test("D-086: staff on the same solar comment keep the staff link", async () => {
+  fresh();
+  ctx.rows.comments = [baseComment({ record_object: "solar", record_id: SOLAR_ID })];
+  ctx.rows.sundial_solar_cache = [{ sf_id: SOLAR_ID, customer_name_at_creation: "HOLLAND, DANA", sundial_customer_sf_id: SOLAR_CUSTOMER, client_sf_id: "harmon", tenant_id: "harmon" }];
+  recipientScope("tenant");
+  await handler(hookEvent());
+  assert.equal(ctx.bells[0].url, `/projects/solar/${SOLAR_ID}`);
+});
+
+test("D-086: before the p11 SQL runs (no comments.is_private) the comment read is retried without it and the mention still sends", async () => {
+  fresh();
+  ctx.missingColumns = { comments: ["is_private"] };
+  const res = await handler(hookEvent());
+  assert.equal(parse(res).sent, true);
+  assert.deepEqual(ctx.selects.filter((t) => t === "comments"), ["comments", "comments"], "the wide read, then the old one");
+});
+
+test("D-086: content — the dealer context and the dealer link", () => {
+  const base = "https://sundial.harmonelectric.net";
+  assert.equal(content.recordLink(base, "customer", "a1P", "dealer").url, `${base}/dealer/customers/a1P`);
+  assert.deepEqual(content.dealerRecordLink(base, "a1P"), { url: `${base}/dealer/customers/a1P`, known: true });
+  assert.deepEqual(content.dealerRecordLink(base, null), { url: `${base}/dealer/customers`, known: false });
+  assert.equal(content.DEALER_SCOPES.has("own") && content.DEALER_SCOPES.has("dealer"), true);
+  assert.equal(content.DEALER_SCOPES.has("tenant") || content.DEALER_SCOPES.has("tech"), false);
+});
+
+test("D-086: lookupRecord names the customer — itself for a customer, the cached link for a solar", async () => {
+  fresh();
+  ctx.rows.sundial_solar_cache = [{ sf_id: SOLAR_ID, customer_name_at_creation: "X", sundial_customer_sf_id: SOLAR_CUSTOMER, client_sf_id: "harmon", tenant_id: "harmon" }];
+  const { getSupabaseClient } = await import("../../lib/supabase.js");
+  const sb = await getSupabaseClient();
+  assert.equal((await lookupRecord(sb, "solar", SOLAR_ID, "harmon")).customerId, SOLAR_CUSTOMER);
+  assert.equal((await lookupRecord(sb, "customer", RECORD_ID, "harmon")).customerId, RECORD_ID);
+  assert.equal((await lookupRecord(sb, "customer", "a1Pmissing", "harmon")).customerId, "a1Pmissing", "a cache miss still knows a customer's own id");
 });

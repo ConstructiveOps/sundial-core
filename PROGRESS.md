@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-23 — Field-design workbooks: Sales Rep first, the dealer shown, legacy fields last — DONE, NOT DEPLOYED
+
+- **`Sundial_Customer__c_Field_Design.xlsx`, Lead & Source:** `Sales_Rep__c` relabelled "Sales Rep (Required)" (a label, not a rule) and moved above `Sales_Company__c`; new row `Dealer_Display_Name__c` "Dealer (based on Sales Rep)", Formula (Text), help "Set automatically from the Sales Rep's dealer.", Sales Rep / Sales Dealer = read; `Dealer_Name__c` → "Legacy Dealer Name (Do Not Use)", bottom of the section. The second `Sales_Rep__c` (Integration & System) untouched.
+- **`Sundial_Solar_Fields_by_Section.xlsx`, Sale/Contract Details:** `Sales_Rep__c` → "Sales Rep"; `Dealer_Display_Name__c` after it (read / read); `Sales_Representative__c`, `Sales_Company_Harmon_Solar_or_Third__c`, `Third_Party_Sales_Representative__c` → "Legacy Sales Representative" / "Legacy Sales Company" / "Legacy Third-Party Sales Rep", moved to the bottom in that order, role cells unchanged.
+- Edited with ExcelJS (the tool `apply-dealer-visibility.mjs` writes with); the edit checked that every row outside the section is identical, shifted by one. Harmon's dealer-portal sheet not touched.
+- `apply-dealer-visibility.mjs` dry run: **0 cell changes** (customer 340 rows, solar 480). `generate-field-configs.mjs --apply`: the only manifest change is `Dealer_Display_Name__c` in `read` (and `dealer_display_name` in `listColumns`) for both roles on both objects; new versions customer `f97d4629…`, solar `385f7206…`. The cache tables have no `dealer_display_name` column — fine: record pages read `?full=true` from Salesforce, and list projection skips columns the cache lacks.
+- Copied both workbooks to harmon-crm `docs/` (generator drift warnings cleared). Suite 1,688 / 1,688.
+
 ## 2026-10-23 — Commission-PO updates: never overwrite a hand edit, frozen M1 moves M2, Open POs held to be edited (D-057 am. 2, `feature/dealer-terms`) — BUILT, NOT DEPLOYED, hold gate CLOSED
 
 - **Investigation first (read-only):** 27 Failed projects carried "PO … was updated but no longer matches". Every one was an Open, Hold = false PO; the one update ever proven (runbook Step 7) was On Hold. Harmon had corrected all 27 by hand in Acumatica; 28 of 29 Open POs already held the ruled amount (SOL-10134 one cent over). Probe: `scripts/probe-commission-po-update.mjs` (`--all-failed` grades each PO against the ruling).

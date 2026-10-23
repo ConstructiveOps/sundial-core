@@ -1,5 +1,5 @@
 {
-  "version": "sha256:68ba778369be5ec4dc73d39ebb8a442c",
+  "version": "sha256:385f7206f2d2e3838e036fb91d1eb31b",
   "object": "Sundial_Solar__c",
   "roles": {
     "Sales Rep": {
@@ -36,6 +36,7 @@
         "Credit_Expiration_Date__c",
         "Customer_Name_at_Creation__c",
         "Days_to_Glass_on_Roof__c",
+        "Dealer_Display_Name__c",
         "Dealer_Responded__c",
         "Derate_Scheduled__c",
         "Derate_To__c",
@@ -225,6 +226,7 @@
         "Credit_Expiration_Date__c",
         "Customer_Name_at_Creation__c",
         "Days_to_Glass_on_Roof__c",
+        "Dealer_Display_Name__c",
         "Dealer_Fee__c",
         "Dealer_Responded__c",
         "Derate_Scheduled__c",
@@ -403,6 +405,7 @@
       "credit_expiration_date",
       "customer_name_at_creation",
       "days_to_glass_on_roof",
+      "dealer_display_name",
       "dealer_responded",
       "derate_scheduled",
       "derate_to",
@@ -597,6 +600,7 @@
       "credit_expiration_date",
       "customer_name_at_creation",
       "days_to_glass_on_roof",
+      "dealer_display_name",
       "dealer_fee",
       "dealer_responded",
       "derate_scheduled",

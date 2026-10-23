@@ -1,5 +1,5 @@
 {
-  "version": "sha256:b5522ad1a6c2ee41ac3c92ae6bbf7485",
+  "version": "sha256:f97d462918e9583b5e89fbd631f9e346",
   "object": "Sundial_Customer__c",
   "roles": {
     "Sales Rep": {
@@ -54,6 +54,7 @@
         "Credit_Check_Date__c",
         "Credit_Expiration_Date__c",
         "Credit_Qualified__c",
+        "Dealer_Display_Name__c",
         "Dealer_Fee_Percent__c",
         "Dealer_Name__c",
         "Dec_Usage_kW__c",
@@ -438,6 +439,7 @@
         "Credit_Check_Date__c",
         "Credit_Expiration_Date__c",
         "Credit_Qualified__c",
+        "Dealer_Display_Name__c",
         "Dealer_Fee_Percent__c",
         "Dealer_Fee__c",
         "Dealer_Name__c",
@@ -814,6 +816,7 @@
       "credit_check_date",
       "credit_expiration_date",
       "credit_qualified",
+      "dealer_display_name",
       "dealer_fee_percent",
       "dealer_name",
       "dec_usage_kw",
@@ -1054,6 +1057,7 @@
       "credit_check_date",
       "credit_expiration_date",
       "credit_qualified",
+      "dealer_display_name",
       "dealer_fee",
       "dealer_fee_percent",
       "dealer_name",

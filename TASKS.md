@@ -4,6 +4,14 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-23 — Sales Rep / Dealer labels and order in the two field-design workbooks — DONE, NOT DEPLOYED
+
+- [x] Customer "Lead & Source": `Sales_Rep__c` → "Sales Rep (Required)" (label only, nothing enforced), moved above `Sales_Company__c`; new `Dealer_Display_Name__c` "Dealer (based on Sales Rep)", Formula (Text), read / read; `Dealer_Name__c` → "Legacy Dealer Name (Do Not Use)", bottom of the section. The Integration & System `Sales_Rep__c` row untouched
+- [x] Solar "Sale/Contract Details": `Sales_Rep__c` → "Sales Rep"; `Dealer_Display_Name__c` after it, read / read; `Sales_Representative__c` / `Sales_Company_Harmon_Solar_or_Third__c` / `Third_Party_Sales_Representative__c` → "Legacy …", moved to the bottom in that order, role cells unchanged
+- [x] `apply-dealer-visibility.mjs` dry run: **0 cell changes** on both objects. Manifests regenerated (only `Dealer_Display_Name__c` added, read for both roles on both objects). Workbooks copied to harmon-crm `docs/` (drift warnings gone). Suite 1,688 / 1,688
+- [ ] **TIM: deploy** `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-auth-proxy`, then `node scripts/verify-field-manifest-live.mjs`
+- [ ] **harmon-crm:** regenerate its client layouts from the copied workbooks (`npm run generate:configs`) so the new labels / order / field reach the pages — the server manifest alone only governs what is sent
+
 ## 2026-10-23 — Commission-PO amount updates do not stick (27 projects) — FIX BUILT (`feature/dealer-terms`), NOT DEPLOYED; hold gate CLOSED
 
 Full write-up: `docs/integrations/acumatica-commission-po-runbook.md` → "2026-10-23 — Why amount updates do not stick". Probe: `scripts/probe-commission-po-update.mjs`.
@@ -24,7 +32,7 @@ Full write-up: `docs/integrations/acumatica-commission-po-runbook.md` → "2026-
 - [x] Tests: commission-PO 109, budget-push 100 (gate closed/open, every hold step, manual edit, reconcile, frozen M1, receipts, reconcile mode)
 - [ ] **TIM: deploy** `.\deploy.ps1 sundial-acumatica-budget-push` (bundles the engine — the same deploy the 2026-10-22 section lists, so one deploy carries both), then `node scripts/reconcile-commission-pos.mjs` (dry run) and `--apply`
 - [ ] **TIM: the 12 `dealer_missing` projects** (SOL-10050 / 10051 / 10062 / 10063 / 10070 / 10071 / 10124 / 10130 / 10132 / 10133 / 10134 / 10136): post-cutover with no `Dealer__c`. Their PO amounts reconcile; set the dealer (on the rep, or the record) before their next budget push or it refuses
-- [ ] **Next Salesforce package:** add **`Manually Set`** to `Commission_PO_Status__c` (restricted picklist), then flip `MANUALLY_SET_PICKLIST.deployed = true` in the same change. Until then a Manually Set record shows `Frozen` and says so in the error
+- [ ] **`Manually Set` on `Commission_PO_Status__c`** — queued in the one **Next Salesforce package** entry (2026-10-22 section below), with the engine switch to flip after it deploys. Until then a Manually Set record shows `Frozen` and says so in the error
 - [ ] **Tell Harmon** their hand corrections are seen and will be respected by the fix — and ask who is making them
 
 ## 2026-10-22 — The backend reads the dealer (D-085 amendment 1, `feature/dealer-terms`) — BUILT, NOT DEPLOYED
@@ -43,7 +51,10 @@ Full write-up: `docs/integrations/acumatica-commission-po-runbook.md` → "2026-
 - [ ] **TIM: the one post-cutover Solar record with no dealer whose Customer has one** — set its `Dealer__c` from the Customer (the new create path prevents more). And the 13 post-cutover Solar records with a rep but no dealer: their reps have no `Dealer__c` — set it on the rep (`Sundial_User__c`), and the next rep save re-stamps the deal
 - [ ] **TIM: 6 pre-cutover Solar records where the dealer and the picklist disagree on internal vs external** (SOL-5733, SOL-6179, SOL-6200, SOL-8767, SOL-9396, SOL-9603 — none calculated or pushed yet). Their budget line follows the dealer (the rule), their redline formula still follows the picklist (v9 keeps pre-9/4 redlines). Correct whichever is wrong before calculating them
 - [ ] **Re-push pass** (the 27 update mismatches are cleared by `scripts/reconcile-commission-pos.mjs`, not a re-push — see the 2026-10-23 section above): `node scripts/list-failed-commission-pos.mjs` — 32 Failed on 2026-10-22. 6 are an unmapped sales company (after deploy the dealer ones become `vendor_missing` until the vendor id is set). ⚠️ **26 are NOT a dealer problem:** "PO … was updated but no longer matches the expected shape: UnitCost is X, expected Y" — the amount PUT returns 200 but the re-read shows the old amount (e.g. SOL-10125 M2: 11,868 vs 12,508). That is the update path in `updateCommissionPo`, pre-existing; investigate before re-pushing those, a re-push will fail the same way
-- [ ] **Next Salesforce package (metadata only):** `Commission_Redline_PPW__c` inline help text on BOTH objects → "Blank when the deal has no dealer (set the Sales Rep); deals created before 2026-09-04 use the legacy sales-company rates." (it still says "Blank if the sales company is not set"; v9 kept every attribute identical to v8 by spec)
+- [ ] **Next Salesforce package (metadata only):**
+  - `Commission_Redline_PPW__c` inline help text on BOTH objects → "Blank when the deal has no dealer (set the Sales Rep); deals created before 2026-09-04 use the legacy sales-company rates." (it still says "Blank if the sales company is not set"; v9 kept every attribute identical to v8 by spec)
+  - `Commission_PO_Status__c` (Sundial_Solar__c, restricted picklist): add the value **`Manually Set`** (2026-10-23, D-057 am. 2)
+  - **Once `Manually Set` is deployed:** flip `MANUALLY_SET_PICKLIST = { deployed: true }` in `lambdas/sundial-acumatica-commission-po/index.js` (and its pinning test, "committed values…", plus `PO_STATUSES`), then `.\deploy.ps1 sundial-acumatica-budget-push`. Never before: writing an undeployed value to a restricted picklist fails the whole status update
 
 ## 2026-10-22 — Dealer terms on `Sundial_Dealer__c` (D-085, `feature/dealer-terms`) — DEPLOYED (Tim, 2026-10-22)
 

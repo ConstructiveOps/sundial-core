@@ -13,7 +13,18 @@ The original design brief is `docs/pwa-architecture-design.md` (its header lists
 | The text | `sundial-core/lib/sms-send.js` | The ONE way Sundial sends a customer text; `sundial-sms` and the board Lambda both use it |
 | Access | `sundial-core/lib/access.js` | scope `tech` (Technician): `service.tech.self` (writes on own calls), `service.tech.read` (the module, read-only) and `service.sms.send`; the user directory; no other `/sf` reads, no modules |
 | App | `harmon-crm/src/tech/` | `TechLayout`, `TechTodayPage`, `TechCallPage`, `TechListPages`, `TechDetailPages`, `techApi.ts`, `offline.ts`, `photoStore.ts`, `techView.ts`, `gps.ts`, `registerSw.ts` |
-| PWA | `harmon-crm/public/manifest.webmanifest`, `public/sw.js`, `public/icons/tech-*.png` | Installable; opens offline |
+| PWA | `harmon-crm/public/manifest.webmanifest`, `public/sw.js`, `public/icons/tech-*.png`, `src/lib/pwa-head.ts` | Installable; opens offline |
+
+## A second installable app: the dealer portal (2026-10-26, dealer module step 5)
+
+The dealer shell (`/dealer`) is installable too, from the same origin and the same service worker.
+
+- **One manifest at a time.** Each shell puts its own manifest link, `theme-color`, `apple-touch-icon` and `apple-mobile-web-app-capable` into `<head>` in its mount effect, and removes the other app's first (`harmon-crm/src/lib/pwa-head.ts`; `tech/registerSw.ts` → `registerTechPwa()`, `dealer/registerDealerPwa.ts` → `registerDealerPwa()`). Unmounting removes only that app's tags. The office portal carries none. This was module-scope code in `TechLayout.tsx` before, so merely importing the tech shell changed the page.
+- **The dealer manifest is generated.** `public/manifest-dealer.webmanifest` (id / start_url `/dealer`, scope `/`) and `public/icons/dealer-{192,512}(-maskable).png` come from `scripts/generate-dealer-pwa.mjs` (sharp), which reads `clientConfig.dealer.appName` / `appShortName` / `branding.primaryColor` and the client logo in `public/icons/_source/`. `src/dealer/pwa.node.test.ts` fails if the manifest drifts from the config.
+- **`sw.js` (`VERSION` `sundial-v3`).** `SHELL` holds both apps' shells, manifests and icons. A navigation under `/tech` or `/dealer` is network-first and falls back offline to THAT app's cached shell (`shellFor()`). Office navigations are still never answered. A push takes its icon from the payload's `app` (`pushIcon()`): `dealer` gets the dealer icon, anything else (and every push until the backend sends `app`, dealer step 6) gets the tech icon. `src/lib/sw.node.test.ts` runs the worker against a fake `self` to pin both.
+- **Push subscriptions** carry `app: 'office' | 'tech' | 'dealer'` (`PushApp`). `POST /notify/subscriptions` accepts `dealer` from dealer step 6; before that it coerces to `office`.
+- **Install hints** (`src/dealer/DealerInstall.tsx`): the iPhone "Share → Add to Home Screen" banner (push only works from the installed app there) and an Install sheet in More / the sidebar, with the browser's own Install button when `beforeinstallprompt` fired.
+- **No offline queue for dealers.** The dealer app opens offline (the shell) but every read and write is online. Nothing from `src/tech/offline.ts` is reused.
 
 ## The menu (2026-09-16)
 

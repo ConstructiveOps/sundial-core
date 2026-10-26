@@ -26,6 +26,8 @@
 -- allows. `c.*` is expanded when the view is created: a new customer cache column is NOT
 -- in the dealer list until this file is re-run. Dropping a customer cache column needs this
 -- view dropped first (Postgres refuses, naming it).
+-- Re-run after: sql/2026-10-26_customer_last_modified.sql (`lastmodifieddate`, the list
+-- rows' `updatedAt`).
 --
 -- ACCESS: service_role only. security_invoker so it never runs with its owner's rights,
 -- and every privilege revoked from the browser roles — the cache tables themselves are

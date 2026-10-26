@@ -1159,13 +1159,27 @@ D-079 sync keeps it current and this list does not re-fetch stale rows.
   "source": "cache", "count": 50, "total": 3511, "limit": 50, "offset": 0, "hasMore": true,
   "records": [
     {
-      "sf_id": "a1P…", "name": "…", "first_name": "…", "stage": "Sold", "status": "Opportunity", "…": "the role's list columns (manifest listColumns), nulls and long text dropped",
+      "sf_id": "a1P…", "name": "…", "first_name": "…", "stage": "Sold", "status": "Opportunity", "sales_rep_name": "…", "…": "the role's list columns (manifest listColumns), nulls and long text dropped",
+      "updatedAt": "2026-10-24T17:05:00.000Z",
       "solar": { "sf_id": "a1S…", "stage": "Permitting", "project_name": "…" },
       "journey": { "stage": "permitting", "source": "solar", "index": 15, "offPath": null }
     }
   ]
 }
 ```
+
+`sales_rep_name` (Customer formula `Sales_Rep_Name__c`) is a list column for both sales
+roles since 2026-10-26: a dealer owner sees every rep's customers and needs the name to tell
+them apart; a rep's rows are only ever their own.
+
+**`updatedAt`** (2026-10-26) is row metadata, not a customer field: the customer's Salesforce
+`LastModifiedDate` (ISO timestamp), from the cache column `lastmodifieddate`
+(`sql/2026-10-26_customer_last_modified.sql`). On every row for every role whatever the
+manifest says; the raw `lastmodifieddate` column is never in the row. It is the
+**customer's** modification time, not its solar's. `null` until that SQL, a re-run of the
+view SQL and one full customer resync are done (a row the incremental sync has not touched
+since stays `null` until the resync). It is not `last_synced_at`, which is when Sundial last
+copied the row and moves for every row on a resync.
 
 `solar` is `null` without a project; its `stage` / `project_name` pass through the **solar**
 manifest. `journey` is `lib/dealer-journey.js` `journeyFor` over what the role can see:

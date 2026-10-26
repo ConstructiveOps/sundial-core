@@ -4,6 +4,15 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-26 — Dealer list: rep name + last updated — BUILT, NOT DEPLOYED
+
+- [x] `Sales_Rep_Name__c` row in the Customer workbook, OVERRIDES read for Sales Dealer + Sales Rep, manifests regenerated (`sales_rep_name` in both roles' listColumns), workbook copied to harmon-crm `docs/`
+- [x] `sundial-dealer` list rows return `updatedAt` (Salesforce LastModifiedDate); `sql/2026-10-26_customer_last_modified.sql`; tests; `docs/api-endpoints.md`. Suite 1,752 / 1,752
+- [ ] **TIM: run `sql/2026-10-26_customer_last_modified.sql`**, then **re-run `sql/sundial_dealer_customer_view.sql`** (Supabase SQL editor, in that order)
+- [ ] **TIM: one full customer resync** — Lambda `sundial-cache-sync` → Test with `{ "object": "customer", "mode": "full" }` (fills `lastmodifieddate` on existing rows)
+- [ ] **TIM: redeploy** `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-dealer` (the manifest is bundled into each)
+- [ ] harmon-crm: show `sales_rep_name` and `updatedAt` on the `/dealer` list rows
+
 ## 2026-10-23 — The `/dealer` shell's backend, `sundial-dealer` (dealer module step 3 of 9) — BUILT, NOT DEPLOYED
 
 - [x] `lambdas/sundial-dealer` (list + detail), `lib/dealer-journey.js`, `sql/sundial_dealer_customer_view.sql`, `dealer.read`, shared code moved to `lib/` (cache-read, sf-describe, full-read, caller-filters), wire script, matrix checks, docs. Suite 1,747 / 1,747

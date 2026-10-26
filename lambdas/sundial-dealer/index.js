@@ -68,6 +68,15 @@ export const MAX_LIMIT = 200;
 /** The view's own columns — never part of the customer row the caller gets. */
 export const JOURNEY_COLUMNS = Object.freeze(["journey_solar_sf_id", "journey_solar_stage", "journey_solar_project_name", "journey_solar_count"]);
 /**
+ * The cache column every list row's `updatedAt` comes from: Salesforce LastModifiedDate
+ * (sql/2026-10-26_customer_last_modified.sql). Row metadata, not a customer field — it is
+ * returned whatever the manifest says (the sheet's LastModifiedDate row stays hidden) and
+ * never passed through as a column, so every role gets the same `updatedAt` and no role
+ * gets `lastmodifieddate`. LastModifiedDate, not SystemModstamp: SystemModstamp also moves
+ * on system-only writes, and "last updated" on the list means someone changed the deal.
+ */
+export const UPDATED_AT_COLUMN = "lastmodifieddate";
+/**
  * Which project leads when a customer has several: the first non-empty of these, newest
  * first. The SAME order as the cache's created_date (CREATED_DATE_SOURCE.solar in
  * sundial-sf-query, mirrored by sundial-cache-sync), which is what the view sorts by —
@@ -131,7 +140,7 @@ export function stageOrExpr(values) {
  */
 export function toListRow(row, access) {
   const customerCols = {};
-  for (const [k, v] of Object.entries(row)) if (!JOURNEY_COLUMNS.includes(k)) customerCols[k] = v;
+  for (const [k, v] of Object.entries(row)) if (!JOURNEY_COLUMNS.includes(k) && k !== UPDATED_AT_COLUMN) customerCols[k] = v;
   const customer = projectRow("customer", access, projectListRow(customerCols));
   let solar = null;
   if (row.journey_solar_sf_id) {
@@ -145,7 +154,7 @@ export function toListRow(row, access) {
   }
   // The whole journey ({stage, source, index, offPath}), not just stage + source: a list
   // card needs the flag (a Cancelled deal is on no step) and should not ask twice.
-  return { ...customer, solar, journey: journeyFor(customer.stage ?? null, solar?.stage ?? null, { hasSolar: !!solar }) };
+  return { ...customer, updatedAt: row[UPDATED_AT_COLUMN] ?? null, solar, journey: journeyFor(customer.stage ?? null, solar?.stage ?? null, { hasSolar: !!solar }) };
 }
 
 /**
@@ -237,6 +246,7 @@ async function handleList({ access, tenantId, cors, qs }) {
     return jsonResponse(200, cors, { source: "cache", count: 0, total: 0, limit, offset, hasMore: false, records: [] });
   }
   if (!columnSet.has("customer_type")) console.warn("dealer: customer_type absent from the view — Service-only customers not excluded");
+  if (!columnSet.has(UPDATED_AT_COLUMN)) console.warn(`dealer: ${UPDATED_AT_COLUMN} absent from the view — updatedAt is null; run sql/2026-10-26_customer_last_modified.sql`);
 
   const supabase = await getSupabaseClient();
   const select = buildListSelect(columnSet);

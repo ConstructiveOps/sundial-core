@@ -56,6 +56,11 @@ const OVERRIDES = [
   { object: "solar", field: "Commission_Total_PPW__c", role: "Sales Rep", value: "hidden" },
   { object: "solar", field: "Commission_Redline_PPW__c", role: "Sales Dealer", value: "read" },
   { object: "solar", field: "Commission_Redline_PPW__c", role: "Sales Rep", value: "hidden" },
+  // Rep name (Tim, 2026-10-26): the dealer list shows an owner every rep's customers and
+  // needs the name to tell the reps apart. A rep's row filter is their own customers, so
+  // the only name a rep can ever read here is their own.
+  { object: "customer", field: "Sales_Rep_Name__c", role: "Sales Dealer", value: "read" },
+  { object: "customer", field: "Sales_Rep_Name__c", role: "Sales Rep", value: "read" },
 ];
 
 /**

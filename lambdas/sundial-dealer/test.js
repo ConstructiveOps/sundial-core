@@ -99,7 +99,7 @@ const VIEW_COLUMNS = [
   "sf_id", "client_sf_id", "tenant_id", "created_date", "is_stale", "last_synced_at", "cache_version",
   "name", "first_name", "last_name", "stage", "status", "street", "city", "postal_code", "primary_email", "primary_phone",
   "company_name", "alternate_contact_phone", "alternate_contact_email", "customer_type", "lead_source",
-  "sales_rep_sf_id", "dealer_sf_id", "commission_total", "notes",
+  "sales_rep_sf_id", "dealer_sf_id", "commission_total", "notes", "sales_rep_name", "lastmodifieddate",
 ];
 const pl = (values, extra = {}) => ({ type: "picklist", picklistValues: values.map((v) => ({ label: v, value: v, active: true })), ...extra });
 const DESCRIBE = {
@@ -256,7 +256,7 @@ test("list rows: the role's columns only, never the view's own; the solar summar
   assert.equal(b.total, 2);
   const [a, c] = b.records;
   const cols = listColumnsFor("customer", accessFor("Sales Rep"));
-  for (const k of Object.keys(a)) if (!["solar", "journey"].includes(k)) assert.ok(cols.has(k), `${k} is a rep list column`);
+  for (const k of Object.keys(a)) if (!["solar", "journey", "updatedAt"].includes(k)) assert.ok(cols.has(k), `${k} is a rep list column`);
   assert.equal(a.commission_total, undefined, "hidden from a rep");
   assert.equal(a.sales_rep_sf_id, undefined, "an access column is not a rep list column");
   assert.equal(a.notes, undefined, "long text is never in a list row");
@@ -273,6 +273,44 @@ test("toListRow (tenant scope): every customer column, still not the view's jour
   assert.equal(r.commission_total, 1);
   assert.equal(r.journey_solar_count, undefined);
   assert.equal(r.journey.source, "customer");
+});
+
+// --- rep name and last updated (2026-10-26) ------------------------------------------------
+
+test("manifest: Sales_Rep_Name__c is read (never edit) and sales_rep_name a list column, for rep AND dealer", () => {
+  for (const level of ["Sales Rep", "Sales Dealer"]) {
+    const f = fieldsFor("customer", accessFor(level));
+    assert.ok(f.read.has("Sales_Rep_Name__c"), `${level} reads it`);
+    assert.ok(!f.edit.has("Sales_Rep_Name__c"), `${level} never edits a formula`);
+    assert.ok(listColumnsFor("customer", accessFor(level)).has("sales_rep_name"), `${level} list column`);
+    assert.ok(!listColumnsFor("customer", accessFor(level)).has("lastmodifieddate"), "the raw column is not a list column");
+  }
+});
+
+test("list rows (rep, dealer): carry sales_rep_name; updatedAt is the row's LastModifiedDate, the raw column never", async () => {
+  const MOD = "2026-10-24T17:05:00.000Z";
+  for (const level of ["Sales Rep", "Sales Dealer"]) {
+    reset();
+    ctx.level = level;
+    ctx.viewRows = [{ sf_id: CUST, client_sf_id: TENANT, name: "Ada Lee", stage: "Sold", sales_rep_name: "Rae Rep", lastmodifieddate: MOD,
+      last_synced_at: "2026-10-26T00:00:00Z", journey_solar_sf_id: null, journey_solar_count: 0 }];
+    const res = await handler(ev("/dealer/customers"));
+    assert.equal(res.statusCode, 200);
+    const sel = calls("select")[0][1].split(",");
+    assert.ok(sel.includes("sales_rep_name") && sel.includes("lastmodifieddate"), "both are selected from the view");
+    const [r] = body(res).records;
+    assert.equal(r.sales_rep_name, "Rae Rep", level);
+    assert.equal(r.updatedAt, MOD, `${level}: the Salesforce modification time, not last_synced_at`);
+    assert.equal(r.lastmodifieddate, undefined, level);
+  }
+});
+
+test("toListRow: updatedAt for tenant scope too, without the raw column; null when the cache has none", () => {
+  const admin = toListRow({ sf_id: CUST, stage: "New", lastmodifieddate: "2026-10-01T00:00:00Z", journey_solar_sf_id: null }, accessFor("Admin"));
+  assert.equal(admin.updatedAt, "2026-10-01T00:00:00Z");
+  assert.equal(admin.lastmodifieddate, undefined, "row metadata, not a passed-through column");
+  const blank = toListRow({ sf_id: CUST, stage: "New", journey_solar_sf_id: null }, accessFor("Sales Rep"));
+  assert.equal(blank.updatedAt, null, "a row synced before the column existed");
 });
 
 // --- the detail ---------------------------------------------------------------------------

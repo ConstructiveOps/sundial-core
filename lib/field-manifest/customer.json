@@ -1,5 +1,5 @@
 {
-  "version": "sha256:f97d462918e9583b5e89fbd631f9e346",
+  "version": "sha256:e2162852674293ef2a40d0dedc1a2136",
   "object": "Sundial_Customer__c",
   "roles": {
     "Sales Rep": {
@@ -162,6 +162,7 @@
         "Roof_Warranty_Sold__c",
         "Roofing_Project_Created__c",
         "SES_Upgrade_Included_in_Contract__c",
+        "Sales_Rep_Name__c",
         "Sales_Rep_Notes__c",
         "Sat_By__c",
         "Secondary_Phone__c",
@@ -576,6 +577,7 @@
         "Roofing_Project_Created__c",
         "SES_Upgrade_Included_in_Contract__c",
         "Sales_Company__c",
+        "Sales_Rep_Name__c",
         "Sales_Rep_Notes__c",
         "Sat_By__c",
         "Secondary_Phone__c",
@@ -926,6 +928,7 @@
       "roof_type",
       "roof_warranty_sold",
       "roofing_project_created",
+      "sales_rep_name",
       "sales_rep_notes",
       "sat_by_sf_id",
       "secondary_phone",
@@ -1196,6 +1199,7 @@
       "roof_warranty_sold",
       "roofing_project_created",
       "sales_company",
+      "sales_rep_name",
       "sales_rep_notes",
       "sat_by_sf_id",
       "secondary_phone",

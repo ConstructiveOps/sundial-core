@@ -220,6 +220,12 @@ test("list: q is the shared word search, stage the journey or-group, limit clamp
   assert.deepEqual(calls("range")[0], ["range", 40, 40 + MAX_LIMIT - 1]);
 });
 
+test("list: a floor off-path key (Hold) filters on that one value — the deals no step can reach", async () => {
+  await handler(ev("/dealer/customers", { stage: "hold" }));
+  const ors = calls("or").map(([, e]) => e);
+  assert.equal(ors[ors.length - 1], stageOrExpr(["Hold"]));
+});
+
 test("stageOrExpr: the customer's stage when there is no solar, the solar's when there is", () => {
   assert.equal(
     stageOrExpr(["Audit", "Site survey scheduled"]),
@@ -229,7 +235,7 @@ test("stageOrExpr: the customer's stage when there is no solar, the solar's when
 });
 
 test("list: an unknown stage key and a sort off the allowlist are 400s; nothing is read", async () => {
-  let res = await handler(ev("/dealer/customers", { stage: "hold" }));
+  let res = await handler(ev("/dealer/customers", { stage: "not-a-stage" }));
   assert.equal(res.statusCode, 400);
   assert.equal(body(res).code, "INVALID_STAGE");
   res = await handler(ev("/dealer/customers", { sort: "commission_total:desc" }));

@@ -57,7 +57,7 @@ import {
 import { parseSort, applyCallerFiltersToQuery, pgrstQuote } from "../../lib/caller-filters.js";
 import { getRawDescribe, getQueryableFields, buildPicklistEntry } from "../../lib/sf-describe.js";
 import { readFullRecord } from "../../lib/full-read.js";
-import { journeyFor, stageFilterValues } from "../../lib/dealer-journey.js";
+import { journeyFor, listFilterValues } from "../../lib/dealer-journey.js";
 
 export const ACTION = "dealer.read";
 export const VIEW = "sundial_dealer_customer_view";
@@ -210,7 +210,8 @@ async function handleList({ access, tenantId, cors, qs }) {
 
   let stageValues = null;
   if (qs.stage != null && String(qs.stage).trim() !== "") {
-    stageValues = stageFilterValues(String(qs.stage).trim());
+    // A journey step key, or a floor off-path key (Hold, Cancelled, … — step 4).
+    stageValues = listFilterValues(String(qs.stage).trim());
     if (!stageValues) return jsonResponse(400, cors, { error: "invalid_stage", code: "INVALID_STAGE" });
   }
   let limit = intParam(qs.limit, DEFAULT_LIMIT);

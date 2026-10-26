@@ -1,5 +1,11 @@
 # Sundial — Progress Log
 
+## 2026-10-23 — The dealer list filters on Hold / Cancelled too (dealer module step 4 follow-up) — BUILT, NOT DEPLOYED
+
+- **`lib/dealer-journey.js`:** `FLOOR_FILTERS` (the off-path values anchored to CURRENT: Hold, Not Interested, DNQ, Wants for Free, Closed Lost, Cancelled, Cancelled - Awaiting Sales to Resell, each with a slug key) and `listFilterValues(key)`: a step's `stageFilterValues`, else that one floor value, else null. `stageFilterValues` is unchanged (`"hold"` is still null there).
+- **`sundial-dealer`:** `GET /dealer/customers?stage=` goes through `listFilterValues`, so `stage=hold` lists the held deals (same or-group shape). The portal's `/dealer` stage chips (harmon-crm `feature/dealer-shell`) send these keys; until this is deployed they get `400 INVALID_STAGE`.
+- Tests: `lib/dealer-journey.test.js` +1 (FLOOR_FILTERS = every CURRENT value, keys unique and never a step's, `listFilterValues` takes both kinds, an anchored value is not its own filter), `lambdas/sundial-dealer/test.js` +1 (`stage=hold` → `stageOrExpr(["Hold"])`; the 400 case now uses an unknown key). Docs: `docs/api-endpoints.md` (`stage`), `docs/portal-feature-inventory.md` §10 D1–D3.
+
 ## 2026-10-23 — The `/dealer` shell's backend: `sundial-dealer` (dealer module step 3 of 9, `feature/dealer-lambda`) — BUILT, NOT DEPLOYED, SQL NOT RUN
 
 - **`lambdas/sundial-dealer`** — `GET /dealer/customers` (q, stage = journey key, limit 50 / max 200, offset, sort) and `GET /dealer/customers/{id}` (`{ customer, solar, solarCount, access: { customer: { visible, editable }, solar: { visible } | null, manifestVersion }, picklists: { customer: Stage__c + Status__c, solar: Stage__c }, journey }`). Action **`dealer.read`** (tenant, dealer, own), always on — not behind `ACCESS_MODEL_MODE`. Rows: `rowFilter("customer")` first; the solar is found by `Sundial_Customer__c` + tenant (never its own dealer / rep) and its full read is bound to that customer id. Service-only customers excluded like the Sales page. Detail = one SOQL with the row filter (404 otherwise), no separate `assertRecordVisible` round trip. List rows carry the full journey (`stage, source, index, offPath`), not only `stage` + `source`, so a card can show a Cancelled / Hold flag.

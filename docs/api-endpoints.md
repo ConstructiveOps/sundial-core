@@ -1144,7 +1144,7 @@ Then `rowFilter("customer")`, ANDed first; field visibility from the manifests, 
 | Param | Meaning |
 |---|---|
 | `q` | Search — the Sales list's word search over the customer's name / company / email / phone / address columns (`SEARCH_FIELDS.customer`, every word must match some column; a phone matches on digits) |
-| `stage` | A journey step **key** (`appointment-set`, `permitting`, … — `lib/dealer-journey.js` `JOURNEY`). Matches the deals whose LEADING stage is that step's value or an off-path value anchored to it: the customer's stage when it has no solar, the solar's when it does. Off-path values drawn at the deal's floor (Hold, Cancelled, Closed Lost, …), unknown values and blanks match no step. Unknown key → **400 `INVALID_STAGE`** |
+| `stage` | A journey step **key** (`appointment-set`, `permitting`, … — `lib/dealer-journey.js` `JOURNEY`). Matches the deals whose LEADING stage is that step's value or an off-path value anchored to it: the customer's stage when it has no solar, the solar's when it does. **Or a floor key** (2026-10-23, dealer step 4; `FLOOR_FILTERS`: `hold`, `not-interested`, `dnq`, `wants-for-free`, `closed-lost`, `cancelled`, `cancelled-awaiting-sales-to-resell`): the deals whose leading stage is exactly that value. These are the off-path values drawn at the deal's floor, which no step's filter reaches. Both kinds go through `listFilterValues`. Unknown values and blanks match nothing. Any other key → **400 `INVALID_STAGE`** |
 | `limit` | Page size, default **50**, max **200** |
 | `offset` | Start row, default 0 |
 | `sort` | `column:asc|desc` from the customer sort allowlist (`lib/caller-filters.js`), NULLS LAST then `sf_id`; default `created_date` desc. Off the list → **400 `INVALID_SORT`** |

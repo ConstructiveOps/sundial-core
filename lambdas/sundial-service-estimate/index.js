@@ -34,6 +34,7 @@
 //   GET    /service/invoices/{id}                   one invoice + payments                           │ invoice.js
 //   GET    /service/invoices/{id}/preview           the invoice document (HTML)                      │
 //   POST   /service/invoices/{id}/payments          record a check / ACH / remittance / refund       │
+//   POST   /service/jobs/{id}/payments              a check / ACH deposit before the invoice (2026-10-27) │
 //   POST   /service/invoices/{id}/send              email the PDF to the payer                       │
 //   POST   /service/invoices/{id}/void              void with a reason (reissue = "-2")              ┘
 //   GET    /service/jobs/{id}/labor                 completed calls + clock hours + billing state    ┐
@@ -488,6 +489,7 @@ const ROUTES = [
   ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
   ["GET", /^\/service\/invoices\/([^/]+)\/?$/, "getInvoice"],
   ["POST", /^\/service\/invoices\/([^/]+)\/payments\/?$/, "recordPayment"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/payments\/?$/, "recordJobDeposit"], // a deposit before the invoice exists (2026-10-27)
   ["POST", /^\/service\/invoices\/([^/]+)\/send\/?$/, "sendInvoice"],
   ["POST", /^\/service\/invoices\/([^/]+)\/void\/?$/, "voidInvoice"],
   ["GET", /^\/service\/jobs\/([^/]+)\/labor\/?$/, "getLabor"],
@@ -2382,7 +2384,7 @@ export function createHandler(deps = {}) {
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     unlockEstimate: "service.estimate.write", // whoever may edit the estimate may reopen it; the invoice is not touched
     invoiceReport: "service.estimate.write", // a read, like getInvoice
-    issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
+    issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", recordJobDeposit: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is a level-gated action, everywhere
     jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",
     jobCharge: "service.card.charge", // Admin / Executive / Manager (lib/access.js ACTION_LEVELS; Managers since 2026-10-16)

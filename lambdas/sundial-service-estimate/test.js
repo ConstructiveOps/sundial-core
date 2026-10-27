@@ -15,7 +15,7 @@ import {
   itemFieldsFromBody, newVersionFields, lineFromItem, adHocLine, linePatchFields, inPlaceEditable,
 } from "./pricebook.js";
 import { createHandler, matchRoute, PROJECT_TYPE_TAG } from "./index.js";
-import { paidSummary, invoiceStatusFor, jobPaymentStatusFor, nextInvoiceName, paymentFieldsFromBody, invoicePdfKey } from "./invoice.js";
+import { paidSummary, invoiceStatusFor, jobPaymentStatusFor, nextInvoiceName, paymentFieldsFromBody, depositFieldsFromBody, DEPOSIT_METHODS, invoicePdfKey } from "./invoice.js";
 import { clockMinutes, roundUpQuarterHours, laborRow, parseLaborEntry } from "./labor.js";
 import { renderEstimateDocument } from "../../lib/estimate-document.js";
 import { tablesFromRows } from "../../lib/tax-zones.js";
@@ -251,6 +251,8 @@ test("matchRoute: the club's public routes strip the stage prefix too and never 
 test("matchRoute strips a stage prefix and captures ids", () => {
   assert.deepEqual(matchRoute("POST", "/prod/service/estimates/abc/lines"), { name: "addLine", params: ["abc"] });
   assert.deepEqual(matchRoute("DELETE", "/service/estimates/a/lines/b"), { name: "deleteLine", params: ["a", "b"] });
+  assert.deepEqual(matchRoute("POST", "/prod/service/jobs/j1/payments"), { name: "recordJobDeposit", params: ["j1"] }); // a deposit before the invoice (2026-10-27)
+  assert.deepEqual(matchRoute("POST", "/service/invoices/i1/payments"), { name: "recordPayment", params: ["i1"] });
   assert.equal(matchRoute("GET", "/service/nope"), null);
 });
 
@@ -1525,6 +1527,143 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
 
   const evs = fake.activity.map((a) => a.event);
   assert.ok(evs.includes("invoice_issued") && evs.includes("invoice_sent") && evs.includes("payment_recorded") && evs.includes("invoice_voided"));
+});
+
+test("depositFieldsFromBody (2026-10-27): the invoice route's validation, held to Deposit and a non-card method", () => {
+  const ctx = { jobId: "SER000000000000001", tenantId: TENANT, userId: USER, now: new Date("2026-10-27T15:00:00Z") };
+  const ok = depositFieldsFromBody({ method: "ACH", amount: "125.005", reference: "ACH-77", notes: "first half" }, ctx);
+  assert.deepEqual(ok.fields, {
+    Service_Job__c: ctx.jobId, Client__c: TENANT, Type__c: "Deposit", Method__c: "ACH", Amount__c: 125.01, Status__c: "Succeeded",
+    Received_At__c: "2026-10-27T15:00:00.000Z", Reference__c: "ACH-77", Notes__c: "first half", Recorded_By__c: USER,
+  });
+  assert.equal("Invoice__c" in ok.fields, false, "no invoice — the row hangs off the job");
+  assert.equal(depositFieldsFromBody({ amount: 10 }, ctx).fields.Method__c, "Check", "the invoice route's default method");
+  assert.equal(depositFieldsFromBody({ type: "Deposit", method: "Partner Remittance", amount: 10 }, ctx).fields.Type__c, "Deposit");
+  assert.match(depositFieldsFromBody({ type: "Payment", amount: 10 }, ctx).problems.join(), /type must be Deposit/);
+  assert.match(depositFieldsFromBody({ type: "Refund", amount: 10 }, ctx).problems.join(), /type must be Deposit/);
+  assert.match(depositFieldsFromBody({ method: "Card", amount: 10 }, ctx).problems.join(), /Charge card/);
+  assert.match(depositFieldsFromBody({ amount: 0 }, ctx).problems.join(), /positive/);
+  assert.match(depositFieldsFromBody({ amount: 5, receivedAt: "not a date" }, ctx).problems.join(), /receivedAt/);
+  assert.deepEqual(DEPOSIT_METHODS, ["Check", "ACH", "Partner Remittance", "Other"]);
+});
+
+test("office deposits before the invoice (2026-10-27, Harmon): a check / ACH lands on the job like a card deposit, counts against what is owed, is adopted at issue, and survives a void", async () => {
+  const fake = fakeSalesforce();
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
+  const h = makeHandler(fake);
+  const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, estimate: { depositRequired: true, depositType: "Flat", depositValue: 150 }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }, { description: "Breaker", kind: "Material", unitPrice: 100 }] });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  const est = fake.store.Sundial_Estimate__c[0];
+  assert.equal(est.Deposit_Amount__c, 150);
+  assert.ok(!est.Deposit_Paid_At__c);
+
+  // Nothing yet: the no-invoice view carries a zero total beside its (empty) rows.
+  let cur = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(cur.body.invoice, null);
+  assert.equal(cur.body.depositsTotal, 0);
+  assert.deepEqual(cur.body.payments, []);
+
+  // Refused before any write: the wrong type, a card, nothing.
+  for (const body of [{ type: "Payment", method: "Check", amount: 50 }, { method: "Card", amount: 50 }, { method: "Check", amount: 0 }]) {
+    const r = await call(h, "POST", `/service/jobs/${job.Id}/payments`, body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.code, "PAYMENT_INVALID");
+  }
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 0);
+  assert.equal((await call(h, "POST", "/service/jobs/SER999999999999999/payments", { amount: 50 })).status, 404, "another tenant's (or no) job is a 404");
+
+  // A $100 check: a Deposit row on the JOB, Succeeded, recorded by the caller — the card deposit's shape.
+  let r = await call(h, "POST", `/service/jobs/${job.Id}/payments`, { type: "Deposit", method: "Check", amount: 100, reference: "1044", receivedAt: "2026-09-09" });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  const row = fake.store.Sundial_Service_Payment__c[0];
+  assert.equal(r.body.id, row.Id);
+  assert.equal(row.Service_Job__c, job.Id);
+  assert.ok(!row.Invoice__c, "no invoice");
+  assert.equal(row.Type__c, "Deposit");
+  assert.equal(row.Method__c, "Check");
+  assert.equal(row.Status__c, "Succeeded");
+  assert.equal(row.Recorded_By__c, USER);
+  assert.equal(row.Client__c, TENANT);
+  assert.equal(row.Received_At__c, "2026-09-09T00:00:00.000Z");
+  assert.equal(r.body.depositsTotal, 100);
+  assert.equal(r.body.payments.length, 1);
+  assert.equal(r.body.paymentStatus, "Deposit Paid", "jobPaymentStatusFor, as for a card deposit");
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  assert.equal(r.body.jobStatus, job.Status__c);
+  // Short of the estimate's $150 deposit: the customer's page still asks, and the office is told.
+  assert.ok(!est.Deposit_Paid_At__c);
+  assert.ok(r.body.warnings.some((w) => /still offers the deposit/.test(w)), JSON.stringify(r.body.warnings));
+  const act = fake.activity.find((a) => a.event === "payment_recorded" && a.record_sf_id === row.Id);
+  assert.ok(act, "activity row");
+  assert.equal(act.details.via, "office-deposit");
+  assert.equal(act.details.type, "Deposit");
+  assert.equal(act.details.amount, 100);
+
+  // A $50 ACH makes the deposit whole: the estimate is stamped like the card path stamps it.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/payments`, { method: "ACH", amount: 50 });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.depositsTotal, 150);
+  assert.deepEqual(r.body.warnings, []);
+  assert.ok(est.Deposit_Paid_At__c, "the customer's page stops offering the deposit");
+
+  // The reads agree: the job's invoice view, and the card page's `owed` (the estimate's total less
+  // what was taken — a check subtracts exactly as a card does, because they are the same rows).
+  cur = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(cur.body.depositsTotal, 150);
+  assert.equal(cur.body.payments.length, 2);
+  const card = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(card.status, 200, JSON.stringify(card.body));
+  assert.equal(card.body.owedBasis, "estimate");
+  assert.equal(card.body.estimateTotal, est.Total__c);
+  assert.equal(card.body.owed, Math.round((est.Total__c - 150) * 100) / 100);
+
+  // Issue adopts both rows; the invoice shows Paid to date / Balance due.
+  const iss = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(iss.status, 201, JSON.stringify(iss.body));
+  const inv = fake.store.Sundial_Service_Invoice__c[0];
+  assert.ok(fake.store.Sundial_Service_Payment__c.every((p) => p.Invoice__c === inv.Id), "both office deposits adopted");
+  assert.equal(inv.Paid_Amount__c, 150);
+  assert.equal(inv.Status__c, "Partially Paid");
+  assert.equal(iss.body.balance, Math.round((inv.Total__c - 150) * 100) / 100);
+  assert.equal(job.Payment_Status__c, "Partially Paid");
+  const pv = await call(h, "GET", `/service/invoices/${inv.Id}/preview`);
+  assert.ok(pv.body.html.includes("Paid to date"));
+  assert.ok(pv.body.html.includes("-$150.00") || pv.body.html.includes("($150.00)") || pv.body.html.includes("−$150.00"), "the deposits shown as paid");
+  assert.ok(pv.body.html.includes("Balance due"));
+
+  // With a live invoice the money goes on the invoice — the job route says so, writes nothing.
+  const blocked = await call(h, "POST", `/service/jobs/${job.Id}/payments`, { method: "Check", amount: 20 });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.code, "INVOICE_EXISTS");
+  assert.equal(blocked.body.invoiceId, inv.Id);
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 2);
+
+  // Void never deletes money: the rows stay on the job, unhooked, and count again before the reissue.
+  const v = await call(h, "POST", `/service/invoices/${inv.Id}/void`, { reason: "Wrong breaker" });
+  assert.equal(v.status, 200, JSON.stringify(v.body));
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 2);
+  assert.ok(fake.store.Sundial_Service_Payment__c.every((p) => !p.Invoice__c && p.Service_Job__c === job.Id && p.Status__c === "Succeeded"));
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+  cur = await call(h, "GET", `/service/jobs/${job.Id}/invoice`);
+  assert.equal(cur.body.depositsTotal, 150);
+  assert.equal(cur.body.invoice.Status__c, "Void");
+  assert.equal(cur.body.payments.length, 2, "a void invoice's view lists the money waiting for the reissue");
+  // …and the office may add to them again before the reissue.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/payments`, { method: "Other", amount: 25 });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.depositsTotal, 175);
+  const re = await call(h, "POST", `/service/jobs/${job.Id}/invoice`, {});
+  assert.equal(re.status, 201, JSON.stringify(re.body));
+  assert.equal(fake.store.Sundial_Service_Invoice__c[1].Paid_Amount__c, 175);
+});
+
+test("POST /service/jobs/{id}/payments is service.invoice.write: a tech is refused before any write", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake, { access: { level: "Technician", scope: "tech", userId: USER, tenantId: TENANT } });
+  const r = await call(h, "POST", "/service/jobs/SER000000000000001/payments", { method: "Check", amount: 50 });
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  assert.equal(fake.store.Sundial_Service_Payment__c.length, 0);
 });
 
 test("labor helpers: clock → quarter hours, row sources, entry validation", () => {

@@ -19,6 +19,7 @@
       POST   /service/jobs/{id}/card-session | card-link | charge     (Stripe's card page, the customer link, an Admin charge)
       GET    /service/jobs/{id}/costing                                (job costing, 2026-10-05)
       POST   /service/jobs/{id}/tax-zone                               (set / correct the job's tax zone, D-083)
+      POST   /service/jobs/{id}/payments                               (a check / ACH deposit before the invoice, 2026-10-27)
       GET    /service/tax-zones                                        (the office's zone picker, D-083)
       POST   /service/jobs/{id}/report/prepare                         (the PDF's photos, shrunk in rounds, 2026-10-12)
       POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
@@ -154,7 +155,8 @@ foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobCosting $m }
 Write-Host "==> /service/jobs/{id}/card : GET, OPTIONS" -ForegroundColor Cyan
 $jobCard = Ensure-Resource $jobId "card"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobCard $m }
-foreach ($part in @("card-session", "card-link", "charge")) {
+# A check / ACH deposit before the invoice exists (2026-10-27): the row lands on the job.
+foreach ($part in @("card-session", "card-link", "charge", "payments")) {
     Write-Host "==> /service/jobs/{id}/$part : POST, OPTIONS" -ForegroundColor Cyan
     $r = Ensure-Resource $jobId $part
     foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }

@@ -1,5 +1,18 @@
 # Sundial — Progress Log
 
+## 2026-10-27 — Office deposits before the invoice (D-072 amendment 16) — BUILT, NOT DEPLOYED
+
+- **Why (Harmon, Heather):** a check or ACH deposit could only be recorded on an invoice, so the office issued one just to hold the money and voided it later.
+- **`POST /service/jobs/{id}/payments`** (`sundial-service-estimate`, `invoice.js` `recordJobDeposit`, action `service.invoice.write`): `{ type: Deposit, method: Check|ACH|Partner Remittance|Other, amount, receivedAt?, reference?, notes? }` → 201 `{ id, payments, depositsTotal, jobStatus, paymentStatus, warnings }`.
+  - The row is the card deposit's shape: on the job, no `Invoice__c`, `Succeeded`, `Recorded_By__c` = caller. Validation is the invoice route's (`depositFieldsFromBody` wraps `paymentFieldsFromBody`); a Card method or a non-Deposit type is `400 PAYMENT_INVALID`.
+  - `409 INVOICE_EXISTS` while a live invoice exists. `Payment_Status__c` through `settleJobWithoutInvoice` → `jobPaymentStatusFor` (`Deposit Paid`). Activity `payment_recorded`, `via: "office-deposit"`.
+  - **Added beyond the brief:** the estimate's `Deposit_Paid_At__c` is stamped once the job's unattached money covers `Deposit_Amount__c`, as the card path does. Without it the customer's page (`sundial-service-public` `paymentSummary`) would keep offering a deposit the office already took. Short of the amount, a warning says so.
+- **`GET /service/jobs/{id}/invoice`** always returns `depositsTotal` (unattached money, net of refunds). While the current invoice is Void, `payments` lists the unattached rows instead of an empty list.
+- **Pinned with tests** (no code change needed): the card page's `owed` subtracts office deposits; issue adopts them (Paid to date / Balance due on the document); void leaves them on the job, unhooked; a reissue picks them up.
+- Tests: 3 new + 2 route asserts in `lambdas/sundial-service-estimate/test.js`. Suite 1,780 / 1,780.
+- Docs: `docs/api-endpoints.md`, `DECISIONS.md` (D-072 am. 16), `CLAUDE.md`, new `docs/integrations/acumatica.md` (a job-level Deposit = an AR Prepayment, applied by the invoice push; no code). `scripts/wire-service-estimate-routes.ps1` wires the route.
+- Portal (harmon-crm): not in this change. The portal feature-inventory row goes in with the portal's "Record deposit" button.
+
 ## 2026-10-27 — `/auth/me` returns `access.manifestVersion` (dealer step 8 follow-up) — BUILT, NOT DEPLOYED
 
 - **`sundial-auth-proxy`** imports `MANIFEST_VERSION` from `lib/field-manifest` and returns `user.access.manifestVersion` on `GET /auth/me`. The value is the same string the record reads advertise, e.g. `customer:e2162852/roofing:486658de/solar:385f7206`.

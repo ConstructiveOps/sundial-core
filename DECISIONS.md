@@ -3829,3 +3829,16 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - A bulk stage change fans out one push per recipient per row; so does a TRUNCATE + full resync of the solar cache (every row re-inserted = "new project"). The off switch is deleting the `stage_notify_url` row; the runbook says to use it. A routine full resync is safe (upserts, no stage moves).
 - A post can name a stage the row no longer has (two moves inside one sync); each transition is still its own notification, which is what happened.
 - The customer stage keeps notifying after a solar exists, though the journey then ignores it — "every stage change" was the ask.
+
+## D-072 amendment 16 (2026-10-27): a check / ACH deposit lands on the job before any invoice exists
+
+**Context.** Harmon (Heather): the office takes check and ACH deposits before the work. The only manual-money route was `POST /service/invoices/{id}/payments`, so the office issued an invoice just to have somewhere to put the money, then voided it later. Card deposits never had that problem — they land as unattached `Deposit` rows on the job (stripe.js) that the invoice adopts at issue.
+
+**Decision.**
+1. **`POST /service/jobs/{id}/payments`** (`recordJobDeposit` in `invoice.js`, action `service.invoice.write`) writes a `Deposit` row on the JOB with no `Invoice__c`, `Succeeded`, `Recorded_By__c` = caller — the row a card deposit is. The invoice route's validation (`paymentFieldsFromBody`, through `depositFieldsFromBody`), held to Type `Deposit` and a non-card method (Check / ACH / Partner Remittance / Other): a card is taken through Stripe, never typed in as money received.
+2. **One payer of record at a time:** while the job has a live invoice the route refuses (`409 INVOICE_EXISTS`) — the money goes on the invoice, where `settleMoney` moves the bill.
+3. **No new money logic.** The job's `Payment_Status__c` comes from `settleJobWithoutInvoice` → `jobPaymentStatusFor`; issue's orphan back-fill adopts the rows; void unhooks them and they stay on the job; the card page's `owed` subtracts them because it reads the same rows.
+4. **The customer's page must not ask twice.** The card path stamps `Deposit_Paid_At__c` on the estimate, which is what turns off the page's deposit step. A manual deposit stamps it when the job's unattached money reaches the estimate's `Deposit_Amount__c`; short of it, the response warns that the page still offers the deposit.
+5. `GET /service/jobs/{id}/invoice` always returns `depositsTotal` (the unattached money, net of refunds), and a Void current invoice's view lists the unattached rows rather than nothing.
+
+**Consequences.** No issue-then-void just to hold a check. A partial check below the required deposit leaves the customer's page offering the full deposit amount (the page does not subtract) — the warning is the office's cue to tell the customer. Acumatica: a job-level Deposit maps to an AR Prepayment when the push is built (`docs/integrations/acumatica.md`).

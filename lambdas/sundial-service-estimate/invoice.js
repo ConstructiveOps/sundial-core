@@ -5,6 +5,7 @@
 //   GET  /service/invoices/{id}                one invoice + payments + job/estimate summary
 //   GET  /service/invoices/{id}/preview        the document (HTML) — same model as the PDF
 //   POST /service/invoices/{id}/payments       record a check / ACH / partner remittance / refund
+//   POST /service/jobs/{id}/payments           a check / ACH deposit BEFORE the invoice exists (2026-10-27)
 //   POST /service/invoices/{id}/send           email the PDF to the payer
 //   POST /service/invoices/{id}/void           void (reason required); a reissue is "-2"
 //
@@ -17,7 +18,8 @@
 //   - Job Payment_Status__c and the Invoiced → Paid job status follow the money in one
 //     function (settleMoney), the way settleJobStatus owns the schedule states.
 //   - Deposits taken before the invoice existed (Invoice__c blank) are back-filled onto
-//     the invoice at issue and count toward it.
+//     the invoice at issue and count toward it — card deposits (stripe.js) and the office's
+//     check / ACH deposits (recordJobDeposit) alike: one row shape, one adoption.
 //   - TAX CATEGORIES ARE FROZEN TOO (D-083): issue writes each line's EFFECTIVE category
 //     (after the job-level warranty rule) onto the line, and the invoiced estimate ignores
 //     the job's Bill To from then on — a later Bill To change never re-taxes an issued
@@ -148,6 +150,21 @@ export function paymentFieldsFromBody(body, { jobId, invoiceId, tenantId, userId
   };
   for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
   return { fields };
+}
+
+/**
+ * A deposit the office records on the JOB before any invoice exists (2026-10-27, Harmon):
+ * the invoice route's validation, held to Type Deposit and a non-card method (a card is
+ * taken through Stripe — Charge card — never typed in as money received).
+ */
+export const DEPOSIT_METHODS = ["Check", "ACH", "Partner Remittance", "Other"];
+export function depositFieldsFromBody(body, { jobId, tenantId, userId, now }) {
+  const extra = [];
+  if (body?.type && body.type !== "Deposit") extra.push("type must be Deposit (money before the invoice is a deposit)");
+  if (body?.method && !DEPOSIT_METHODS.includes(body.method)) extra.push(`method must be one of ${DEPOSIT_METHODS.join(", ")} (a card deposit goes through Charge card)`);
+  const { fields, problems } = paymentFieldsFromBody({ ...body, type: "Deposit" }, { jobId, invoiceId: null, tenantId, userId, now });
+  const all = [...extra, ...(problems || [])];
+  return all.length ? { problems: all } : { fields };
 }
 
 /** Where the invoice's estimate goes back to when the invoice is voided. */
@@ -373,7 +390,16 @@ export function payerSnapshot(job, payer) {
 export function createInvoiceHandlers(d, h) {
   const { jsonResponse, bad, notFound, sfError, CACHE } = h;
   const money = h.money || createMoneyCore(d, h);
-  const { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney } = money;
+  const { loadJob, loadInvoice, loadJobInvoices, loadJobPayments, currentOf, balanceOf, settleMoney, settleJobWithoutInvoice } = money;
+
+  /**
+   * The job's money with no invoice to hang it on: the unattached rows (card and office
+   * deposits alike) and what they come to — net of any refund, which is what issue adopts.
+   */
+  function unattachedView(payments) {
+    const rows = (payments || []).filter((p) => !p.Invoice__c);
+    return { invoice: null, payments: rows, depositsTotal: paidSummary(rows).paid, balance: null, pdfUrl: null };
+  }
 
   /**
    * What the invoice DOCUMENT needs beyond the records (D-081): the payer record (only for
@@ -526,6 +552,7 @@ export function createInvoiceHandlers(d, h) {
       const inv = currentOf(invoices);
       const payments = await loadJobPayments(job.Id, tenantId);
       const blocker = issueBlocker(job, invoices);
+      const unattached = unattachedView(payments);
       return jsonResponse(200, cors, {
         sendDefaults: await invoiceSendDefaults(inv, job, tenantId),
         jobId: job.Id,
@@ -536,7 +563,10 @@ export function createInvoiceHandlers(d, h) {
         cardOnFile: job.Customer_Card_on_File__c === true, // Stripe (amendment 8): the office may charge it
         billToType: job.Bill_To_Type__c || "Customer",
         history: invoices.map((i) => ({ id: i.Id, name: i.Name, status: i.Status__c, total: i.Total__c, issuedAt: i.Issued_At__c, voidedAt: i.Voided_At__c })),
-        ...(inv ? present(inv, payments.filter((p) => p.Invoice__c === inv.Id)) : { invoice: null, payments: payments.filter((p) => !p.Invoice__c), balance: null, pdfUrl: null }),
+        // A void invoice holds no money (void unhooks it), so its view lists what is on the job
+        // waiting for the reissue. depositsTotal is always the unattached money, net of refunds.
+        ...(!inv ? unattached : present(inv, inv.Status__c === "Void" ? unattached.payments : payments.filter((p) => p.Invoice__c === inv.Id))),
+        depositsTotal: unattached.depositsTotal,
       });
     },
 
@@ -859,6 +889,50 @@ export function createInvoiceHandlers(d, h) {
         details: { invoice: inv.Name, type: fields.Type__c, method: fields.Method__c, amount: fields.Amount__c, reference: fields.Reference__c ?? null, paid: money.summary.paid, balance: money.balance, invoiceStatus: inv.Status__c },
       });
       return jsonResponse(201, cors, { success: true, id: created.id, ...present(inv, money.payments), jobStatus: job.Status__c, paymentStatus: job.Payment_Status__c });
+    },
+
+    /**
+     * POST /service/jobs/{id}/payments — a check / ACH / remittance DEPOSIT before the bill
+     * (2026-10-27, Harmon). The office used to issue an invoice just to have somewhere to put
+     * the money, then void it. Now the row lands on the job with no invoice — exactly the row
+     * a card deposit is (stripe.js) — and issue adopts it like any other. Once a live invoice
+     * exists the money goes on the invoice instead (409 INVOICE_EXISTS; the portal routes there).
+     */
+    async recordJobDeposit({ ctx, params, body }) {
+      const { tenantId, userId, cors } = ctx;
+      const job = await loadJob(params[0], tenantId);
+      if (!job) return notFound(cors);
+      const live = (await loadJobInvoices(job.Id, tenantId)).find((i) => i.Status__c !== "Void");
+      if (live) return jsonResponse(409, cors, { error: "invoice_exists", code: "INVOICE_EXISTS", message: `${live.Name} is issued — record the payment on the invoice.`, invoiceId: live.Id });
+      const { fields, problems } = depositFieldsFromBody(body, { jobId: job.Id, tenantId, userId, now: d.now() });
+      if (problems) return bad(cors, "PAYMENT_INVALID", problems.join("; "));
+      let created;
+      try {
+        created = await d.sfCreateRecord(PAYMENT_SF_OBJECT, fields);
+      } catch (e) {
+        return sfError(cors, e, "payment create");
+      }
+      await h.markStale(CACHE.payment, [created.id], tenantId);
+      const settled = await settleJobWithoutInvoice({ job, tenantId });
+      const view = unattachedView(settled.payments);
+      // The customer's page offers the deposit step until Deposit_Paid_At__c is stamped — the
+      // card path stamps it, so a check that covers the deposit must too, or the customer is
+      // asked to pay it twice. A partial check leaves it unstamped (the page still asks).
+      const warnings = [];
+      const est = job.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
+      if (est && !est.Deposit_Paid_At__c && est.Deposit_Required__c === true) {
+        if (view.depositsTotal >= cents(est.Deposit_Amount__c) - 0.004) {
+          await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Deposit_Paid_At__c: fields.Received_At__c });
+          await h.markStale(CACHE.estimate, [est.Id], tenantId);
+        } else {
+          warnings.push(`The estimate asks for a $${cents(est.Deposit_Amount__c).toFixed(2)} deposit; $${view.depositsTotal.toFixed(2)} is recorded, so the customer's page still offers the deposit.`);
+        }
+      }
+      await h.act(ctx, {
+        event: EVENTS.PAYMENT_RECORDED, recordType: "servicepayment", recordSfId: created.id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null,
+        details: { invoice: null, type: "Deposit", method: fields.Method__c, amount: fields.Amount__c, reference: fields.Reference__c ?? null, paid: settled.summary.paid, depositsTotal: view.depositsTotal, via: "office-deposit" },
+      });
+      return jsonResponse(201, cors, { success: true, id: created.id, payments: view.payments, depositsTotal: view.depositsTotal, jobStatus: job.Status__c, paymentStatus: job.Payment_Status__c, warnings });
     },
 
     async sendInvoice({ ctx, params, body }) {

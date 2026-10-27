@@ -4,6 +4,13 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-27 — Office deposits before the invoice (D-072 amendment 16)
+
+- [x] `POST /service/jobs/{id}/payments` (check / ACH / remittance / other deposit on the job), `depositsTotal` on `GET /service/jobs/{id}/invoice`, `Deposit_Paid_At__c` stamped when covered; tests for owed / issue adoption / void (suite 1,780 / 1,780)
+- [ ] **TIM: deploy** — `.\deploy.ps1 sundial-service-estimate`, then `.\scripts\wire-service-estimate-routes.ps1` (adds `/service/jobs/{id}/payments`)
+- [ ] harmon-crm: "Record deposit" on the job page when there is no live invoice (routes to the invoice's payment form when there is); add the portal feature-inventory row with it
+- [ ] Acumatica push (when built): job-level Deposit → AR Prepayment, applied by the invoice push (`docs/integrations/acumatica.md`)
+
 ## 2026-10-27 — Dealer module step 8 of 9: verification + docs; where steps 0–7 stand (step 9 is Harmon's review)
 
 Checked live on 2026-10-27 (AWS, Supabase, the deployed API), not from the older sections below. Their "NOT DEPLOYED" headers are history.

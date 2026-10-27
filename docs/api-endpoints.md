@@ -894,6 +894,20 @@ A failed holding-object delete is **not** a failed match — the bytes are attac
 
 **Wiring:** `scripts/wire-comment-mention-route.ps1`. **Wire and verify this route before applying the trigger migration** — the trigger swallows post failures by design, so an unwired route loses notifications silently.
 
+#### `POST /webhooks/stage-change` (Postgres, 2026-10-26, dealer module step 6)
+
+**Lambda:** `sundial-notify` (`stage.js`). **Caller:** the cache triggers in `sql/sundial_stage_notify.sql` via `pg_net` — AFTER UPDATE OF stage on `sundial_customer_cache` / `sundial_solar_cache` when the stage really changed, and AFTER INSERT on `sundial_solar_cache`.
+
+**Authentication:** `X-Sundial-Stage-Secret`, constant-time against Secrets Manager `sundial/stage-notify` → `secret` (env `STAGE_NOTIFY_SECRET` second). No JWT. **No secret configured → 401 for everything.**
+
+**Request body:** `{ "object": "customer"|"solar", "sf_id", "client_sf_id", "old_stage", "new_stage", "modstamp", "op": "insert"|"update" }`.
+
+**Behavior:** read the cache row (and, for a solar, its customer's); recipients in the row's tenant = the rep's profile (`sundial_user_id` = `sales_rep_sf_id`, scope own / dealer only) + every `access_scope = 'dealer'` profile with that `dealer_sf_id` — a solar without its own falls back to the customer's. One `lib/notify.js` delivery: category `stage`, kind `customer` / `solar` / `solar_created`, title `<customer> → <new stage>`, url `/dealer/customers/{customerId}`, record type `dealercustomer`, dedupe `stage:{object}:{sf_id}:{new_stage}:{modstamp}`, push `app: 'dealer'`. Harmon staff are never recipients.
+
+**Responses:** 200 `{ sent: true, kind, recipients, inserted, skipped, pushed }`; 200 `{ sent: false, reason }` for `record_not_found` / `tenant_mismatch` / `no_recipients`; 400 `INVALID_BODY` (missing fields, object not customer / solar); 401. A replay inserts nothing (`inserted: 0`).
+
+**Wiring:** `scripts/wire-notify-routes.ps1`. Runbook: `docs/integrations/push-notifications.md` § One-time setup step 6.
+
 #### `POST /webhooks/acumatica`
 
 **Lambda:** `sundial-acumatica-webhook`
@@ -959,7 +973,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-service-board` | GET /service/board, GET+POST /service/jobs/{id}/calls, PATCH /service/calls/{id}, POST /service/calls/{id}/cancel, POST /service/calls/{id}/unschedule, GET+POST /service/calls/{id}/clock, GET+POST+DELETE /service/jobs/{id}/photos[/confirm], POST /service/jobs/{id}/photos/thumbs, GET /service/tech/jobs/{id}/{photos\|files}, GET /service/techs/locations, GET /service/payroll (D-076); **the tech app:** GET /service/tech/day, POST /service/tech/day/{start\|end\|note}, GET /service/tech/price-book, GET /service/tech/calls/{id}, POST …/status, …/notes, …/checklist, …/photos, …/photos/confirm, GET …/photos |
 | `sundial-service-public` | GET /public/estimates/{token}, POST /public/estimates/{token}/{accept\|decline\|checkout} (no auth — the token is the credential) |
 | `sundial-sms` | GET+POST /service/jobs/{id}/sms, GET /service/sms/unmatched, POST /sms/inbound + POST /sms/status (Twilio-signed, no JWT) |
-| `sundial-notify` | GET /notify/config, POST+DELETE /notify/subscriptions, POST /notify/test (**also** EventBridge `sundial-notify-sweep` every 5 min — D-074) |
+| `sundial-notify` | GET /notify/config, POST+DELETE /notify/subscriptions (`app`: office / tech / dealer), POST /notify/test, POST /webhooks/stage-change (Postgres, shared secret — dealer stage alerts) (**also** EventBridge `sundial-notify-sweep` every 5 min — D-074) |
 | `sundial-aurora-webhook` | GET /webhooks/aurora/agreement-status (doorbell → SQS) |
 | `sundial-welcome-call` | POST /webhooks/retell, POST /welcome-call/orphan-match (**also** EventBridge — see below) |
 | `sundial-comment-notify` | POST /webhooks/comment-mention (called by Postgres via pg_net) |

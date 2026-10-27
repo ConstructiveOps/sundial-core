@@ -15,11 +15,13 @@ This page is the runbook: what to create, what to paste where, who hears what, a
 | Office | `tech_activity` | a tech clocks in, completes, marks a no-show — or a call is still `Scheduled` 30 minutes past its start | the job |
 | Office | `money` | approved / declined online, deposit or invoice paid, a card failed, club join / ended / past due / cancellation scheduled | the estimate / job / membership |
 | Office | `customer_message` | an inbound text (matched or not), a website call-me, an online booking | the job (or `/service`) |
+| Dealer + rep | `stage` | **every** stage change of their deal (dealer module step 6, 2026-10-26): the Customer's `Stage__c` moves, the linked Solar's `Stage__c` moves, or a new Solar project appears (`kind` customer / solar / solar_created) — from ANY path (portal, Flows, Aurora, Zapier, Salesforce admin), because the hook is a trigger on the cache. Recipients: the deal's rep (profile `sundial_user_id` = `sales_rep_sf_id`, scope own / dealer only) + every dealer-scope profile of its `dealer_sf_id`; a solar with neither uses its customer's. **Harmon staff are never told by this.** Title `<customer> → <stage>` (raw picklist value), body "Previously: <old stage>". A stage off the journey still notifies | `/dealer/customers/{customerId}` (push `app: 'dealer'`) |
+| Dealer + rep | `mention` | as above, after D-086's private-comment guard | `/dealer/customers/{customerId}` (push `app: 'dealer'`) |
 | Service managers / the assignee | `service_intake` | **always on — no switch** (Harmon, 2026-10-02): a Service customer created, un-archived or first tagged Service with nobody in Assigned To → every active Admin / Manager / Executive whose default department is Service (minus whoever did it); someone put in Assigned To → that person (not when they assigned themselves). From the Service popups and Add to Service (estimate Lambda) and from the customer page's own edits (`sundial-sf-update`). `lib/service-intake-alerts.js` | `/customers/{id}` |
 
 "The office" = everyone in the tenant whose `profiles.access_scope` is `tenant`, minus whoever did the thing. **"On my way" does not ring the office** — the board's live blocks carry it; seven techs a morning would be noise.
 
-Each person can switch a category off in **Settings → Notifications** (a missing switch is ON), and can turn browser pop-ups off separately. `service_intake` is deliberately on neither list: it rides on whether the person has notifications at all. The `mention` bell is independent of the "Email me when I'm @-mentioned" switch.
+Each person can switch a category off in **Settings → Notifications** (a missing switch is ON; dealers and reps see `DEALER_CATEGORIES` = stage, mention), and can turn browser pop-ups off separately. `service_intake` is deliberately on neither list: it rides on whether the person has notifications at all. The `mention` bell is independent of the "Email me when I'm @-mentioned" switch.
 
 ## The three deliveries
 
@@ -44,7 +46,22 @@ Recipients are Supabase auth uuids. A Salesforce `Sundial_User__c` id (a call's 
 3. **Create the Lambda** `sundial-notify` in the console like `sundial-sms` (Node 22.x, `index.handler`, role `sundial-lambda-execution-role`, 30 s timeout), then `.\deploy.ps1 sundial-notify`. Optional env: `SERVICE_TIMEZONE` (default `America/Phoenix`), `REMINDER_HOUR` (default `17`).
 4. `.\scripts\wire-notify-routes.ps1` — the four `/notify/*` routes, the invoke permission, **and** the EventBridge rule `sundial-notify-sweep` (`rate(5 minutes)`) that runs the reminder sweep; deploys the API.
 5. **Redeploy the emitters:** `sundial-auth-proxy` (the new `notify.self` action in `lib/access.js`), `sundial-service-board`, `sundial-sms`, `sundial-service-estimate`, `sundial-service-public`, `sundial-comment-notify`.
-6. Push the portal (Vercel). Then, in the portal: bell → gear → **Turn on** → **Send me a test**. On a phone: open the tech app from the Home Screen and tap **Turn on** on the banner.
+6. **Dealer stage alerts (dealer module step 6, 2026-10-26):**
+   1. Make a long random secret (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`) and put it in a new Secrets Manager secret **`sundial/stage-notify`** = `{ "secret": "…" }`. Until it exists the route refuses every post (401).
+   2. `.\deploy.ps1 sundial-notify` and `.\deploy.ps1 sundial-comment-notify` (the mention push now carries `app: 'dealer'` for a dealer / rep).
+   3. `.\scripts\wire-notify-routes.ps1` again — adds `POST /webhooks/stage-change` and its invoke permission, deploys the API.
+   4. **Supabase SQL editor:** `sql/sundial_stage_notify.sql` (after `sql/sundial_comment_mention_notify.sql`, which created `private.app_config`). It adds `lastmodifieddate` to both caches, lets push subscriptions say `app = 'dealer'`, and creates the three triggers.
+   5. Then the two config rows (the same secret as step 1):
+      ```sql
+      insert into private.app_config (key, value) values
+        ('stage_notify_url',    'https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod/webhooks/stage-change'),
+        ('stage_notify_secret', '<the secret>')
+      on conflict (key) do update set value = excluded.value, updated_at = now();
+      ```
+   6. Optional: one full resync of `solar` (and `customer`, if not already done for the dealer list) so `lastmodifieddate` is filled; until then the dedupe stamp is `last_synced_at`, which works.
+   7. Test: move the designated test record's stage, then `select status_code, content from net._http_response order by created desc limit 5` — `200` with `reason: no_recipients` is correct for a record with no signed-in dealer / rep.
+   - ⚠️ **Turn it off before bulk stage changes** (a Salesforce data fix, an import, a TRUNCATE + full resync of the solar cache — every re-inserted solar is a "new project"): `delete from private.app_config where key = 'stage_notify_url';` and re-insert it afterwards. A routine `{ "mode": "full" }` resync is safe — it upserts and no stage moves.
+7. Push the portal (Vercel). Then, in the portal: bell → gear → **Turn on** → **Send me a test**. On a phone: open the tech app from the Home Screen and tap **Turn on** on the banner.
 
 ## Devices
 
@@ -64,6 +81,8 @@ Recipients are Supabase auth uuids. A Salesforce `Sundial_User__c` id (a call's 
    - **"Are you still at the job?" (`reminder/overrun`, 2026-10-21).** The tech — never the office — gets one push per call when they are still clocked into an In Progress call 2 hours after its scheduled end (within 12 hours): "SVC-01234 was scheduled to end 2 hours ago" (3+ hours says the real number), "Are you still at <customer>, <address>? Tap to clock out or keep going.", opening the call in the tech app. A tech who already clocked out of the call (paused — left for the next job) is not asked. Key `overrun:{call}`; nothing changes the call. Not ringing? The tech's **Reminders** switch in Settings is the same one the hour-before reminder uses.
 
 ## Security
+
+- The stage webhook (`POST /webhooks/stage-change`) is called by Postgres, not a browser: the `X-Sundial-Stage-Secret` header is compared in constant time and an unconfigured secret refuses everything. The post names a record; who is told and in which tenant come from the cache row (a post whose `client_sf_id` disagrees with the row's is skipped). Every skip is a 200 so pg_net does not retry; the dedupe key `stage:{object}:{sf_id}:{new_stage}:{modstamp}` makes a redelivery silent.
 
 - The recipient / owner of every subscription is the verified JWT subject; the browser cannot subscribe anyone else or read anyone's endpoints (no browser policy on `sundial_push_subscriptions` at all).
 - The private VAPID key is only ever in Secrets Manager and Lambda memory; the public key is public by design.

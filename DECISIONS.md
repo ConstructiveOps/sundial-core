@@ -3810,3 +3810,22 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - A comment flipped to private is not delivered to a rep's open tab (RLS refuses the new row); it disappears on reload. They had already read it.
 - `scripts/verify-comment-rls.mjs` also stopped treating zz-tech as `none` scope — stale since p10.
 - The portal half (Private toggle + badge, picker privacy, UPDATE events, the dealer feed) is later dealer-module steps.
+
+
+## D-074 amendment 3 (2026-10-26): a third audience — dealers and reps hear every stage change of their deal, from a trigger on the cache
+
+**Dealer module step 6 of 9.**
+
+**Context.** A dealer or rep follows a deal from the `/dealer` shell and wants to be told when it moves. Nothing in Sundial decides a stage change: `Stage__c` on `Sundial_Customer__c` and `Sundial_Solar__c` is moved by portal edits, Tim's Flows, Aurora, Zapier and admins in Salesforce. An emitter in `sundial-sf-update` would hear only the portal's edits.
+
+**Decision.**
+1. **The hook is the cache**, the one place every path lands (write-through, read-time refresh, the 5-minute sync). `sql/sundial_stage_notify.sql`: `notify_stage_change()` (SECURITY DEFINER, pinned search_path) behind `trg_customer_cache_stage_notify` / `trg_solar_cache_stage_notify` (AFTER UPDATE OF stage, WHEN `old.stage IS DISTINCT FROM new.stage`) and `trg_solar_cache_created_notify` (AFTER INSERT on the solar cache), posting `{ object, sf_id, client_sf_id, old_stage, new_stage, modstamp, op }` through `pg_net` with `X-Sundial-Stage-Secret` — the `comment_mentions` pattern, config in `private.app_config` (`stage_notify_url`, `stage_notify_secret`), every failure swallowed so the cache write always wins.
+2. **`POST /webhooks/stage-change` in `sundial-notify`** (`stage.js`): the secret in constant time (Secrets Manager `sundial/stage-notify`, env second), fail closed; the cache row decides the tenant and the recipients, the post only the stage values; every skip a 200.
+3. **Recipients are dealers and reps only — never staff:** the profile whose `sundial_user_id` is the row's `sales_rep_sf_id` **if its scope is own or dealer**, plus every `access_scope = 'dealer'` profile with the row's `dealer_sf_id`; a solar with neither falls back to its customer's (D-086's "solar through its customer"). Category **`stage`**, kinds `customer` / `solar` / `solar_created`, link `/dealer/customers/{customerId}` (`RECORD_PATHS.dealercustomer`), dedupe `stage:{object}:{sf_id}:{new_stage}:{modstamp}`. A stage off `lib/dealer-journey.js` still notifies. Nothing is rate limited.
+4. **`DEALER_CATEGORIES` = stage, mention** (the dealer Settings list). Push payloads carry **`app`** when the emitter names one (`dealer` here and on a dealer / rep mention from `sundial-comment-notify`) so the one service worker opens the right shell; it is not stored on the bell row. `sundial_push_subscriptions.app` accepts `dealer`.
+5. **The modstamp is Salesforce `LastModifiedDate`**, cached as `lastmodifieddate` on both tables (added by the same file; the sync fills a column by its existence), `last_synced_at` until filled. It is in the key so a redelivery is silent and the same stage reached again later is news.
+
+**Consequences.**
+- A bulk stage change fans out one push per recipient per row; so does a TRUNCATE + full resync of the solar cache (every row re-inserted = "new project"). The off switch is deleting the `stage_notify_url` row; the runbook says to use it. A routine full resync is safe (upserts, no stage moves).
+- A post can name a stage the row no longer has (two moves inside one sync); each transition is still its own notification, which is what happened.
+- The customer stage keeps notifying after a solar exists, though the journey then ignores it — "every stage change" was the ask.

@@ -471,6 +471,8 @@ export async function handleMention(payload, cfg, { now = new Date(), notifier =
     recordType: comment.record_object,
     recordSfId: comment.record_id,
     dedupeKey: `mention:${mention.id}`,
+    // A dealer or rep's phone opens the dealer shell (dealer module step 6).
+    ...(toDealer ? { app: "dealer" } : {}),
   });
 
   if (emailOff) {

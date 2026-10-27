@@ -929,6 +929,7 @@ test("D-086: a PUBLIC comment mentioning a rep still sends — and links to the 
     assert.equal(parse(res).sent, true, String(context));
     assert.ok(ctx.sent[0].text.includes(`${DEFAULT_PORTAL_BASE_URL}/dealer/customers/${RECORD_ID}`), ctx.sent[0].text);
     assert.equal(ctx.bells[0].url, `/dealer/customers/${RECORD_ID}`);
+    assert.equal(ctx.bells[0].app, "dealer", "a rep's push opens the dealer shell");
   }
 });
 
@@ -963,6 +964,7 @@ test("D-086: staff on the same solar comment keep the staff link", async () => {
   recipientScope("tenant");
   await handler(hookEvent());
   assert.equal(ctx.bells[0].url, `/projects/solar/${SOLAR_ID}`);
+  assert.equal(ctx.bells[0].app, undefined, "staff pushes name no shell");
 });
 
 test("D-086: before the p11 SQL runs (no comments.is_private) the comment read is retried without it and the mention still sends", async () => {

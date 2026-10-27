@@ -7,6 +7,10 @@
       POST   /notify/subscriptions   turn push on for this browser / phone
       DELETE /notify/subscriptions   turn it off
       POST   /notify/test            ring yourself (bell + push)
+      POST   /webhooks/stage-change  a deal's stage moved — posted by the cache trigger in
+                                     sql/sundial_stage_notify.sql through pg_net (dealer
+                                     module step 6; the X-Sundial-Stage-Secret header is the
+                                     only gate, checked IN the Lambda, fail closed)
     plus OPTIONS for CORS. AWS_PROXY, authorization NONE at the gateway — the Supabase JWT
     is checked IN the Lambda (action notify.self: every signed-in scope but none).
 
@@ -20,6 +24,9 @@
          (generate with: node -e "console.log(JSON.stringify(require('web-push').generateVAPIDKeys()))"
           from the sundial-core folder — the private key goes in the secret and nowhere else)
       3. sql/sundial_notifications.sql has been run in the Supabase SQL editor.
+      4. (stage webhook) Secrets Manager `sundial/stage-notify` = { "secret": "…" } — the
+         same value as private.app_config 'stage_notify_secret' (sql/sundial_stage_notify.sql).
+         Wiring the route before the secret exists is safe: the Lambda refuses every post.
     Optional Lambda env on sundial-notify: SERVICE_TIMEZONE (default America/Phoenix),
     REMINDER_HOUR (local hour of the day-before digest, default 17).
 
@@ -81,10 +88,18 @@ Write-Host "==> /notify/test : POST, OPTIONS" -ForegroundColor Cyan
 $test = Ensure-Resource $notify "test"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $test $m }
 
+Write-Host "==> /webhooks/stage-change : POST (Postgres, shared secret)" -ForegroundColor Cyan
+$webhooks = Ensure-Resource $root "webhooks"
+$stageChange = Ensure-Resource $webhooks "stage-change"
+Wire-Method $stageChange "POST"
+
 Write-Host "==> Lambda invoke permission (apigateway)" -ForegroundColor Cyan
 aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-notify" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/*/notify/*" --output json 2>$null | Out-Null
+aws lambda add-permission --function-name $Fn --region $Region `
+    --statement-id "apigw-notify-stage-change" --action "lambda:InvokeFunction" `
+    --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/webhooks/stage-change" --output json 2>$null | Out-Null
 Write-Host "  (an 'already exists' error here is harmless - permission is in place)" -ForegroundColor DarkGray
 
 Write-Host "==> EventBridge schedule '$RuleName' (rate(5 minutes)) -> $Fn" -ForegroundColor Cyan
@@ -104,6 +119,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Add notification routes -> $Fn" --output json | Out-Null
+    --description "Notification routes + stage webhook -> $Fn" --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
 Write-Host "SUCCESS. Try it: GET https://$ApiId.execute-api.$Region.amazonaws.com/$Stage/notify/config (with a portal JWT)" -ForegroundColor Green

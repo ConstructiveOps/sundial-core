@@ -7,6 +7,8 @@
 //                                       caller's verified identity, never request input
 //   DELETE /notify/subscriptions       { endpoint }  turn it off (only the caller's own row)
 //   POST   /notify/test                ring the caller: a bell row + a push to their devices
+//   POST   /webhooks/stage-change      a deal's stage moved (the cache trigger, pg_net) → its
+//                                       dealer + rep (stage.js; shared secret, no JWT)
 //   (EventBridge, every 5 minutes)     the sweep — see below
 //
 // EVERYTHING ELSE that notifies lives where the event happens: the dispatch board
@@ -55,6 +57,7 @@ import { broadcast as realBroadcast } from "../../lib/realtime.js";
 import { alwaysEnforcedAccess, assertAction } from "../../lib/access-enforce.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { CATEGORIES, SUBSCRIPTIONS_TABLE, createNotifier, fmtTime, jobLabel, realSendPush } from "../../lib/notify.js";
+import { createStageHandler, isStageWebhook } from "./stage.js";
 
 export const CALL_SF_OBJECT = "Sundial_Service_Call__c";
 export const ONE_HOUR_WINDOW_MIN = 65; // a 5-minute sweep must not miss a call that starts in exactly 60
@@ -159,6 +162,7 @@ export function createHandler(deps = {}) {
   };
   const timeZone = d.env.SERVICE_TIMEZONE || "America/Phoenix";
   const notifier = deps.notifier ?? createNotifier({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, broadcast: d.broadcast, sendPush: d.sendPush, now: d.now, env: d.env });
+  const stageChange = createStageHandler({ getSupabaseClient: d.getSupabaseClient, getSecret: d.getSecret, env: d.env, notifier });
 
   const H = {
     // --- GET /notify/config -----------------------------------------------------------
@@ -176,7 +180,8 @@ export function createHandler(deps = {}) {
       const auth = str(sub?.keys?.auth);
       if (!endpoint || !p256dh || !auth) return jsonResponse(400, cors, { error: "bad_request", code: "SUBSCRIPTION_INVALID", message: "The browser did not hand us a complete push subscription." });
       if (!/^https:\/\//i.test(endpoint) || endpoint.length > 2000) return jsonResponse(400, cors, { error: "bad_request", code: "ENDPOINT_INVALID" });
-      const app = body?.app === "tech" ? "tech" : "office";
+      // Which shell registered the device: tech (/tech), dealer (/dealer), else the office.
+      const app = body?.app === "tech" || body?.app === "dealer" ? body.app : "office";
       const cfg = await notifier.pushConfig();
       if (!cfg.configured) return jsonResponse(503, cors, { error: "not_configured", code: "PUSH_NOT_CONFIGURED", message: "Push isn't set up on the server yet (no VAPID keys)." });
       const supabase = await d.getSupabaseClient();
@@ -438,6 +443,15 @@ export function createHandler(deps = {}) {
     }
 
     const method = httpMethod(event);
+    // The stage webhook comes from Postgres (pg_net) with a shared secret, not a JWT.
+    if (isStageWebhook(method, event?.rawPath || event?.path || "")) {
+      try {
+        return await stageChange(event);
+      } catch (err) {
+        console.error("stage-notify error:", err?.message || err);
+        return { statusCode: 500, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "server_error", route: "stage-change" }) };
+      }
+    }
     const headers = normalizeHeaders(event?.headers);
     const cors = corsHeaders(headers["origin"]);
     if (method === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };

@@ -4,6 +4,17 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-26 — Stage-change push to dealers and reps (dealer module step 6 of 9, D-074 am. 3) — BUILT, NOT DEPLOYED, SQL NOT RUN
+
+- [x] `sql/sundial_stage_notify.sql` (triggers, `lastmodifieddate` on both caches, `dealer` push app), `sundial-notify` `POST /webhooks/stage-change` (`stage.js`), `lib/notify.js` (`stage`, `DEALER_CATEGORIES`, `dealercustomer`, push `app`), comment-notify `app: 'dealer'`, wire script, tests, docs. Suite 1,772 / 1,772
+- [ ] **TIM: Secrets Manager `sundial/stage-notify`** = `{ "secret": "<long random>" }`
+- [ ] **TIM: redeploy** `.\deploy.ps1 sundial-notify` and `.\deploy.ps1 sundial-comment-notify`
+- [ ] **TIM: `.\scripts\wire-notify-routes.ps1`** (adds `/webhooks/stage-change`, deploys the API)
+- [ ] **TIM: Supabase SQL editor** — `sql/sundial_stage_notify.sql`, then the two `private.app_config` rows (`stage_notify_url`, `stage_notify_secret` = the same secret) — in that order, after the route is live (the trigger swallows post failures)
+- [ ] Optional: full resync `{ "object": "solar", "mode": "full" }` to fill `lastmodifieddate`
+- [ ] Test on the designated test record (`net._http_response` → 200); a ZZ dealer / rep fixture signed in on a phone should get the push
+- [ ] Remember: delete the `stage_notify_url` row before any bulk stage fix or solar-cache rebuild
+
 ## 2026-10-26 — Dealer list: rep name + last updated — BUILT, NOT DEPLOYED
 
 - [x] `Sales_Rep_Name__c` row in the Customer workbook, OVERRIDES read for Sales Dealer + Sales Rep, manifests regenerated (`sales_rep_name` in both roles' listColumns), workbook copied to harmon-crm `docs/`

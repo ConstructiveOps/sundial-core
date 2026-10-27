@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHandler, FORGOT_LIMIT } from "./index.js";
 import { mintAndSend, DEFAULT_PORTAL_BASE_URL } from "../../lib/auth-email.js";
+import { MANIFEST_VERSION } from "../../lib/field-manifest/index.js";
 
 function world() {
   const ctx = { emails: [], emailConfigured: true, links: [], resets: [], genError: null };
@@ -306,7 +307,8 @@ test("D-078: GET /auth/me carries tenant.slug next to tenant.clientId — additi
   assert.equal(r.statusCode, 200);
   const body = JSON.parse(r.body);
   assert.deepEqual(body.tenant, { clientId: "a1W7y000007AszBEAS", slug: "harmon" });
-  assert.deepEqual(body.user, { ...identity.user, access: identity.access }, "the user block is what it was");
+  // 2026-10-27: access also carries the bundled manifest version (me.test.js); nothing else moved.
+  assert.deepEqual(body.user, { ...identity.user, access: { ...identity.access, manifestVersion: MANIFEST_VERSION } }, "the user block is what it was");
   assert.deepEqual(Object.keys(body), ["user", "tenant"]);
   assert.equal(upserts[0].tenant_id, "a1W7y000007AszBEAS", "the profile still stores the tenant RECORD id");
   // Another tenant reads its own slug; a user with no tenant record reads null.

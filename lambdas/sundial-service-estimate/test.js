@@ -2588,11 +2588,25 @@ test("club: with SolarFax's API configured the activation creates the member + s
   fake.solarFaxFails = true;
   r = await pub(h, "POST", "/public/club/harmon/join", { planCode: "monitor", interval: "monthly", customer: { firstName: "Bo", lastName: "Ng", email: "bo@example.com" } });
   const m2 = fake.store.Sundial_Membership__c[1];
+  const errLines = [];
+  const realError = console.error;
+  console.error = (...args) => { errLines.push(args.map(String).join(" ")); };
+  try {
   r = await send(h, stripeDelivery(evt("evt_x3", "checkout.session.completed", { id: "cs_test_2", object: "checkout.session", mode: "subscription", customer: "cus_club2", subscription: "sub_y", metadata: { tenantId: TENANT, membershipId: m2.Id } })));
   assert.equal(r.status, 200);
   assert.equal(m2.Status__c, "Active");
   assert.equal(m2.SolarFacts_Status__c, "Failed");
-  assert.match(m2.SolarFacts_Last_Error__c, /Invalid Api-Key/);
+  } finally { console.error = realError; }
+  // SolarFax's body is stored for support: "<status>: <message> — <body>".
+  assert.equal(m2.SolarFacts_Last_Error__c, '200: Invalid Api-Key — {"success":false,"message":"Invalid Api-Key"}');
+  const logLine = errLines.find((l) => l.startsWith("club: SolarFax answered"));
+  assert.ok(logLine, "the status + body + request are logged");
+  const logged = JSON.parse(logLine.slice("club: SolarFax answered ".length));
+  assert.equal(logged.status, 200);
+  assert.deepEqual(logged.body, { success: false, message: "Invalid Api-Key" });
+  assert.equal(logged.request.user.email, "b***@example.com", "the email is masked");
+  assert.equal(logged.event, "member.activated");
+  assert.ok(!errLines.some((l) => /key-1|tok-1|bo@example.com/.test(l)), "never the key, the token or the full email");
   assert.match(fake.emails.find((e) => e.to === "service-team@example.com" && /Bo Ng/.test(e.text)).text, /SolarFax was NOT told \(Invalid Api-Key\)/);
   fake.solarFaxFails = false;
   r = await call(h, "POST", `/service/club/memberships/${m2.Id}/solarfacts`);

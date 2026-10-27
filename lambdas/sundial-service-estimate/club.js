@@ -39,7 +39,7 @@ import { soqlEscapeString } from "../../lib/salesforce.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { ensureStripeCustomer, fromCents, stripeForTenant, toCents, StripeError } from "../../lib/stripe.js";
-import { createSolarFactsClient, solarFactsConfigFor, splitName } from "../../lib/solarfacts.js";
+import { createSolarFactsClient, maskedRequest, SolarFactsError, solarFactsConfigFor, solarFactsErrorText, splitName } from "../../lib/solarfacts.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
 import { candidateSoql, matchCandidates, normalizeNewCustomer, CANDIDATE_SELECT, CUSTOMER_SF_OBJECT } from "./customer.js";
@@ -419,10 +419,13 @@ export function createClubHandlers(d, h) {
     const okStatus = cancelling ? "Cancel Sent" : "Sent";
     const failStatus = cancelling ? "Cancel Failed" : "Failed";
     const now = d.now().toISOString();
-    const fail = async (err) => {
+    // `reason` stays the short message (the team email quotes it); the stored error carries
+    // SolarFax's status + response body for support when there is one.
+    const fail = async (err, stored = null) => {
       const msg = String(err).slice(0, 255);
-      console.error("club: SolarFax hand-off failed:", msg);
-      await d.sfUpdateRecord(MEMBERSHIP_SF_OBJECT, membership.Id, { SolarFacts_Status__c: failStatus, SolarFacts_Last_Error__c: msg });
+      const lastError = stored || msg;
+      console.error("club: SolarFax hand-off failed:", lastError);
+      await d.sfUpdateRecord(MEMBERSHIP_SF_OBJECT, membership.Id, { SolarFacts_Status__c: failStatus, SolarFacts_Last_Error__c: lastError });
       return { sent: false, reason: msg };
     };
 
@@ -444,6 +447,12 @@ export function createClubHandlers(d, h) {
         Object.assign(membership, upd);
         return { sent: true, via: "api", action: res?.action ?? null, accountId: upd.SolarFacts_Account_Id__c ?? null, test: cfg.solarFacts.test };
       } catch (e) {
+        if (e instanceof SolarFactsError) {
+          // Status + SolarFax's body + what we sent (email masked) — never the key or token,
+          // which travel as headers and are not on the error.
+          console.error("club: SolarFax answered", JSON.stringify({ event, membershipId: membership.Id, status: e.status, body: e.body ?? null, request: maskedRequest(e.request) }));
+          return fail(e.message, solarFactsErrorText(e));
+        }
         return fail(e?.message || e);
       }
     }

@@ -36,8 +36,11 @@ ever types a card, and nothing about Harmon's plans is in code: the catalog is S
    customer; SolarFax is sent the member (`POST users` with name / email / phone / address, the
    connect-invite template — SolarFax emails the invite, not Sundial); the team is emailed. A
    redelivered event is a no-op. SolarFax refusing or being down is stamped on the row
-   (`SolarFacts_Status__c = Failed`, the message in `SolarFacts_Last_Error__c`) and named in the
-   team email — it never fails the webhook; the office's **Resend** retries it.
+   (`SolarFacts_Status__c = Failed`, and in `SolarFacts_Last_Error__c` an API refusal is stored as
+   `<status>: <message> — <first 200 chars of SolarFax's JSON response>`, 255 max) and named in the
+   team email — it never fails the webhook; the office's **Resend** retries it. The Lambda log line
+   `club: SolarFax answered {…}` carries the status, SolarFax's body and the request we sent with the
+   member's email masked (`a***@gmail.com`) for SolarFax support — never the Api-Key / Access-Token.
 3. `/club/joined?session=cs_…` polls `GET joined` until the row says Active — the page never
    waits on the webhook; the email is the confirmation.
 4. Renewals: `invoice.paid` stamps the last payment and lifetime revenue; `invoice.payment_failed`

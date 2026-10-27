@@ -1,5 +1,12 @@
 # Sundial — Progress Log
 
+## 2026-10-27 — A SolarFax refusal keeps SolarFax's own answer, for support (`club.js` `postSolarFacts`) — BUILT, NOT DEPLOYED
+
+- **`SolarFacts_Last_Error__c`** on an API failure is now `<status>: <message> — <first 200 chars of JSON.stringify(SolarFax's body)>` (still 255 max; no dash part when SolarFax sent no body, e.g. unreachable = `0: SolarFax could not be reached: …`). The team email still quotes the short message. Hook / no-email failures unchanged.
+- **Log line** `club: SolarFax answered {event, membershipId, status, body, request}` — the request body we sent with `user.email` masked (`a***@gmail.com`) so SolarFax support can match it. The key and token are headers and never on the error.
+- **`lib/solarfacts.js`:** `SolarFactsError` carries `request`; new `maskEmail`, `maskedRequest` (copy, never mutates), `solarFactsErrorText`.
+- Tests: `lib/solarfacts.test.js` +1 (format, 200 / 255 cuts, no body, masking, no credentials on the request); `sundial-service-estimate/test.js` SolarFax test asserts the exact stored error and the masked log line, and that no log line holds the key, token or full email. Docs: `docs/integrations/service-club.md`.
+
 ## 2026-10-26 — Dealers and reps get a push on every stage change of their deal (dealer module step 6 of 9, D-074 amendment 3, `feature/stage-notify`) — BUILT, NOT DEPLOYED, SQL NOT RUN
 
 - **The hook is the cache, not a Lambda.** `sql/sundial_stage_notify.sql` (idempotent): `notify_stage_change()` (SECURITY DEFINER, pinned search_path, `private` schema-qualified) and three triggers — AFTER UPDATE OF stage on `sundial_customer_cache` and `sundial_solar_cache` WHEN the stage really changed, AFTER INSERT on `sundial_solar_cache` (a new project). Posts `{ object, sf_id, client_sf_id, old_stage, new_stage, modstamp, op }` through `pg_net` with `X-Sundial-Stage-Secret`, every failure swallowed (copied from `notify_comment_mention`). `op` was added to the requested body: without it a stage set on an OLD solar whose stage was blank would look like a new project. Config rows `stage_notify_url` / `stage_notify_secret` in `private.app_config`, documented in the file. Same file: `sundial_push_subscriptions` check now `app in ('office','tech','dealer')`.

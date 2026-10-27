@@ -4,7 +4,42 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## 2026-10-26 — Stage-change push to dealers and reps (dealer module step 6 of 9, D-074 am. 3) — BUILT, NOT DEPLOYED, SQL NOT RUN
+## 2026-10-27 — Dealer module step 8 of 9: verification + docs; where steps 0–7 stand (step 9 is Harmon's review)
+
+Checked live on 2026-10-27 (AWS, Supabase, the deployed API), not from the older sections below. Their "NOT DEPLOYED" headers are history.
+
+**Verification**
+- [x] `scripts/verify-dealer-module.mjs` (new): **23 / 24** on ZZ users. Lists, the solar twin, another dealer's 404, comment privacy, the rep's dealer-context post, the stage push (one row each for zz-rep-a2 + zz-mgr-a, none for zz-rep-a1, none extra after a re-sync) and the tech app's 403 all pass. Fixtures re-seeded after (`seed-access-test-fixtures.mjs --apply`)
+- [x] `scripts/verify-access-matrix.mjs`: Technician is scope `tech` (200 on `/sf/user` + `/sf/users`), and the dealer check prints why a row is excluded. **0 mismatches** for every user
+- [x] `scripts/verify-field-manifest-live.mjs`: 44 / 44 (deployed manifests = the workbooks)
+- [ ] **FAILED: `/auth/me` carries no `manifestVersion`** (check E). `sundial-auth-proxy` never imports `lib/field-manifest`, though access-model §1.3 / §4.5 say it does. No portal code reads it today, so nothing is broken. **TIM: decide** — add it (one line in auth-proxy + a test, then `.\deploy.ps1 sundial-auth-proxy`) or drop it from the docs
+- [x] Found while verifying: a portal save only flags the cache row stale, so a dealer's stage push follows the next read of that record (seconds) or the 5-minute sync. Documented (access-model §13.4, push-notifications, api-endpoints). `docs/api-endpoints.md`'s `PATCH /sf/{object}/{id}` example corrected to `{ "fields": … }`
+- [ ] Note: the designated record is tagged `Customer_Type__c = Service` (Service testing), so zz-rep-a1's dealer LIST is empty by the Service-only rule. Correct, and now explained by both scripts. Leave it unless Service testing moves to another record
+
+**Deployed and live (steps 0–7)**
+- [x] Step 0 — manifests from Harmon's sheet + `OVERRIDES`: in `sundial-sf-query` / `sundial-sf-update` / `sundial-dealer` (10-26), live check 44 / 44
+- [x] Step 1 — `sql/sundial_access_p11_comment_privacy.sql` **Parts A and B** (1,238 existing solar comments + 49 system lines private); `sundial-comment-notify` (10-27), `sundial-sf-update`
+- [x] Step 3 — `sundial-dealer` Lambda (10-26, 1,024 MB), `/dealer/customers[/{id}]` routes, `sql/sundial_dealer_customer_view.sql` (with `lastmodifieddate`), `dealer.read` on `/auth/me` (`sundial-auth-proxy` 10-23), floor chips (`listFilterValues`)
+- [x] 10-26 list follow-up — `sales_rep_name` + `updatedAt` on list rows, `sql/2026-10-26_customer_last_modified.sql`, the view re-run
+- [x] Step 6 — `sql/sundial_stage_notify.sql` (3 triggers), `private.app_config` `stage_notify_url` / `stage_notify_secret`, Secrets Manager `sundial/stage-notify`, `POST /webhooks/stage-change`, `sundial-notify` + `sundial-comment-notify` (10-27)
+- [x] `GET /sf/users` `staff` flag (live: 30 of 33 rows staff for a rep)
+- [x] Portal steps 2, 4, 5, 7 — on harmon-crm `main` (`c5e6544`, pushed)
+
+**Still pending**
+- [ ] **TIM: full resync** of `customer` then `solar` (`sundial-cache-sync` → Test `{ "object": "customer", "mode": "full" }`, then solar). 39,386 of 39,485 customer rows have no `lastmodifieddate`, so most dealer rows show "Created", not "Updated". **Delete `private.app_config` `stage_notify_url` first and put it back after**: a full resync re-inserts solars, and every one would push as a new project
+- [ ] **TIM: real phones** — the harmon-crm step 4 / 5 / 7 go-live checks (iPhone Add to Home Screen + push, Android install, offline open) as `zz-rep-a1` / `zz-mgr-a`. One dealer device is already subscribed (`zz-rep-a2`, 20:03 today); this session's stage tests pushed to it
+- [ ] **TIM: confirm `Company_Name__c` = edit for both sales roles** (step 0 section below)
+- [ ] Harmon: send dealers `harmon-crm/docs/dealer-portal-install.md` (export to PDF) once the phone checks pass
+- [ ] Dealer feed: a dealer cannot delete their own note yet (harmon-crm TASKS)
+- [ ] The seed script's closing "TODO(Phase 1): Sundial_Dealer__c does not exist" line is stale text (the ZZ users keep their dealers); tidy when next touched
+
+**Open Harmon questions (step 9, Harmon's review)**
+- [ ] **The journey list** — the 9 customer + 19 solar steps and the off-path mapping in `lib/dealer-journey.js` (Hold / Cancelled / Closed Lost … as flags, the four "Sold …" values folded into Sold - Pending Review, "Follow Up" etc. anchored at Appointment Set). Does it read the way Harmon talks about a deal?
+- [ ] **`Dealer_Fee__c`** — Harmon's sheet lists it twice: Y under Contract & Financing, blank for the rep under Budget Inputs. The stricter answer won, so **reps do not see Dealer Fee** and dealers do. Is that right?
+- [ ] **The Commissions rows** — Ralph's sheet left the commission fields off. Tim's `OVERRIDES` show `Commission_Total__c`, `Commission_Total_PPW__c` and `Commission_Redline_PPW__c` to Sales Dealers (read) and hide them from Sales Reps, on Customer and Solar. Confirm, or name the fields Harmon wants each role to see
+- [ ] **The Welcome Call form parameters** — the dealer app opens `https://welcomecall.sundialcrm.com/page` pre-filled with `customer_name`, `phone_number`, `customer_email`, `property_address`, `city`, `state`, `zip_code`. Does the form fill all seven, and should anything else be passed (system size, contract amount, financing partner, the dealer / rep name)?
+
+## 2026-10-26 — Stage-change push to dealers and reps (dealer module step 6 of 9, D-074 am. 3) — DEPLOYED, verified live 2026-10-27 (step 8 section above)
 
 - [x] `sql/sundial_stage_notify.sql` (triggers, `lastmodifieddate` on both caches, `dealer` push app), `sundial-notify` `POST /webhooks/stage-change` (`stage.js`), `lib/notify.js` (`stage`, `DEALER_CATEGORIES`, `dealercustomer`, push `app`), comment-notify `app: 'dealer'`, wire script, tests, docs. Suite 1,772 / 1,772
 - [ ] **TIM: Secrets Manager `sundial/stage-notify`** = `{ "secret": "<long random>" }`
@@ -15,7 +50,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Test on the designated test record (`net._http_response` → 200); a ZZ dealer / rep fixture signed in on a phone should get the push
 - [ ] Remember: delete the `stage_notify_url` row before any bulk stage fix or solar-cache rebuild
 
-## 2026-10-26 — Dealer list: rep name + last updated — BUILT, NOT DEPLOYED
+## 2026-10-26 — Dealer list: rep name + last updated — DEPLOYED except the full customer resync (step 8 section above)
 
 - [x] `Sales_Rep_Name__c` row in the Customer workbook, OVERRIDES read for Sales Dealer + Sales Rep, manifests regenerated (`sales_rep_name` in both roles' listColumns), workbook copied to harmon-crm `docs/`
 - [x] `sundial-dealer` list rows return `updatedAt` (Salesforce LastModifiedDate); `sql/2026-10-26_customer_last_modified.sql`; tests; `docs/api-endpoints.md`. Suite 1,752 / 1,752
@@ -24,7 +59,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **TIM: redeploy** `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-dealer` (the manifest is bundled into each)
 - [ ] harmon-crm: show `sales_rep_name` and `updatedAt` on the `/dealer` list rows
 
-## 2026-10-23 — The `/dealer` shell's backend, `sundial-dealer` (dealer module step 3 of 9) — BUILT, NOT DEPLOYED
+## 2026-10-23 — The `/dealer` shell's backend, `sundial-dealer` (dealer module step 3 of 9) — DEPLOYED, verified live 2026-10-27
 
 - [x] `lambdas/sundial-dealer` (list + detail), `lib/dealer-journey.js`, `sql/sundial_dealer_customer_view.sql`, `dealer.read`, shared code moved to `lib/` (cache-read, sf-describe, full-read, caller-filters), wire script, matrix checks, docs. Suite 1,747 / 1,747
 - [ ] **TIM: run `sql/sundial_dealer_customer_view.sql`** in the Supabase SQL editor (until then the list answers 503 `DEALER_VIEW_MISSING`). Re-run it whenever a column is added to `sundial_customer_cache`, or the dealer list will not carry it
@@ -34,7 +69,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Then `node scripts/verify-access-matrix.mjs` — every `dealer:` line `ok`
 - [ ] **harmon-crm (step 4+):** the `/dealer` shell itself
 
-## 2026-10-23 — Per-comment privacy (D-086, dealer module step 1 of 9) — BUILT, NOT DEPLOYED
+## 2026-10-23 — Per-comment privacy (D-086, dealer module step 1 of 9) — DEPLOYED (Parts A + B), verified live 2026-10-27
 
 - [x] `sql/sundial_access_p11_comment_privacy.sql`; `sundial-comment-notify` private skip + dealer links; `lib/intake-comment.js` private system lines; both verify scripts; docs. Suite 1,701 / 1,701
 - [ ] **TIM / HARMON: decide on existing solar comments** before Part A — leave them public (reps read the staff comments on their own solar projects) or run the file's optional Part B (all existing solar comments + system lines private). Run V5 after Part A to see the count either way
@@ -43,7 +78,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **TIM: live proof** — `node scripts/verify-comment-scope.mjs` then `node scripts/verify-comment-rls.mjs` (ZZ users only; three ZZ mention emails per green run)
 - [ ] **harmon-crm (later dealer-module steps):** Private toggle + badge on Customer / Solar threads (`set_comment_private`), send `is_private` on insert, the picker's `mentionable_users(…, p_is_private)`, UPDATE events in the thread subscription (an unknown id on UPDATE = insert), the dealer portal's merged Customer + Solar feed with `context = 'dealer'`
 
-## 2026-10-23 — Sales Rep / Dealer labels and order in the two field-design workbooks — DONE, NOT DEPLOYED
+## 2026-10-23 — Sales Rep / Dealer labels and order in the two field-design workbooks — DONE, DEPLOYED (the live manifest check passes 44 / 44, 2026-10-27)
 
 - [x] Customer "Lead & Source": `Sales_Rep__c` → "Sales Rep (Required)" (label only, nothing enforced), moved above `Sales_Company__c`; new `Dealer_Display_Name__c` "Dealer (based on Sales Rep)", Formula (Text), read / read; `Dealer_Name__c` → "Legacy Dealer Name (Do Not Use)", bottom of the section. The Integration & System `Sales_Rep__c` row untouched
 - [x] Solar "Sale/Contract Details": `Sales_Rep__c` → "Sales Rep"; `Dealer_Display_Name__c` after it, read / read; `Sales_Representative__c` / `Sales_Company_Harmon_Solar_or_Third__c` / `Third_Party_Sales_Representative__c` → "Legacy …", moved to the bottom in that order, role cells unchanged
@@ -105,7 +140,7 @@ Full write-up: `docs/integrations/acumatica-commission-po-runbook.md` → "2026-
 - [ ] **TIM: vendors the CSV cannot place.** 8 CSV rows reach no dealer (rep names: Dennis Alessandro, Thomas Kopp, Daniel Reese, Ben Wollschlager; plus Desert Sun Systems, Volt Energy, SunbaseData Admin, and "Mr. Clutch Solar", whose dealer is reached through its "Mr Clutch Solar" row anyway). Active dealers left without a vendor: Invictus Energy, Sunlink Energy (+ the two ZZ fixtures; Harmon Solar is internal, correctly blank)
 - [x] **Lambdas still read the Solar picklist for post-cutover deals** — done in D-085 amendment 1 (section above), deploy pending
 
-## 2026-10-22 — Dealer module step 0 of 9: field visibility from Harmon's sheet (`feature/dealer-visibility`) — APPLIED TO THE WORKBOOKS + MANIFEST, NOT DEPLOYED
+## 2026-10-22 — Dealer module step 0 of 9: field visibility from Harmon's sheet (`feature/dealer-visibility`) — DEPLOYED, live manifest check 44 / 44 on 2026-10-27
 
 - [x] `scripts/apply-dealer-visibility.mjs`: sheet ("unlisted = unchanged") + rule 7 Solar adder mirror + `OVERRIDES`; applied; manifests regenerated; workbooks copied to harmon-crm `docs/` (access-model §4.1a). Suite 1,608 / 1,608
 - [ ] **TIM: confirm `Company_Name__c` as `edit` for both sales roles.** It came from harmon-crm's D-081 sheet row, not from Harmon's sheet. If it should be read-only for sales, change that row to `read` in the workbook (both repos) and regenerate

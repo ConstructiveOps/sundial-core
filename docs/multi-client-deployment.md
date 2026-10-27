@@ -158,7 +158,15 @@ primary-tenant rule (D-078).
    (Technician → the tech app), default department, **On Dispatch Board** + order, bill and
    cost rates [USERS]. **One email = one login = one tenant**: an address that already has
    a login in another tenant is refused (`409 EMAIL_IN_USE_OTHER_TENANT`).
-3. **Dealers** (`Sundial_Dealer__c`) if the client sells through dealers.
+3. **Dealers** (`Sundial_Dealer__c`) if the client sells through dealers [DEALER]. One row
+   per selling organization (`Client__c` → the tenant, `Active__c`, `Is_Internal__c`,
+   redlines, `Acumatica_Vendor_ID__c` only with the client's own Acumatica). Each Sales
+   Dealer / Sales Rep user gets `Dealer__c` in Manage Users; a deal takes its dealer from
+   its rep (D-064 A1). A Sales Rep with no dealer, or with an inactive one, is scope `none`
+   and sees nothing; give a dealer's owner the **Sales Dealer** level. Those logins land on
+   the dealer app (`/dealer`), not the office portal. The field set they see is org-wide
+   (the manifest, step 6); a client that wants a different one is a sheet and a manifest
+   change for everyone, or a client-side narrowing in the fork.
 4. **Price book** — `Sundial_Price_Book_Item__c` rows with `Client__c` (the import in
    `salesforce/pricebook-import/`). Never the standard `Pricebook2`.
 5. **Service Club** (if any) — the tenant's `Sundial_Service_Plan__c` rows [CLUB].
@@ -238,6 +246,13 @@ per-client environment. Two things to know:
 
 - `SUNDIAL_<NAME>_TENANTS` would let the new tenant share Harmon's Acumatica, Aurora or
   Retell. **Leave it unset.**
+- **`sundial-dealer`** (the dealer app's `GET /dealer/customers[/{id}]`, action
+  `dealer.read`) is one of the shared functions; it filters by the caller's tenant like
+  every other. Only a **fresh stack** (a new AWS account / API) needs it created: a Lambda
+  with `sundial-sf-query`'s role, runtime and environment, `.\deploy.ps1 sundial-dealer`,
+  then `.\scripts\wire-dealer-routes.ps1` [DEALER]. The same holds for
+  `POST /webhooks/stage-change` on `sundial-notify` (`.\scripts\wire-notify-routes.ps1`)
+  and the `sundial/stage-notify` secret: one of each serves every tenant.
 - Some settings are still **one value per Lambda**, i.e. Harmon's for every tenant:
   `SERVICE_TIMEZONE` (appointment emails, payroll weeks), `SERVICE_SHOP_LATLNG` +
   `SERVICE_GEOFENCE_METERS` (the geofence tag), `REMINDER_HOUR`, `EMAIL_FROM` /
@@ -261,6 +276,16 @@ every tenant. Know the consequences:
   are invalidation hints, not records).
 - Auth session lifetime is one setting for everyone (`docs/pwa-architecture.md` →
   *Staying signed in*).
+- **The `private.app_config` rows are project-wide, not per tenant**: `comment_notify_url`
+  / `comment_notify_secret` (mention emails) and `stage_notify_url` / `stage_notify_secret`
+  (dealer stage pushes) already exist and serve every tenant. The webhook resolves the tenant
+  from the cache row and refuses a mismatch. Never add a second set for a client. On a
+  **fresh** Supabase project they are inserted once, after their SQL files and after the
+  routes are live (`docs/integrations/push-notifications.md` step 6). **Delete
+  `stage_notify_url` before a bulk load of a new client's customers or solars**, then put it
+  back: every imported stage would otherwise push to that client's dealers and reps.
+- `sql/sundial_dealer_customer_view.sql` (the dealer list) is shared too. Re-run it after
+  adding a column to `sundial_customer_cache`, for every tenant at once.
 
 ### 7. The portal fork (half a day to two days)
 
@@ -279,7 +304,17 @@ every tenant. Know the consequences:
 5. **Harmon-specific text in code** — the generated detail configs' labels and help text,
    `INTAKE_FIELDS`, default state `AZ`, the Phoenix map centre, board hours
    (`portal-feature-inventory.md` → *Known Harmon leftovers*).
-6. **Walk `docs/portal-feature-inventory.md` row by row.** Each row: present and working,
+6. **The dealer app** (if the client has dealers or reps) [DEALER-PWA]:
+   `client-config.dealer.appName` / `appShortName` (the words under the home-screen icon),
+   `dealer.welcomeCallFormUrl` (Harmon's external Welcome Call form; blank → the page says
+   it is not set up), the client's logo on white at `public/icons/_source/` (the generator
+   reads `harmon_logo.png` by name — rename the constant in
+   `scripts/generate-dealer-pwa.mjs` or the file), then `npm run generate:dealer-pwa` →
+   `public/manifest-dealer.webmanifest` + `public/icons/dealer-*.png`, and bump `public/sw.js`
+   `VERSION`. The dealer record's layout (`npm run generate:dealer-config`) is generated from
+   Harmon's dealer sheet in sundial-core `docs/` — a client with its own sheet replaces that
+   input, never copies it into the fork.
+7. **Walk `docs/portal-feature-inventory.md` row by row.** Each row: present and working,
    or in `CLIENT_DIVERGENCE.md`. Rows dated after the copy commit are improvements the fork
    does not have yet.
 
@@ -320,6 +355,11 @@ every tenant. Know the consequences:
 8. Turn push on in Settings → Notifications and **Send me a test**.
 9. Press the Acumatica / Aurora buttons if any survived the fork: they must answer
    `INTEGRATION_NOT_ENABLED`, never act.
+10. If dealers: a Sales Rep login of the new tenant lands on `/dealer`, lists only its own
+    customers, installs from the phone's browser (`Share → Add to Home Screen` on iPhone),
+    and shows the new client's icon and name. Move one of that rep's test customers' stage
+    from the office: the rep's dealer Inbox gets one row. On Harmon,
+    `node scripts/verify-dealer-module.mjs` still passes (ZZ users only).
 
 ---
 

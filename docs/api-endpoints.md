@@ -299,19 +299,21 @@ The Solar Projects page's stage columns and PM / Sales Rep option counts **and**
 **Lambda:** `sundial-sf-update`
 **Purpose:** Update fields on a record. Writes to Salesforce, updates cache, broadcasts via Supabase Realtime.
 
-**Request body:** JSON object of field API names to new values.
+**Request body:** `{ "fields": { … } }` — field API names to new values under `fields`. A body without a non-empty `fields` object is `400 INVALID_BODY` and writes nothing (corrected 2026-10-27: this example used to show the field map at the top level, which the Lambda refuses).
 
 ```json
 {
-  "Stage__c": "Contract Signed",
-  "Project_Manager__c": "a02XX0000045EFGH"
+  "fields": {
+    "Stage__c": "Contract Signed",
+    "Project_Manager__c": "a02XX0000045EFGH"
+  }
 }
 ```
 
 **Behavior:**
 - Validates the authenticated user has permission to edit the record's tenant
 - Writes to Salesforce via JSforce
-- On success, updates the corresponding cache table
+- On success, flags the cache row `is_stale` (it does not write the new values into the cache; the next single-record read or the 5-minute `sundial-cache-sync` refreshes the row — measured 2026-10-27, and the reason a dealer's stage push follows that refresh, `docs/access-model.md` §13.4)
 - Broadcasts a change event via Supabase Realtime so other connected clients refresh
 
 **Job Bill To (D-081, 2026-10-07).** On `PATCH /sf/job/{id}` (and `POST /sf/job`) a body that touches `Bill_To_Type__c` or `Bill_To_Customer__c` is judged against the job as it is now by `lib/bill-to.js`: type `Customer` → `Bill_To_Customer__c` and `Bill_To_Name__c` are cleared in the same write; any other type needs a paying customer in the caller's tenant — **`400 BILL_TO_CUSTOMER_REQUIRED`** (none), **`400 BILL_TO_CUSTOMER_NOT_FOUND`** (unknown, or another tenant's), **`400 BILL_TO_CUSTOMER_INVALID`** (not an id); each body carries `field: "Bill_To_Customer__c"`, and nothing is written. `Bill_To_Name__c` is then written from the payer's display name in the same PATCH. **`Bill_To_Name__c` in the body is ignored** (dropped, logged once) on every job write — the rest of the PATCH lands.

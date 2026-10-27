@@ -1741,8 +1741,10 @@ Expected-outcome matrix (excerpt; the script carries the full table):
 | `zz-rep-a1` | 200 | 404 | 404 | 403 | a1, a2, mgr-a, admin, exec; **not** b1 |
 | `zz-mgr-a` | 200 | 200 | 404 | 403 | same as above |
 | `zz-rep-nodealer` | 404 | 404 | 404 | 403 | 403 |
-| `zz-tech` | 404 | 404 | 404 | 403 | 403 |
+| `zz-tech` | 404 | 404 | 404 | 403 | everyone (scope `tech` since p10: the tech app's mention picker reads `/sf/users` and `/sf/user`; corrected 2026-10-27, it was 403 here and in the matrix script) |
 | `zz-admin` | 200 | 200 | 200 | 200 | everyone |
+
+The Dealer module has its own end-to-end proof on these fixtures, `scripts/verify-dealer-module.mjs` (§13.5).
 
 ---
 
@@ -1828,3 +1830,51 @@ Resolved 2026-08-26:
    edit (read-only Solar, as specified). Customer `edit` rows are confined to the sale-time sections
    (Proposal & Design Inputs, Property & Site, Utility, Contact, Design Request, Appointment, Lead &
    Source, Marketing); no protected or formula field is marked `edit`.
+
+---
+
+## 13. The Dealer module (steps 0–7, 2026-10-22 → 10-27)
+
+Sales Dealer and Sales Rep logins (scopes `dealer` / `own`) get one shell of their own, `/dealer` (harmon-crm), instead of the office portal. Nothing in this section widens a sales scope's ROWS; it changes which surface they reach, which fields they read on it, and which comments they read.
+
+### 13.1 One record per customer — `dealer.read`, `sundial-dealer`
+
+- `GET /dealer/customers[/{id}]` (`lambdas/sundial-dealer`, `docs/api-endpoints.md`). Action **`dealer.read`** (tenant, dealer, own) — always on, not behind `ACCESS_MODEL_MODE`. A technician, a dealer-less rep or an inactive dealer's rep is `403 ACTION_FORBIDDEN` before any read.
+- Rows are **`rowFilter("customer")` only** (§3.2), on `sql/sundial_dealer_customer_view.sql` (the customer cache + its leading solar). A record outside it is 404, never 403.
+- **The solar is read through its customer** (by `Sundial_Customer__c`, never the solar's own `Dealer__c` / `Sales_Rep__c`), bound in the SOQL to that customer id. The most recently created solar leads.
+- A customer tagged **Service and nothing else** is left out of the list (the Sales page's rule, 2026-09-28); its detail read still answers. Archived customers are listed. When a list is shorter than `/sf/customer`, `scripts/verify-access-matrix.mjs` prints why for each missing row.
+- Where a deal is on the Customer → Solar path is `lib/dealer-journey.js` alone (copied into harmon-crm `config/dealer-stages.ts`, pinned by a test).
+
+### 13.2 Fields — Harmon's sheet + `OVERRIDES` (§4.1a)
+
+The `Sales Rep` / `Sales Dealer` columns of the Customer and Solar workbooks come from Harmon's dealer-portal sheet (`docs/Dealer Portal Field Visibility from Harmon.xlsx`, sundial-core only), applied by `scripts/apply-dealer-visibility.mjs`:
+
+- A listed field is authoritative (Y → `read`, an existing `edit` stays `edit`; blank → `hidden`). **An unlisted field is unchanged.** A conflicting duplicate takes the stricter answer.
+- Rule 7: the Solar adder mirror takes the dealer's Customer answer (73 fields; the mirror's 70 internal cost / margin fields stay hidden).
+- **`OVERRIDES`**, applied last: the three commission fields (`Commission_Total__c`, `Commission_Total_PPW__c`, `Commission_Redline_PPW__c`) are `read` for Sales Dealer and `hidden` for Sales Rep on both objects; `Sales_Rep_Name__c` is `read` for both (an owner tells reps apart; a rep only ever reads their own name).
+- Then `scripts/generate-field-configs.mjs --apply` → `lib/field-manifest/*.json`, bundled into every Lambda that reads records. The dealer detail read advertises the bundle as `access.manifestVersion`.
+
+### 13.3 Comments — D-086 (amends A11)
+
+- `comments.is_private` (default false). A private comment is readable only by tenant / tech scope, and only they may insert one.
+- A solar record is visible to own / dealer scope **through its customer** (`record_visible_for` v4). One read rule, `comment_readable_for(profile, object, id, is_private)`, feeds the SELECT policy, the mentions INSERT policy and `mentionable_users` (4-arg), so nobody is @-mentioned on a comment they cannot read.
+- One write path for the flag, `set_comment_private()`: caller AND author tenant / tech, so a dealer's own words are never hidden from them. Still no UPDATE policy on `comments`.
+- The dealer feed reads the Customer's and the Solar's public comments together and posts to the **Customer** with `context = 'dealer'`. Server system lines (D-084) are written private.
+- `sundial-comment-notify` sends a dealer / rep nothing for a private comment (fail closed on an unknown scope) and links them to `/dealer/customers/{customerId}`.
+
+### 13.4 Notifications — D-074 amendment 3
+
+Dealers and reps hear every stage change of their deal: a trigger on the customer and solar caches (`sql/sundial_stage_notify.sql`) posts to `POST /webhooks/stage-change` (`sundial-notify` `stage.js`). Recipients: the deal's rep (own / dealer scope only) plus the dealer's `dealer`-scope profiles; category `stage`; push `app: 'dealer'`.
+
+**Latency (measured 2026-10-27).** `sundial-sf-update` does not write the new value into the cache; it flags the row `is_stale`. The trigger therefore fires when the row is next refreshed: a single-record read (seconds after the office re-opens or re-reads the record) or the 5-minute `sundial-cache-sync`. A dealer hears a portal stage change within 5 minutes at worst, and exactly once: the trigger only fires on a real change, and the dedupe key (`stage:{object}:{id}:{stage}:{modstamp}`) keeps a replay silent.
+
+### 13.5 The proof — `scripts/verify-dealer-module.mjs`
+
+ZZ users only (passwords from `sundial/test-users`), canary-first for its one Salesforce write. It checks the lists and the solar twin (A), the comment rules (B), the stage push end to end (C), the tech app refusing a sales login (D), and the manifest version (E). `--skip-stage` runs everything but the write. Afterwards: `node scripts/seed-access-test-fixtures.mjs --apply`.
+
+Two fixture facts it relies on:
+
+- **ZZ PORTAL TEST 2 belongs to zz-rep-a2** (dealer A). zz-rep-a1 owns only the designated record, so C asserts on the record's own rep and uses rep-a1 as the "not your deal" control.
+- **The designated record is tagged `Customer_Type__c = Service`** by the Service module's own ZZ testing, so zz-rep-a1's dealer LIST is empty. That is the correct Service-only rule, not a filter bug, and the scripts say so. The rep's detail read and comment checks use that record, and they pass.
+
+**Run 2026-10-27: 23 / 24.** The one failure is E: `/auth/me` carries no `user.access.manifestVersion` (its access block has level, scope, ids, modules and actions — `dealer.read` among them — but no version) (§1.3, §4.2's risk table and §4.5 say it does; `sundial-auth-proxy` never imports `lib/field-manifest`). The dealer detail read's `access.manifestVersion` matches the local manifest.

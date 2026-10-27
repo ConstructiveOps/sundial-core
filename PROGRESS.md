@@ -1,5 +1,32 @@
 # Sundial — Progress Log
 
+## 2026-10-27 — Dealer module step 8 of 9: end-to-end verification and the docs (`feature/dealer-verify`)
+
+- **`scripts/verify-dealer-module.mjs`** (new; ZZ users from `sundial/test-users` only). Sections:
+  - **A — lists.** zz-rep-a1's list = their own customers minus Service-only (computed from Salesforce), and the detail read returns the solar twin. zz-mgr-a's list = every dealer-A customer in Salesforce. zz-rep-b1 gets 404 on each dealer-A customer, and none is on their list.
+  - **B — comments.** The rep reads the public customer and solar comments, not the private one. The rep's post lands on the customer with `context = 'dealer'`. Staff `set_comment_private` hides a row from the rep's next read. Four probe comments, each deleted by its author.
+  - **C — stage push.** One canary `PATCH /sf/customer` of ZZ PORTAL TEST 2's `Stage__c` as zz-admin, with a `FIELDS(ALL)` re-read that aborts on drift. Then exactly one `stage` bell row for the record's own rep (zz-rep-a2 — the brief said zz-rep-a1, who does not own that record) and one for zz-mgr-a, none for zz-rep-a1, still one after a second `sundial-cache-sync`. Restored, and its bell rows marked read.
+  - **D — tech app.** `/service/tech/*` is 403 for both sales logins.
+  - **E — manifest.** The version the server advertises vs `MANIFEST_VERSION`.
+  - `--skip-stage` runs A, B, D and E only, with no Salesforce write.
+- **Run: 23 / 24.** Fixtures re-seeded after (`seed-access-test-fixtures.mjs --apply`), with the ZZ users' dealers intact. No product code changed.
+  - **FAIL E:** `/auth/me` `user.access` has no `manifestVersion`. `sundial-auth-proxy` never imports `lib/field-manifest`, though access-model §1.3 / §4.5 say it does. harmon-crm never reads it. Reported, not fixed (TASKS).
+  - The dealer detail read's `access.manifestVersion` matches the local manifest. `verify-field-manifest-live.mjs`: 44 / 44.
+- **Found while building C:**
+  - `sundial-sf-update` only flags the cache row `is_stale`, so the trigger fires at the next refresh: a single-record read (the push arrived within seconds of the office re-read) or the 5-minute sync.
+  - A first run "failed" because the previous run's restore had not reached the cache yet. Moving the stage to the value the cache still held was correctly silent. The script now makes the cache agree with Salesforce before writing.
+  - The `PATCH /sf/{object}/{id}` example in `docs/api-endpoints.md` showed a bare field map. The Lambda wants `{ "fields": … }` (400 `INVALID_BODY` otherwise, nothing written). Doc corrected.
+- **Fixture fact:** the designated record carries `Customer_Type__c = Service` (from Service testing), so zz-rep-a1's dealer list is empty under the Service-only rule. Both scripts now say why, instead of showing an empty list.
+- **`scripts/verify-access-matrix.mjs`:** the Technician fixture is scope `tech`. It gets 200 on `GET /sf/user` and `GET /sf/users` (the tech app's mention picker) and is still refused every sales surface (`noSales`). The "dealer list = /sf/customer set" check prints each excluded row's reason (Service-only, plus archived where it applies) and says when an empty list is explained. Run: **0 mismatches** for tech, rep-a1 and mgr-a (the full run before the change differed only on the two tech rows).
+- **Docs:**
+  - `docs/access-model.md`: new §13 The Dealer module (`dealer.read`, the Harmon sheet + `OVERRIDES`, D-086, stage pushes and their latency, the proof); §9 `zz-tech` row corrected.
+  - `docs/pwa-architecture.md`: "Two shells, one worker, one manifest per shell"; stale step-6 lines fixed.
+  - `docs/integrations/push-notifications.md`: when a stage push arrives. `docs/api-endpoints.md`: the PATCH body; the write marks the cache stale.
+  - `docs/multi-client-deployment.md`: dealers + user `Dealer__c`; `sundial-dealer` / wire scripts only on a fresh stack; the shared `private.app_config` rows; the dealer app in the fork; a dealer verification step.
+  - `docs/portal-feature-inventory.md`: step codes DEALER and DEALER-PWA; D2 / D7 / N7 dependency cells now say live; D8 rejoined to its table (a blank line had split it off); a verification note.
+  - CLAUDE.md: Key UI Components item 12, the Dealer module (same item in harmon-crm's copy).
+- **Live state checked for TASKS:** p11 Parts A + B applied (1,238 solar comments private); the dealer view carries `lastmodifieddate`, but 39,386 of 39,485 customer rows are still blank (full resync pending); one dealer push subscription (zz-rep-a2).
+
 ## 2026-10-27 — A SolarFax refusal keeps SolarFax's own answer, for support (`club.js` `postSolarFacts`) — DEPLOYED 2026-10-27 (`sundial-service-estimate`)
 
 - **`SolarFacts_Last_Error__c`** on an API failure is now `<status>: <message> — <first 200 chars of JSON.stringify(SolarFax's body)>` (still 255 max; no dash part when SolarFax sent no body, e.g. unreachable = `0: SolarFax could not be reached: …`). The team email still quotes the short message. Hook / no-email failures unchanged.

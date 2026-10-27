@@ -53,7 +53,9 @@ const USERS = [
   { slug: "rep-harmon", accessLevel: "Sales Rep", futureScope: "own" },
   { slug: "rep-nodealer", accessLevel: "Sales Rep", futureScope: "none" },
   { slug: "rep-inactive-dealer", accessLevel: "Sales Rep", futureScope: "none" },
-  { slug: "tech", accessLevel: "Technician", futureScope: "none" },
+  // A Technician is scope `tech` since p10 (D-072 am. 7), not `none`: no sales surface, but
+  // the two user lists are open to it (the tech app's mention picker reads them).
+  { slug: "tech", accessLevel: "Technician", futureScope: "tech" },
   { slug: "admin", accessLevel: "Admin", futureScope: "tenant" },
   { slug: "exec", accessLevel: "Executive", futureScope: "tenant" },
   { slug: "manager", accessLevel: "Manager", futureScope: "tenant" }, // the office Manager (2026-10-16)
@@ -78,7 +80,7 @@ const SURFACES = [
     key: "customer.list",
     label: "GET /sf/customer",
     path: () => "/sf/customer?limit=5",
-    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+    pending: (u) => (noSales(u) ? 403 : 200),
   },
   {
     key: "customer.single.own",
@@ -107,13 +109,13 @@ const SURFACES = [
     key: "customer.search",
     label: "GET /sf/customer?q=ZZ",
     path: () => "/sf/customer?q=ZZ&limit=5",
-    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+    pending: (u) => (noSales(u) ? 403 : 200),
   },
   {
     key: "solar.list",
     label: "GET /sf/solar",
     path: () => "/sf/solar?limit=5",
-    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+    pending: (u) => (noSales(u) ? 403 : 200),
   },
   {
     key: "roofing.list",
@@ -133,6 +135,7 @@ const SURFACES = [
     key: "users.list",
     label: "GET /sf/user",
     // §3.5: dealer/own see their own dealer's people plus Harmon staff; `none` is 403.
+    // `tech` is 200: the tech app's mention picker needs the people it can tag (p10).
     path: () => "/sf/user?limit=5",
     pending: (u) => (u.futureScope === "none" ? 403 : 200),
   },
@@ -143,7 +146,7 @@ const SURFACES = [
     // above: it queries Salesforce directly and returns a compact {id,name} projection
     // for the mention picker and the rep dropdown. Same §3.5 rule, different code path —
     // and it was uncovered here until Phase 2, which meant the union could have regressed
-    // on one route while the matrix stayed green on the other.
+    // on one route while the matrix stayed green on the other. `tech` is 200, as above.
     path: () => "/sf/users",
     pending: (u) => (u.futureScope === "none" ? 403 : 200),
   },
@@ -155,7 +158,7 @@ const SURFACES = [
     // §4.4's field-level narrowing arrives with the Phase 4 manifest and will not change
     // this status code, only the field set inside the body.
     path: () => "/sf/meta/customer/picklists",
-    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+    pending: (u) => (noSales(u) ? 403 : 200),
   },
   // --- The dealer shell (dealer module step 3, lambdas/sundial-dealer) ---------------
   // dealer.read admits tenant, dealer and own; a technician and a dealer-less rep are 403
@@ -166,20 +169,20 @@ const SURFACES = [
     key: "dealer.list",
     label: "GET /dealer/customers",
     path: () => "/dealer/customers?limit=5",
-    pending: (u) => (u.futureScope === "none" ? 403 : 200),
+    pending: (u) => (noSales(u) ? 403 : 200),
   },
   {
     key: "dealer.single.own",
     label: "GET /dealer/customers/{ownRecord}",
     path: (ctx) => (ctx.ownCustomerId ? `/dealer/customers/${ctx.ownCustomerId}` : null),
     // `none` is refused by the ACTION gate (403) before any record is considered.
-    pending: (u, ctx) => (u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.ownRecord)),
+    pending: (u, ctx) => (noSales(u) ? 403 : recordVisible(u, ctx, ctx.ownRecord)),
   },
   {
     key: "dealer.single.other",
     label: "GET /dealer/customers/{otherRepsRecord}",
     path: (ctx) => (ctx.otherCustomerId ? `/dealer/customers/${ctx.otherCustomerId}` : null),
-    pending: (u, ctx) => (u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.otherRecord)),
+    pending: (u, ctx) => (noSales(u) ? 403 : recordVisible(u, ctx, ctx.otherRecord)),
   },
   {
     key: "files.customer.list",
@@ -199,7 +202,7 @@ const SURFACES = [
     // A SALES role is different and still 404s: they CAN list customer files, so the
     // refusal does depend on the record, and the code must not reveal which.
     pending: (u, ctx) =>
-      u.futureScope === "none" ? 403 : recordVisible(u, ctx, ctx.ownRecord),
+      noSales(u) ? 403 : recordVisible(u, ctx, ctx.ownRecord),
   },
   {
     key: "files.solar.list",
@@ -209,6 +212,11 @@ const SURFACES = [
     pending: (u) => (u.futureScope === "tenant" ? 200 : 403),
   },
 ];
+
+/** No sales surface at all: `none`, and a technician (`tech` reads only the Service module). */
+function noSales(u) {
+  return u.futureScope === "none" || u.futureScope === "tech";
+}
 
 // --- plumbing ----------------------------------------------------------------
 async function loadCredentials() {
@@ -291,9 +299,10 @@ async function allIds(token, base, pageSize) {
  */
 async function dealerChecks(u, ctx, token, fixtures) {
   const out = [];
-  const [sfSet, dealerSet] = await Promise.all([
+  const [sfSet, dealerSet, everyVisible] = await Promise.all([
     allIds(token, "/sf/customer?fields=list&not[customer_type]=Service", 5000),
     allIds(token, "/dealer/customers", 200),
+    allIds(token, "/sf/customer?fields=list", 5000), // the row filter alone, nothing excluded
   ]);
   if (!sfSet || !dealerSet) {
     out.push({ label: "dealer list = /sf/customer set", ok: false, detail: `a page failed (sf ${!!sfSet}, dealer ${!!dealerSet})` });
@@ -305,6 +314,25 @@ async function dealerChecks(u, ctx, token, fixtures) {
       ok: extra.length === 0 && missing.length === 0,
       detail: `${dealerSet.size} rows; ${extra.length} extra, ${missing.length} missing`,
     });
+    // Say WHY a customer the row filter admits is not on the dealer list, so an empty list
+    // for a rep is explained rather than silent (2026-10-27: zz-rep-a1's only customer, the
+    // designated record, is tagged Service-only by the Service module's own testing).
+    const excluded = everyVisible ? [...everyVisible].filter((id) => !dealerSet.has(id)) : [];
+    if (excluded.length) {
+      const rows = await sfQuery(
+        `SELECT Id, Name, Customer_Type__c, Archived__c FROM Sundial_Customer__c WHERE Id IN (` +
+          excluded.slice(0, 200).map((id) => `'${soqlEscapeString(id)}'`).join(",") + `)`
+      );
+      for (const c of rows) {
+        const serviceOnly = String(c.Customer_Type__c ?? "").split(";").map((s) => s.trim()).filter(Boolean).join(";") === "Service";
+        const why = [serviceOnly && "Service-only (Customer_Type__c = Service; left to the Service module)", c.Archived__c && "archived"]
+          .filter(Boolean).join(", ") || "neither Service-only nor archived — unexplained";
+        out.push({ label: `excluded: ${c.Name}`, ok: serviceOnly, detail: why });
+      }
+    }
+    if (dealerSet.size === 0) {
+      out.push({ label: "empty dealer list", ok: true, detail: excluded.length ? "explained by the exclusions above" : "the row filter admits no customer for this user" });
+    }
   }
 
   const visibleTwins = fixtures.customers.filter(
@@ -390,7 +418,7 @@ async function loadFixtureIds() {
  */
 function recordVisible(u, ctx, rec) {
   if (u.futureScope === "tenant") return 200;
-  if (u.futureScope === "none") return 404;
+  if (noSales(u)) return 404;
   if (!rec) return 404;
   if (u.futureScope === "dealer") {
     return rec.dealer && ctx.userDealer && rec.dealer === ctx.userDealer ? 200 : 404;

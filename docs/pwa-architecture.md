@@ -1,6 +1,25 @@
-# The technician app (PWA) — as built
+# The installable apps (PWA) — technician and dealer — as built
 
-**Status:** built 2026-09-16 (D-072 amendment 7). Lives **inside the portal at `/tech`** — same login, same Vercel deploy, its own phone-first shell. A user whose access level is **Technician** lands there from every office route; the office can open it too (and look at any tech's day).
+**Status:** the technician app built 2026-09-16 (D-072 amendment 7); the dealer app 2026-10-26 / 27 (dealer module steps 5–7). Both live **inside the portal**, at `/tech` and `/dealer` — same login, same Vercel deploy, each its own phone-first shell. A Technician lands on `/tech` from every office route; a Sales Dealer or Sales Rep (scope `dealer` / `own`) lands on `/dealer` (`harmon-crm/src/components/ShellRouter.tsx`, `lib/shell-home.ts` is the one scope → shell table). Tenant scope can open either.
+
+## Two shells, one worker, one manifest per shell
+
+| | Technician | Dealer |
+|---|---|---|
+| Shell | `/tech` (`src/tech/TechLayout.tsx`, dark) | `/dealer` (`src/dealer/DealerLayout.tsx`, light, client-branded) |
+| Who lands there | scope `tech` | scope `dealer`, `own` |
+| Manifest | `public/manifest.webmanifest` | `public/manifest-dealer.webmanifest` (generated, `npm run generate:dealer-pwa`) |
+| Icons | `public/icons/tech-*.png` | `public/icons/dealer-{192,512}(-maskable).png` (generated from `public/icons/_source/`) |
+| Head tags | `registerTechPwa()` (`src/tech/registerSw.ts`) | `registerDealerPwa()` (`src/dealer/registerDealerPwa.ts`) |
+| Offline | online-first **with a queue** (below) | opens offline (the cached shell); every read and write is online |
+| Push `app` | `tech` | `dealer` (the backend sends it from dealer step 6; categories `stage` + `mention`) |
+| Inbox | `/tech/inbox` | `/dealer/inbox` |
+
+- **One service worker, `public/sw.js`** (`VERSION` `sundial-v3`), registered by whichever shell mounts (`registerServiceWorker()` in `src/lib/pwa-head.ts`). The office portal registers none. The worker caches both shells; a navigation under `/tech` or `/dealer` falls back offline to **that** app's shell (`shellFor()`); office navigations are never answered. A push takes its icon from the payload's `app` (`pushIcon()`); a tap prefers an open window **of the same app** (`pickWindow`), else opens the record (the home-screen app on a phone).
+- **One manifest at a time.** Each shell's mount effect removes the other app's manifest / `theme-color` / `apple-touch-icon` / `apple-mobile-web-app-capable` tags and adds its own (marked `data-pwa-app`); unmounting removes only its own (`applyPwaHead`). iOS takes the home-screen icon from the `apple-touch-icon`, not the manifest, which is why that tag is per shell too.
+- **A new client** regenerates the dealer manifest and icons from its own `client-config` (`dealer.appName`, `dealer.appShortName`, `branding.primaryColor`) and logo, and bumps `VERSION` when `SHELL` changes (`docs/multi-client-deployment.md`).
+
+The rest of this page is the technician app, then the dealer app's details.
 
 The original design brief is `docs/pwa-architecture-design.md` (its header lists where the build diverged). This page is the architecture as it exists, written for the next person who touches it. `docs/service-workflows.md` §8 is the workflow contract it implements.
 
@@ -21,8 +40,9 @@ The dealer shell (`/dealer`) is installable too, from the same origin and the sa
 
 - **One manifest at a time.** Each shell puts its own manifest link, `theme-color`, `apple-touch-icon` and `apple-mobile-web-app-capable` into `<head>` in its mount effect, and removes the other app's first (`harmon-crm/src/lib/pwa-head.ts`; `tech/registerSw.ts` → `registerTechPwa()`, `dealer/registerDealerPwa.ts` → `registerDealerPwa()`). Unmounting removes only that app's tags. The office portal carries none. This was module-scope code in `TechLayout.tsx` before, so merely importing the tech shell changed the page.
 - **The dealer manifest is generated.** `public/manifest-dealer.webmanifest` (id / start_url `/dealer`, scope `/`) and `public/icons/dealer-{192,512}(-maskable).png` come from `scripts/generate-dealer-pwa.mjs` (sharp), which reads `clientConfig.dealer.appName` / `appShortName` / `branding.primaryColor` and the client logo in `public/icons/_source/`. `src/dealer/pwa.node.test.ts` fails if the manifest drifts from the config.
-- **`sw.js` (`VERSION` `sundial-v3`).** `SHELL` holds both apps' shells, manifests and icons. A navigation under `/tech` or `/dealer` is network-first and falls back offline to THAT app's cached shell (`shellFor()`). Office navigations are still never answered. A push takes its icon from the payload's `app` (`pushIcon()`): `dealer` gets the dealer icon, anything else (and every push until the backend sends `app`, dealer step 6) gets the tech icon. `src/lib/sw.node.test.ts` runs the worker against a fake `self` to pin both.
-- **Push subscriptions** carry `app: 'office' | 'tech' | 'dealer'` (`PushApp`). `POST /notify/subscriptions` accepts `dealer` from dealer step 6; before that it coerces to `office`.
+- **`sw.js` (`VERSION` `sundial-v3`).** `SHELL` holds both apps' shells, manifests and icons. A navigation under `/tech` or `/dealer` is network-first and falls back offline to THAT app's cached shell (`shellFor()`). Office navigations are still never answered. A push takes its icon from the payload's `app` (`pushIcon()`): `dealer` gets the dealer icon, anything else gets the tech icon. The backend sends `app: 'dealer'` on stage pushes and on a dealer / rep's mention pushes (dealer step 6, deployed 2026-10-27). A tap prefers an open window of the same app (`pickWindow`, step 7). `src/lib/sw.node.test.ts` runs the worker against a fake `self` to pin all three.
+- **Push subscriptions** carry `app: 'office' | 'tech' | 'dealer'` (`PushApp`); `POST /notify/subscriptions` keeps `dealer` (step 6).
+- **Notifications inside the shell** (step 7): `/dealer/inbox` lists the bell rows with an unread badge on its tab; Notification settings shows **Stage changes** and **Mentions** (`DEALER_CATEGORIES`) for a dealer / own login from any entry point.
 - **Install hints** (`src/dealer/DealerInstall.tsx`): the iPhone "Share → Add to Home Screen" banner (push only works from the installed app there) and an Install sheet in More / the sidebar, with the browser's own Install button when `beforeinstallprompt` fired.
 - **No offline queue for dealers.** The dealer app opens offline (the shell) but every read and write is online. Nothing from `src/tech/offline.ts` is reused.
 
@@ -88,7 +108,7 @@ The phone appends; the office corrects on the dispatch board (**Fix time** on th
 
 A tap is sent straight away when there is signal. Otherwise — or when the request dies on the way (network error, 5xx, 429, 401) — it is stored in `localStorage` (`sundial-tech-queue`) with **its tap time and its own id**, painted onto the local copy at once (`techView.withPending`), and replayed **in order, one at a time** on the next `online` event, app open, or tab focus. Photo bytes wait in IndexedDB (`photoStore.ts`); a photo replays as presign → PUT → confirm and re-presigns if the URL expired mid-way. A tap the server refuses (any other 4xx — out of order, the checklist gate, a cancelled call) is kept as **failed** with the server's message, replay continues with the next one, and the header shows it with a Discard button. Anything already waiting for a call forces the next tap on that call to queue behind it, so the clock never sees events out of order.
 
-The last good copy of the day and of each call is cached in `localStorage` so the app opens with no signal; the service worker (`public/sw.js`) caches only the app shell (network-first for navigations, cache-first for hashed assets) and never an API response. It is registered from `/tech` only — the office portal has no worker.
+The last good copy of the day and of each call is cached in `localStorage` so the app opens with no signal; the service worker (`public/sw.js`) caches only the app shell (network-first for navigations, cache-first for hashed assets) and never an API response. It is registered from `/tech` and `/dealer` only — the office portal has no worker.
 
 ## Staying signed in
 

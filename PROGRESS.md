@@ -1,6 +1,6 @@
 # Sundial — Progress Log
 
-## 2026-10-27 — A SolarFax refusal keeps SolarFax's own answer, for support (`club.js` `postSolarFacts`) — BUILT, NOT DEPLOYED
+## 2026-10-27 — A SolarFax refusal keeps SolarFax's own answer, for support (`club.js` `postSolarFacts`) — DEPLOYED 2026-10-27 (`sundial-service-estimate`)
 
 - **`SolarFacts_Last_Error__c`** on an API failure is now `<status>: <message> — <first 200 chars of JSON.stringify(SolarFax's body)>` (still 255 max; no dash part when SolarFax sent no body, e.g. unreachable = `0: SolarFax could not be reached: …`). The team email still quotes the short message. Hook / no-email failures unchanged.
 - **Log line** `club: SolarFax answered {event, membershipId, status, body, request}` — the request body we sent with `user.email` masked (`a***@gmail.com`) so SolarFax support can match it. The key and token are headers and never on the error.

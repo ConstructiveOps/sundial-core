@@ -20,6 +20,7 @@ import { sfQuery as realSfQuery, soqlEscapeString } from "../../lib/salesforce.j
 import { getSecret as realGetSecret } from "../../lib/secrets.js";
 import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { createTenantSettings } from "../../lib/tenant-settings.js";
+import { MANIFEST_VERSION } from "../../lib/field-manifest/index.js";
 
 // --- CORS ------------------------------------------------------------------
 
@@ -418,8 +419,15 @@ export function createHandler(deps = {}) {
     // (Sundial_Tenant__c.Name, already on the resolved identity — no extra read), so a
     // portal build can tell that the person who just signed in belongs to ITS tenant
     // and sign them out if not. A label, never an isolation key.
+    //
+    // `access.manifestVersion` (access-model §1.3 / §4.5) is the field manifest bundled
+    // into this Lambda, so the client can compare it with its own generated configs.
+    // It was documented from the start but never sent until 2026-10-27 (found by
+    // scripts/verify-dealer-module.mjs, check E). Added here, not in resolveIdentity,
+    // because the identity is shared by every Lambda and only this endpoint reports it.
+    const access = identity.access ? { ...identity.access, manifestVersion: MANIFEST_VERSION } : identity.access;
     return jsonResponse(200, cors, {
-      user: { ...identity.user, access: identity.access },
+      user: { ...identity.user, access },
       tenant: { clientId: identity.tenantId, slug: identity.tenantSlug ?? null },
     });
   } catch (err) {

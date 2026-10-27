@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-27 — `/auth/me` returns `access.manifestVersion` (dealer step 8 follow-up) — BUILT, NOT DEPLOYED
+
+- **`sundial-auth-proxy`** imports `MANIFEST_VERSION` from `lib/field-manifest` and returns `user.access.manifestVersion` on `GET /auth/me`. The value is the same string the record reads advertise, e.g. `customer:e2162852/roofing:486658de/solar:385f7206`.
+  - It is added at the response, not in `lib/identity.js`, so the shared identity (and the profile upsert that reads it) is not mutated. An identity with no access block still answers `access: null`.
+  - Every other key is unchanged. This closes `scripts/verify-dealer-module.mjs` check E once deployed.
+- Tests: new `lambdas/sundial-auth-proxy/me.test.js` (4: the version, pass-through of every other key and the `user` / `tenant` shape, no mutation, null access). It is in `npm test`. `forgot.test.js`'s D-078 shape test now expects the new key. Suite **1,777 / 1,777**. The test bundle builds (esbuild, the manifest JSON inlined).
+- Docs unchanged on purpose (Tim): `docs/access-model.md` already describes this behaviour.
+
 ## 2026-10-27 — Dealer module step 8 of 9: end-to-end verification and the docs (`feature/dealer-verify`)
 
 - **`scripts/verify-dealer-module.mjs`** (new; ZZ users from `sundial/test-users` only). Sections:

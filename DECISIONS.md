@@ -3842,3 +3842,16 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 5. `GET /service/jobs/{id}/invoice` always returns `depositsTotal` (the unattached money, net of refunds), and a Void current invoice's view lists the unattached rows rather than nothing.
 
 **Consequences.** No issue-then-void just to hold a check. A partial check below the required deposit leaves the customer's page offering the full deposit amount (the page does not subtract) — the warning is the office's cue to tell the customer. Acumatica: a job-level Deposit maps to an AR Prepayment when the push is built (`docs/integrations/acumatica.md`).
+
+## D-064 amendment 2 (2026-10-28): which shell a sales login lands in is a per-user choice, not a role
+
+**Context.** The dealer app (`/dealer`, dealer module steps 0–8) was built to be where every Sales Dealer / Sales Rep lands. On 2026-10-27 harmon-crm's `ShellRouter` was hotfixed to send every sales login to the office portal instead: existing sales users already work in the office portal and must not be moved without a choice.
+
+**Decision.**
+1. `Sundial_User__c.Portal_Experience__c` — restricted picklist `Dealer App` | `Office Portal`, **no default** (created by Tim in Setup).
+2. `lib/access.js` `shellFor` → `access.shell` on `/auth/me`: for scope `dealer` / `own`, `"dealer"` **only** on an exact `Dealer App`, else `"office"` (blank and `Office Portal` alike — every existing user keeps the portal they know); `null` for tenant / tech / none.
+3. **Not a role.** It never reaches `resolveScope`, the row filter, the module gate, actions, the field manifests or RLS. A rep in the office portal sees exactly what they would in the dealer app.
+4. `sundial-user-admin` is the one write path: accepted for the two sales levels only (`400 PORTAL_EXPERIENCE_NOT_APPLICABLE` otherwise, judged on the resulting level); **a new sales user is stamped `Dealer App`** when the admin sends none; PATCH changes it only when the body names it.
+5. `lib/identity.js` reads the field under a guard (INVALID_FIELD → the identity query re-runs without it, remembered five minutes): a missing field or missing field access can never break sign-in, it only means `office` for everyone.
+
+**Consequences.** The dealer app is opt-in for existing users and the default for new ones. harmon-crm's `ShellRouter` reads `user.access.shell` instead of the scope. The integration user needs Read + Edit on the field.

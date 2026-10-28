@@ -105,6 +105,8 @@ Webhook endpoints use a separate verification mechanism (signed payload from the
 - `tenant.clientId` — the Salesforce Client record id (the tenant isolation key), **not** a slug.
 - `tenant.slug` (D-078, 2026-09-29, additive) — the tenant's slug (`Sundial_Tenant__c.Name`, e.g. `harmon`), or `null` for a user with no tenant record. A **label**: a portal build compares it with its own tenant and signs the person out on a mismatch (every tenant shares one Supabase project, so a login works at any portal). Never an isolation key — that stays `clientId` (D-035).
 
+- `access.shell` (2026-10-28) — which app a sales login lands in: `"dealer"` (the `/dealer` app) only when the user's `Portal_Experience__c` is `Dealer App`; `"office"` for any other dealer / own-scope user (blank and `Office Portal` alike); `null` for tenant / tech / none. Not a role — scope, modules, actions and manifests are identical either way (`docs/access-model.md` §13.0). `user.portalExperience` carries the raw picklist value (or `null`).
+
 See DECISIONS.md D-043 for the access model.
 
 ---
@@ -722,6 +724,8 @@ Lists all `Sundial_User__c` in the caller's tenant, **including inactive**.
 
 **The dispatch board (2026-09-30):** every user also carries `dispatchBoard` (`Dispatch_Board__c`, a column on the board) and `dispatchOrder` (`Dispatch_Order__c`, the column's position, `null` = after the numbered ones), and the response carries `dispatchFields: true|false` — false when `salesforce/dispatch-board-2026-09-30` is not deployed yet (the list is re-queried without the two columns and the portal hides the controls). `POST` and `PATCH` accept `dispatchBoard` (boolean) and `dispatchOrder` (whole number 0–999, or `null` / `""` to clear); naming them on an org without the fields is `400 DISPATCH_FIELDS_MISSING`.
 
+**Where a sales login lands (2026-10-28):** every user carries `portalExperience` (`Portal_Experience__c`: `"Dealer App"` | `"Office Portal"` | `null` — `null` = blank = office portal), and the response carries `portalExperienceField: true|false` (false when the integration user cannot read the field; the list is re-queried without it). `POST` and `PATCH` accept `portalExperience` (exactly one of the two values) **for Sales Rep / Sales Dealer only** — any other level is `400 PORTAL_EXPERIENCE_NOT_APPLICABLE`, judged on the level the request leaves the user at (like `dealerId`); another value is `400 VALIDATION_ERROR` (`fields.portalExperience`). **`POST` of a sales role with no value stamps `Dealer App`** (new dealer users start in the dealer app) and returns `portalExperience` in the 201; if the field is not writable yet that default is dropped and the user created anyway (`portalExperience: null`), while an admin-chosen value is `400 PORTAL_EXPERIENCE_FIELD_MISSING` (the fresh login is removed, as for any failed create). **`PATCH` never changes it unless the body names it** — not even when it moves a user into a sales role.
+
 #### `POST /admin/users`
 
 Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
@@ -750,7 +754,7 @@ Creates a portal user: a Supabase auth user **and** a `Sundial_User__c`.
 
 #### `PATCH /admin/users/{id}`
 
-Updates whitelisted fields on one tenant user. Body may contain `firstName`, `lastName`, `phone`, `accessLevel`, `defaultDepartment`, `dispatchBoard`, `dispatchOrder`, `active` (boolean). Any other key (`superAdmin`, `email`, `Client__c`, `Supabase_User_Id__c`, `hierarchyLevel`, …) → 400 `FIELD_NOT_ALLOWED`.
+Updates whitelisted fields on one tenant user. Body may contain `firstName`, `lastName`, `phone`, `accessLevel`, `defaultDepartment`, `dispatchBoard`, `dispatchOrder`, `dealerId`, `portalExperience` (sales levels only), `active` (boolean). Any other key (`superAdmin`, `email`, `Client__c`, `Supabase_User_Id__c`, `hierarchyLevel`, …) → 400 `FIELD_NOT_ALLOWED`.
 - Tenant pre-check: a cross-tenant or missing id → 404 `RECORD_NOT_FOUND`.
 - `active: false` also **bans** the linked Supabase auth user (kills live supabase-direct sessions, e.g. comments RLS); `active: true` unbans. The ban/unban is **retried (3 attempts, backoff)** so a transient blip can't leave a deactivated user un-banned or a reactivated user stuck banned. Salesforce `Active__c` is the source of truth — a persistent ban failure still applies the SF change and returns `supabaseBanFailed: true`.
 - A Super Admin **cannot deactivate themselves** → 400 `CANNOT_DEACTIVATE_SELF`.
@@ -1107,6 +1111,7 @@ tenant-wide levels.
 | `DEALER_REQUIRED_FOR_SALES_ROLE` | 400 | a sales role would end up with no dealer |
 | `DEALER_NOT_FOUND` | 400 | unknown id, another tenant's dealer, an INACTIVE dealer, or a value that is not a Salesforce id — all indistinguishable on purpose |
 | `DEALER_NOT_APPLICABLE` | 400 | `dealerId` sent for a tenant-wide level |
+| `PORTAL_EXPERIENCE_NOT_APPLICABLE` | 400 | `portalExperience` sent for a level that is not Sales Rep / Sales Dealer (2026-10-28) |
 
 On PATCH the rule is evaluated against the state the request **results in**, not against
 the body: a PATCH setting only `accessLevel: "Sales Rep"` is refused if the record has

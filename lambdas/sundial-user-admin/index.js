@@ -375,23 +375,66 @@ function dispatchFieldsMissing(sfErr, fields, cors) {
   });
 }
 
+// --- Where a sales login lands (2026-10-28) -------------------------------------
+// Sundial_User__c.Portal_Experience__c, restricted picklist, no default. `portalExperience`
+// in the API. NOT a role: lib/access.js shellFor reads it for dealer / own scope only, so it
+// is accepted for the two sales levels and refused for the rest — the same reasoning as
+// DEALER_NOT_APPLICABLE (an ignored field reads as an applied one). A new sales user
+// starts in the dealer app; every existing user (blank) stays in the office portal.
+const PORTAL_EXPERIENCE_FIELD = "Portal_Experience__c";
+export const PORTAL_EXPERIENCES = new Set(["Dealer App", "Office Portal"]);
+export const NEW_SALES_USER_EXPERIENCE = "Dealer App";
+const PORTAL_EXPERIENCE_RE = /Portal_Experience__c/i;
+const PORTAL_EXPERIENCE_NOT_APPLICABLE = {
+  error: "portal_experience_not_applicable",
+  code: "PORTAL_EXPERIENCE_NOT_APPLICABLE",
+  message:
+    "portalExperience applies only to the sales access levels (Sales Rep, Sales Dealer). " +
+    "Every other role has one portal.",
+};
+function parsePortalExperience(b, errors) {
+  if (!hasOwn(b, "portalExperience")) return undefined;
+  const v = trimStr(b.portalExperience);
+  if (!PORTAL_EXPERIENCES.has(v)) {
+    errors.portalExperience = `portalExperience must be one of: ${[...PORTAL_EXPERIENCES].join(", ")}`;
+    return undefined;
+  }
+  return v;
+}
+function portalExperienceFieldMissing(sfErr, cors) {
+  if (!PORTAL_EXPERIENCE_RE.test(String(sfErr?.sfBody ?? sfErr?.message ?? ""))) return null;
+  return jsonResponse(400, cors, {
+    error: "portal_experience_field_missing",
+    code: "PORTAL_EXPERIENCE_FIELD_MISSING",
+    message: "Sundial_User__c.Portal_Experience__c is not readable / writable by the integration user yet — grant it field access first.",
+  });
+}
+
 // === GET /admin/users ======================================================
 async function handleList(identity, cors) {
-  const soqlFor = (withDispatch) =>
+  // Two optional field groups, each dropped on its own if the org refuses it (the
+  // dispatch-board package, Portal_Experience__c's field access).
+  const soqlFor = (withDispatch, withExperience) =>
     `SELECT Id, First_Name__c, Last_Name__c, Email__c, Phone__c, Access_Level__c, ` +
     `Default_Department__c, Active__c, Super_Admin__c, Hierarchy_Level__c, Supabase_User_Id__c, ` +
-    `Dealer__c, Dealer__r.Name${withDispatch ? ", Dispatch_Board__c, Dispatch_Order__c" : ""} ` +
+    `Dealer__c, Dealer__r.Name${withDispatch ? ", Dispatch_Board__c, Dispatch_Order__c" : ""}` +
+    `${withExperience ? `, ${PORTAL_EXPERIENCE_FIELD}` : ""} ` +
     `FROM ${SF_OBJECT} ` +
     `WHERE Client__c = '${soqlEscapeString(identity.tenantId)}' ` +
     `ORDER BY Last_Name__c, First_Name__c`;
   let rows;
   let dispatchFields = true;
-  try {
-    rows = await sfQuery(soqlFor(true));
-  } catch (e) {
-    if (!DISPATCH_FIELD_RE.test(String(e?.sfBody ?? e?.message ?? ""))) throw e;
-    dispatchFields = false;
-    rows = await sfQuery(soqlFor(false));
+  let portalExperienceField = true;
+  for (;;) {
+    try {
+      rows = await sfQuery(soqlFor(dispatchFields, portalExperienceField));
+      break;
+    } catch (e) {
+      const msg = String(e?.sfBody ?? e?.message ?? "");
+      if (portalExperienceField && PORTAL_EXPERIENCE_RE.test(msg)) portalExperienceField = false;
+      else if (dispatchFields && DISPATCH_FIELD_RE.test(msg)) dispatchFields = false;
+      else throw e;
+    }
   }
   const users = (rows || []).map((r) => ({
     id: r.Id,
@@ -414,6 +457,8 @@ async function handleList(identity, cors) {
     // The dispatch board (2026-09-30): a column, and where. Null order = after the numbered.
     dispatchBoard: r.Dispatch_Board__c === true,
     dispatchOrder: r.Dispatch_Order__c == null ? null : Number(r.Dispatch_Order__c),
+    // Where a sales login lands: 'Dealer App' | 'Office Portal' | null (blank = office).
+    portalExperience: r[PORTAL_EXPERIENCE_FIELD] ?? null,
   }));
 
   // The dealer options, alongside the users.
@@ -426,7 +471,8 @@ async function handleList(identity, cors) {
   // the critical path. Both sources are the same function; they cannot disagree.
   const dealers = await listActiveDealers(identity.tenantId);
   // `dispatchFields` tells the portal whether the board checkbox / order can be edited yet.
-  return jsonResponse(200, cors, { users, dealers, dispatchFields });
+  // `portalExperienceField` likewise for the sales users' portal choice.
+  return jsonResponse(200, cors, { users, dealers, dispatchFields, portalExperienceField });
 }
 
 /** Active dealers in a tenant, as {id, name}, alphabetical. */
@@ -519,6 +565,7 @@ async function handleCreate(identity, event, cors) {
   }
   const dispatchFields = {};
   parseDispatch(b, errors, dispatchFields);
+  const requestedExperience = parsePortalExperience(b, errors);
   const credentialMode = b.credentialMode;
   if (credentialMode !== "invite" && credentialMode !== "password") {
     errors.credentialMode = 'credentialMode must be "invite" or "password"';
@@ -586,6 +633,14 @@ async function handleCreate(identity, event, cors) {
   } else if (dealerIdRaw) {
     return jsonResponse(400, cors, DEALER_NOT_APPLICABLE);
   }
+
+  // Where the login lands: sales roles only; a new sales user starts in the dealer app
+  // unless the admin chose otherwise. `stampedExperience` = we chose it, not the admin.
+  if (requestedExperience !== undefined && !isSalesRole) {
+    return jsonResponse(400, cors, PORTAL_EXPERIENCE_NOT_APPLICABLE);
+  }
+  const portalExperience = isSalesRole ? (requestedExperience ?? NEW_SALES_USER_EXPERIENCE) : null;
+  const stampedExperience = isSalesRole && requestedExperience === undefined;
 
   // a. Duplicate guard within THIS tenant.
   const dupe = await sfQuery(
@@ -712,14 +767,27 @@ async function handleCreate(identity, event, cors) {
   // Validated by id against an ACTIVE dealer in this tenant above — never the raw
   // request value, and never present for a tenant-wide role.
   if (dealer) fields.Dealer__c = dealer.id;
+  if (portalExperience) fields[PORTAL_EXPERIENCE_FIELD] = portalExperience;
 
   try {
-    const created = await sfCreateRecord(SF_OBJECT, fields);
+    let created;
+    try {
+      created = await sfCreateRecord(SF_OBJECT, fields);
+    } catch (e) {
+      // The field's access not granted yet: a value the ADMIN chose is a refusal (below),
+      // but our own default must never be the reason a sales user cannot be created —
+      // create them without it (blank = office portal) and say so.
+      if (!(stampedExperience && PORTAL_EXPERIENCE_RE.test(String(e?.sfBody ?? e?.message ?? "")))) throw e;
+      console.warn("user-admin: Portal_Experience__c not writable — sales user created without it (lands in the office portal).");
+      delete fields[PORTAL_EXPERIENCE_FIELD];
+      created = await sfCreateRecord(SF_OBJECT, fields);
+    }
     const resp = { id: created.id, email, credentialMode };
     if (dealer) {
       resp.dealerId = dealer.id;
       resp.dealerName = dealer.name;
     }
+    if (isSalesRole) resp.portalExperience = fields[PORTAL_EXPERIENCE_FIELD] ?? null;
     if (inviteSent) resp.inviteSent = true;
     if (inviteVia) resp.inviteVia = inviteVia;
     if (inviteWarning) resp.inviteWarning = inviteWarning;
@@ -728,7 +796,9 @@ async function handleCreate(identity, event, cors) {
     // Compensating action: delete the FRESH auth user so we don't orphan it. Never
     // delete a reused (pre-existing) user. If deletion also fails, surface loudly.
     console.error("sundial_user create failed:", sfErr?.message, sfErr?.sfBody || "");
-    const missing = dispatchFieldsMissing(sfErr, fields, cors);
+    const missing =
+      (hasOwn(fields, PORTAL_EXPERIENCE_FIELD) ? portalExperienceFieldMissing(sfErr, cors) : null) ??
+      dispatchFieldsMissing(sfErr, fields, cors);
     let orphanAuthUser = false;
     if (freshlyCreated) {
       try {
@@ -821,6 +891,9 @@ async function handleUpdate(identity, event, cors) {
     else fields.Default_Department__c = v || null;
   }
   parseDispatch(b, errors, fields);
+  // Never changed unless the body names it — not even when the access level moves.
+  // Whether it is allowed depends on the resulting level, checked after the read below.
+  const requestedExperience = parsePortalExperience(b, errors);
   // D-064: dealerId is accepted here, but WHETHER it is required depends on the
   // access level this PATCH leaves the user at — which may come from the body or may
   // already be on the record. Resolved after the record is read, below.
@@ -840,7 +913,7 @@ async function handleUpdate(identity, event, cors) {
       fields: errors,
     });
   }
-  if (Object.keys(fields).length === 0 && activeChange === null && !dealerIdProvided) {
+  if (Object.keys(fields).length === 0 && activeChange === null && !dealerIdProvided && requestedExperience === undefined) {
     return jsonResponse(400, cors, { error: "no_fields", code: "NO_FIELDS" });
   }
 
@@ -921,6 +994,11 @@ async function handleUpdate(identity, event, cors) {
     // a tenant-wide user had been attributed to a dealer.
     return jsonResponse(400, cors, DEALER_NOT_APPLICABLE);
   }
+  // Same question for the portal choice: where does this user END UP?
+  if (requestedExperience !== undefined) {
+    if (!resultingIsSales) return jsonResponse(400, cors, PORTAL_EXPERIENCE_NOT_APPLICABLE);
+    fields[PORTAL_EXPERIENCE_FIELD] = requestedExperience;
+  }
 
   if (resultingIsSales) {
     // Explicitly clearing the dealer of someone who stays in a sales role is the same
@@ -951,7 +1029,9 @@ async function handleUpdate(identity, event, cors) {
     await sfUpdateRecord(SF_OBJECT, recordId, fields);
   } catch (sfErr) {
     console.error("sundial_user update failed:", sfErr?.message, sfErr?.sfBody || "");
-    const missing = dispatchFieldsMissing(sfErr, fields, cors);
+    const missing =
+      (hasOwn(fields, PORTAL_EXPERIENCE_FIELD) ? portalExperienceFieldMissing(sfErr, cors) : null) ??
+      dispatchFieldsMissing(sfErr, fields, cors);
     if (missing) return missing;
     return jsonResponse(502, cors, { error: "sf_update_failed", code: "SF_UPDATE_FAILED" });
   }

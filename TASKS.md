@@ -4,6 +4,14 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-28 — Per-user shell for sales logins (`Portal_Experience__c` → `access.shell`, D-064 am. 2)
+
+- [x] `lib/identity.js` (guarded read), `lib/access.js` `shellFor` / `accessBlock` `shell`, `sundial-user-admin` GET / POST / PATCH `portalExperience`; tests (suite 1,795 / 1,795); docs
+- [ ] **TIM: field access** — give the Sundial integration user Read + Edit on `Sundial_User__c.Portal_Experience__c` (until then: everyone lands in the office portal and new sales users are created without the value)
+- [ ] **TIM: deploy** — `.\deploy.ps1 sundial-auth-proxy` and `.\deploy.ps1 sundial-user-admin` (no route changes). Other Lambdas pick up `lib/identity.js` on their next deploy; only `/auth/me` is read for `shell`
+- [ ] harmon-crm: `ShellRouter` lands a sales login on `/dealer` when `user.access.shell === "dealer"`, else the office portal (replaces the 2026-10-27 hotfix); Manage Users shows the Dealer App / Office Portal picker for Sales Rep / Sales Dealer only; add the feature-inventory row
+- [ ] Decide which existing sales users move to `Dealer App` (per user in Manage Users — no bulk script unless asked)
+
 ## 2026-10-27 — Office deposits before the invoice (D-072 amendment 16)
 
 - [x] `POST /service/jobs/{id}/payments` (check / ACH / remittance / other deposit on the job), `depositsTotal` on `GET /service/jobs/{id}/invoice`, `Deposit_Paid_At__c` stamped when covered; tests for owed / issue adoption / void (suite 1,780 / 1,780)

@@ -1,5 +1,15 @@
 # Sundial — Progress Log
 
+## 2026-10-28 — Per-user shell for sales logins: `Portal_Experience__c` → `access.shell` (D-064 am. 2) — BUILT, NOT DEPLOYED
+
+- **Why:** the 2026-10-27 hotfix lands every sales login in the office portal; the dealer app becomes opt-in per user. Tim created `Sundial_User__c.Portal_Experience__c` (restricted picklist `Dealer App` | `Office Portal`, no default).
+- **`lib/identity.js`:** the identity SOQL selects `Portal_Experience__c`; `user.portalExperience`. Guarded: an INVALID_FIELD answer re-runs the query without it (remembered 5 min per container), so a missing field / field access never breaks sign-in — everyone gets `office`. No describe call on the hot path.
+- **`lib/access.js`:** `shellFor(scope, portalExperience)` + `accessBlock(scopeCtx, { portalExperience })` → `access.shell`: `dealer` only for dealer / own scope with exactly `Dealer App`; `office` for any other sales user (blank included); `null` for tenant / tech / none. Touches no scope, manifest, action or RLS. `sundial-auth-proxy` passes it through unchanged (redeploy only — it bundles `lib/`).
+- **`sundial-user-admin`:** GET returns `portalExperience` per user + `portalExperienceField`; POST / PATCH accept it for Sales Rep / Sales Dealer only (`400 PORTAL_EXPERIENCE_NOT_APPLICABLE`, judged on the resulting level). POST of a sales role with no value stamps `Dealer App`; PATCH never changes it unless named. Field not writable yet: our default is dropped and the user still created; an admin-chosen value is `400 PORTAL_EXPERIENCE_FIELD_MISSING`.
+- Tests: `lib/access.test.js` +3, `lib/identity.test.js` +1, `lambdas/sundial-user-admin/handler.test.js` +11. Suite 1,795 / 1,795.
+- Docs: `docs/access-model.md` §1.3, §3 (note), §13 + new §13.0; `docs/api-endpoints.md` (`/auth/me`, `/admin/users`); `DECISIONS.md` D-064 am. 2; CLAUDE.md (Key UI Components item 12).
+- Portal (harmon-crm): not in this change — `ShellRouter` should read `user.access.shell`, and Manage Users needs the picker for sales users (+ the feature-inventory row with it).
+
 ## 2026-10-27 — Office deposits before the invoice (D-072 amendment 16) — BUILT, NOT DEPLOYED
 
 - **Why (Harmon, Heather):** a check or ACH deposit could only be recorded on an invoice, so the office issued one just to hold the money and voided it later.

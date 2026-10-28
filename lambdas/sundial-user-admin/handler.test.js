@@ -67,6 +67,7 @@ function resetCtx() {
   ctx.created = [];
   ctx.updated = [];
   ctx.createError = null;
+  ctx.createErrorOnce = null; // thrown by the NEXT create only (the retry-without-field path)
   ctx.updateError = null;
   ctx.sfQueryOverride = null;
   ctx.authCalls = [];
@@ -105,6 +106,11 @@ mock.module("../../lib/salesforce.js", {
       return ctx.queryRows.shift() ?? [];
     },
     sfCreateRecord: async (sfObject, fields) => {
+      if (ctx.createErrorOnce) {
+        const m = ctx.createErrorOnce;
+        ctx.createErrorOnce = null;
+        throw new Error(m);
+      }
       if (ctx.createError) throw new Error(ctx.createError);
       ctx.created.push({ sfObject, fields });
       return { id: TARGET_ID };
@@ -1204,4 +1210,139 @@ test("D-078: a FRESH login never pays for the cross-tenant check — one Salesfo
   assert.equal(res.statusCode, 201, res.body);
   assert.equal(ctx.queries.length, 1, "only the same-tenant duplicate guard");
   assert.ok(!ctx.queries.some((q) => q.includes("Supabase_User_Id__c")));
+});
+
+// ===========================================================================
+// (f) Where a sales login lands — Portal_Experience__c (2026-10-28)
+// ===========================================================================
+
+const getUsers = () => handler({ requestContext: { http: { method: "GET" } }, headers: { authorization: "Bearer test", origin: "http://localhost:5173" }, rawPath: "/admin/users" });
+const NO_FIELD = "No such column 'Portal_Experience__c' on entity 'Sundial_User__c' (INVALID_FIELD)";
+
+test("POST a sales role with no portalExperience stamps 'Dealer App' — new dealer users start in the dealer app", async () => {
+  for (const accessLevel of ["Sales Rep", "Sales Dealer"]) {
+    resetCtx();
+    ctx.queryRows = [dealerRow(), []];
+    const res = await handler(postEvent(createBody({ accessLevel, dealerId: DEALER_ID })));
+    assert.equal(res.statusCode, 201, res.body);
+    assert.equal(ctx.created[0].fields.Portal_Experience__c, "Dealer App", accessLevel);
+    assert.equal(parse(res).portalExperience, "Dealer App", accessLevel);
+  }
+});
+
+test("POST a sales role with portalExperience 'Office Portal' keeps the admin's choice", async () => {
+  ctx.queryRows = [dealerRow(), []];
+  const res = await handler(postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID, portalExperience: "Office Portal" })));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.equal(ctx.created[0].fields.Portal_Experience__c, "Office Portal");
+});
+
+test("POST a non-sales role never writes Portal_Experience__c, and naming it is 400 PORTAL_EXPERIENCE_NOT_APPLICABLE", async () => {
+  ctx.queryRows = [[]];
+  let res = await handler(postEvent(createBody({ accessLevel: "Admin" })));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.ok(!("Portal_Experience__c" in ctx.created[0].fields));
+  assert.ok(!("portalExperience" in parse(res)));
+
+  for (const accessLevel of ["Admin", "Manager", "Executive", "Technician"]) {
+    resetCtx();
+    res = await handler(postEvent(createBody({ accessLevel, portalExperience: "Dealer App" })));
+    assert.equal(res.statusCode, 400, accessLevel);
+    assert.equal(parse(res).code, "PORTAL_EXPERIENCE_NOT_APPLICABLE", accessLevel);
+    assert.equal(ctx.authCalls.length, 0, `${accessLevel}: refused before any login is made`);
+    assert.equal(ctx.created.length, 0);
+  }
+});
+
+test("POST with an unknown portalExperience value is a validation error", async () => {
+  const res = await handler(postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID, portalExperience: "dealer" })));
+  assert.equal(res.statusCode, 400);
+  assert.ok(parse(res).fields.portalExperience);
+});
+
+test("POST: the field not writable yet never blocks a sales user — our default is dropped and the create retried", async () => {
+  ctx.queryRows = [dealerRow(), []];
+  ctx.createErrorOnce = NO_FIELD;
+  const res = await handler(postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID })));
+  assert.equal(res.statusCode, 201, res.body);
+  assert.ok(!("Portal_Experience__c" in ctx.created[0].fields));
+  assert.equal(parse(res).portalExperience, null);
+});
+
+test("POST: an admin-CHOSEN value the org cannot take is 400 PORTAL_EXPERIENCE_FIELD_MISSING, and the fresh login is removed", async () => {
+  ctx.queryRows = [dealerRow(), []];
+  ctx.createErrorOnce = NO_FIELD;
+  const res = await handler(postEvent(createBody({ accessLevel: "Sales Rep", dealerId: DEALER_ID, portalExperience: "Office Portal" })));
+  assert.equal(res.statusCode, 400, res.body);
+  assert.equal(parse(res).code, "PORTAL_EXPERIENCE_FIELD_MISSING");
+  assert.ok(ctx.authCalls.some((c) => c.op === "deleteUser"));
+});
+
+test("PATCH portalExperience on a sales user writes only that field", async () => {
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  const res = await handler(patchEvent(TARGET_ID, { portalExperience: "Office Portal" }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.deepEqual(ctx.updated[0].fields, { Portal_Experience__c: "Office Portal" });
+});
+
+test("PATCH never changes Portal_Experience__c unless the body names it — not even on a move INTO a sales role", async () => {
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  let res = await handler(patchEvent(TARGET_ID, { firstName: "Renamed" }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.ok(!("Portal_Experience__c" in ctx.updated[0].fields));
+
+  ctx.queryRows = [ownedRow(), dealerRow()];
+  res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Dealer", dealerId: DEALER_ID }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.ok(!("Portal_Experience__c" in ctx.updated[1].fields));
+});
+
+test("PATCH portalExperience is judged against the RESULTING level", async () => {
+  // A Manager staying a Manager: refused.
+  ctx.queryRows = [ownedRow()];
+  let res = await handler(patchEvent(TARGET_ID, { portalExperience: "Dealer App" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "PORTAL_EXPERIENCE_NOT_APPLICABLE");
+  assert.equal(ctx.updated.length, 0);
+
+  // A sales user being moved to Admin in the same PATCH: refused.
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  res = await handler(patchEvent(TARGET_ID, { accessLevel: "Admin", portalExperience: "Dealer App" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "PORTAL_EXPERIENCE_NOT_APPLICABLE");
+
+  // A Manager being moved INTO a sales role in the same PATCH: allowed.
+  ctx.queryRows = [ownedRow(), dealerRow()];
+  res = await handler(patchEvent(TARGET_ID, { accessLevel: "Sales Rep", dealerId: DEALER_ID, portalExperience: "Dealer App" }));
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(ctx.updated[0].fields.Portal_Experience__c, "Dealer App");
+});
+
+test("PATCH naming portalExperience before the field is writable is 400 PORTAL_EXPERIENCE_FIELD_MISSING", async () => {
+  ctx.queryRows = [ownedRow({ Access_Level__c: "Sales Rep", Dealer__c: DEALER_ID })];
+  ctx.updateError = NO_FIELD;
+  const res = await handler(patchEvent(TARGET_ID, { portalExperience: "Dealer App" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(parse(res).code, "PORTAL_EXPERIENCE_FIELD_MISSING");
+});
+
+test("GET returns portalExperience per user; an org that refuses the field re-queries without it", async () => {
+  const row = { Id: TARGET_ID, Access_Level__c: "Sales Rep", Active__c: true, Super_Admin__c: false, Portal_Experience__c: "Dealer App" };
+  ctx.queryRows = [[row, { ...row, Id: "a1O7y00000OtherAAA", Portal_Experience__c: undefined }], []];
+  let body = parse(await getUsers());
+  assert.equal(body.portalExperienceField, true);
+  assert.equal(body.users[0].portalExperience, "Dealer App");
+  assert.equal(body.users[1].portalExperience, null);
+  assert.match(ctx.queries[0], /Portal_Experience__c/);
+
+  resetCtx();
+  const rows = [[{ ...row, Portal_Experience__c: undefined }], []];
+  ctx.sfQueryOverride = async (soql) => {
+    if (soql.includes("Portal_Experience__c")) throw Object.assign(new Error("bad field"), { sfBody: NO_FIELD });
+    return rows.shift() ?? [];
+  };
+  body = parse(await getUsers());
+  assert.equal(body.portalExperienceField, false);
+  assert.equal(body.dispatchFields, true, "the dispatch fields are kept — only the refused field is dropped");
+  assert.equal(body.users[0].portalExperience, null);
 });

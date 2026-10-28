@@ -126,6 +126,7 @@ access: {
   userId:   "a0X...",              // Sundial_User__c Id
   dealerId: "a0Y...",              // Sundial_Dealer__c Id or null
   tenantId: "a1W...",              // unchanged
+  shell:    "office",              // dealer | office for dealer / own; null otherwise (§13.0)
   manifestVersion: "sha256:…",     // §4.5
 }
 ```
@@ -645,6 +646,13 @@ to fix before cutover, not a tolerance.
 ---
 
 ## 3. Row-filter semantics per object
+
+> **`access.shell` is not part of anything below (2026-10-28).** `Sundial_User__c.Portal_Experience__c`
+> (restricted picklist `Dealer App` | `Office Portal`, no default) decides only which app a `dealer` /
+> `own` login lands in — `lib/access.js` `shellFor`, carried on `/auth/me` as `user.access.shell`.
+> It is never read by `resolveScope`, `rowFilter`, `canReadObject`, `canAction`, the field manifests
+> or any RLS policy: a rep in the office portal sees exactly the rows, fields and actions they would
+> see in the dealer app. See §13.0.
 
 ### 3.1 Module gate (whole objects)
 
@@ -1835,7 +1843,22 @@ Resolved 2026-08-26:
 
 ## 13. The Dealer module (steps 0–7, 2026-10-22 → 10-27)
 
-Sales Dealer and Sales Rep logins (scopes `dealer` / `own`) get one shell of their own, `/dealer` (harmon-crm), instead of the office portal. Nothing in this section widens a sales scope's ROWS; it changes which surface they reach, which fields they read on it, and which comments they read.
+Sales Dealer and Sales Rep logins (scopes `dealer` / `own`) have a shell of their own, `/dealer` (harmon-crm), which a login lands in when its `Portal_Experience__c` is `Dealer App` (§13.0); otherwise they use the office portal. Nothing in this section widens a sales scope's ROWS; it changes which surface they reach, which fields they read on it, and which comments they read.
+
+### 13.0 Which shell a sales login lands in — `access.shell` (2026-10-28)
+
+The dealer app is **opt-in per user**, not automatic for the sales scopes (hotfix 2026-10-27: harmon-crm's `ShellRouter` sent every sales login to the office portal while this was settled).
+
+| Scope | `Portal_Experience__c` | `access.shell` | Lands in |
+|---|---|---|---|
+| `dealer` / `own` | `Dealer App` | `dealer` | `/dealer` |
+| `dealer` / `own` | `Office Portal` | `office` | the office portal |
+| `dealer` / `own` | blank (every user from before the field) | `office` | the office portal |
+| `tenant` / `tech` / `none` | anything | `null` | their one home |
+
+- **Not a role.** It changes no scope, manifest, action or RLS — only which app opens. `lib/identity.js` reads the field (guarded: an org or integration user that cannot read it answers INVALID_FIELD, the identity query re-runs without it, every login gets `office`); `lib/access.js` `shellFor` decides; `accessBlock` carries it; `/auth/me` returns it.
+- **Who sets it:** Manage Users (`sundial-user-admin`). `POST /admin/users` of a Sales Rep / Sales Dealer with no value stamps `Dealer App` — a new dealer user starts in the dealer app. `PATCH` changes it only when the body names it. For any other level, naming it is `400 PORTAL_EXPERIENCE_NOT_APPLICABLE` (judged on the level the request leaves the user at, like `dealerId`).
+- **The client reflects it**, like everything else in `access` (§4.5): a stale value only opens the other shell, which the server serves under the same scope.
 
 ### 13.1 One record per customer — `dealer.read`, `sundial-dealer`
 

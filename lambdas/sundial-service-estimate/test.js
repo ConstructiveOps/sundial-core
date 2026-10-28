@@ -2703,7 +2703,7 @@ test("club: with SolarFax's API configured the activation creates the member + s
   assert.equal(inv.headers["Access-Token"], "tok-1");
   assert.deepEqual(inv.body.user, { firstName: "Ann", lastName: "Lee", email: "ann@example.com", enableAccess: "1", enableEmails: "1" });
   assert.deepEqual(inv.body.account, { phone: "602-555-0101", addressOne: "9 Oak St", city: "Mesa", state: "AZ", zip: "85201", isLead: "0" });
-  assert.deepEqual(inv.body.sendEmailTemplate, { Name: "Harmon Connect" });
+  assert.equal(inv.body.sendEmailTemplate, "Harmon Connect");
   assert.equal(inv.body.disconnect, undefined);
   assert.equal(inv.body.test, undefined);
   assert.equal(m.SolarFacts_Status__c, "Sent");

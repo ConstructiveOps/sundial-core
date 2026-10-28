@@ -96,7 +96,7 @@ only ever born from our own join. The join refuses a customer who already has a 
    solardatapros.crunch.help → System Guides → API Docs) for three things, for Harmon's account:
    - the **`Api-Key`** and the **`Access-Token`** (two separate values; both go on every request);
    - the **name of the email template** to send on join — the white-labelled "connect your
-     utility / monitoring" invite for Harmon (the API's `sendEmailTemplate.Name`; if they have
+     utility / monitoring" invite for Harmon (the API's `sendEmailTemplate`, a plain string — e.g. `"Monitoring Welcome Email"`; if they have
      not made one, ask them to, with Harmon's branding and the club's wording). Without it the
      member is created in SolarFax but no email goes out;
    - confirmation that the **`disconnect`** flag on `POST users` is what they want us to send when

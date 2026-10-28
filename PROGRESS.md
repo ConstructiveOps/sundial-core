@@ -5,7 +5,7 @@
 - **Why:** SolarFax support says the invite field is `"sendEmailTemplate": "Monitoring Welcome Email"`, not `{ "Name": … }`. The object form was our reading of their docs.
 - `lib/solarfacts.js` `inviteBody` sends the tenant’s `inviteTemplate` as the string itself. Tests: `lib/solarfacts.test.js` (5 / 5), `lambdas/sundial-service-estimate/test.js` (79 / 79).
 - Docs: `docs/integrations/service-club.md` step 5; `DECISIONS.md` D-073 amendment 1 item 1 (corrected in place, noted).
-- **Deploy (Tim):** `.deploy.ps1 sundial-service-estimate`. Secrets Manager `sundial/service-club` → `tenants.harmon.solarFacts.inviteTemplate` must read exactly `Monitoring Welcome Email`.
+- **Deploy (Tim):** `.\deploy.ps1 sundial-service-estimate`. Secrets Manager `sundial/service-club` → `tenants.harmon.solarFacts.inviteTemplate` must read exactly `Monitoring Welcome Email`.
 
 ## 2026-10-28 — Per-user shell for sales logins: `Portal_Experience__c` → `access.shell` (D-064 am. 2) — BUILT, NOT DEPLOYED
 

@@ -104,7 +104,9 @@ only ever born from our own join. The join refuses a customer who already has a 
      and solar"). If they would rather keep the account and only stop monitoring, tell me and
      the call changes in one place (`lib/solarfacts.js`).
    Their API also takes `test: "1"`, which validates a request without doing it — the secret's
-   `"test": true` turns that on for a dry run of the whole join flow.
+   `"test": true` turns that on for a dry run of the whole join flow. **SolarFax treats an absent
+   `test` as ON**, so Sundial always sends it: `"0"` for a real call, `"1"` in test mode
+   (SolarFax support, 2026-10-28).
 6. **Secrets Manager** → Store a new secret → *Other type* → plaintext → name **`sundial/service-club`**:
    ```json
    {

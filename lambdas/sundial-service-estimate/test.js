@@ -2705,7 +2705,7 @@ test("club: with SolarFax's API configured the activation creates the member + s
   assert.deepEqual(inv.body.account, { phone: "602-555-0101", addressOne: "9 Oak St", city: "Mesa", state: "AZ", zip: "85201", isLead: "0" });
   assert.equal(inv.body.sendEmailTemplate, "Harmon Connect");
   assert.equal(inv.body.disconnect, undefined);
-  assert.equal(inv.body.test, undefined);
+  assert.equal(inv.body.test, "0", "always sent — SolarFax treats an absent test as ON");
   assert.equal(m.SolarFacts_Status__c, "Sent");
   assert.equal(m.SolarFacts_Account_Id__c, "SFA-1");
   assert.equal(m.SolarFacts_User_Id__c, "SFU-1");
@@ -2719,6 +2719,7 @@ test("club: with SolarFax's API configured the activation creates the member + s
   assert.equal(fake.solarFaxCalls.length, 2);
   const off = fake.solarFaxCalls[1];
   assert.equal(off.body.disconnect, "1");
+  assert.equal(off.body.test, "0");
   assert.equal(off.body.user.email, "ann@example.com");
   assert.equal(off.body.sendEmailTemplate, undefined, "no invite on the way out");
   assert.equal(m.SolarFacts_Status__c, "Cancel Sent");

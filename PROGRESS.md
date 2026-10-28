@@ -1,5 +1,12 @@
 # Sundial — Progress Log
 
+## 2026-10-28 — SolarFax: `test` is always sent, "0" for a real user — BUILT, NOT DEPLOYED
+
+- **Why:** SolarFax support says their API treats an absent `test` as ON (validate, do nothing), so omitting it — as we did outside test mode — never created a real user. A real call must send `"test": "0"`.
+- `lib/solarfacts.js` `inviteBody` and `disconnectBody` always carry `test: cfg.test ? "1" : "0"`; header comment says why. Tests: `lib/solarfacts.test.js` (5 / 5 — "0" by default, "1" with the tenant's `test` on), `lambdas/sundial-service-estimate/test.js` (79 / 79 — the invite and the disconnect both send "0").
+- Docs: `docs/integrations/service-club.md` step 5; `DECISIONS.md` D-073 amendment 1 item 3.
+- **Deploy (Tim):** `.deploy.ps1 sundial-service-estimate`. Members joined before this deploy were sent to SolarFax in test mode — use the office's Resend on each after deploying.
+
 ## 2026-10-28 — SolarFax `sendEmailTemplate` is a plain string — BUILT, NOT DEPLOYED
 
 - **Why:** SolarFax support says the invite field is `"sendEmailTemplate": "Monitoring Welcome Email"`, not `{ "Name": … }`. The object form was our reading of their docs.

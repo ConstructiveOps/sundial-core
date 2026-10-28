@@ -1,5 +1,13 @@
 # Sundial — Progress Log
 
+## 2026-10-28 — Solar layout: `Alternate_Contact_Email__c` after Alternate Phone (`hotfix/solar-alternate-contact-email`) — DONE, NOT DEPLOYED
+
+- **Why:** Tim created `Sundial_Solar__c.Alternate_Contact_Email__c` (Email). Describe as the integration user: present, createable, updateable (FLS OK).
+- **`Sundial_Solar_Fields_by_Section.xlsx`, Customer/Site Details:** new row 17, right after `Alternate_Phone__c`: label "Alternate Contact Email", Type Email, description "Email for the alternate contact; copied from the Customer's Alternate_Contact_Email__c at Create Project.", Sales Rep / Sales Dealer = read / read (the Alternate Phone row's values). Visibility/Editability, Help Text and Highlight left blank, as on that row. Edited with ExcelJS, as on 10-23. A fresh re-read confirmed all 480 existing rows identical (rows after 16 shifted by one). No merges, validations or styles in the sheet. The Customer workbook and Harmon's dealer-portal sheet were not touched.
+- `apply-dealer-visibility.mjs` dry run: **0 cell changes** on both workbooks. `generate-field-configs.mjs --apply`: the only manifest change is `Alternate_Contact_Email__c` in `read` (and `alternate_contact_email` in `listColumns`) for both roles on Solar. Solar read went from 140 to 141 (rep) and 215 to 216 (dealer). New solar version `b3e5be07…`; customer and roofing unchanged. The cache has no `alternate_contact_email` column, and that is fine: the record page reads `?full=true` from Salesforce, and list projection skips columns the cache lacks.
+- Both workbooks copied to harmon-crm `docs/`, and the generator's drift warning cleared. Suite 1,795 / 1,795. Inventory row L10.
+- **Not done here (harmon-crm):** `npm run generate:solar-config` so the portal's Solar page shows the field. Also, the Create Project copy described in the row does not exist yet: `customer-to-solar-map.ts` does not map Customer `Alternate_Contact_Email__c` to Solar.
+
 ## 2026-10-28 — SolarFax: `test` is always sent, "0" for a real user — BUILT, NOT DEPLOYED
 
 - **Why:** SolarFax support says their API treats an absent `test` as ON (validate, do nothing), so omitting it — as we did outside test mode — never created a real user. A real call must send `"test": "0"`.

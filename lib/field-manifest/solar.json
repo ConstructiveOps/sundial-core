@@ -1,5 +1,5 @@
 {
-  "version": "sha256:385f7206f2d2e3838e036fb91d1eb31b",
+  "version": "sha256:b3e5be075847d3ee1c3dc924616cab11",
   "object": "Sundial_Solar__c",
   "roles": {
     "Sales Rep": {
@@ -7,6 +7,7 @@
         "Adders_Sent_to_Salesperson_Dealer__c",
         "Additional_Phone__c",
         "Address__c",
+        "Alternate_Contact_Email__c",
         "Alternate_Phone__c",
         "Animals_on_Location__c",
         "Annual_Percentage_Rate__c",
@@ -192,6 +193,7 @@
         "Adders_Sent_to_Salesperson_Dealer__c",
         "Additional_Phone__c",
         "Address__c",
+        "Alternate_Contact_Email__c",
         "Alternate_Phone__c",
         "Animals_on_Location__c",
         "Annual_Percentage_Rate__c",
@@ -373,6 +375,7 @@
       "adders_sent_to_salesperson_dealer",
       "additional_phone",
       "address",
+      "alternate_contact_email",
       "alternate_phone",
       "animals_on_location",
       "annual_percentage_rate",
@@ -563,6 +566,7 @@
       "adders_sent_to_salesperson_dealer",
       "additional_phone",
       "address",
+      "alternate_contact_email",
       "alternate_phone",
       "animals_on_location",
       "annual_percentage_rate",

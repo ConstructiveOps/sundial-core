@@ -1,6 +1,6 @@
 # Sundial — Progress Log
 
-## 2026-10-30 — Harmon's first dealer-module feedback: a folded stage + hidden fields (`feature/harmon-feedback-1`) — BUILT, NOT DEPLOYED
+## 2026-10-30 — Harmon's first dealer-module feedback: a folded stage + hidden fields (`feature/harmon-feedback-1`) — DEPLOYED 2026-10-30
 
 - **Why:** Harmon does not want dealers or reps to know a permit has been received, because they would demand an install date at once. They also do not want them to see Harmon's NS adder cost basis.
 - **Folded stage.** `lib/dealer-journey.js` has a third table, `FOLDED = { "Permitting Received": "Permit Submitted" }`, plus `foldStage` / `isFoldedStage`.

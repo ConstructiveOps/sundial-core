@@ -1,5 +1,23 @@
 # Sundial — Progress Log
 
+## 2026-10-30 — Reporting R0: the reporting-grade cache (D-087, `feature/report-cache`) — DONE, NOT DEPLOYED, SQL NOT RUN
+
+- **Why:** reports run on the Supabase cache, never on Salesforce (D-087, `docs/reporting-module.md`). So the cache has to hold every field a detail layout shows, not just the ~20–50 columns the lists needed.
+- **The generator.** `scripts/generate-report-columns.mjs` reads each object's field-design workbook (§4.1), a live describe as the integration user (`lib/sf-describe.js`), and the live cache columns and their types (PostgREST's OpenAPI document). For `po` / `user` / `membership` / `serviceplan` (no workbook) it takes every readable field. The decisions are in `lib/report-columns.js`: names only from `sfFieldToColumn` (imported), types from the §4.2 map, refusals reported and never guessed. It writes `sql/2026-10-30_report_columns.sql` and `docs/reporting-cache-coverage.md`, and never runs the SQL. A re-run produces the same bytes; `--check` confirmed no change.
+- **What it found (live, 2026-10-30):** 962 columns to add across 14 tables (customer 287, solar 447, roofing 158, job 9, estimate 4, servicecall 6, serviceinvoice 2, servicepayment 4, serviceline 0, pricebookitem 2, po 11, user 17, membership 7, serviceplan 8). **No Read FLS gaps**: every workbook field is in the integration user's describe. Refused:
+  - `Sundial_Solar__c.Active_Days__c` — a TODAY() formula the sync cannot keep fresh;
+  - `Sundial_Solar__c.Number_of_Panels__c` — the column exists as `integer`, the describe says double (left alone);
+  - `Utility_Password__c` (customer and solar), `Sundial_Estimate__c.Public_Token__c`, `Sundial_Service_Job__c.Report_Public_Token__c`, `Sundial_User__c.Hourly_Cost_Rate__c` — sensitive.
+- **Two refusals beyond §4.3, added during the build (Tim to confirm):**
+  1. **A new formula the incremental sync cannot keep fresh** (the `lib/formula-parents.js` rules). A stale number in a report is a wrong number.
+  2. **Sensitive fields.** A cache column comes back on every cache read of its row. The public-page tokens are bearer credentials (whoever holds one opens the customer's estimate / report). `Hourly_Cost_Rate__c` is a pay rate, and `lib/cost-gate.js` gates only price-book / line costs, so `GET /sf/user` would have handed a cached copy to anyone who can read users. All of these stay live-only.
+- **The query-length ceiling, measured.** `sfQuery` sends SOQL as a GET, and Salesforce refuses a URI over 16,384 bytes. The generator now reports each table's incremental-sync URI length once its new columns exist. Solar is the widest at **14,278** (customer 9,019, roofing 5,102, the rest under 2,000). It fits, with ~2 KB to spare for future solar fields.
+- **The sync streams.** `sundial-cache-sync` `syncObject` upserts each Salesforce page (≤ 2,000 records) before the next page is fetched, in full and incremental mode, through a new `lib/salesforce.js` `sfQueryPages(soql, onPage)`. `sfQuery` itself is unchanged, so no other Lambda moves. Kept: the watermark moves once, only after every page wrote cleanly (a failed page stops the run; already-written pages are harmless upserts); the zero-change run is one SOQL and no cache write; each row's `client_sf_id` comes from its own record's `Client__c`.
+- **Tests:** `lib/report-columns.test.js` (15: the type map and every refusal, on fixtures). `sync-runs.test.js` +5 (pages interleave with upserts in full and incremental mode, a failed page stops the run and holds the watermark, per-record tenant across pages, an all-tenant-less page writes nothing). `test.js` mock gains `sfQueryPages`. Suite **1,826 / 1,826**.
+- **Docs:** D-087 in DECISIONS.md; CLAUDE.md Key UI Components item 11 replaced (here and in harmon-crm, whose "Last re-synced" line was updated); docs list; `docs/caching-architecture.md` "Reporting-grade cache (R0, 2026-10-30)"; TASKS.md has Tim's steps in order.
+- **Not done, by instruction:** the SQL is not run, nothing was resynced, and `LIST_PROJECTION`, `lib/access.js`, the field manifests and every other Lambda are untouched.
+- **Pipeline timings:** _before → after — fill in from the TASKS.md measurements._
+
 ## 2026-10-30 — Harmon's first dealer-module feedback: a folded stage + hidden fields (`feature/harmon-feedback-1`) — DEPLOYED 2026-10-30
 
 - **Why:** Harmon does not want dealers or reps to know a permit has been received, because they would demand an install date at once. They also do not want them to see Harmon's NS adder cost basis.

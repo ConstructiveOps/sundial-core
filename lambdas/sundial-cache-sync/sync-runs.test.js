@@ -10,20 +10,27 @@
 //     (what makes a 5-minute schedule cheap);
 //   - { objects: [...] } syncs exactly that list;
 //   - the incremental query also asks for rows whose formula-feeding PARENT changed,
-//     and the watermark includes the parent's modstamp but never moves backwards.
+//     and the watermark includes the parent's modstamp but never moves backwards;
+//   - the sync STREAMS (D-087 R0): each Salesforce page is upserted before the next page
+//     is fetched, in full and incremental mode alike; the watermark moves once, after
+//     the last page, and not at all if any page's upsert fails; each row's tenant comes
+//     from its own record's Client__c, on every page.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
 
 const TENANT = "a0Xharmon";
-const ctx = { soql: [], writes: [], tables: {}, sfAnswer: () => [], sfThrows: false };
+const ctx = { soql: [], writes: [], events: [], tables: {}, sfAnswer: () => [], sfThrows: false, pageSize: 2000, failCacheUpsert: null };
 function resetCtx() {
   ctx.soql = [];
   ctx.writes = [];
+  ctx.events = []; // ordered: "page:<n>" when Salesforce hands over page n, "upsert:<rows>" per cache upsert
   ctx.tables = { sundial_sync_state: [], cache_sync_runs: [] };
   ctx.sfAnswer = () => [];
   ctx.sfThrows = false;
+  ctx.pageSize = 2000; // Salesforce's page
+  ctx.failCacheUpsert = null; // 1-based index of the cache upsert that returns an error
 }
 
 // Chainable + thenable fake covering what the sync path uses.
@@ -48,6 +55,11 @@ class Q {
       return { data: this.single ? out[0] ?? null : out, error: null };
     }
     ctx.writes.push({ table: this.table, op: this.op, n: this.rows?.length ?? 0 });
+    if (this.op === "upsert" && this.table.endsWith("_cache")) {
+      ctx.events.push(`upsert:${this.rows.length}`);
+      const nth = ctx.events.filter((e) => e.startsWith("upsert:")).length;
+      if (ctx.failCacheUpsert === nth) return { data: null, error: { message: "test: upsert refused" } };
+    }
     if (this.op === "upsert") {
       for (const row of this.rows) {
         const i = rows.findIndex((r) => r.sf_id === row.sf_id || (row.object_key && r.object_key === row.object_key));
@@ -72,6 +84,20 @@ mock.module("../../lib/salesforce.js", {
       ctx.soql.push(soql);
       if (ctx.sfThrows) throw new Error("SF unavailable");
       return ctx.sfAnswer(soql);
+    },
+    // The sync's streaming query: one SOQL, its answer handed over ctx.pageSize at a time,
+    // each page awaited before the next is "fetched" — the contract of lib/salesforce.js.
+    sfQueryPages: async (soql, onPage) => {
+      ctx.soql.push(soql);
+      if (ctx.sfThrows) throw new Error("SF unavailable");
+      const all = ctx.sfAnswer(soql) || [];
+      let pages = 0;
+      for (let i = 0; i === 0 || i < all.length; i += ctx.pageSize) {
+        ctx.events.push(`page:${pages}`);
+        await onPage(all.slice(i, i + ctx.pageSize), { pageIndex: pages });
+        pages++;
+      }
+      return { pages, records: all.length };
     },
     soqlEscapeString: (v) => String(v),
   },
@@ -240,4 +266,76 @@ test("taxzones task: the handler routes { task: 'taxzones' } away from the Sales
   assert.match(r.error, /503/);
   assert.equal(ctx.soql.length, 0);
   assert.equal(runsFor("taxzones").length, 1);
+});
+
+// --- Streaming (D-087 R0) ------------------------------------------------------
+// Records for the customer object: id n, the tenant given, modstamp minute n.
+const customers = (n, tenantOf = () => TENANT) =>
+  Array.from({ length: n }, (_, i) => ({
+    Id: `a1P${String(i).padStart(12, "0")}AAA`,
+    Client__c: tenantOf(i),
+    Name: `C${i}`,
+    SystemModstamp: new Date(Date.parse(WM) + (i + 1) * 60000).toISOString(),
+    Client__r: { Name: "harmon" },
+  }));
+
+test("full resync streams: each page is upserted before the next page is fetched", async () => {
+  ctx.pageSize = 3;
+  ctx.sfAnswer = () => customers(7);
+  const res = await handler({ object: "customer", mode: "full" });
+  assert.equal(res.objects.customer.status, "ok");
+  assert.equal(res.objects.customer.processed, 7);
+  assert.equal(ctx.soql.length, 1, "still ONE query — the pages are its locator, not new SOQL");
+  assert.deepEqual(ctx.events, ["page:0", "upsert:3", "page:1", "upsert:3", "page:2", "upsert:1"]);
+  assert.equal(ctx.tables.sundial_customer_cache.length, 7);
+  const state = ctx.tables.sundial_sync_state.find((s) => s.object_key === "customer");
+  assert.equal(state.last_synced_modstamp, customers(7)[6].SystemModstamp, "the max across every page");
+  assert.equal(runsFor("customer")[0].rows_upserted, 7);
+});
+
+test("incremental runs stream too", async () => {
+  ctx.pageSize = 2;
+  ctx.sfAnswer = () => customers(5);
+  await handler({ objects: ["customer"], intervalMinutes: 5 });
+  assert.deepEqual(ctx.events, ["page:0", "upsert:2", "page:1", "upsert:2", "page:2", "upsert:1"]);
+  assert.match(ctx.soql[0], /WHERE/, "the incremental window, not the full query");
+});
+
+test("a failed page stops the run and the watermark does not move", async () => {
+  ctx.pageSize = 2;
+  ctx.failCacheUpsert = 2; // the second page's upsert
+  ctx.sfAnswer = () => customers(6);
+  const res = await handler({ objects: ["customer"], intervalMinutes: 5 });
+  assert.equal(res.objects.customer.status, "error");
+  assert.equal(res.objects.customer.error, "cache_upsert_failed");
+  assert.deepEqual(ctx.events, ["page:0", "upsert:2", "page:1", "upsert:2"], "page 3 is never fetched");
+  const state = ctx.tables.sundial_sync_state.find((s) => s.object_key === "customer");
+  assert.equal(state.last_synced_modstamp, WM, "the next run re-reads the whole window");
+  assert.equal(state.last_run_status, "error");
+  const [r] = runsFor("customer");
+  assert.equal(r.ok, false);
+  assert.equal(r.watermark, null);
+});
+
+test("tenant isolation per record, on every page; tenant-less records skipped but counted for the watermark", async () => {
+  ctx.pageSize = 2;
+  const tenants = ["a0Xharmon", "a0Xother", null, "a0Xother", "a0Xharmon"];
+  ctx.sfAnswer = () => customers(5, (i) => tenants[i]);
+  const res = await handler({ object: "customer", mode: "full" });
+  assert.equal(res.objects.customer.processed, 4);
+  assert.equal(res.objects.customer.skipped, 1);
+  const cached = Object.fromEntries(ctx.tables.sundial_customer_cache.map((r) => [r.name, r.client_sf_id]));
+  assert.deepEqual(cached, { C0: "a0Xharmon", C1: "a0Xother", C3: "a0Xother", C4: "a0Xharmon" });
+  assert.equal(
+    ctx.tables.sundial_sync_state.find((s) => s.object_key === "customer").last_synced_modstamp,
+    customers(5)[4].SystemModstamp
+  );
+});
+
+test("a page of only tenant-less records writes nothing, and the run goes on", async () => {
+  ctx.pageSize = 2;
+  const tenants = [null, null, TENANT];
+  ctx.sfAnswer = () => customers(3, (i) => tenants[i]);
+  await handler({ objects: ["customer"], intervalMinutes: 5 });
+  assert.deepEqual(ctx.events, ["page:0", "page:1", "upsert:1"]);
 });

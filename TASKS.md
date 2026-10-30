@@ -4,6 +4,44 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-30 — Reporting R0: the reporting-grade cache (D-087, `feature/report-cache`)
+
+- [x] `scripts/generate-report-columns.mjs` + `lib/report-columns.js` (type map, refusals) → `sql/2026-10-30_report_columns.sql` (962 columns, 14 tables) + `docs/reporting-cache-coverage.md`; `--check` shows no change on a re-run
+- [x] `sundial-cache-sync` streams page by page (`lib/salesforce.js` `sfQueryPages`), full and incremental; the watermark moves only after every page wrote cleanly; tests (suite 1,826 / 1,826)
+- [x] Docs: D-087 (DECISIONS.md), CLAUDE.md item 11 (here and harmon-crm), `docs/caching-architecture.md` "Reporting-grade cache (R0)"
+- [ ] **TIM: grant Read FLS** — nothing to grant: the coverage report found every workbook field readable by the integration user (its "TIM: grant Read FLS" list is empty). If you add workbook rows first, re-run `node scripts/generate-report-columns.mjs` and grant what it lists
+- [ ] **TIM: measure BEFORE (Supabase SQL editor)** — run each twice and write down the second run's "Execution Time":
+  `explain analyze select public.sundial_customer_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null);`
+- [ ] **TIM: measure BEFORE** —
+  `explain analyze select public.sundial_solar_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null, array['complete','cancel','pto','closed','archive'], array['Billing Complete - Pending Closeout']);`
+- [ ] **TIM: Supabase SQL editor** — open `sql/2026-10-30_report_columns.sql`, paste the whole file, Run (adds empty columns only; safe to run twice)
+- [ ] **TIM: raise the Lambda** — `aws lambda update-function-configuration --function-name sundial-cache-sync --memory-size 1024 --timeout 900 --region us-west-1` (or Console → sundial-cache-sync → Configuration → General configuration → Memory 1024 MB, Timeout 15 min 0 sec)
+- [ ] **TIM: deploy** — `.\deploy.ps1 sundial-cache-sync`
+- [ ] **TIM: Supabase SQL editor** — `delete from private.app_config where key = 'stage_notify_url';` (first copy the current value: `select value from private.app_config where key = 'stage_notify_url';`)
+- [ ] **TIM: full resync** (Lambda console → sundial-cache-sync → Test), one event each, waiting for each to finish: `{ "object": "customer", "mode": "full" }`
+- [ ] **TIM: Supabase SQL editor** — re-run `sql/sundial_dealer_customer_view.sql` (the dealer list reads that view)
+- [ ] **TIM: full resync** — `{ "object": "solar", "mode": "full" }`
+- [ ] **TIM: terminal** — `node scripts/check-cache-formula-coverage.mjs` (must end "Every cached formula column is covered")
+- [ ] **TIM: full resync** — `{ "object": "roofing", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "job", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "estimate", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "servicecall", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "serviceinvoice", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "servicepayment", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "serviceline", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "pricebookitem", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "po", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "user", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "membership", "mode": "full" }`
+- [ ] **TIM: full resync** — `{ "object": "serviceplan", "mode": "full" }`
+- [ ] **TIM: reconcile** (Test events, in the same order) — `{ "object": "customer", "mode": "reconcile" }`, then the same with `solar`, `roofing`, `job`, `estimate`, `servicecall`, `serviceinvoice`, `servicepayment`, `serviceline`, `pricebookitem`, `po`, `user`, `membership`, `serviceplan`. A refusal ("too many ghosts") is the safety rail: stop and ask, never add `force` blind
+- [ ] **TIM: Supabase SQL editor** — put the stage hook back: `insert into private.app_config (key, value) values ('stage_notify_url', '<the value you copied>') on conflict (key) do update set value = excluded.value, updated_at = now();`
+- [ ] **TIM: measure AFTER** — the customer `explain analyze` above, twice, second run's Execution Time
+- [ ] **TIM: measure AFTER** — the solar `explain analyze` above, twice, second run's Execution Time
+- [ ] **PROGRESS line:** record both timings, before → after (e.g. "customer pipeline 41 → 44 ms, solar 18 → 19 ms"). Over ~50 ms worse on either: stop and decide the sibling `sundial_<object>_report` table (`docs/reporting-module.md` §4.4)
+- [ ] Merge `feature/report-cache` → `master` and push, in the same pass as the deploy
+- [ ] Later (not R0): R1 — the engine (`docs/reporting-module.md` §6)
+
 ## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)
 
 - [x] `lib/dealer-journey.js` `FOLDED` (Permitting Received → Permit Submitted); `sundial-dealer` rewrites `Stage__c` / picklist for dealer / own scope; `sundial-notify/stage.js` sends nothing into a folded stage; tests (suite 1,806 / 1,806)

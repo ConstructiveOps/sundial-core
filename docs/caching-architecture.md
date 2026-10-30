@@ -494,3 +494,121 @@ rather than by a second thing somebody has to remember. No request input can wid
 Cache rows are additionally **projected** to the caller's manifest columns before they
 leave the Lambda (§4.3), so a column a role may not read never reaches the browser even
 though it is stored.
+
+## Reporting-grade cache (R0, 2026-10-30)
+
+Reports run on the cache, never on Salesforce (D-087, `docs/reporting-module.md`). R0 makes
+the cache wide enough to report on: **every field a detail layout shows is a cache column.**
+What each table carries, and what was refused, is `docs/reporting-cache-coverage.md`.
+
+### The rule (§4.1)
+
+For each cached object, every field on its field-design workbook (any section) gets a cache
+column, plus every field already cached. Objects with no workbook (`po`, `user`,
+`membership`, `serviceplan`) get every field the integration user can read.
+
+| Object key | Cache table | Field list |
+|---|---|---|
+| customer | `sundial_customer_cache` | `docs/Sundial_Customer__c_Field_Design.xlsx` (*Fields by Section*) |
+| solar | `sundial_solar_cache` | `docs/Sundial_Solar_Fields_by_Section.xlsx` (*Fields by Section*) |
+| roofing | `sundial_roofing_cache` | `docs/Sundial_Roofing_Fields_by_Section.xlsx` (*Field List (Module)*) |
+| job / serviceinvoice / servicepayment | their cache tables | `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Job / Invoice / Payment Fields*) |
+| estimate / serviceline / pricebookitem | their cache tables | `docs/Sundial_Estimate_Fields_by_Section.xlsx` (*Estimate / Service Line / Price Book Item Fields*) |
+| servicecall | `sundial_service_call_cache` | `docs/Sundial_Service_Call_Fields_by_Section.xlsx` (*Service Call Fields*) |
+| po, user, membership, serviceplan | their cache tables | every readable describe field |
+
+Column names come **only** from `sfFieldToColumn()` in `lib/cache-row.js` (lowercase, `__c`
+stripped, reference fields suffixed `_sf_id`). That is why no code changes when a column is
+added: `buildCacheSelect` selects every field whose column exists, so `sundial-cache-sync`
+and `sundial-sf-query` fill it on the next sync.
+
+**How a column is added.** `node scripts/generate-report-columns.mjs` reads the workbooks, a
+live describe as the integration user (`lib/sf-describe.js` `getQueryableFields`), and the
+live cache columns (PostgREST's OpenAPI document, the method the sync's `getCacheColumns`
+uses). It writes `sql/2026-10-30_report_columns.sql` (one `alter table … add column if not
+exists` per column, commented with the Salesforce API name and label) and the coverage
+report. It never runs the SQL. Both files are deterministic: an unchanged state is an empty
+diff, and `--check` exits 1 when either would change. The decisions are in
+`lib/report-columns.js`, unit-tested with fixtures in `lib/report-columns.test.js`.
+
+### The type map (§4.2)
+
+| Salesforce describe type | Postgres |
+|---|---|
+| string, textarea, picklist, multipicklist, phone, email, url, id, encryptedstring | `text` |
+| reference | `text` (column `<name>_sf_id`) |
+| boolean | `boolean` |
+| int | `integer` |
+| double, currency, percent | `numeric` |
+| date | `date` |
+| datetime | `timestamptz` |
+| formula | its result type (the describe reports it) |
+| address, location, base64, anyType, anything else | **refused** |
+
+### What the generator refuses, and reports (§4.3)
+
+Nothing is guessed. Each of these is listed in the coverage report with its reason:
+
+- **Name over 63 characters.** Postgres would truncate it and the sync would never match it.
+- **Column collision.** Two Salesforce fields map to one column (`Name` / `Name__c`), or a
+  field maps onto a control column the sync writes itself (`sf_id`, `created_date`,
+  `is_stale` …). No new column; an existing one is left as it is.
+- **Not readable.** The field is not in the integration user's describe. It becomes a
+  **TIM: grant Read FLS** line and gets no column until it is readable. (A field that has
+  not been created yet looks the same.)
+- **Existing column, different type.** Left alone and reported (e.g. `sundial_solar_cache`
+  `number_of_panels` is `integer`; the describe says double).
+- **Unmapped type** (address, location, base64, anyType).
+- **A new formula the sync cannot keep fresh** (TODAY() / NOW(), a `$` global, an
+  unresolvable parent — the `lib/formula-parents.js` rules). A stale number in a report is a
+  wrong number. Added 2026-10-30.
+- **Sensitive.** Credentials (any API name ending in Password / Secret / Token, e.g.
+  `Utility_Password__c`, an estimate's `Public_Token__c`) and `Sundial_User__c.Hourly_Cost_Rate__c`
+  (a pay rate with no cache-read gate — `lib/cost-gate.js` covers only price-book and line
+  costs). A cache column comes back on every cache read of its row, and a report never needs
+  these. Added 2026-10-30.
+
+Long-text fields **are** included (they are on the layouts). They stay out of
+`LIST_PROJECTION` and out of list responses.
+
+### The sync streams
+
+`sundial-cache-sync` writes each Salesforce page (up to 2,000 records) before it fetches the
+next (`lib/salesforce.js` `sfQueryPages`), in full and incremental mode. A full resync of a
+470-column object no longer holds the whole object in memory. The rules it already had stay:
+
+- The watermark moves **once**, after the last page, and only if every page's upsert
+  succeeded. A failed page stops the run and leaves the watermark alone. The next run
+  re-reads the window; pages already written are upserts, so writing them again is harmless.
+- A zero-change run is still **one SOQL and no cache write** (`sync-runs.test.js`).
+- Each row's tenant comes from **its own record's** `Client__c`, on every page. A record with
+  no `Client__c` is skipped but still counts toward the watermark.
+
+**The query-length ceiling.** `sfQuery` / `sfQueryPages` send the SOQL as a GET, and
+Salesforce refuses a URI over 16,384 bytes. Every selected field adds its name to that URI.
+The generator reports each table's incremental-sync URI length once its new columns exist.
+After R0, solar is the widest at 14,278 bytes. A future wide addition to solar must be
+checked against that column of the coverage report; past the limit, the sync has to split its
+SELECT before the column can be added.
+
+The Lambda runs at **1,024 MB / 15 min** from R0 on (it was sized for a ~50-column table).
+
+### Running the resync (§4.5)
+
+Once the SQL has run, the new columns are empty until a full resync:
+
+1. **Delete `private.app_config` `stage_notify_url` first** and put it back after the
+   customer / solar resyncs (D-074 am. 3). A full resync is upserts and moves no stage, but
+   the design does not rely on that.
+2. One object per Test event, `{ "object": "<key>", "mode": "full" }`, in this order:
+   customer, solar, roofing, job, estimate, servicecall, serviceinvoice, servicepayment,
+   serviceline, pricebookitem, then po, user, membership, serviceplan.
+3. After customer: re-run `sql/sundial_dealer_customer_view.sql` (the dealer list reads that
+   view; new customer columns reach it only when it is rebuilt).
+4. After customer and solar: `node scripts/check-cache-formula-coverage.mjs`.
+5. Then `{ "object": "<key>", "mode": "reconcile" }` per object, so records deleted in
+   Salesforce do not inflate report counts (D-051).
+
+Before the SQL and again after the resync, time both pipeline functions with `explain analyze`
+(they are the only portal paths that scan whole tables). A regression over ~50 ms moves the
+wide columns into a sibling `sundial_<object>_report` table keyed on `sf_id`.

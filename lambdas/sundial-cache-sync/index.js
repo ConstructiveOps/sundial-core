@@ -21,8 +21,9 @@
 //     record no longer exists. MANUAL INVOKE ONLY — not on any schedule. This is the
 //     only destructive mode here; see reconcileObject for the safety rails.
 //
-// Both sync modes follow the Salesforce query locator to exhaustion (via sfQuery),
-// so a single run captures the whole result set rather than one 2000-row page.
+// Both sync modes follow the Salesforce query locator to exhaustion (via sfQueryPages),
+// so a single run captures the whole result set rather than one 2000-row page — and
+// each page is upserted before the next is fetched, never all held at once (D-087 R0).
 //
 // DELETES DO NOT PROPAGATE ON THE SYNC PATH — by construction. Both incremental and
 // full are UPSERT-ONLY, and a deleted record simply stops appearing in the SOQL
@@ -45,7 +46,7 @@
 // Lambda stays isolated from the proven read Lambda. If a third consumer appears,
 // promote these to a shared lib/ module.
 
-import { getSalesforceToken, sfQuery } from "../../lib/salesforce.js";
+import { getSalesforceToken, sfQuery, sfQueryPages } from "../../lib/salesforce.js";
 import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
 import { parentModstampPaths, incrementalWhere, readPath } from "../../lib/formula-parents.js";
 import { getAcumaticaEntity } from "../../lib/acumatica.js";
@@ -618,113 +619,136 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
   // CROSS-TENANT system query — NO Client__c filter BY DESIGN. Each record still
   // carries its own Client__c, which drives its cache row's tenant below.
   //
-  // NO SOQL LIMIT in either mode: sfQuery follows nextRecordsUrl to exhaustion, so
-  // a single run captures the WHOLE result set (all ~40k on a full resync, or the
-  // entire changed window on an incremental run). This removes the old 2000-per-run
-  // cap AND the tie bug where >2000 records sharing one SystemModstamp could be
-  // split across a page boundary and partially skipped by the "> watermark" cursor.
+  // NO SOQL LIMIT in either mode: sfQueryPages follows nextRecordsUrl to exhaustion, so
+  // a single run covers the WHOLE result set (all ~40k on a full resync, or the entire
+  // changed window on an incremental run). This removes the old 2000-per-run cap AND the
+  // tie bug where >2000 records sharing one SystemModstamp could be split across a page
+  // boundary and partially skipped by the "> watermark" cursor.
   //   - full:        every record for the object (ignores the window).
   //   - incremental: only records changed since the watermark / first-run lookback,
   //     OR whose formula-feeding parent changed (incrementalWhere, D-079).
   //
+  // STREAMED, PAGE BY PAGE (D-087 R0, 2026-10-30): each Salesforce page (up to 2,000
+  // records) is mapped and upserted before the next page is fetched, then let go. With
+  // the reporting-grade cache (~470 columns on solar) holding a whole full resync in
+  // memory first was hundreds of MB. The watermark still moves only once, at the end,
+  // and only if EVERY page's upsert succeeded: a failed page stops the run, leaves the
+  // watermark where it was, and the next run re-reads the window — the pages already
+  // written are upserts, so writing them again is harmless.
+  //
   // ZERO-CHANGE RUN = ONE SOQL AND NO CACHE WRITE (pinned by sync-runs.test.js): an
-  // empty result returns below before any cache read or upsert. That is what makes a
+  // empty first page writes nothing — no version read, no upsert. That is what makes a
   // 5-minute schedule cheap (D-079 runbook: objects × runs/day SOQL, nothing else).
   const soql = full
     ? `SELECT ${syncSelectList} FROM ${entry.sfObject} ORDER BY SystemModstamp ASC`
     : `SELECT ${syncSelectList} FROM ${entry.sfObject} ` +
       `WHERE ${incrementalWhere(watermarkIso, parentPaths)} ORDER BY SystemModstamp ASC`;
-  const records = await sfQuery(soql);
 
-  if (!records || records.length === 0) {
-    await writeSyncState(supabase, objectKey, { modstamp: null, status: "ok", count: 0 });
-    return { processed: 0, skipped: 0, fetched: 0, newWatermark: watermarkIso, status: "ok", mode: full ? "full" : "incremental" };
-  }
-
-  // Max SystemModstamp across ALL returned records (incl. skipped null-tenant
-  // ones) so the watermark can't stall on a window of tenant-less records. The
-  // parents' modstamps count too, and an incremental watermark never moves BACKWARDS:
-  // a run that only found parent-changed rows (whose own modstamps are old) must not
-  // rewind the cursor and re-pull the window next time.
+  // Max SystemModstamp across ALL returned records (incl. skipped null-tenant ones) so
+  // the watermark can't stall on a window of tenant-less records. The parents'
+  // modstamps count too, and an incremental watermark never moves BACKWARDS: a run that
+  // only found parent-changed rows (whose own modstamps are old) must not rewind the
+  // cursor and re-pull the window next time.
   let maxMs = full ? 0 : Date.parse(watermarkIso) || 0;
   const bump = (v) => {
     const ms = Date.parse(v);
     if (Number.isFinite(ms) && ms > maxMs) maxMs = ms;
   };
-  for (const rec of records) {
-    bump(rec.SystemModstamp);
-    for (const p of parentPaths) bump(readPath(rec, `${p}.SystemModstamp`));
-  }
-  const newWatermark = new Date(maxMs).toISOString();
 
-  // Skip records with a null Client__c — never write a tenant-less cache row.
-  const valid = [];
+  const nowIso = new Date().toISOString();
+  const hasVersion = columnSet.has("cache_version");
+  let fetched = 0;
+  let processed = 0;
   let skipped = 0;
-  for (const rec of records) {
-    if (!rec.Client__c) {
-      skipped++;
-      continue;
+  let pagesWritten = 0;
+  let writeOk = true;
+
+  // A failed upsert is thrown out of the page callback to stop the paging; anything
+  // else (a Salesforce error) propagates to the handler as before.
+  class CacheWriteFailed extends Error {}
+
+  async function writePage(records) {
+    if (records.length === 0) return;
+    fetched += records.length;
+    for (const rec of records) {
+      bump(rec.SystemModstamp);
+      for (const p of parentPaths) bump(readPath(rec, `${p}.SystemModstamp`));
     }
-    valid.push(rec);
+
+    // Skip records with a null Client__c — never write a tenant-less cache row.
+    const valid = [];
+    for (const rec of records) {
+      if (!rec.Client__c) {
+        skipped++;
+        continue;
+      }
+      valid.push(rec);
+    }
+    if (valid.length === 0) return;
+
+    const versionMap = hasVersion
+      ? await getExistingCacheVersions(supabase, entry.cacheTable, valid.map((r) => r.Id))
+      : new Map();
+    const rows = valid.map((rec) =>
+      mapSfRecordToCacheRow(rec, selectFields, columnSet, {
+        tenantId: rec.Client__c, // per-record isolation key straight from Salesforce
+        tenantSlug: rec.Client__r?.Name ?? null, // human label only
+        now: nowIso,
+        cacheVersion: hasVersion ? (versionMap.get(rec.Id) ?? 0) + 1 : null,
+        createdDateSources,
+      })
+    );
+
+    // Idempotent upsert keyed on sf_id (chunked). A re-run of the same window is
+    // harmless because these are upserts, not inserts.
+    for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
+      const chunk = rows.slice(i, i + UPSERT_CHUNK);
+      let error;
+      try {
+        ({ error } = await supabase.from(entry.cacheTable).upsert(chunk, { onConflict: "sf_id" }));
+      } catch (e) {
+        console.error(`cache-sync upsert threw (${objectKey}):`, e?.message || String(e));
+        throw new CacheWriteFailed();
+      }
+      if (error) {
+        console.error(`cache-sync upsert error (${objectKey}):`, error.message);
+        throw new CacheWriteFailed();
+      }
+    }
+    processed += valid.length;
+    pagesWritten++;
   }
+
+  try {
+    await sfQueryPages(soql, writePage);
+  } catch (e) {
+    if (!(e instanceof CacheWriteFailed)) throw e;
+    writeOk = false;
+  }
+
   if (skipped > 0) {
     console.warn(`cache-sync: ${objectKey} skipped ${skipped} record(s) with null Client__c.`);
   }
 
-  const nowIso = new Date().toISOString();
-  const hasVersion = columnSet.has("cache_version");
-  const versionMap = hasVersion
-    ? await getExistingCacheVersions(
-        supabase,
-        entry.cacheTable,
-        valid.map((r) => r.Id)
-      )
-    : new Map();
-
-  const rows = valid.map((rec) =>
-    mapSfRecordToCacheRow(rec, selectFields, columnSet, {
-      tenantId: rec.Client__c, // per-record isolation key straight from Salesforce
-      tenantSlug: rec.Client__r?.Name ?? null, // human label only
-      now: nowIso,
-      cacheVersion: hasVersion ? (versionMap.get(rec.Id) ?? 0) + 1 : null,
-      createdDateSources,
-    })
-  );
-
-  // Idempotent upsert keyed on sf_id (chunked). A re-run of the same window is
-  // harmless because these are upserts, not inserts.
-  let writeOk = true;
-  for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
-    const chunk = rows.slice(i, i + UPSERT_CHUNK);
-    try {
-      const { error } = await supabase
-        .from(entry.cacheTable)
-        .upsert(chunk, { onConflict: "sf_id" });
-      if (error) {
-        writeOk = false;
-        console.error(`cache-sync upsert error (${objectKey}):`, error.message);
-        break;
-      }
-    } catch (e) {
-      writeOk = false;
-      console.error(`cache-sync upsert threw (${objectKey}):`, e?.message || String(e));
-      break;
-    }
+  if (fetched === 0) {
+    await writeSyncState(supabase, objectKey, { modstamp: null, status: "ok", count: 0 });
+    return { processed: 0, skipped: 0, fetched: 0, newWatermark: watermarkIso, status: "ok", mode: full ? "full" : "incremental" };
   }
 
-  // Advance the watermark ONLY on a clean write, and only to the DATA's own max
-  // SystemModstamp (never "now") so nothing between the last record and now is
+  // Advance the watermark ONLY when every page wrote cleanly, and only to the DATA's own
+  // max SystemModstamp (never "now") so nothing between the last record and now is
   // skipped. On a write failure, leave the watermark so the next run retries.
   if (writeOk) {
+    const newWatermark = new Date(maxMs).toISOString();
     await writeSyncState(supabase, objectKey, {
       modstamp: newWatermark,
       status: "ok",
-      count: valid.length,
+      count: processed,
     });
     return {
-      processed: valid.length,
+      processed,
       skipped,
-      fetched: records.length,
+      fetched,
       newWatermark,
       status: "ok",
       mode: full ? "full" : "incremental",
@@ -735,6 +759,8 @@ async function syncObject(supabase, objectKey, { full = false } = {}) {
   return {
     processed: 0,
     skipped,
+    fetched,
+    pagesWritten, // pages upserted before the failure (harmless: re-read next run)
     newWatermark: watermarkIso, // unchanged
     status: "error",
     error: "cache_upsert_failed",

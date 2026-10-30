@@ -29,6 +29,13 @@
 // IDEMPOTENT by the notifier's dedupe key `stage:{object}:{sf_id}:{new_stage}:{modstamp}`:
 // a pg_net redelivery or a hand replay rings nobody twice. Nothing is rate limited.
 //
+// FOLDED STAGES (lib/dealer-journey.js FOLDED, 2026-10-30). Every recipient here is a
+// dealer or a rep, and a folded stage is one they must not learn about ("Permitting
+// Received" reads as "Permit Submitted"). So a move INTO a folded stage sends nothing (a
+// 200 skip, logged kind=folded); a move OUT of one reports "Previously:" as its folded
+// value; and a move whose folded previous stage reads the same as the new one (Permitting
+// Received → Permit Submitted) is no visible change and is skipped the same way.
+//
 // EVERY SKIP IS A 200 (row gone, tenant mismatch, nobody to tell) — pg_net does not
 // retry a 200, and retrying would change nothing. Only a bad secret (401) or body (400)
 // is an error.
@@ -38,6 +45,7 @@
 import { constantTimeEquals } from "../../lib/secure-compare.js";
 import { customerDisplayName } from "../../lib/customer-name.js";
 import { CATEGORIES } from "../../lib/notify.js";
+import { foldStage, isFoldedStage } from "../../lib/dealer-journey.js";
 
 export const STAGE_SECRET_HEADER = "x-sundial-stage-secret";
 export const STAGE_SECRET_NAME = "sundial/stage-notify";
@@ -164,11 +172,19 @@ export function createStageHandler(d) {
     const sfId = str(body?.sf_id);
     const clientSfId = str(body?.client_sf_id);
     if (!body || !CACHE_TABLES[object] || !sfId || !clientSfId) return respond(400, { error: "invalid_body", code: "INVALID_BODY" });
-    const oldStage = str(body.old_stage);
+    // What a dealer / rep is shown — never a folded value (header).
+    const rawOldStage = str(body.old_stage);
     const newStage = str(body.new_stage);
+    const oldStage = rawOldStage === null ? null : foldStage(rawOldStage);
     const op = str(body.op)?.toLowerCase() ?? null;
     const modstamp = str(body.modstamp);
     const skip = (reason) => (console.log(`stage-notify: ${object}/${sfId} skipped — ${reason}`), respond(200, { sent: false, reason }));
+
+    // Before any read: nothing a dealer may see has changed.
+    if (isFoldedStage(newStage) || (isFoldedStage(rawOldStage) && oldStage === newStage)) {
+      console.log(`stage-notify: ${object}/${sfId} kind=folded — nothing sent`);
+      return respond(200, { sent: false, reason: "folded" });
+    }
 
     const supabase = await d.getSupabaseClient();
     const row = await readRow(supabase, CACHE_TABLES[object], sfId);

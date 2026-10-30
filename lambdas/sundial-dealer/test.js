@@ -16,7 +16,9 @@
 //     solar read after it), the narrowed SELECT, the solar found by customer id and NOT by
 //     its own dealer / rep, the newest one leading, solarCount, the access block (solar
 //     visible ⊆ the solar manifest), picklists limited to readable fields, the journey;
-//   - pickLeadingSolar agrees with the view's ORDER BY, and its source list is sf-query's.
+//   - pickLeadingSolar agrees with the view's ORDER BY, and its source list is sf-query's;
+//   - a folded stage (Permitting Received) reaches a rep / dealer only as Permit Submitted —
+//     list row, detail record, picklist — while tenant scope sees the raw value.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -113,7 +115,7 @@ const DESCRIBE = {
   ],
   Sundial_Solar__c: [
     { name: "Id", type: "id" }, { name: "Client__c", type: "reference" }, { name: "Project_Name__c", type: "string" },
-    { name: "Stage__c", ...pl(["Audit", "Permitting"]) }, { name: "Contract_Amount__c", type: "currency" },
+    { name: "Stage__c", ...pl(["Audit", "Permitting", "Permit Submitted", "Permitting Received"]) }, { name: "Contract_Amount__c", type: "currency" },
     { name: "Sales_Rep__c", type: "reference" }, { name: "Dealer__c", type: "reference" },
     { name: "Sundial_Customer__c", type: "reference" }, { name: "Sunbase_Created_Date__c", type: "datetime" },
     { name: "Contract_Date__c", type: "date" }, { name: "CreatedDate", type: "datetime" },
@@ -368,7 +370,7 @@ test("detail: picklists are Stage + Status (with the dependency) and solar Stage
   const b = body(await handler(ev(`/dealer/customers/${CUST}`)));
   assert.deepEqual(Object.keys(b.picklists.customer).sort(), ["Stage__c", "Status__c"]);
   assert.equal(b.picklists.customer.Stage__c.controllingField, "Status__c");
-  assert.deepEqual(b.picklists.solar.Stage__c.values.map((v) => v.value), ["Audit", "Permitting"]);
+  assert.deepEqual(b.picklists.solar.Stage__c.values.map((v) => v.value), ["Audit", "Permitting", "Permit Submitted"], "the folded value is never an option for a rep");
 });
 
 test("detail: the journey leads with the solar", async () => {
@@ -431,4 +433,62 @@ test("pickLeadingSolar: first non-empty source, newest first, undated last, then
 test("the source list is sf-query's CREATED_DATE_SOURCE.solar — the cache column the view sorts by", async () => {
   const { CREATED_DATE_SOURCE } = await import("../sundial-sf-query/index.js");
   assert.deepEqual([...SOLAR_CREATED_DATE_SOURCE], CREATED_DATE_SOURCE.solar);
+});
+
+// --- folded stages (Harmon's first dealer feedback, 2026-10-30) --------------------------
+
+const foldedRow = () => ({ sf_id: CUST, client_sf_id: TENANT, name: "Ada Lee", stage: "Sold",
+  journey_solar_sf_id: SOLAR_NEW, journey_solar_stage: "Permitting Received", journey_solar_project_name: "Lee PV", journey_solar_count: 1 });
+
+test("folded (list, rep + dealer): solar.stage is Permit Submitted and the raw value appears nowhere in the response", async () => {
+  for (const level of ["Sales Rep", "Sales Dealer"]) {
+    reset();
+    ctx.level = level;
+    ctx.viewRows = [foldedRow()];
+    const res = await handler(ev("/dealer/customers"));
+    const [r] = body(res).records;
+    assert.equal(r.solar.stage, "Permit Submitted", level);
+    assert.equal(r.journey.stage, "permit-submitted");
+    assert.equal(r.journey.offPath, null);
+    assert.doesNotMatch(res.body, /Permitting Received/, level);
+  }
+});
+
+test("folded (list, tenant): the raw stage, the folded journey", () => {
+  const r = toListRow(foldedRow(), accessFor("Admin"));
+  assert.equal(r.solar.stage, "Permitting Received");
+  assert.equal(r.journey.stage, "permit-submitted");
+});
+
+test("folded (list): the Permit Submitted filter also matches Permitting Received; there is no filter of its own", async () => {
+  let res = await handler(ev("/dealer/customers", { stage: "permit-submitted" }));
+  assert.equal(res.statusCode, 200);
+  assert.ok(calls("or").at(-1)[1].includes('journey_solar_stage.in.("Permit Submitted","Permitting Received")'));
+  res = await handler(ev("/dealer/customers", { stage: "permitting-received" }));
+  assert.equal(res.statusCode, 400);
+  assert.equal(body(res).code, "INVALID_STAGE");
+});
+
+test("folded (detail, rep + dealer): Stage__c is Permit Submitted, the journey has no flag, the raw value is nowhere", async () => {
+  for (const level of ["Sales Rep", "Sales Dealer"]) {
+    reset();
+    ctx.level = level;
+    seedDetail();
+    ctx.solarRecords[SOLAR_NEW].Stage__c = "Permitting Received";
+    const res = await handler(ev(`/dealer/customers/${CUST}`));
+    const b = body(res);
+    assert.equal(b.solar.Stage__c, "Permit Submitted", level);
+    assert.deepEqual(b.journey, { stage: "permit-submitted", source: "solar", index: 16, offPath: null });
+    assert.doesNotMatch(res.body, /Permitting Received/, level);
+  }
+});
+
+test("folded (detail, tenant): the raw Stage__c and the full picklist", async () => {
+  ctx.level = "Admin";
+  seedDetail();
+  ctx.solarRecords[SOLAR_NEW].Stage__c = "Permitting Received";
+  const b = body(await handler(ev(`/dealer/customers/${CUST}`)));
+  assert.equal(b.solar.Stage__c, "Permitting Received");
+  assert.ok(b.picklists.solar.Stage__c.values.some((v) => v.value === "Permitting Received"));
+  assert.equal(b.journey.stage, "permit-submitted");
 });

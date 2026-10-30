@@ -4,6 +4,16 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)
+
+- [x] `lib/dealer-journey.js` `FOLDED` (Permitting Received → Permit Submitted); `sundial-dealer` rewrites `Stage__c` / picklist for dealer / own scope; `sundial-notify/stage.js` sends nothing into a folded stage; tests (suite 1,806 / 1,806)
+- [x] `OVERRIDES`: permit / utility-approval dates (Solar) + NS adder markup / material cost / labor hours (both objects) hidden for both roles; workbooks applied, manifests regenerated, workbooks copied to harmon-crm `docs/`
+- [x] Docs: access-model §13 (§13.6 new), api-endpoints
+- [ ] **TIM: redeploy** (the manifests and `lib/dealer-journey.js` are bundled in): `.\deploy.ps1 sundial-sf-query`, `.\deploy.ps1 sundial-sf-update`, `.\deploy.ps1 sundial-dealer`, `.\deploy.ps1 sundial-notify`. No route or SQL changes
+- [ ] harmon-crm: regenerate the dealer config from the new workbooks / manifests, and update `config/dealer-stages.ts` to match `lib/dealer-journey.js`: drop the "Permitting Received" step (27 steps) and add the `FOLDED` table. Its pinning test will fail until then
+- [ ] **Decide:** should the office portal's solar reads (`sundial-sf-query` `GET /sf/solar`, `?full=true`) also fold `Stage__c` for a sales login whose shell is `office`? Today only `sundial-dealer` hides the raw value (access-model §13.6)
+- [ ] Confirm with Harmon: the `permit-submitted` filter includes Permitting Received deals (so the filter count matches the cards)
+
 ## 2026-10-28 — Per-user shell for sales logins (`Portal_Experience__c` → `access.shell`, D-064 am. 2)
 
 - [x] `lib/identity.js` (guarded read), `lib/access.js` `shellFor` / `accessBlock` `shell`, `sundial-user-admin` GET / POST / PATCH `portalExperience`; tests (suite 1,795 / 1,795); docs

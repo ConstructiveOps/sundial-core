@@ -1866,7 +1866,7 @@ The dealer app is **opt-in per user**, not automatic for the sales scopes (hotfi
 - Rows are **`rowFilter("customer")` only** (§3.2), on `sql/sundial_dealer_customer_view.sql` (the customer cache + its leading solar). A record outside it is 404, never 403.
 - **The solar is read through its customer** (by `Sundial_Customer__c`, never the solar's own `Dealer__c` / `Sales_Rep__c`), bound in the SOQL to that customer id. The most recently created solar leads.
 - A customer tagged **Service and nothing else** is left out of the list (the Sales page's rule, 2026-09-28); its detail read still answers. Archived customers are listed. When a list is shorter than `/sf/customer`, `scripts/verify-access-matrix.mjs` prints why for each missing row.
-- Where a deal is on the Customer → Solar path is `lib/dealer-journey.js` alone (copied into harmon-crm `config/dealer-stages.ts`, pinned by a test).
+- Where a deal is on the Customer → Solar path is `lib/dealer-journey.js` alone (copied into harmon-crm `config/dealer-stages.ts`, pinned by a test). Some stages are **folded** — shown as a different step (§13.6).
 
 ### 13.2 Fields — Harmon's sheet + `OVERRIDES` (§4.1a)
 
@@ -1875,6 +1875,10 @@ The `Sales Rep` / `Sales Dealer` columns of the Customer and Solar workbooks com
 - A listed field is authoritative (Y → `read`, an existing `edit` stays `edit`; blank → `hidden`). **An unlisted field is unchanged.** A conflicting duplicate takes the stricter answer.
 - Rule 7: the Solar adder mirror takes the dealer's Customer answer (73 fields; the mirror's 70 internal cost / margin fields stay hidden).
 - **`OVERRIDES`**, applied last: the three commission fields (`Commission_Total__c`, `Commission_Total_PPW__c`, `Commission_Redline_PPW__c`) are `read` for Sales Dealer and `hidden` for Sales Rep on both objects; `Sales_Rep_Name__c` is `read` for both (an owner tells reps apart; a rep only ever reads their own name).
+- **Hidden from both roles** (`OVERRIDES`, Harmon's first dealer feedback, 2026-10-30; `hiddenForSalesRoles` in the script):
+  - The permit / utility approval dates, Solar only (the Customer workbook has none of them): `Permit_in_Office__c`, `Permit_Received__c`, `Permit_Received_2__c` … `_4__c`, `Utility_Application_Approved_Date__c`, `Utility_Application_Revisions_Approved__c`. Same reason as the folded stage (§13.6).
+  - The NS adder cost basis, Customer and Solar: `NS_Adder_{1..5}_Markup_Percent__c`, `_Material_Cost__c`, `_Labor_Hours__c`. Overrides apply after rule 7, so the mirror cannot bring them back. `NS_Adder_n_Description__c` and `NS_Adder_n_Price__c` stay as the sheet and rule 7 say (dealer `read`).
+  - Result: Customer dealer read 265 → 250 (rep unchanged: it never had them); Solar rep read 141 → 134, dealer 216 → 194. None of the 22 fields is in either role's `read` or `listColumns`.
 - Then `scripts/generate-field-configs.mjs --apply` → `lib/field-manifest/*.json`, bundled into every Lambda that reads records. The dealer detail read advertises the bundle as `access.manifestVersion`.
 
 ### 13.3 Comments — D-086 (amends A11)
@@ -1889,6 +1893,8 @@ The `Sales Rep` / `Sales Dealer` columns of the Customer and Solar workbooks com
 
 Dealers and reps hear every stage change of their deal: a trigger on the customer and solar caches (`sql/sundial_stage_notify.sql`) posts to `POST /webhooks/stage-change` (`sundial-notify` `stage.js`). Recipients: the deal's rep (own / dealer scope only) plus the dealer's `dealer`-scope profiles; category `stage`; push `app: 'dealer'`.
 
+A move **into** a folded stage (§13.6) sends nothing; a move out of one names the previous stage as its folded value.
+
 **Latency (measured 2026-10-27).** `sundial-sf-update` does not write the new value into the cache; it flags the row `is_stale`. The trigger therefore fires when the row is next refreshed: a single-record read (seconds after the office re-opens or re-reads the record) or the 5-minute `sundial-cache-sync`. A dealer hears a portal stage change within 5 minutes at worst, and exactly once: the trigger only fires on a real change, and the dedupe key (`stage:{object}:{id}:{stage}:{modstamp}`) keeps a replay silent.
 
 ### 13.5 The proof — `scripts/verify-dealer-module.mjs`
@@ -1901,3 +1907,29 @@ Two fixture facts it relies on:
 - **The designated record is tagged `Customer_Type__c = Service`** by the Service module's own ZZ testing, so zz-rep-a1's dealer LIST is empty. That is the correct Service-only rule, not a filter bug, and the scripts say so. The rep's detail read and comment checks use that record, and they pass.
 
 **Run 2026-10-27: 23 / 24.** The one failure is E: `/auth/me` carries no `user.access.manifestVersion` (its access block has level, scope, ids, modules and actions — `dealer.read` among them — but no version) (§1.3, §4.2's risk table and §4.5 say it does; `sundial-auth-proxy` never imports `lib/field-manifest`). The dealer detail read's `access.manifestVersion` matches the local manifest.
+
+### 13.6 Folded stages — `FOLDED` (Harmon's first dealer feedback, 2026-10-30)
+
+Harmon does not want a dealer or rep to know a permit has been received: they would demand an install date at once. `lib/dealer-journey.js` has a third table beside `JOURNEY` and `OFF_PATH`:
+
+```js
+FOLDED = { "Permitting Received": "Permit Submitted" }
+```
+
+A folded value is shown **as** another step, with **no flag**. An off-path value is drawn as a flag; a folded one is meant to look identical to its target.
+
+| Where | What a sales role (`dealer` / `own`) gets |
+|---|---|
+| `journeyFor` (every scope) | the target's `stage` / `index`, `offPath: null`. "Permitting Received" is no longer a JOURNEY step: 27 steps, 18 solar |
+| List filters | no key for the folded value (`permitting-received` → 400 `INVALID_STAGE`); not a floor filter. The target step's filter **does** match it server-side (`stageFilterValues("permit-submitted")` = `["Permit Submitted", "Permitting Received"]`). Otherwise a dealer filtering on Permit Submitted would get fewer deals than the cards show, and the gap would reveal the permit |
+| `sundial-dealer` list | `solar.stage` rewritten to the target |
+| `sundial-dealer` detail | `solar.Stage__c` rewritten to the target; the folded value removed from `picklists.solar.Stage__c` (values and dependencies) |
+| `sundial-notify` stage push | into a folded stage: nothing sent (200 `{ sent: false, reason: "folded" }`, logged `kind=folded`). Out of one: "Previously:" shows the folded value. From the folded value to its own target: no visible change, nothing sent |
+
+**Tenant scope sees the truth** in `sundial-dealer` (raw `Stage__c`, full picklist). Its journey is still folded, because `journeyFor` has one answer.
+
+**Scope of the guarantee.** The rewrite is in `sundial-dealer` only. A sales login that calls `GET /sf/solar` or `?full=true` on `sundial-sf-query` directly still reads the raw `Stage__c` (it is on both roles' Solar manifest). The dealer app does not make those calls, but the office portal does for a sales login whose shell is `office` (§13.0). Closing that path means folding in `lib/full-read.js` / `lib/cache-read.js` for sales scopes. Not done yet; see TASKS.
+
+The dates that would reveal the same thing are hidden by `OVERRIDES` (§13.2).
+
+To fold another stage, add it to `FOLDED`. The tests check that the target is a step and that the folded value is neither a step nor off-path. Also update harmon-crm `config/dealer-stages.ts`.

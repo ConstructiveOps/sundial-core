@@ -910,7 +910,9 @@ A failed holding-object delete is **not** a failed match — the bytes are attac
 
 **Behavior:** read the cache row (and, for a solar, its customer's); recipients in the row's tenant = the rep's profile (`sundial_user_id` = `sales_rep_sf_id`, scope own / dealer only) + every `access_scope = 'dealer'` profile with that `dealer_sf_id` — a solar without its own falls back to the customer's. One `lib/notify.js` delivery: category `stage`, kind `customer` / `solar` / `solar_created`, title `<customer> → <new stage>`, url `/dealer/customers/{customerId}`, record type `dealercustomer`, dedupe `stage:{object}:{sf_id}:{new_stage}:{modstamp}`, push `app: 'dealer'`. Harmon staff are never recipients.
 
-**Responses:** 200 `{ sent: true, kind, recipients, inserted, skipped, pushed }`; 200 `{ sent: false, reason }` for `record_not_found` / `tenant_mismatch` / `no_recipients`; 400 `INVALID_BODY` (missing fields, object not customer / solar); 401. A replay inserts nothing (`inserted: 0`).
+**Folded stages** (2026-10-30, `lib/dealer-journey.js` `FOLDED`): if `new_stage` is folded (`Permitting Received`), nothing is sent. The same applies when a folded `old_stage` reads the same as `new_stage`. Both are checked before any read and logged `kind=folded`. If `old_stage` is folded, the body's "Previously:" shows its folded value (`Permit Submitted`).
+
+**Responses:** 200 `{ sent: true, kind, recipients, inserted, skipped, pushed }`; 200 `{ sent: false, reason }` for `folded` / `record_not_found` / `tenant_mismatch` / `no_recipients`; 400 `INVALID_BODY` (missing fields, object not customer / solar); 401. A replay inserts nothing (`inserted: 0`).
 
 **Wiring:** `scripts/wire-notify-routes.ps1`. Runbook: `docs/integrations/push-notifications.md` § One-time setup step 6.
 
@@ -1203,7 +1205,10 @@ since stays `null` until the resync). It is not `last_synced_at`, which is when 
 copied the row and moves for every row on a resync.
 
 `solar` is `null` without a project; its `stage` / `project_name` pass through the **solar**
-manifest. `journey` is `lib/dealer-journey.js` `journeyFor` over what the role can see:
+manifest. **For dealer / own scope `solar.stage` is the folded value** (2026-10-30,
+`lib/dealer-journey.js` `FOLDED`): a solar at `Permitting Received` reads `Permit Submitted`,
+and the raw value appears nowhere in the response. Tenant scope gets the raw stage. The
+`permit-submitted` filter matches both values; `permitting-received` is not a key (400). `journey` is `lib/dealer-journey.js` `journeyFor` over what the role can see:
 `stage` is the JOURNEY key the deal is on (null when it is on no step), `index` where it is
 drawn, `offPath` `{ value, anchor, tone: info|warn|stop }` for an off-path value (`anchor`
 null = drawn at the deal's floor: Audit with a solar, New without). Errors: **403**
@@ -1242,6 +1247,13 @@ are indistinguishable). A malformed id is 404 without a query.
 - `access.*.visible` / `editable` — `null` means tenant scope, no restriction (§4.3).
 - `picklists` — from the describe, limited to the fields the role may read; a dependent
   picklist carries its `controllingField` + `dependencies` map (`lib/sf-describe.js`).
+- **Folded stages, dealer / own scope only** (2026-10-30, `lib/dealer-journey.js` `FOLDED`):
+  `solar.Stage__c` is rewritten to the step it is shown as (`Permitting Received` →
+  `Permit Submitted`), and the folded value is removed from `picklists.solar.Stage__c`
+  (`values` and every `dependencies` list). The `journey` is the target step, with `offPath`
+  `null`. Tenant scope gets the raw `Stage__c` and the full picklist. This rewrite is in this
+  Lambda only: `GET /sf/solar` and `?full=true` still return the raw value
+  (access-model §13.6).
 
 Wire script: `scripts/wire-dealer-routes.ps1` (resources `/dealer/customers` +
 `/dealer/customers/{id}`, GET + OPTIONS, invoke permission `apigw-dealer` on `…/*/*/dealer/*`).

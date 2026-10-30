@@ -6,7 +6,7 @@
 // only — staff never) + the dealer's people, inside the row's tenant; a solar falls back
 // to its parent customer's rep and dealer; the dedupe key makes a replay silent; the
 // solar_created kind; the dealer link, the dealer app tag, and that an off-journey stage
-// still notifies.
+// still notifies; a folded stage (Permitting Received) is never named to a dealer or rep.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -191,4 +191,50 @@ test("a dealer turned stage alerts off is skipped; the rep is still told", async
   store.user_preferences.push({ user_id: "uuid-dealer-boss", notify_prefs: { stage: false } });
   await post(customerMove());
   assert.deepEqual(rows().map((n) => n.profile_id), ["uuid-rep"]);
+});
+
+// --- folded stages (lib/dealer-journey.js FOLDED, 2026-10-30) ----------------------------
+
+const solarMove = (old_stage, new_stage, modstamp = "MF") => ({ object: "solar", sf_id: SOLAR, client_sf_id: TENANT, old_stage, new_stage, modstamp, op: "update" });
+
+test("folded: a move INTO Permitting Received sends nothing, logs kind=folded", async () => {
+  const { post, rows, pushes } = setup();
+  const log = console.log;
+  const lines = [];
+  console.log = (m) => lines.push(String(m));
+  let r;
+  try {
+    r = await post(solarMove("Permit Submitted", "Permitting Received"));
+  } finally {
+    console.log = log;
+  }
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { sent: false, reason: "folded" });
+  assert.equal(rows().length, 0);
+  assert.equal(pushes.length, 0);
+  assert.ok(lines.some((l) => l.includes("kind=folded")), lines.join(" | "));
+  assert.ok(!lines.some((l) => l.includes("Permitting Received")), "the log names no stage");
+});
+
+test("folded: a move OUT of Permitting Received reports the previous stage as Permit Submitted", async () => {
+  const { post, rows } = setup();
+  const r = await post(solarMove("Permitting Received", "Interconnection"));
+  assert.equal(r.body.sent, true);
+  assert.equal(rows()[0].title, "Ann Lee → Interconnection");
+  assert.equal(rows()[0].body, "Previously: Permit Submitted");
+  for (const n of rows()) assert.ok(!JSON.stringify(n).includes("Permitting Received"));
+});
+
+test("folded: Permitting Received → Permit Submitted is no visible change — nothing sent", async () => {
+  const { post, rows } = setup();
+  const r = await post(solarMove("Permitting Received", "Permit Submitted"));
+  assert.deepEqual(r.body, { sent: false, reason: "folded" });
+  assert.equal(rows().length, 0);
+});
+
+test("folded: a solar CREATED at Permitting Received sends nothing either", async () => {
+  const { post, rows } = setup();
+  const r = await post({ object: "solar", sf_id: SOLAR, client_sf_id: TENANT, old_stage: null, new_stage: "Permitting Received", modstamp: "M0", op: "insert" });
+  assert.equal(r.body.reason, "folded");
+  assert.equal(rows().length, 0);
 });

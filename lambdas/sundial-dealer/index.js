@@ -35,6 +35,12 @@
 // solar projects by Sundial_Customer__c (the leading one by the view's rule,
 // pickLeadingSolar), read with the solar manifest and bound to that customer id.
 //
+// FOLDED STAGES (Harmon's first dealer feedback, 2026-10-30): for dealer / own scope the
+// solar's raw Stage__c is rewritten to the step it is shown as (lib/dealer-journey.js
+// FOLDED — "Permitting Received" reads as "Permit Submitted") in the list row's
+// solar.stage, the detail's solar.Stage__c and the solar Stage__c picklist, so the raw
+// value never reaches a sales role from this Lambda. Tenant scope sees the truth.
+//
 // Value-safety: never logs a token, a search term or record data.
 
 import { resolveIdentity } from "../../lib/identity.js";
@@ -57,7 +63,7 @@ import {
 import { parseSort, applyCallerFiltersToQuery, pgrstQuote } from "../../lib/caller-filters.js";
 import { getRawDescribe, getQueryableFields, buildPicklistEntry } from "../../lib/sf-describe.js";
 import { readFullRecord } from "../../lib/full-read.js";
-import { journeyFor, listFilterValues } from "../../lib/dealer-journey.js";
+import { journeyFor, listFilterValues, foldStage, isFoldedStage } from "../../lib/dealer-journey.js";
 
 export const ACTION = "dealer.read";
 export const VIEW = "sundial_dealer_customer_view";
@@ -101,6 +107,21 @@ export const NOT_SERVICE_ONLY = Object.freeze({
   ignored: [],
   active: true,
 });
+
+/** The scopes that are shown a folded stage AS its target (lib/dealer-journey.js FOLDED). */
+export function foldsStages(access) {
+  return access?.scope === "dealer" || access?.scope === "own";
+}
+
+/** A picklist entry without the folded values: an option list must not name them either. */
+export function withoutFoldedValues(entry) {
+  if (!entry) return entry;
+  const keep = (v) => !isFoldedStage(v?.value);
+  const dependencies = entry.dependencies
+    ? Object.fromEntries(Object.entries(entry.dependencies).map(([k, vs]) => [k, (vs || []).filter(keep)]))
+    : entry.dependencies;
+  return { ...entry, values: (entry.values || []).filter(keep), dependencies };
+}
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/;
 
@@ -150,7 +171,8 @@ export function toListRow(row, access) {
       project_name: row.journey_solar_project_name ?? null,
     });
     // The id is always kept: the project is visible through this customer by definition.
-    solar = { sf_id: row.journey_solar_sf_id, stage: p.stage ?? null, project_name: p.project_name ?? null };
+    const stage = p.stage ?? null;
+    solar = { sf_id: row.journey_solar_sf_id, stage: foldsStages(access) ? foldStage(stage) : stage, project_name: p.project_name ?? null };
   }
   // The whole journey ({stage, source, index, offPath}), not just stage + source: a list
   // card needs the flag (a Cancelled deal is on no step) and should not ask twice.
@@ -325,6 +347,12 @@ async function handleDetail({ access, tenantId, cors, id }) {
     picklistsFor("customer", CUSTOMER_SF_OBJECT, CUSTOMER_PICKLISTS, access),
     picklistsFor("solar", SOLAR_SF_OBJECT, SOLAR_PICKLISTS, access),
   ]);
+
+  // A sales role never receives a folded stage value: not on the record, not as an option.
+  if (foldsStages(access)) {
+    if (solar?.record && solar.record.Stage__c != null) solar.record.Stage__c = foldStage(solar.record.Stage__c);
+    if (solarPicklists.Stage__c) solarPicklists.Stage__c = withoutFoldedValues(solarPicklists.Stage__c);
+  }
 
   const j = journeyFor(customer.record.Stage__c ?? null, solar?.record?.Stage__c ?? null, { hasSolar: !!solar });
   return jsonResponse(200, cors, {

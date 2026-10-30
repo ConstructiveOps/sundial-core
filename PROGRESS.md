@@ -1,5 +1,30 @@
 # Sundial — Progress Log
 
+## 2026-10-30 — Harmon's first dealer-module feedback: a folded stage + hidden fields (`feature/harmon-feedback-1`) — BUILT, NOT DEPLOYED
+
+- **Why:** Harmon does not want dealers or reps to know a permit has been received, because they would demand an install date at once. They also do not want them to see Harmon's NS adder cost basis.
+- **Folded stage.** `lib/dealer-journey.js` has a third table, `FOLDED = { "Permitting Received": "Permit Submitted" }`, plus `foldStage` / `isFoldedStage`.
+  - "Permitting Received" is no longer a JOURNEY step (27 steps, 18 solar). `journeyFor` returns Permit Submitted's stage and index for it, with no flag.
+  - No filter key names the folded value. **Choice to check:** the `permit-submitted` filter matches it server-side. If it did not, a dealer filtering on Permit Submitted would see fewer deals than the cards show, and the gap would give the permit away. To change that, delete the `FOLDED` loop in `stageFilterValues`.
+- **`sundial-dealer`** (dealer / own scope): list `solar.stage` and detail `solar.Stage__c` are rewritten to the folded value. The folded value is also removed from `picklists.solar.Stage__c`, which would otherwise have listed it as an option. Tenant scope sees the raw value.
+- **`sundial-notify/stage.js`:** a move into a folded stage sends nothing (`reason: "folded"`, logged `kind=folded`, checked before any read). A move out of one shows "Previously: Permit Submitted". Permitting Received → Permit Submitted counts as no visible change and sends nothing.
+- **Hidden fields** (`OVERRIDES` in `scripts/apply-dealer-visibility.mjs`, new `hiddenForSalesRoles` helper), for both roles:
+  - Solar only: `Permit_in_Office__c`, `Permit_Received__c` / `_2` / `_3` / `_4`, `Utility_Application_Approved_Date__c`, `Utility_Application_Revisions_Approved__c`. None of these exist in the Customer workbook.
+  - Customer and Solar: `NS_Adder_{1..5}_Markup_Percent__c` / `_Material_Cost__c` / `_Labor_Hours__c`.
+  - Dry run: 15 cell changes on Customer, 29 on Solar, no override misses. Applied, then manifests regenerated:
+
+  | Manifest | Rep read | Dealer read | Rep listColumns | Dealer listColumns |
+  |---|---|---|---|---|
+  | Customer | 189 → 189 | 265 → 250 | 196 → 196 | 272 → 257 |
+  | Solar | 141 → 134 | 216 → 194 | 149 → 142 | 224 → 202 |
+
+  - Customer version `717b6d19…`, Solar `460629e9…`; Roofing unchanged.
+  - Checked against the generated JSON: none of the 22 fields is in either role's `read` or `listColumns`, and all 10 NS description / price fields are still dealer `read`.
+  - Both workbooks copied to harmon-crm `docs/` (hashes match).
+- **Tests:** `lib/dealer-journey.test.js` (15, including "a solar in Permitting Received reports stage Permit Submitted, source solar, offPath null"), `lambdas/sundial-dealer/test.js` (32), `lambdas/sundial-notify/stage.test.js` (16). Suite **1,806 / 1,806**.
+- **Docs:** access-model §13.1, §13.2, §13.4 and new §13.6; api-endpoints (dealer list / detail, stage webhook).
+- **Known gap:** the Stage__c rewrite is in `sundial-dealer` only. A sales login in the office portal (`access.shell = office`) still reads the raw `Stage__c` through `sundial-sf-query` (`GET /sf/solar`, `?full=true`), where it is on both roles' Solar manifest. See TASKS.
+
 ## 2026-10-28 — Solar layout: `Alternate_Contact_Email__c` after Alternate Phone (`hotfix/solar-alternate-contact-email`) — DONE, NOT DEPLOYED
 
 - **Why:** Tim created `Sundial_Solar__c.Alternate_Contact_Email__c` (Email). Describe as the integration user: present, createable, updateable (FLS OK).

@@ -61,7 +61,34 @@ const OVERRIDES = [
   // the only name a rep can ever read here is their own.
   { object: "customer", field: "Sales_Rep_Name__c", role: "Sales Dealer", value: "read" },
   { object: "customer", field: "Sales_Rep_Name__c", role: "Sales Rep", value: "read" },
+  // Harmon's first dealer feedback (Tim, 2026-10-30), hidden from BOTH roles:
+  //   - the permit-received and utility-approval dates: a dealer who knows the permit is
+  //     in demands an install date at once. Same reason the "Permitting Received" stage is
+  //     folded into Permit Submitted (lib/dealer-journey.js FOLDED). Solar only — the
+  //     Customer workbook has none of these.
+  //   - the NS adder cost basis (markup, material cost, labor hours): what Harmon pays.
+  //     The NS adder's description and price stay as the sheet / rule 7 say.
+  ...hiddenForSalesRoles(["solar"], [
+    "Permit_in_Office__c",
+    "Permit_Received__c",
+    "Permit_Received_2__c",
+    "Permit_Received_3__c",
+    "Permit_Received_4__c",
+    "Utility_Application_Approved_Date__c",
+    "Utility_Application_Revisions_Approved__c",
+  ]),
+  ...hiddenForSalesRoles(
+    ["customer", "solar"],
+    [1, 2, 3, 4, 5].flatMap((n) => [`NS_Adder_${n}_Markup_Percent__c`, `NS_Adder_${n}_Material_Cost__c`, `NS_Adder_${n}_Labor_Hours__c`])
+  ),
 ];
+
+/** OVERRIDES rows hiding each field from both sales roles on each named object. */
+function hiddenForSalesRoles(objects, fields) {
+  return objects.flatMap((object) =>
+    fields.flatMap((field) => ["Sales Dealer", "Sales Rep"].map((role) => ({ object, field, role, value: "hidden" })))
+  );
+}
 
 /**
  * Rule 7 — the Solar adder set takes the dealer's Customer answer (Tim, 2026-10-22).

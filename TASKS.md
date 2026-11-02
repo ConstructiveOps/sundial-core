@@ -8,7 +8,9 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 - [x] `Invoice_Date__c`: set at issue (`invoiceDate`, today by default, due counted from it), changed by `PATCH /service/invoices/{id}` (PDF re-rendered, activity row), printed on the document, the report's range + order. `scripts/backfill-invoice-date.mjs`.
 - [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` (dry run) then `--apply`; harmon-crm `main`.
-- [ ] Later: `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it. **Still open (2026-11-02):** the generator re-run did not add it — `Invoice_Date__c` is not on the *Service Invoice Fields* sheet of `docs/Sundial_Service_Job_Fields_by_Section.xlsx`, and §4.1 adds workbook fields only. Add the row there, re-run `node scripts/generate-report-columns.mjs --sql sql/<date>_report_columns_followon.sql`, run it, full-resync `serviceinvoice`, then add `invoice_date` to the serviceinvoice `LIST_PROJECTION` (+ `list-projection.test.js`).
+- [x] `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it — the row added to the *Service Invoice Fields* sheet (Tim), `sql/2026-11-02_report_columns_followon.sql` (the one column), `invoice_date` in the serviceinvoice `LIST_PROJECTION` (+ `list-projection.test.js`).
+- [ ] **Tim:** Supabase SQL editor — run `sql/2026-11-02_report_columns_followon.sql`; `.deploy.ps1 sundial-sf-query`; Lambda console → sundial-cache-sync → Test `{ "object": "serviceinvoice", "mode": "full" }`. (The file is already in `APPLIED_SQL_FILES`, so the generator never rewrites it.)
+- [ ] harmon-crm: the Invoices tab shows / sorts by `invoice_date` (falling back to `issued_at` for an undated row).
 
 ## 2026-10-30 — Invoice report for the GL (Harmon — Heather)
 

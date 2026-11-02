@@ -10,6 +10,8 @@
 
 **Not done (follow-up):** the Invoices tab's list still shows the issued date from the cache — `invoice_date` is not a cache column yet (`sql/sundial_service_invoice_cache.sql` + the sync's column map).
 
+**Follow-up (2026-11-02, same day): `invoice_date` is a cache column.** Tim added `Dates | Invoice Date | Invoice_Date__c | Date` to the *Service Invoice Fields* sheet of `docs/Sundial_Service_Job_Fields_by_Section.xlsx`; `node scripts/generate-report-columns.mjs --sql sql/2026-11-02_report_columns_followon.sql` found exactly one missing column on any table — `invoice_date date` on `sundial_service_invoice_cache` — and nothing else changed (no refusal, no FLS gap; the serviceinvoice sync URI 725 → 746, solar still 14,278). The sync fills it with no code change once the column exists. `invoice_date` joins the serviceinvoice `LIST_PROJECTION` in `sundial-sf-query` so `?fields=list` carries it and the tab can sort by it (`list-projection.test.js`). Deploy: run the SQL, `.deploy.ps1 sundial-sf-query`, full-resync serviceinvoice. The portal still has to read it (harmon-crm).
+
 **Deploy (Tim):** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (re-run; adds PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` then `--apply`; harmon-crm `main`.
 
 ## 2026-10-30 — Invoice report for the GL: tax zone, amounts by tax category, any date range (Harmon — Heather)

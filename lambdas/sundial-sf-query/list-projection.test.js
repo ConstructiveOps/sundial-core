@@ -290,6 +290,7 @@ const LIST_PROJECTION_SOURCES = {
       "bill_to_type", "bill_to_name", "billing_reference", "total", "paid_amount", "balance", "due_date",
     ],
     "D-081: the payer snapshot (harmon-crm Prompt 2)": ["bill_to_customer_sf_id", "bill_to_address"],
+    "2026-11-02: Invoice_Date__c — the Invoices tab lists / sorts by it": ["invoice_date"],
   },
 };
 

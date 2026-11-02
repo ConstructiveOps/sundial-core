@@ -355,6 +355,7 @@ export const LIST_PROJECTION = {
     "name", "status", "service_job_sf_id", "issued_at", "due_date", "acumatica_entered_at",
     "bill_to_type", "bill_to_name", "billing_reference", "total", "paid_amount", "balance",
     "bill_to_customer_sf_id", "bill_to_address", // D-081: the payer snapshot at issue
+    "invoice_date", // 2026-11-02: the office's invoice date — the Invoices tab lists / sorts by it
   ],
 };
 

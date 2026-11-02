@@ -89,6 +89,7 @@ import {
   TENANT_ACCESS_LEVELS,
 } from "../../lib/access.js";
 import { COST_FIELDS, COSTING_READ, stripCost } from "../../lib/cost-gate.js";
+import { buildIdChunkQueries } from "../../lib/soql-budget.js";
 // FIELD MANIFEST (D-064 Phase 4, §4.3/§4.4). Imported at module scope on purpose: the
 // loader validates every manifest at import and THROWS, so a broken or missing manifest
 // fails this Lambda at cold start rather than serving unfiltered data at request time.
@@ -421,8 +422,9 @@ const SF_LIVE_MAX_LIMIT = 500;
 // the object, a row is fresh iff is_stale is not true; otherwise the pre-D-079 rule
 // (is_stale false AND last_synced_at within CACHE_TTL_MS, default 10 min, now an env
 // var). A row that is not fresh is refreshed from Salesforce on read.
-// Max record Ids per SOQL IN() when surgically re-fetching stale rows. Beyond
-// this we chunk into multiple queries (a single IN is fine at current volumes).
+// Max record Ids per SOQL IN() when surgically re-fetching stale rows. The real chunk
+// is usually smaller: lib/soql-budget.js sizes it from what is left of Salesforce's
+// 16,384-byte URI once the SELECT list is in (after R0, solar's SELECT alone is ~14 KB).
 const REFETCH_ID_CHUNK_SIZE = 200;
 // Some Sundial objects have hundreds of fields (Sundial_Solar__c has ~270) —
 // far more than any cache table stores. We do NOT select an arbitrary slice.
@@ -721,7 +723,8 @@ async function upsertCacheRows(supabase, cacheTable, rows, label) {
 // Re-fetch specific records by Id from Salesforce, using the cache-backed field
 // SELECT. TENANT ISOLATION (defense in depth): Client__c is always in the WHERE
 // even though we also constrain by Id — a cross-tenant Id can never be returned.
-// The Id list is chunked so a large stale set never builds an oversized IN()/SOQL.
+// The Id list is chunked so no query's URI passes 16,384 bytes: the chunk size comes
+// from the URI budget left after this SELECT list (idChunkSize), capped at 200.
 //
 // Chunks run REFETCH_CONCURRENCY at a time. Strictly sequential chunks were fine
 // at a 500-row page (3 chunks) but not at 5000 (25 chunks): at the ~1.5s per chunk
@@ -729,30 +732,27 @@ async function upsertCacheRows(supabase, cacheTable, rows, label) {
 // function's 30s timeout. Bounded waves keep a fully-stale max-size page inside the
 // timeout without hammering the Salesforce API.
 const REFETCH_CONCURRENCY = 5;
-async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
-  const chunks = [];
-  for (let i = 0; i < ids.length; i += REFETCH_ID_CHUNK_SIZE) {
-    chunks.push(ids.slice(i, i + REFETCH_ID_CHUNK_SIZE));
-  }
+export function refetchQueries({ sfObject, selectList, tenantId, ids }) {
+  const quoted = ids.map((id) => `'${soqlEscapeString(id)}'`);
+  const build = (inList) =>
+    `SELECT ${selectList} FROM ${sfObject} ` +
+    `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
+    `AND Id IN (${inList})`;
+  return buildIdChunkQueries(build, quoted, { max: REFETCH_ID_CHUNK_SIZE });
+}
 
-  const out = [];
-  for (let i = 0; i < chunks.length; i += REFETCH_CONCURRENCY) {
-    const wave = chunks.slice(i, i + REFETCH_CONCURRENCY);
-    const results = await Promise.all(
-      wave.map((chunk) => {
-        const quoted = chunk.map((id) => `'${soqlEscapeString(id)}'`).join(", ");
-        const soql =
-          `SELECT ${selectList} FROM ${sfObject} ` +
-          `WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-          `AND Id IN (${quoted})`;
-        return sfQuery(soql);
-      })
-    );
+async function refetchByIds({ sfObject, selectList, tenantId, ids }) {
+  const queries = refetchQueries({ sfObject, selectList, tenantId, ids });
+
+  const records = [];
+  for (let i = 0; i < queries.length; i += REFETCH_CONCURRENCY) {
+    const wave = queries.slice(i, i + REFETCH_CONCURRENCY);
+    const results = await Promise.all(wave.map((soql) => sfQuery(soql)));
     for (const recs of results) {
-      if (recs && recs.length) out.push(...recs);
+      if (recs && recs.length) records.push(...recs);
     }
   }
-  return out;
+  return { records, queries: queries.length };
 }
 
 // --- SINGLE-RECORD read: FULL mode -----------------------------------------
@@ -1480,6 +1480,7 @@ async function handleListRead(ctx) {
   const refreshedBySfId = new Map();
   const deletedIds = [];
   let refetchMs = 0;
+  let refetchSoql = 0;
   if (staleRows.length > 0) {
     const staleIds = staleRows.map((r) => r.sf_id).filter(Boolean);
     const versionBySfId = new Map(
@@ -1488,7 +1489,9 @@ async function handleListRead(ctx) {
     const nowIso = new Date().toISOString();
 
     const refetchStartMs = Date.now();
-    const refetched = await refetchByIds({ sfObject, selectList, tenantId, ids: staleIds });
+    const { records: refetched, queries: refetchCount } =
+      await refetchByIds({ sfObject, selectList, tenantId, ids: staleIds });
+    refetchSoql = refetchCount;
     refetchMs = Date.now() - refetchStartMs;
     const refetchedById = new Map(refetched.map((rec) => [rec.Id, rec]));
 
@@ -1561,7 +1564,7 @@ async function handleListRead(ctx) {
     rows: records.length,
     offset,
     stale: staleRows.length,
-    soql: Math.ceil(staleRows.length / REFETCH_ID_CHUNK_SIZE),
+    soql: refetchSoql,
     refetchMs,
     fields: listColumns ? "list" : "all",
     filters: callerFilters.any.length + callerFilters.not.length,

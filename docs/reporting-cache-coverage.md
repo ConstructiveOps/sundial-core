@@ -23,6 +23,10 @@
 *Sync query URI* = the length of the incremental sync's GET once the columns exist (the parent-modstamp
 OR included). Salesforce refuses a URI over 16,384 bytes; a table marked **OVER** must not get its
 columns until the sync can split its SELECT.
+The widest is `sundial_solar_cache` at 14,278: its sync SELECT must be split into two
+queries before roughly 60 more fields are cached there. The portal's stale-row refresh (`sundial-sf-query`
+`refetchByIds`) sizes its `Id IN (…)` list from the same budget (`lib/soql-budget.js`), so it fits at any
+SELECT width — that deploy must be live before the SQL runs.
 
 ## TIM: grant Read FLS
 

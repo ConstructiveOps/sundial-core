@@ -8,12 +8,14 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 - [x] `scripts/generate-report-columns.mjs` + `lib/report-columns.js` (type map, refusals) → `sql/2026-10-30_report_columns.sql` (962 columns, 14 tables) + `docs/reporting-cache-coverage.md`; `--check` shows no change on a re-run
 - [x] `sundial-cache-sync` streams page by page (`lib/salesforce.js` `sfQueryPages`), full and incremental; the watermark moves only after every page wrote cleanly; tests (suite 1,826 / 1,826)
+- [x] `sundial-sf-query` stale-row refresh sizes its `Id IN (…)` chunk from the 16,384-byte URI budget (`lib/soql-budget.js`), not a fixed 200 — after the SQL, 200 solar Ids would not fit; tests `lib/soql-budget.test.js`
 - [x] Docs: D-087 (DECISIONS.md), CLAUDE.md item 11 (here and harmon-crm), `docs/caching-architecture.md` "Reporting-grade cache (R0)"
 - [ ] **TIM: grant Read FLS** — nothing to grant: the coverage report found every workbook field readable by the integration user (its "TIM: grant Read FLS" list is empty). If you add workbook rows first, re-run `node scripts/generate-report-columns.mjs` and grant what it lists
 - [ ] **TIM: measure BEFORE (Supabase SQL editor)** — run each twice and write down the second run's "Execution Time":
   `explain analyze select public.sundial_customer_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null);`
 - [ ] **TIM: measure BEFORE** —
   `explain analyze select public.sundial_solar_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null, array['complete','cancel','pto','closed','archive'], array['Billing Complete - Pending Closeout']);`
+- [ ] **TIM: deploy** — `.deploy.ps1 sundial-sf-query` (the URI-budget refetch; must be live BEFORE the SQL runs)
 - [ ] **TIM: Supabase SQL editor** — open `sql/2026-10-30_report_columns.sql`, paste the whole file, Run (adds empty columns only; safe to run twice)
 - [ ] **TIM: raise the Lambda** — `aws lambda update-function-configuration --function-name sundial-cache-sync --memory-size 1024 --timeout 900 --region us-west-1` (or Console → sundial-cache-sync → Configuration → General configuration → Memory 1024 MB, Timeout 15 min 0 sec)
 - [ ] **TIM: deploy** — `.\deploy.ps1 sundial-cache-sync`
@@ -41,6 +43,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **PROGRESS line:** record both timings, before → after (e.g. "customer pipeline 41 → 44 ms, solar 18 → 19 ms"). Over ~50 ms worse on either: stop and decide the sibling `sundial_<object>_report` table (`docs/reporting-module.md` §4.4)
 - [ ] Merge `feature/report-cache` → `master` and push, in the same pass as the deploy
 - [ ] Later (not R0): R1 — the engine (`docs/reporting-module.md` §6)
+- [ ] Later: split the solar sync SELECT (`sundial-cache-sync`) into two queries before roughly 60 more solar fields are cached — its URI is 14,278 of 16,384 bytes today (`docs/reporting-cache-coverage.md`)
 
 ## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)
 

@@ -286,6 +286,11 @@ every tenant. Know the consequences:
   back: every imported stage would otherwise push to that client's dealers and reps.
 - `sql/sundial_dealer_customer_view.sql` (the dealer list) is shared too. Re-run it after
   adding a column to `sundial_customer_cache`, for every tenant at once.
+- **`sql/2026-11-02_service_role_timeouts.sql`** (already run on the shared project) gives
+  `service_role` — every Lambda's Supabase role — its own `statement_timeout = 120s` /
+  `lock_timeout = 30s`. Without it the role inherits `authenticator`'s 8-second defaults and
+  a wide cache page upsert fails mid-resync (`cache_upsert_failed`, 2026-11-02). **A fresh
+  Supabase project must run it** before its first full resync.
 
 ### 7. The portal fork (half a day to two days)
 

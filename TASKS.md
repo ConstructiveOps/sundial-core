@@ -8,53 +8,56 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 - [x] `Invoice_Date__c`: set at issue (`invoiceDate`, today by default, due counted from it), changed by `PATCH /service/invoices/{id}` (PDF re-rendered, activity row), printed on the document, the report's range + order. `scripts/backfill-invoice-date.mjs`.
 - [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` (dry run) then `--apply`; harmon-crm `main`.
-- [ ] Later: `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it.
+- [ ] Later: `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it. **Still open (2026-11-02):** the generator re-run did not add it — `Invoice_Date__c` is not on the *Service Invoice Fields* sheet of `docs/Sundial_Service_Job_Fields_by_Section.xlsx`, and §4.1 adds workbook fields only. Add the row there, re-run `node scripts/generate-report-columns.mjs --sql sql/<date>_report_columns_followon.sql`, run it, full-resync `serviceinvoice`, then add `invoice_date` to the serviceinvoice `LIST_PROJECTION` (+ `list-projection.test.js`).
 
 ## 2026-10-30 — Invoice report for the GL (Harmon — Heather)
 
 - [x] `GET /service/invoices/report`: the job's tax zone + the subtotal by tax category per invoice and in the totals; any range ≤ 92 days (portal presets + From / To). +1 test scope (79).
 - [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; merge / push harmon-crm `main`.
 
-## 2026-10-30 — Reporting R0: the reporting-grade cache (D-087, `feature/report-cache`)
+## 2026-10-30 — Reporting R0: the reporting-grade cache (D-087, `feature/report-cache`) — DONE, run 2026-11-02
 
 - [x] `scripts/generate-report-columns.mjs` + `lib/report-columns.js` (type map, refusals) → `sql/2026-10-30_report_columns.sql` (962 columns, 14 tables) + `docs/reporting-cache-coverage.md`; `--check` shows no change on a re-run
 - [x] `sundial-cache-sync` streams page by page (`lib/salesforce.js` `sfQueryPages`), full and incremental; the watermark moves only after every page wrote cleanly; tests (suite 1,826 / 1,826)
 - [x] `sundial-sf-query` stale-row refresh sizes its `Id IN (…)` chunk from the 16,384-byte URI budget (`lib/soql-budget.js`), not a fixed 200 — after the SQL, 200 solar Ids would not fit; tests `lib/soql-budget.test.js`
 - [x] Docs: D-087 (DECISIONS.md), CLAUDE.md item 11 (here and harmon-crm), `docs/caching-architecture.md` "Reporting-grade cache (R0)"
-- [ ] **TIM: grant Read FLS** — nothing to grant: the coverage report found every workbook field readable by the integration user (its "TIM: grant Read FLS" list is empty). If you add workbook rows first, re-run `node scripts/generate-report-columns.mjs` and grant what it lists
-- [ ] **TIM: measure BEFORE (Supabase SQL editor)** — run each twice and write down the second run's "Execution Time":
+- [x] **TIM: grant Read FLS** — nothing to grant: the coverage report found every workbook field readable by the integration user (its "TIM: grant Read FLS" list is empty). If you add workbook rows first, re-run `node scripts/generate-report-columns.mjs` and grant what it lists
+- [x] **TIM: measure BEFORE (Supabase SQL editor)** — run each twice and write down the second run's "Execution Time":
   `explain analyze select public.sundial_customer_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null);`
-- [ ] **TIM: measure BEFORE** —
+- [x] **TIM: measure BEFORE** —
   `explain analyze select public.sundial_solar_pipeline('a1W7y000007AszBEAS', '{"eq":{}}'::jsonb, null, array['complete','cancel','pto','closed','archive'], array['Billing Complete - Pending Closeout']);`
-- [ ] **TIM: deploy** — `.deploy.ps1 sundial-sf-query` (the URI-budget refetch; must be live BEFORE the SQL runs)
-- [ ] **TIM: Supabase SQL editor** — open `sql/2026-10-30_report_columns.sql`, paste the whole file, Run (adds empty columns only; safe to run twice)
-- [ ] **TIM: raise the Lambda** — `aws lambda update-function-configuration --function-name sundial-cache-sync --memory-size 1024 --timeout 900 --region us-west-1` (or Console → sundial-cache-sync → Configuration → General configuration → Memory 1024 MB, Timeout 15 min 0 sec)
-- [ ] **TIM: deploy** — `.\deploy.ps1 sundial-cache-sync`
-- [ ] **TIM: Supabase SQL editor** — `delete from private.app_config where key = 'stage_notify_url';` (first copy the current value: `select value from private.app_config where key = 'stage_notify_url';`)
-- [ ] **TIM: full resync** (Lambda console → sundial-cache-sync → Test), one event each, waiting for each to finish: `{ "object": "customer", "mode": "full" }`
-- [ ] **TIM: Supabase SQL editor** — re-run `sql/sundial_dealer_customer_view.sql` (the dealer list reads that view)
-- [ ] **TIM: full resync** — `{ "object": "solar", "mode": "full" }`
-- [ ] **TIM: terminal** — `node scripts/check-cache-formula-coverage.mjs` (must end "Every cached formula column is covered")
-- [ ] **TIM: full resync** — `{ "object": "roofing", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "job", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "estimate", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "servicecall", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "serviceinvoice", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "servicepayment", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "serviceline", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "pricebookitem", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "po", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "user", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "membership", "mode": "full" }`
-- [ ] **TIM: full resync** — `{ "object": "serviceplan", "mode": "full" }`
-- [ ] **TIM: reconcile** (Test events, in the same order) — `{ "object": "customer", "mode": "reconcile" }`, then the same with `solar`, `roofing`, `job`, `estimate`, `servicecall`, `serviceinvoice`, `servicepayment`, `serviceline`, `pricebookitem`, `po`, `user`, `membership`, `serviceplan`. A refusal ("too many ghosts") is the safety rail: stop and ask, never add `force` blind
-- [ ] **TIM: Supabase SQL editor** — put the stage hook back: `insert into private.app_config (key, value) values ('stage_notify_url', '<the value you copied>') on conflict (key) do update set value = excluded.value, updated_at = now();`
-- [ ] **TIM: measure AFTER** — the customer `explain analyze` above, twice, second run's Execution Time
-- [ ] **TIM: measure AFTER** — the solar `explain analyze` above, twice, second run's Execution Time
-- [ ] **PROGRESS line:** record both timings, before → after (e.g. "customer pipeline 41 → 44 ms, solar 18 → 19 ms"). Over ~50 ms worse on either: stop and decide the sibling `sundial_<object>_report` table (`docs/reporting-module.md` §4.4)
-- [ ] Merge `feature/report-cache` → `master` and push, in the same pass as the deploy
+- [x] **TIM: deploy** — `.deploy.ps1 sundial-sf-query` (the URI-budget refetch; must be live BEFORE the SQL runs)
+- [x] **TIM: Supabase SQL editor** — open `sql/2026-10-30_report_columns.sql`, paste the whole file, Run (adds empty columns only; safe to run twice) — ran 2026-11-02 (963 columns)
+- [x] **TIM: raise the Lambda** — `aws lambda update-function-configuration --function-name sundial-cache-sync --memory-size 1024 --timeout 900 --region us-west-1` (or Console → sundial-cache-sync → Configuration → General configuration → Memory 1024 MB, Timeout 15 min 0 sec) — done, 1,024 MB / 15 min
+- [x] **TIM: deploy** — `.\deploy.ps1 sundial-cache-sync`
+- [x] **TIM: Supabase SQL editor** — `delete from private.app_config where key = 'stage_notify_url';` (first copy the current value: `select value from private.app_config where key = 'stage_notify_url';`)
+- [x] **TIM: full resync** (Lambda console → sundial-cache-sync → Test), one event each, waiting for each to finish: `{ "object": "customer", "mode": "full" }` — the first run failed `cache_upsert_failed` (statement timeout, 8 s inherited from `authenticator`); fixed live with `sql/2026-11-02_service_role_timeouts.sql`, then re-run clean
+- [x] **TIM: Supabase SQL editor** — re-run `sql/sundial_dealer_customer_view.sql` (the dealer list reads that view)
+- [x] **TIM: full resync** — `{ "object": "solar", "mode": "full" }`
+- [x] **TIM: terminal** — `node scripts/check-cache-formula-coverage.mjs` (must end "Every cached formula column is covered")
+- [x] **TIM: full resync** — `{ "object": "roofing", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "job", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "estimate", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "servicecall", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "serviceinvoice", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "servicepayment", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "serviceline", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "pricebookitem", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "po", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "user", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "membership", "mode": "full" }`
+- [x] **TIM: full resync** — `{ "object": "serviceplan", "mode": "full" }`
+- [x] **TIM: reconcile** (Test events, in the same order) — `{ "object": "customer", "mode": "reconcile" }`, then the same with `solar`, `roofing`, `job`, `estimate`, `servicecall`, `serviceinvoice`, `servicepayment`, `serviceline`, `pricebookitem`, `po`, `user`, `membership`, `serviceplan`. A refusal ("too many ghosts") is the safety rail: stop and ask, never add `force` blind
+- [x] **TIM: Supabase SQL editor** — put the stage hook back: `insert into private.app_config (key, value) values ('stage_notify_url', '<the value you copied>') on conflict (key) do update set value = excluded.value, updated_at = now();`
+- [x] **TIM: measure AFTER** — the customer `explain analyze` above, twice, second run's Execution Time
+- [x] **TIM: measure AFTER** — the solar `explain analyze` above, twice, second run's Execution Time
+- [x] **PROGRESS line:** record both timings, before → after (e.g. "customer pipeline 41 → 44 ms, solar 18 → 19 ms"). Over ~50 ms worse on either: stop and decide the sibling `sundial_<object>_report` table (`docs/reporting-module.md` §4.4) — **customer 85 → 85 ms; solar 22 → 179 ms minutes after the full resync, 32 ms after `vacuum (analyze)`** (the 179 was dead tuples from the rewrite, not width). **Decision: no sibling table; the wide tables stand.**
+- [x] Merge `feature/report-cache` → `master` and push, in the same pass as the deploy
+- [x] **2026-11-02 — all done:** SQL run, `sundial-sf-query` then `sundial-cache-sync` deployed, all 14 full resyncs + reconciles, stage hook restored, schedule re-enabled. Runbook fixes from the run (service_role timeouts; pause the 5-min rule; vacuum after a rewrite): `docs/caching-architecture.md` "Running a full resync"
+- [x] **Generator re-run 2026-11-02:** no table gained a column (nothing missing; no follow-on SQL written), no refusal or URI number changed (solar still 14,278 / 16,384). The script now writes the SQL only to a NEW file named with `--sql` and never rewrites `sql/2026-10-30_report_columns.sql`
 - [ ] Later (not R0): R1 — the engine (`docs/reporting-module.md` §6)
 - [ ] Later: split the solar sync SELECT (`sundial-cache-sync`) into two queries before roughly 60 more solar fields are cached — its URI is 14,278 of 16,384 bytes today (`docs/reporting-cache-coverage.md`)
+- [ ] Later: `sundial-cache-sync` page upserts retry a statement timeout up to 3 times with backoff before failing the run, and a full run is resumable from the last written page (2026-11-02: one timed-out page threw away a ~7-minute customer run)
 
 ## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)
 

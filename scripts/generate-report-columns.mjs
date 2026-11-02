@@ -1,8 +1,9 @@
 // scripts/generate-report-columns.mjs — the reporting-grade cache (D-087, R0;
 // docs/reporting-module.md §4.1–4.4). READ-ONLY against Salesforce and Supabase.
 //
-//   node scripts/generate-report-columns.mjs             # write the SQL + the coverage report
-//   node scripts/generate-report-columns.mjs --check     # write nothing; exit 1 if either would change
+//   node scripts/generate-report-columns.mjs                                  # the coverage report; SQL only if nothing is missing
+//   node scripts/generate-report-columns.mjs --sql sql/<date>_report_columns_followon.sql   # + the missing columns' SQL
+//   node scripts/generate-report-columns.mjs --check                          # write nothing; exit 1 if the report would change
 //
 // Per cache table it reads three things:
 //   1. the field list — the object's field-design workbook (the sheet and "API Name"
@@ -13,14 +14,16 @@
 //   3. the live cache columns, from PostgREST's OpenAPI document (the method
 //      sundial-cache-sync's getCacheColumns uses), with each column's type.
 //
-// It writes sql/2026-10-30_report_columns.sql (one idempotent `add column if not exists`
-// per column, grouped by table) and docs/reporting-cache-coverage.md. The decisions — the
+// It writes docs/reporting-cache-coverage.md and, when columns are missing, the SQL file named
+// with --sql (one idempotent `add column if not exists` per column, grouped by table). It never
+// rewrites a file in APPLIED_SQL_FILES (lib/report-columns.js) — those have run; the first
+// was sql/2026-10-30_report_columns.sql (run 2026-11-02). The decisions — the
 // type map, the refusals — are lib/report-columns.js, unit-tested there. This file only
 // gathers inputs and writes files. It never runs the SQL.
 //
 // Re-runnable: both outputs are deterministic, so an unchanged state is an empty diff.
-// After Tim runs the SQL, a re-run moves every added column to "Already cached" and the
-// SQL file shrinks to its header — that is the expected diff, not drift.
+// After Tim runs a SQL file, a re-run moves its columns to "Already cached" — the expected
+// diff, not drift. Missing columns with no --sql: the script names the count and exits 1.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -30,11 +33,17 @@ import { getRawDescribe, getQueryableFields } from "../lib/sf-describe.js";
 import { getSupabaseConfig } from "../lib/supabase.js";
 import { sfFieldToColumn, buildCacheSelect } from "../lib/cache-row.js";
 import { parentModstampPaths, incrementalWhere } from "../lib/formula-parents.js";
-import { planTable, renderSql, renderCoverage } from "../lib/report-columns.js";
+import { planTable, renderSql, renderCoverage, APPLIED_SQL_FILES } from "../lib/report-columns.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = path.join(ROOT, "docs");
-const SQL_OUT = path.join(ROOT, "sql", "2026-10-30_report_columns.sql");
+const SQL_ARG = process.argv.includes("--sql") ? process.argv[process.argv.indexOf("--sql") + 1] : null;
+const SQL_REL = SQL_ARG ? path.relative(ROOT, path.resolve(ROOT, SQL_ARG)).split(path.sep).join("/") : null;
+if (process.argv.includes("--sql") && (!SQL_REL || !SQL_REL.startsWith("sql/") || APPLIED_SQL_FILES.includes(SQL_REL))) {
+  console.error(`--sql must name a NEW file under sql/ (never ${APPLIED_SQL_FILES.join(", ")}).`);
+  process.exit(2);
+}
+const SQL_OUT = SQL_REL ? path.join(ROOT, SQL_REL) : null;
 const DOC_OUT = path.join(DOCS, "reporting-cache-coverage.md");
 const CHECK = process.argv.includes("--check");
 
@@ -155,11 +164,13 @@ for (const spec of OBJECTS) {
   );
 }
 
-const sql = renderSql(plans);
-const doc = renderCoverage(plans);
+const missing = plans.reduce((n, p) => n + (p.tableMissing ? 0 : p.add.length), 0);
+const sql = SQL_OUT ? renderSql(plans, { file: SQL_REL }) : null;
+const doc = renderCoverage(plans, { sqlFiles: SQL_REL && missing ? [...APPLIED_SQL_FILES, SQL_REL] : APPLIED_SQL_FILES });
 const same = (file, text) => fs.existsSync(file) && fs.readFileSync(file, "utf8") === text;
+const outputs = [[DOC_OUT, doc], ...(SQL_OUT && missing ? [[SQL_OUT, sql]] : [])];
 if (CHECK) {
-  const changed = [[SQL_OUT, sql], [DOC_OUT, doc]].filter(([f, t]) => !same(f, t)).map(([f]) => path.relative(ROOT, f));
+  const changed = outputs.filter(([f, t]) => !same(f, t)).map(([f]) => path.relative(ROOT, f));
   if (changed.length) {
     console.log(`\nWould change: ${changed.join(", ")}`);
     process.exit(1);
@@ -167,7 +178,14 @@ if (CHECK) {
   console.log("\nNo change.");
   process.exit(0);
 }
-fs.writeFileSync(SQL_OUT, sql, "utf8");
-fs.writeFileSync(DOC_OUT, doc, "utf8");
-console.log(`\nwrote ${path.relative(ROOT, SQL_OUT)}\nwrote ${path.relative(ROOT, DOC_OUT)}`);
+if (missing && !SQL_OUT) {
+  console.error(`\n${missing} column(s) missing. Re-run with --sql sql/<today>_report_columns_followon.sql — nothing written.`);
+  process.exit(1);
+}
+console.log("");
+for (const [file, text] of outputs) {
+  fs.writeFileSync(file, text, "utf8");
+  console.log(`wrote ${path.relative(ROOT, file)}`);
+}
+if (!missing) console.log("No column is missing — no SQL file written.");
 console.log("Nothing was run against the database. The steps are in TASKS.md (Reporting R0).");

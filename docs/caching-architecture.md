@@ -156,7 +156,47 @@ aws lambda invoke --function-name sundial-cache-sync --region us-west-1 \
   --cli-binary-format raw-in-base64-out \
   --payload '{"object":"customer","mode":"full"}' out.json
 ```
-The function is provisioned at **900 s / 1024 MB** so a large object (tens of thousands of rows) completes in one invoke. The response reports `{ processed, fetched, newWatermark, mode }` per object. (Verified 2026-07-28: a 31,948-row customer backfill completed in ~27 s.)
+The function is provisioned at **900 s / 1024 MB** so a large object (tens of thousands of rows) completes in one invoke. The response reports `{ processed, fetched, newWatermark, mode }` per object. (Verified 2026-07-28: a 31,948-row customer backfill completed in ~27 s — when the table had ~45 columns. Since R0 it is ~7 minutes; see below.)
+
+### Running a full resync — the checklist (2026-11-02)
+
+Learned on the R0 resync (PROGRESS.md 2026-11-02). Every full resync, one object or all:
+
+1. **Pause the 5-minute rule** so an incremental run never writes the same table mid-resync:
+   ```
+   aws events disable-rule --name sundial-cache-sync-incremental --region us-west-1
+   ```
+   (Pausing a cold-tier object too? Same command with `sundial-cache-sync-incremental-cold`.)
+2. **The Test event(s)** — `{ "object": "<key>", "mode": "full" }`, one at a time, waiting for each.
+3. **Vacuum each table the resync rewrote**, in the Supabase SQL editor:
+   ```sql
+   vacuum (analyze) public.sundial_customer_cache;   -- one line per rewritten table
+   ```
+   A full resync upserts every row, and Postgres keeps the old copy of each row until a
+   vacuum. The pipeline functions (`sundial_customer_pipeline`, `sundial_solar_pipeline`)
+   read the whole tenant, dead copies included: on 2026-11-02 the solar pipeline went
+   22 → **179 ms** minutes after its resync and back to **32 ms** after `vacuum (analyze)`.
+   Autovacuum gets there eventually; do not leave it to chance.
+4. **Re-enable the rule:**
+   ```
+   aws events enable-rule --name sundial-cache-sync-incremental --region us-west-1
+   ```
+   The next incremental run picks up whatever changed during the pause (the watermark only
+   moves forward from what the full run saw).
+
+**How long it takes.** Salesforce returns ~200-record pages for the wide customer and solar
+queries (it shrinks the page as the SELECT widens), so a full customer run is ~180 pages and
+**about 7 minutes**; solar is shorter (fewer rows). Inside the 15-minute limit, but not by a
+lot — see the TASKS.md Later line on retry / resume.
+
+**The statement timeout.** The first R0 customer run failed with `cache_upsert_failed` —
+"canceling statement due to statement timeout". `service_role` (every Lambda's Supabase
+role) had no settings of its own and inherited `authenticator`'s `statement_timeout = 8s` /
+`lock_timeout = 8s`, so every Lambda write had always had an 8-second ceiling; one 200-row ×
+330-column page upsert crossed it. Fixed by `sql/2026-11-02_service_role_timeouts.sql`
+(120 s / 30 s, service_role only; idempotent). **A new Supabase project needs the same file**
+(`docs/multi-client-deployment.md`). Today a timed-out page fails the whole run and the next
+run starts from page one.
 
 ---
 
@@ -434,7 +474,11 @@ stopped covering.
 | `sundial-cache-sync-incremental-cold` | 30 min | roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership | 90 min |
 
 Each rule passes `{ "objects": [...], "intervalMinutes": N }`; the interval rides on the
-run row, so each object is judged by its own schedule. **Lag:** a change made directly
+run row, so each object is judged by its own schedule. **Pause the hot rule during a full
+resync** (`aws events disable-rule --name sundial-cache-sync-incremental --region us-west-1`,
+`enable-rule` after) — the checklist is "Running a full resync" above. While it is paused the
+freshness check falls back to the 10-minute TTL once the last run is over 15 minutes old;
+that is slow-but-correct, by design. **Lag:** a change made directly
 in Salesforce shows in the portal within one interval (≤5 min hot, ≤30 min cold) — the
 old TTL allowed up to 10 minutes for everything.
 
@@ -595,7 +639,10 @@ The Lambda runs at **1,024 MB / 15 min** from R0 on (it was sized for a ~50-colu
 
 ### Running the resync (§4.5)
 
-Once the SQL has run, the new columns are empty until a full resync:
+Once the SQL has run, the new columns are empty until a full resync. Wrap the whole
+sequence in "Running a full resync — the checklist" above: **pause** the 5-minute rule
+first, `vacuum (analyze)` every rewritten table after, **re-enable** the rule last — and
+make sure `sql/2026-11-02_service_role_timeouts.sql` has run on the project.
 
 1. **Delete `private.app_config` `stage_notify_url` first** and put it back after the
    customer / solar resyncs (D-074 am. 3). A full resync is upserts and moves no stage, but
@@ -611,4 +658,8 @@ Once the SQL has run, the new columns are empty until a full resync:
 
 Before the SQL and again after the resync, time both pipeline functions with `explain analyze`
 (they are the only portal paths that scan whole tables). A regression over ~50 ms moves the
-wide columns into a sibling `sundial_<object>_report` table keyed on `sf_id`.
+wide columns into a sibling `sundial_<object>_report` table keyed on `sf_id`. **Measure after
+the vacuum**, never straight after the resync.
+
+**Result (run 2026-11-02):** customer 85 → 85 ms; solar 22 → 179 ms right after the resync
+(dead tuples), 32 ms after `vacuum (analyze)`. No sibling table — the wide tables stand.

@@ -117,6 +117,14 @@ mock.module("../../lib/salesforce.js", {
       }
       return out;
     },
+    // The sync path streams page by page (D-087 R0; pinned in sync-runs.test.js). Here it
+    // only has to exist: reconcile never uses it, and the sync path it serves answers
+    // "nothing changed".
+    sfQueryPages: async (soql, onPage) => {
+      ctx.soqlCalls.push(soql);
+      await onPage([], { pageIndex: 0 });
+      return { pages: 1, records: 0 };
+    },
     soqlEscapeString: (v) => String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
   },
 });

@@ -269,6 +269,14 @@ function fakeSalesforce() {
     if ((m = cond.match(/^(\w+) = '(.*)'$/))) return String(rec[m[1]] ?? "").toLowerCase() === m[2].replace(/\\'/g, "'").toLowerCase();
     if ((m = cond.match(/^(\w+) != '(.*)'$/))) return String(rec[m[1]] ?? "").toLowerCase() !== m[2].toLowerCase();
     if ((m = cond.match(/^(\w+) != null$/))) return rec[m[1]] != null;
+    if ((m = cond.match(/^(\w+) = null$/))) return rec[m[1]] == null;
+    // date bounds on a Date field (the invoice report by Invoice_Date__c, 2026-11-02): plain YYYY-MM-DD literals
+    if ((m = cond.match(/^(\w+) (>=|<=|>|<) (\d{4}-\d{2}-\d{2})$/))) {
+      const v = rec[m[1]];
+      if (v == null) return false;
+      const a = String(v).slice(0, 10);
+      return m[2] === ">=" ? a >= m[3] : m[2] === "<=" ? a <= m[3] : m[2] === ">" ? a > m[3] : a < m[3];
+    }
     if ((m = cond.match(/^(\w+) = (true|false)$/))) return (rec[m[1]] === true) === (m[2] === "true");
     // IN ('a', 'b') — the intake alert's manager query (2026-10-02)
     if ((m = cond.match(/^(\w+) IN \((.*?)\)?$/))) { // the trailing ")" may already be stripped above
@@ -1420,15 +1428,47 @@ test("invoice lifecycle: issue freezes the estimate, deposits back-fill, payment
   assert.equal(again.status, 409);
   assert.equal(again.body.code, "INVOICE_EXISTS");
 
-  // The week's invoices for accounting (2026-10-01): issued-date range, the job's details, totals.
-  const rep = await call(h, "GET", "/service/invoices/report", null, { from: "2026-09-07", to: "2026-09-13" });
+  // The invoice date (2026-11-02): issued on 2026-09-10 with no date typed → that local day, and the document says so.
+  assert.equal(inv.Invoice_Date__c, "2026-09-10");
+  assert.equal(inv.Due_Date__c, "2026-10-10", "net 30 counts from the invoice date");
+  // The office moves it: PATCH, the PDF re-rendered, an activity row; the report then books it on the new day.
+  const putsBeforeDate = fake.puts.length;
+  const moved = await call(h, "PATCH", `/service/invoices/${inv.Id}`, { invoiceDate: "2026-10-28" });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  assert.equal(inv.Invoice_Date__c, "2026-10-28");
+  assert.ok(fake.puts.length > putsBeforeDate, "the stored PDF was re-rendered");
+  assert.ok(fake.activity.some((a) => a.event === "invoice_updated"), "an activity row");
+  assert.equal((await call(h, "PATCH", `/service/invoices/${inv.Id}`, { invoiceDate: "2026-13-01" })).body.code, "INVOICE_DATE_INVALID");
+  assert.equal((await call(h, "PATCH", `/service/invoices/${inv.Id}`, { invoiceDate: "2026-10-28" })).body.unchanged, true);
+
+  // The invoices for accounting (2026-10-01): a range BY INVOICE DATE (2026-11-02), the job's details, totals.
+  assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-09-07", to: "2026-09-13" })).body.count, 0, "the issue week no longer finds it — the invoice date moved to October");
+  const rep = await call(h, "GET", "/service/invoices/report", null, { from: "2026-10-24", to: "2026-10-31" });
   assert.equal(rep.status, 200, JSON.stringify(rep.body));
   assert.equal(rep.body.count, 1);
   assert.equal(rep.body.invoices[0].number, inv.Name);
+  assert.equal(rep.body.invoices[0].invoiceDate, "2026-10-28");
+  assert.equal(rep.body.invoices[0].issuedAt, inv.Issued_At__c);
   assert.equal(rep.body.invoices[0].customer, "Ivy");
   assert.equal(rep.body.invoices[0].total, 383.6);
   assert.equal(rep.body.invoices[0].balance, 283.6);
   assert.equal(rep.body.totals.balance, 283.6);
+  // For the GL (2026-10-30): the job's tax zone and the subtotal split by the lines' tax categories.
+  assert.equal(rep.body.invoices[0].taxZoneCode, job.Tax_Zone_Code__c);
+  assert.equal(rep.body.invoices[0].taxZoneLabel, job.Tax_Zone_Label__c ?? null);
+  assert.deepEqual(rep.body.taxCategories, ["LABSERV", "RETAIL", "SOLAR", "WARRANTY", "RESALE"]);
+  assert.deepEqual(rep.body.invoices[0].taxCategories, { LABSERV: 275, RETAIL: 100, SOLAR: 0, WARRANTY: 0, RESALE: 0 }, "labor under LABSERV, the taxable material under RETAIL; the five add up to the subtotal");
+  assert.deepEqual(rep.body.totals.taxCategories, { LABSERV: 275, RETAIL: 100, SOLAR: 0, WARRANTY: 0, RESALE: 0 });
+  // any span of dates up to 92 days — a calendar month, a quarter
+  const month = await call(h, "GET", "/service/invoices/report", null, { from: "2026-10-01", to: "2026-10-31" });
+  assert.equal(month.body.count, 1);
+  // an invoice from before the field existed (no Invoice_Date__c) is placed by its issue day, and reads that day
+  inv.Invoice_Date__c = null;
+  const old = await call(h, "GET", "/service/invoices/report", null, { from: "2026-09-07", to: "2026-09-13" });
+  assert.equal(old.body.count, 1, "found by the issue's local day");
+  assert.equal(old.body.invoices[0].invoiceDate, "2026-09-10");
+  inv.Invoice_Date__c = "2026-10-28";
+  assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-07-01", to: "2026-10-15" })).body.code, "RANGE_TOO_WIDE");
   assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-08-01", to: "2026-08-07" })).body.count, 0);
   assert.equal((await call(h, "GET", "/service/invoices/report", null, { from: "2026-13-01" })).body.code, "RANGE_INVALID");
 

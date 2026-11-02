@@ -4,6 +4,17 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-02 — The invoice date (Harmon)
+
+- [x] `Invoice_Date__c`: set at issue (`invoiceDate`, today by default, due counted from it), changed by `PATCH /service/invoices/{id}` (PDF re-rendered, activity row), printed on the document, the report's range + order. `scripts/backfill-invoice-date.mjs`.
+- [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` (dry run) then `--apply`; harmon-crm `main`.
+- [ ] Later: `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it.
+
+## 2026-10-30 — Invoice report for the GL (Harmon — Heather)
+
+- [x] `GET /service/invoices/report`: the job's tax zone + the subtotal by tax category per invoice and in the totals; any range ≤ 92 days (portal presets + From / To). +1 test scope (79).
+- [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; merge / push harmon-crm `main`.
+
 ## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)
 
 - [x] `lib/dealer-journey.js` `FOLDED` (Permitting Received → Permit Submitted); `sundial-dealer` rewrites `Stage__c` / picklist for dealer / own scope; `sundial-notify/stage.js` sends nothing into a folded stage; tests (suite 1,806 / 1,806)

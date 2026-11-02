@@ -38,7 +38,7 @@ import { soqlEscapeString } from "../../lib/salesforce.js";
 import { buildInvoiceModel, renderEstimateDocument } from "../../lib/estimate-document.js";
 import { buildKey, publicUrlForKey, registerFileMetadata, findFileMetadataByKey } from "../../lib/file-access.js";
 import { EVENTS, listActivity } from "../../lib/service-activity.js";
-import { validTaxCategory, lineTaxable } from "../../lib/tax-zones.js";
+import { validTaxCategory, lineTaxable, effectiveTaxCategory, TAX_CATEGORIES } from "../../lib/tax-zones.js";
 
 import { LINE_SF_OBJECT } from "./pricebook.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
@@ -54,7 +54,31 @@ export const PAYMENT_SF_OBJECT = "Sundial_Service_Payment__c";
 export const INVOICE_SELECT =
   "Id, Name, Service_Job__c, Client__c, Status__c, Bill_To_Type__c, Bill_To_Name__c, Bill_To_Customer__c, Bill_To_Address__c, Billing_Reference__c, " +
   "Subtotal__c, Discount_Amount__c, Tax_Rate__c, Tax_Amount__c, Total__c, Paid_Amount__c, Issued_At__c, Sent_At__c, " +
-  "Due_Date__c, Paid_At__c, PDF_S3_Key__c, Acumatica_Ref__c, Acumatica_Entered_At__c, Voided_At__c, Void_Reason__c, CreatedDate";
+  "Due_Date__c, Paid_At__c, PDF_S3_Key__c, Acumatica_Ref__c, Acumatica_Entered_At__c, Voided_At__c, Void_Reason__c, Invoice_Date__c, CreatedDate";
+
+/**
+ * The INVOICE DATE (Harmon, 2026-11-02): `Invoice_Date__c`, a Date the office may set before
+ * issuing and change afterwards — the date the document carries and the one accounting
+ * reports by. `Issued_At__c` stays the instant the invoice was made and never moves. An
+ * invoice from before the field existed has none; it is read as the local day of its issue
+ * (`scripts/backfill-invoice-date.mjs` writes that day onto the old rows).
+ */
+export const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+export function realDay(v) {
+  return typeof v === "string" && DAY_RE.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)) && new Date(`${v}T00:00:00Z`).toISOString().startsWith(v);
+}
+/** YYYY-MM-DD of an instant in the tenant's timezone. */
+export function localDayOf(iso, tz) {
+  if (!iso) return null;
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return null;
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(t).map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}`;
+}
+/** The invoice date as the documents and the report use it: the field, else the issue's local day. */
+export function invoiceDateOf(inv, tz) {
+  return (typeof inv?.Invoice_Date__c === "string" && inv.Invoice_Date__c.slice(0, 10)) || localDayOf(inv?.Issued_At__c, tz);
+}
 export const PAYMENT_SELECT =
   "Id, Name, Service_Job__c, Invoice__c, Client__c, Type__c, Method__c, Amount__c, Status__c, Received_At__c, " +
   "Reference__c, Recorded_By__c, Notes__c, Stripe_Payment_Intent_Id__c, Stripe_Charge_Id__c, Stripe_Refund_Id__c, Failure_Reason__c, CreatedDate";
@@ -647,6 +671,12 @@ export function createInvoiceHandlers(d, h) {
      *
      * Acumatica readiness (D-081): the invoice's Bill_To_Customer__c points at the record
      * whose Acumatica_Customer_ID__c the future invoice push will use. Not built yet.
+     *
+     * For the GL (Heather, 2026-10-30): each invoice carries the job's TAX ZONE and its
+     * amount per TAX CATEGORY (LABSERV / RETAIL / SOLAR / WARRANTY / RESALE — the sum of its
+     * lines' totals under the category each line was frozen in at issue, pre-discount, so
+     * the five add up to the subtotal), and the totals carry the same per category. The
+     * range is any span of dates up to 92 days — the portal used to send one week.
      */
     async invoiceReport({ ctx, query }) {
       const { tenantId, cors } = ctx;
@@ -669,19 +699,56 @@ export function createInvoiceHandlers(d, h) {
       const end = new Date(localStart(to).getTime() + 86400000);
       if (end <= start) return bad(cors, "RANGE_INVALID", "to must not be before from.");
       if (end - start > 92 * 86400000) return bad(cors, "RANGE_TOO_WIDE", "The report covers at most 92 days at a time.");
+      // By INVOICE DATE (2026-11-02), the date the office set — not the instant of issue. An
+      // invoice from before the field existed (no Invoice_Date__c) is placed by its issue's
+      // local day until the backfill stamps it.
       let rows;
       try {
         rows =
           (await d.sfQuery(
             `SELECT ${INVOICE_SELECT}, Service_Job__r.Name, Service_Job__r.Customer_Name_at_Creation__c, Service_Job__r.Address_at_Creation__c, ` +
-              `Service_Job__r.Primary_Email_at_Creation__c, Service_Job__r.Service_Type__c, Service_Job__r.Status__c, Service_Job__r.Payment_Status__c ` +
+              `Service_Job__r.Primary_Email_at_Creation__c, Service_Job__r.Service_Type__c, Service_Job__r.Status__c, Service_Job__r.Payment_Status__c, ` +
+              `Service_Job__r.Estimate__c, Service_Job__r.Tax_Zone_Code__c, Service_Job__r.Tax_Zone_Label__c ` +
               `FROM ${INVOICE_SF_OBJECT} WHERE Client__c = '${soqlEscapeString(tenantId)}' ` +
-              `AND Issued_At__c >= ${start.toISOString()} AND Issued_At__c < ${end.toISOString()} ORDER BY Issued_At__c, Name LIMIT 2000`
+              `AND ((Invoice_Date__c >= ${from} AND Invoice_Date__c <= ${to}) OR (Invoice_Date__c = null AND Issued_At__c >= ${start.toISOString()} AND Issued_At__c < ${end.toISOString()})) ` +
+              `ORDER BY Invoice_Date__c NULLS LAST, Issued_At__c, Name LIMIT 2000`
           )) || [];
       } catch (e) {
         return sfError(cors, e, "invoice report");
       }
       const num = (v) => (v == null || v === "" ? 0 : Number(v) || 0);
+      const cents = (n) => Math.round(n * 100) / 100;
+      // The lines behind every invoice in the range, one query per 200 estimates: the invoice
+      // IS the estimate's lines (Removed ones never issued), so the category split is their
+      // Line_Total__c grouped by the category each was taxed under.
+      const linesByEstimate = new Map();
+      const estimateIds = [...new Set(rows.map((r) => r.Service_Job__r?.Estimate__c).filter(Boolean))];
+      try {
+        for (let i = 0; i < estimateIds.length; i += 200) {
+          const ids = estimateIds.slice(i, i + 200).map((id) => `'${soqlEscapeString(id)}'`).join(", ");
+          const lines = (await d.sfQuery(
+            `SELECT Estimate__c, Kind__c, Tax_Category__c, Line_Total__c, Quantity__c, Unit_Price__c, Stage__c FROM ${LINE_SF_OBJECT} ` +
+              `WHERE Client__c = '${soqlEscapeString(tenantId)}' AND Estimate__c IN (${ids}) AND Stage__c != 'Removed'`
+          )) || [];
+          for (const l of lines) {
+            if (!linesByEstimate.has(l.Estimate__c)) linesByEstimate.set(l.Estimate__c, []);
+            linesByEstimate.get(l.Estimate__c).push(l);
+          }
+        }
+      } catch (e) {
+        return sfError(cors, e, "invoice report lines");
+      }
+      const emptyCategories = () => Object.fromEntries(TAX_CATEGORIES.map((c) => [c, 0]));
+      const categoriesFor = (r) => {
+        const out = emptyCategories();
+        for (const l of linesByEstimate.get(r.Service_Job__r?.Estimate__c) || []) {
+          const cat = effectiveTaxCategory({ kind: l.Kind__c, taxCategory: l.Tax_Category__c }, { billToType: r.Bill_To_Type__c ?? null });
+          // Line_Total__c is the org's formula (qty × unit price); the product stands in where it is unset.
+          const lineTotal = l.Line_Total__c == null ? num(l.Quantity__c) * num(l.Unit_Price__c) : num(l.Line_Total__c);
+          out[cat] = cents((out[cat] ?? 0) + lineTotal);
+        }
+        return out;
+      };
       const invoices = rows.map((r) => {
         const j = r.Service_Job__r ?? {};
         const paid = num(r.Paid_Amount__c);
@@ -690,6 +757,7 @@ export function createInvoiceHandlers(d, h) {
           id: r.Id,
           number: r.Name ?? null,
           status: r.Status__c ?? null,
+          invoiceDate: invoiceDateOf(r, tz),
           issuedAt: r.Issued_At__c ?? null,
           dueDate: r.Due_Date__c ?? null,
           sentAt: r.Sent_At__c ?? null,
@@ -708,6 +776,9 @@ export function createInvoiceHandlers(d, h) {
           billToCustomerId: r.Bill_To_Customer__c ?? null,
           billToAddress: r.Bill_To_Address__c ?? null,
           billingReference: r.Billing_Reference__c ?? null,
+          taxZoneCode: j.Tax_Zone_Code__c ?? null,
+          taxZoneLabel: j.Tax_Zone_Label__c ?? null,
+          taxCategories: categoriesFor(r),
           subtotal: num(r.Subtotal__c),
           discount: num(r.Discount_Amount__c),
           taxRate: num(r.Tax_Rate__c),
@@ -718,11 +789,15 @@ export function createInvoiceHandlers(d, h) {
           acumaticaRef: r.Acumatica_Ref__c ?? null,
         };
       });
+      invoices.sort((a, b) => (a.invoiceDate ?? "").localeCompare(b.invoiceDate ?? "") || (a.issuedAt ?? "").localeCompare(b.issuedAt ?? "") || (a.number ?? "").localeCompare(b.number ?? ""));
       const live = invoices.filter((i) => i.status !== "Void");
       const sum = (k) => Math.round(live.reduce((a, i) => a + i[k], 0) * 100) / 100;
+      const categoryTotals = emptyCategories();
+      for (const i of live) for (const c of TAX_CATEGORIES) categoryTotals[c] = cents(categoryTotals[c] + i.taxCategories[c]);
       return jsonResponse(200, cors, {
         from, to, timeZone: tz, count: invoices.length,
-        totals: { invoices: live.length, void: invoices.length - live.length, subtotal: sum("subtotal"), discount: sum("discount"), tax: sum("tax"), total: sum("total"), paid: sum("paid"), balance: sum("balance") },
+        taxCategories: [...TAX_CATEGORIES],
+        totals: { invoices: live.length, void: invoices.length - live.length, subtotal: sum("subtotal"), discount: sum("discount"), tax: sum("tax"), total: sum("total"), paid: sum("paid"), balance: sum("balance"), taxCategories: categoryTotals },
         invoices,
         truncated: rows.length >= 2000,
       });
@@ -744,13 +819,18 @@ export function createInvoiceHandlers(d, h) {
       const totals = await h.estimateTotals({ ...est, Service_Job__c: job.Id }, lines, { tenantId, date: now, job, live: true });
       if (!totals.tax.matched) return bad(cors, "TAX_ZONE_REQUIRED", `The job's tax zone ${job.Tax_Zone_Code__c} is not in the tax tables — pick the zone again on the job.`, { field: "Tax_Zone_Code__c" });
       const proposed = lines.filter((l) => l.Stage__c === "Proposed").length;
+      // The invoice date (2026-11-02): typed on the card, else today in the tenant's timezone.
+      // "Due in N days" counts from IT, so a back-dated invoice is due when its date says.
+      const tz = d.env?.SERVICE_TIMEZONE || "America/Phoenix";
+      if (body?.invoiceDate != null && body.invoiceDate !== "" && !realDay(body.invoiceDate)) return bad(cors, "INVOICE_DATE_INVALID", "invoiceDate must be a date (YYYY-MM-DD).");
+      const invoiceDate = body?.invoiceDate ? body.invoiceDate : localDayOf(now.toISOString(), tz);
       let dueDate = null;
       if (body?.dueDate) {
         const t = Date.parse(body.dueDate);
         if (Number.isNaN(t)) return bad(cors, "DUE_DATE_INVALID", "dueDate must be a date (YYYY-MM-DD).");
         dueDate = new Date(t).toISOString().slice(0, 10);
       } else if (Number(body?.netDays) > 0) {
-        dueDate = new Date(now.getTime() + Number(body.netDays) * 86400000).toISOString().slice(0, 10);
+        dueDate = new Date(Date.parse(`${invoiceDate}T00:00:00Z`) + Number(body.netDays) * 86400000).toISOString().slice(0, 10);
       }
       // D-081: freeze WHO is billed and WHERE — re-snapshotted on a reissue (-2), never
       // rewritten on a void. A failed payer read issues with the job's name only.
@@ -777,6 +857,7 @@ export function createInvoiceHandlers(d, h) {
         Total__c: totals.total,
         Paid_Amount__c: 0,
         Issued_At__c: now.toISOString(),
+        Invoice_Date__c: invoiceDate,
         Due_Date__c: dueDate,
       };
       for (const k of Object.keys(fields)) if (fields[k] === null) delete fields[k];
@@ -996,6 +1077,47 @@ export function createInvoiceHandlers(d, h) {
       }
       await h.act(ctx, { event: EVENTS.INVOICE_SENT, recordType: "serviceinvoice", recordSfId: inv.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { number: inv.Name, via, delivery, recipient, textedTo, recipients: used, deliveryDetail, balance: balanceOf(inv), pdfKey: pdf.key } });
       return jsonResponse(200, cors, { success: true, id: inv.Id, via, delivery, recipient, textedTo, recipients: used, deliveryDetail, ...present(inv, payments) });
+    },
+
+    /**
+     * PATCH /service/invoices/{id} { invoiceDate } (Harmon, 2026-11-02): the office changes the
+     * date on an issued invoice. The stored PDF is re-rendered so the document carries the new
+     * date (a send re-renders anyway). A void invoice is left alone. Only this field for now —
+     * the money fields are settleMoney's, the payer is the issue's snapshot.
+     */
+    async updateInvoice({ ctx, params, body }) {
+      const { tenantId, cors } = ctx;
+      const inv = await loadInvoice(params[0], tenantId);
+      if (!inv) return notFound(cors);
+      if (inv.Status__c === "Void") return jsonResponse(409, cors, { error: "invoice_void", code: "INVOICE_VOID", message: "A void invoice cannot be changed — issue again instead." });
+      if (!realDay(body?.invoiceDate)) return bad(cors, "INVOICE_DATE_INVALID", "invoiceDate must be a date (YYYY-MM-DD).");
+      const tz = d.env?.SERVICE_TIMEZONE || "America/Phoenix";
+      const from = invoiceDateOf(inv, tz);
+      if (from === body.invoiceDate && inv.Invoice_Date__c) return jsonResponse(200, cors, { success: true, id: inv.Id, unchanged: true, invoice: inv, pdfUrl: inv.PDF_S3_Key__c ? publicUrlForKey(inv.PDF_S3_Key__c) : null });
+      try {
+        await d.sfUpdateRecord(INVOICE_SF_OBJECT, inv.Id, { Invoice_Date__c: body.invoiceDate });
+      } catch (e) {
+        return sfError(cors, e, "invoice update");
+      }
+      inv.Invoice_Date__c = body.invoiceDate;
+      await h.markStale(CACHE.invoice, [inv.Id], tenantId);
+      const job = await loadJob(inv.Service_Job__c, tenantId);
+      let pdf = { key: inv.PDF_S3_Key__c || null, error: null };
+      if (job) {
+        const est = job.Estimate__c ? await h.loadEstimate(job.Estimate__c, tenantId) : null;
+        const lines = est ? (await h.loadLines(est.Id, tenantId)).filter((l) => l.Stage__c !== "Removed") : [];
+        const payments = (await loadJobPayments(job.Id, tenantId)).filter((p) => p.Invoice__c === inv.Id);
+        pdf = await renderAndStorePdf({ invoice: inv, job, est, lines, payments, ctx, tenantId });
+        await h.act(ctx, { event: EVENTS.INVOICE_UPDATED, recordType: "serviceinvoice", recordSfId: inv.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { number: inv.Name, fields: { Invoice_Date__c: { from, to: body.invoiceDate } } } });
+      }
+      return jsonResponse(200, cors, {
+        success: true,
+        id: inv.Id,
+        unchanged: false,
+        invoice: inv,
+        pdfUrl: pdf.key ? publicUrlForKey(pdf.key) : null,
+        warnings: [pdf.error ? "The PDF could not be re-rendered (the date is saved; Send builds a fresh one)." : null].filter(Boolean),
+      });
     },
 
     async voidInvoice({ ctx, params, body }) {

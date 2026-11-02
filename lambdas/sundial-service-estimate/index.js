@@ -488,6 +488,7 @@ const ROUTES = [
   ["GET", /^\/service\/invoices\/report\/?$/, "invoiceReport"], // the week's invoices for accounting (2026-10-01) — before /{id}
   ["GET", /^\/service\/invoices\/([^/]+)\/preview\/?$/, "previewInvoice"],
   ["GET", /^\/service\/invoices\/([^/]+)\/?$/, "getInvoice"],
+  ["PATCH", /^\/service\/invoices\/([^/]+)\/?$/, "updateInvoice"], // the invoice date (2026-11-02)
   ["POST", /^\/service\/invoices\/([^/]+)\/payments\/?$/, "recordPayment"],
   ["POST", /^\/service\/jobs\/([^/]+)\/payments\/?$/, "recordJobDeposit"], // a deposit before the invoice exists (2026-10-27)
   ["POST", /^\/service\/invoices\/([^/]+)\/send\/?$/, "sendInvoice"],
@@ -2384,7 +2385,7 @@ export function createHandler(deps = {}) {
     getJobInvoice: "service.estimate.write", getInvoice: "service.estimate.write", previewInvoice: "service.estimate.write",
     unlockEstimate: "service.estimate.write", // whoever may edit the estimate may reopen it; the invoice is not touched
     invoiceReport: "service.estimate.write", // a read, like getInvoice
-    issueInvoice: "service.invoice.write", recordPayment: "service.invoice.write", recordJobDeposit: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
+    issueInvoice: "service.invoice.write", updateInvoice: "service.invoice.write", recordPayment: "service.invoice.write", recordJobDeposit: "service.invoice.write", sendInvoice: "service.invoice.write", voidInvoice: "service.invoice.write",
     chargeInvoiceRoute: "service.card.charge", // amendment 11: charging a stored card is a level-gated action, everywhere
     jobCard: "service.invoice.write", jobCardSession: "service.invoice.write", jobCardLink: "service.invoice.write",
     jobCharge: "service.card.charge", // Admin / Executive / Manager (lib/access.js ACTION_LEVELS; Managers since 2026-10-16)

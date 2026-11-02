@@ -1,5 +1,27 @@
 # Sundial — Progress Log
 
+## 2026-11-02 — The invoice date is the office's (Harmon): `Invoice_Date__c` on the card, the document and the report
+
+**Ask.** Harmon often needs to change the date on an invoice; Sundial only had the instant of issue. Tim added `Invoice_Date__c` (Date) on `Sundial_Service_Invoice__c`.
+
+**Built.** `INVOICE_SELECT` carries it. Issue takes `invoiceDate` (today in `SERVICE_TIMEZONE` when omitted) and counts `netDays` from it. **`PATCH /service/invoices/{id} { invoiceDate }`** (`updateInvoice`, `service.invoice.write`) changes it on an issued invoice — the stored PDF re-rendered so the document matches, an `invoice_updated` activity row (from → to), `409 INVOICE_VOID` on a void one. The invoice document's meta line is **Invoice date** (the field, else the issue day) instead of "Issued". **The report ranges and sorts by it:** `Invoice_Date__c` in [from, to], an undated (pre-field) invoice placed by its issue's local day; rows carry `invoiceDate` beside `issuedAt`. `scripts/backfill-invoice-date.mjs --tenant harmon [--apply]` stamps the issue's local day on the old rows (canary first). Wire script: PATCH on `/service/invoices/{id}`. Tests: estimate 79 (the lifecycle test: the default date, due from it, the PATCH + re-render + activity + validation, the report finding it by the new date and not the issue week, the undated fallback); the fake SOQL learned Date literals and `= null`.
+
+**Portal (harmon-crm, same day).** `JobInvoiceCard`: an **Invoice date** box beside "Due in" on both Issue rows (today by default), and on the issued invoice "invoice date Oct 28, 2026" with a pencil → date box + save / cancel → `serviceApi.updateInvoice`; "issued" stays beside it. `invoiceExport.ts`: the **Invoice date** column is the field (the issue day for an undated one) and an **Issued date** column follows it; the sub-rows and totals are built by column name now. Tests: `JobInvoiceCard.test.tsx` 11 (+1), `invoiceExport.test.ts` 4.
+
+**Not done (follow-up):** the Invoices tab's list still shows the issued date from the cache — `invoice_date` is not a cache column yet (`sql/sundial_service_invoice_cache.sql` + the sync's column map).
+
+**Deploy (Tim):** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (re-run; adds PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` then `--apply`; harmon-crm `main`.
+
+## 2026-10-30 — Invoice report for the GL: tax zone, amounts by tax category, any date range (Harmon — Heather)
+
+**Ask.** Accounting keys every Service invoice into Acumatica from the Invoices tab's CSV and needs, per invoice, (1) the amount under each tax category (Labor/Services, Taxable Retail, Solar Materials, Warranty, Materials for Resale) for the GL accounts, (2) the job's tax zone, and (3) a report over any period, not one week.
+
+**Built.** `invoice.js` `invoiceReport`: the select carries the job's `Estimate__c` / `Tax_Zone_Code__c` / `Tax_Zone_Label__c`; the lines behind every invoice in the range are read in one query per 200 estimates (`Stage__c != 'Removed'`, as issue did) and each invoice gets `taxCategories` — its lines' totals grouped by `effectiveTaxCategory` (the category frozen on the line at issue; the kind's default / the warranty rule for pre-D-083 rows), pre-discount so the five add up to the subtotal; `totals.taxCategories` over the live invoices; `taxCategories` lists the ids. The range was already any span ≤ 92 days — the portal just never offered it. Backend-only otherwise; no new route. Tests: estimate 79 (+ the report's zone / split / month range / 92-day refusal).
+
+**Portal (harmon-crm, same day).** `invoiceExport.ts`: two new columns (Tax zone, Tax zone code), and under every live invoice row one sub-row per category carrying money (Status = "Tax category", the invoice #, job # and zone repeated, the label + amount in the two new last columns); the totals block ends with the same split. `ServiceInvoicesPage`: a From / To pair (native date inputs) with presets — this / last week, this / last month, last 7 / 30 days — validated against the 92-day cap (`exportRangeProblem` / `presetRange`); file `invoices-{from}-to-{to}.csv`. Tests: `invoiceExport.test.ts` 4.
+
+**Deploy (Tim):** `.\deploy.ps1 sundial-service-estimate`; harmon-crm `main` (Vercel). Inventory row S36 updated.
+
 ## 2026-10-30 — Harmon's first dealer-module feedback: a folded stage + hidden fields (`feature/harmon-feedback-1`) — DEPLOYED 2026-10-30
 
 - **Why:** Harmon does not want dealers or reps to know a permit has been received, because they would demand an install date at once. They also do not want them to see Harmon's NS adder cost basis.

@@ -25,6 +25,7 @@
       POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
       GET    /service/labor/rates                                       (the rate sheet, 2026-10-05)
       GET    /service/invoices/report | /service/invoices/{id} | /service/invoices/{id}/preview
+      PATCH  /service/invoices/{id}                                  (the invoice date, 2026-11-02)
       POST   /service/invoices/{id}/payments | send | void | charge   (charge: the card on file, 2026-09-17)
       POST   /webhooks/stripe/{tenant}                                  (Stripe -> Sundial, signature-gated)
       POST   /service/price-book-items
@@ -172,10 +173,10 @@ $laborRates = Ensure-Resource $labor "rates"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $laborRates $m }
 Write-Host "==> /service/jobs : POST, OPTIONS" -ForegroundColor Cyan
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobs $m }
-Write-Host "==> /service/invoices/{id} : GET, OPTIONS" -ForegroundColor Cyan
+Write-Host "==> /service/invoices/{id} : GET, PATCH (the invoice date, 2026-11-02), OPTIONS" -ForegroundColor Cyan
 $invoices = Ensure-Resource $service "invoices"
 $invId    = Ensure-Resource $invoices "{id}"
-foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invId $m }
+foreach ($m in @("GET", "PATCH", "OPTIONS")) { Wire-Method $invId $m }
 Write-Host "==> /service/invoices/report : GET, OPTIONS (the week's invoices for accounting, 2026-10-01)" -ForegroundColor Cyan
 $invRep = Ensure-Resource $invoices "report"
 foreach ($m in @("GET", "OPTIONS")) { Wire-Method $invRep $m }

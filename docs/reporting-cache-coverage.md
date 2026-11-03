@@ -12,7 +12,7 @@
 | `sundial_service_job_cache` | `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Job Fields*) | 59 | 0 | 1 | 0 | 1,837 |
 | `sundial_estimate_cache` | `docs/Sundial_Estimate_Fields_by_Section.xlsx` (*Estimate Fields*) | 61 | 0 | 1 | 0 | 1,632 |
 | `sundial_service_call_cache` | `docs/Sundial_Service_Call_Fields_by_Section.xlsx` (*Service Call Fields*) | 34 | 0 | 0 | 0 | 995 |
-| `sundial_service_invoice_cache` | `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Invoice Fields*) | 26 | 1 | 0 | 0 | 746 |
+| `sundial_service_invoice_cache` | `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Invoice Fields*) | 27 | 0 | 0 | 0 | 746 |
 | `sundial_service_payment_cache` | `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Payment Fields*) | 18 | 0 | 0 | 0 | 572 |
 | `sundial_service_line_cache` | `docs/Sundial_Estimate_Fields_by_Section.xlsx` (*Service Line Fields*) | 23 | 0 | 0 | 0 | 689 |
 | `sundial_price_book_item_cache` | `docs/Sundial_Estimate_Fields_by_Section.xlsx` (*Price Book Item Fields*) | 23 | 0 | 0 | 0 | 664 |
@@ -123,13 +123,10 @@ none
 
 Source: `docs/Sundial_Service_Job_Fields_by_Section.xlsx` (*Service Invoice Fields*).
 
-**Already cached (26):** `name`, `service_job_sf_id`, `client_sf_id`, `status`, `bill_to_type`, `bill_to_name`, `billing_reference`, `subtotal`, `discount_amount`, `tax_rate`, `tax_amount`, `total`, `paid_amount`, `balance`, `issued_at`, `sent_at`, `due_date`, `paid_at`, `pdf_s3_key`, `acumatica_ref`, `acumatica_entered_at`, `voided_at`, `void_reason`, `hcp_id`, `bill_to_customer_sf_id`, `bill_to_address`
+**Already cached (27):** `name`, `service_job_sf_id`, `client_sf_id`, `status`, `bill_to_type`, `bill_to_name`, `billing_reference`, `subtotal`, `discount_amount`, `tax_rate`, `tax_amount`, `total`, `paid_amount`, `balance`, `issued_at`, `invoice_date`, `sent_at`, `due_date`, `paid_at`, `pdf_s3_key`, `acumatica_ref`, `acumatica_entered_at`, `voided_at`, `void_reason`, `hcp_id`, `bill_to_customer_sf_id`, `bill_to_address`
 
-**Added (1):**
-
-| Column | Type | Salesforce field | Label |
-|---|---|---|---|
-| `invoice_date` | date | `Invoice_Date__c` | Invoice Date |
+**Added (0):**
+none
 
 **Skipped (0):**
 none

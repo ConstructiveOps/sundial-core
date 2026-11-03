@@ -27,16 +27,14 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import ExcelJS from "exceljs";
 import { getRawDescribe, getQueryableFields } from "../lib/sf-describe.js";
-import { getSupabaseConfig } from "../lib/supabase.js";
 import { sfFieldToColumn, buildCacheSelect } from "../lib/cache-row.js";
 import { parentModstampPaths, incrementalWhere } from "../lib/formula-parents.js";
 import { planTable, renderSql, renderCoverage, APPLIED_SQL_FILES } from "../lib/report-columns.js";
+// OBJECTS, the workbook reader and the live-column reader are shared with
+// scripts/generate-report-catalog.mjs (D-088) — one copy, in scripts/lib/report-sources.mjs.
+import { ROOT, DOCS, OBJECTS, readSheet, loadCacheSpec, sourceOf } from "./lib/report-sources.mjs";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const DOCS = path.join(ROOT, "docs");
 const SQL_ARG = process.argv.includes("--sql") ? process.argv[process.argv.indexOf("--sql") + 1] : null;
 const SQL_REL = SQL_ARG ? path.relative(ROOT, path.resolve(ROOT, SQL_ARG)).split(path.sep).join("/") : null;
 if (process.argv.includes("--sql") && (!SQL_REL || !SQL_REL.startsWith("sql/") || APPLIED_SQL_FILES.includes(SQL_REL))) {
@@ -47,71 +45,6 @@ const SQL_OUT = SQL_REL ? path.join(ROOT, SQL_REL) : null;
 const DOC_OUT = path.join(DOCS, "reporting-cache-coverage.md");
 const CHECK = process.argv.includes("--check");
 
-// §4.1. The order is the resync order (§4.5), so the SQL reads in the order Tim works.
-// No `workbook` = every readable describe field.
-const OBJECTS = [
-  { key: "customer", sfObject: "Sundial_Customer__c", cacheTable: "sundial_customer_cache", workbook: "Sundial_Customer__c_Field_Design.xlsx", sheet: "Fields by Section", sectionCol: "Sundial Section", labelCol: "Label" },
-  { key: "solar", sfObject: "Sundial_Solar__c", cacheTable: "sundial_solar_cache", workbook: "Sundial_Solar_Fields_by_Section.xlsx", sheet: "Fields by Section" },
-  { key: "roofing", sfObject: "Sundial_Roofing__c", cacheTable: "sundial_roofing_cache", workbook: "Sundial_Roofing_Fields_by_Section.xlsx", sheet: "Field List (Module)" },
-  { key: "job", sfObject: "Sundial_Service_Job__c", cacheTable: "sundial_service_job_cache", workbook: "Sundial_Service_Job_Fields_by_Section.xlsx", sheet: "Service Job Fields" },
-  { key: "estimate", sfObject: "Sundial_Estimate__c", cacheTable: "sundial_estimate_cache", workbook: "Sundial_Estimate_Fields_by_Section.xlsx", sheet: "Estimate Fields" },
-  { key: "servicecall", sfObject: "Sundial_Service_Call__c", cacheTable: "sundial_service_call_cache", workbook: "Sundial_Service_Call_Fields_by_Section.xlsx", sheet: "Service Call Fields" },
-  { key: "serviceinvoice", sfObject: "Sundial_Service_Invoice__c", cacheTable: "sundial_service_invoice_cache", workbook: "Sundial_Service_Job_Fields_by_Section.xlsx", sheet: "Service Invoice Fields" },
-  { key: "servicepayment", sfObject: "Sundial_Service_Payment__c", cacheTable: "sundial_service_payment_cache", workbook: "Sundial_Service_Job_Fields_by_Section.xlsx", sheet: "Service Payment Fields" },
-  { key: "serviceline", sfObject: "Sundial_Service_Line__c", cacheTable: "sundial_service_line_cache", workbook: "Sundial_Estimate_Fields_by_Section.xlsx", sheet: "Service Line Fields" },
-  { key: "pricebookitem", sfObject: "Sundial_Price_Book_Item__c", cacheTable: "sundial_price_book_item_cache", workbook: "Sundial_Estimate_Fields_by_Section.xlsx", sheet: "Price Book Item Fields" },
-  { key: "po", sfObject: "Sundial_PO__c", cacheTable: "sundial_po_cache" },
-  { key: "user", sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
-  { key: "membership", sfObject: "Sundial_Membership__c", cacheTable: "sundial_membership_cache" },
-  { key: "serviceplan", sfObject: "Sundial_Service_Plan__c", cacheTable: "sundial_service_plan_cache" },
-];
-
-// --- Workbook (the cell reading of generate-field-configs.mjs readSheet) ------
-async function readSheet(spec) {
-  const file = path.join(DOCS, spec.workbook);
-  if (!fs.existsSync(file)) throw new Error(`workbook missing: ${file}`);
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.readFile(file);
-  const ws = wb.getWorksheet(spec.sheet);
-  if (!ws) throw new Error(`${spec.workbook}: no sheet named "${spec.sheet}"`);
-  const col = {};
-  ws.getRow(1).eachCell({ includeEmpty: false }, (c, n) => {
-    col[String(c.value ?? "").trim()] = n;
-  });
-  if (!col["API Name"]) throw new Error(`${spec.workbook} [${spec.sheet}]: no "API Name" column`);
-  const rows = [];
-  for (let r = 2; r <= ws.rowCount; r++) {
-    const row = ws.getRow(r);
-    const cell = (name) => {
-      if (!col[name]) return "";
-      const v = row.getCell(col[name]).value;
-      // A formula cell reads as { formula, result }; take the displayed result.
-      if (v && typeof v === "object" && "result" in v) return String(v.result ?? "").trim();
-      if (v && typeof v === "object" && "richText" in v) return v.richText.map((t) => t.text).join("").trim();
-      return String(v ?? "").trim();
-    };
-    const apiName = cell("API Name");
-    // A section banner or a note in the API Name column is not a field.
-    if (!apiName || !/^[A-Za-z][A-Za-z0-9_]*$/.test(apiName)) continue;
-    rows.push({ rowNumber: r, apiName, label: cell(spec.labelCol ?? "Field Label"), section: cell(spec.sectionCol ?? "Section") });
-  }
-  return rows;
-}
-
-// --- Live cache columns, with their types -------------------------------------
-async function loadCacheSpec() {
-  const cfg = await getSupabaseConfig();
-  const resp = await fetch(`${cfg.url}/rest/v1/`, {
-    headers: { apikey: cfg.serviceRoleKey, Authorization: `Bearer ${cfg.serviceRoleKey}` },
-  });
-  if (!resp.ok) throw new Error(`OpenAPI fetch failed (${resp.status})`);
-  const spec = await resp.json();
-  return (table) => {
-    const def = spec?.definitions?.[table] || spec?.components?.schemas?.[table];
-    return new Map(Object.entries(def?.properties ?? {}).map(([c, p]) => [c, p?.format ?? null]));
-  };
-}
-
 // --- Run ------------------------------------------------------------------------
 const columnsOf = await loadCacheSpec();
 const plans = [];
@@ -121,7 +54,7 @@ for (const spec of OBJECTS) {
   const queryableNames = new Set(queryable.map((f) => f.name.toLowerCase()));
   const existingColumns = columnsOf(spec.cacheTable);
   const workbookRows = spec.workbook ? await readSheet(spec) : null;
-  const source = spec.workbook ? `\`docs/${spec.workbook}\` (*${spec.sheet}*)` : "every field the integration user can read (no workbook)";
+  const source = sourceOf(spec);
 
   // A NEW formula column must be one the incremental sync can keep fresh (D-079). Ask
   // lib/formula-parents.js the same question the sync asks, about the table as it will

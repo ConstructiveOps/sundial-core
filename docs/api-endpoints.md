@@ -968,6 +968,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1021,6 +1022,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `SERVICE_SHOP_LATLNG` | `sundial-service-board` | No | `"33.45,-112.07"` — the shop's coordinates. A clock-in at the shop counts as verified (office work, prep, pickups). |
 | `SERVICE_TIMEZONE` | `sundial-service-board` | No (defaults `America/Phoenix`) | The timezone appointment windows are written in for customer emails ("Monday, September 14, 9:00 AM – 11:00 AM"). Per-tenant. |
 | `SERVICE_BRAND_NAME` | `sundial-service-public`, `sundial-service-board`, `sundial-service-estimate` | No | Fallback company name when Secrets Manager `sundial/brand` has none for the tenant. Superseded 2026-09-24 by the secret below for everything on the documents. **D-078: the primary tenant's name only** — any other tenant uses the `companyName` of its own `sundial/brand` block (documents, appointment emails, the "on my way" text) and prints none if it has none. |
+| `ACCESS_MODEL_MODE` | `sundial-reports` (copied from `sundial-sf-query`) | No | Carried for parity with the other read Lambdas; **`sundial-reports` ignores it** — `reports.read` is always enforced (`alwaysEnforcedAccess`). |
 | `SUNDIAL_PRIMARY_TENANT` | every Lambda (`lib/tenant-guard.js`) | No (defaults `harmon`) | **D-078.** The slug of the primary tenant — the one the single-credential integrations and every un-keyed fallback belong to. Leave unset on Harmon's Lambdas. |
 | `SUNDIAL_ACUMATICA_TENANTS` / `SUNDIAL_AURORA_TENANTS` / `SUNDIAL_WELCOME_CALL_TENANTS` | `sundial-acumatica-push` + `sundial-acumatica-budget-push` / `sundial-aurora-push` / `sundial-welcome-call` | No (unset = the primary tenant only) | **D-078.** Comma-separated slugs of OTHER tenants allowed to use that integration on the primary tenant's account. Set only when a tenant really should share it; a demo tenant never should. |
 | *(secret, not a variable)* `sundial/brand` | `sundial-service-estimate`, `sundial-service-public` | No (documents print the fallback name, no logo, no footer links) | **The tenant's brand on every customer document** (`lib/brand.js`, 2026-09-24): JSON keyed by tenant slug, plus an optional `default` block — `{ "default": {…}, "harmon": { "companyName", "logoUrl" (https, PNG or JPG ≤ 2 MB; the hosted pages show it by URL, the PDFs embed it — fetched once per Lambda and kept a day), "tagline", "addressLine", "phone", "email", "licenseLine", "termsUrl", "termsBlurb", "clubUrl", "clubBlurb", "footerNote", "accentColor" } }`. The footer prints **Terms & Conditions** (`termsUrl` + `termsBlurb`, a generic line when blank) and **Solar Service Club** (`clubUrl` + `clubBlurb`) on the estimate, invoice and job report — page and PDF alike. Re-read every five minutes; a missing secret is not an error. |
@@ -1257,6 +1259,55 @@ are indistinguishable). A malformed id is 404 without a query.
 
 Wire script: `scripts/wire-dealer-routes.ps1` (resources `/dealer/customers` +
 `/dealer/customers/{id}`, GET + OPTIONS, invoke permission `apigw-dealer` on `…/*/*/dealer/*`).
+
+---
+
+## Reports — the engine (D-087 / D-088, Reporting R1a, 2026-11-03) — `sundial-reports`
+
+Every report reads the **Supabase cache** (D-087) through `public.sundial_report_run`
+(`sql/sundial_report_run.sql`); Salesforce is never queried. Design: `docs/reporting-module.md` §6.
+
+**Access, every request:** the verified JWT → the tenant (never request input; no tenant =
+`403 NO_TENANT`) → action **`reports.read`** = tenant scope (Executive / Admin / Manager).
+**Always on**, not behind `ACCESS_MODEL_MODE`. A Sales Rep, Sales Dealer, Technician or a
+`none`-scope user gets **`403 { error: "forbidden", code: "MODULE_FORBIDDEN" }`** on all three
+routes, before anything is read. **Column gates:** a catalog column with a `gate` (the
+`lib/cost-gate.js` cost / markup columns, `service.costing.read`) is removed for a caller
+without that action, from the catalog they are shown and from any definition they run.
+
+### `POST /reports/run`
+Body: a report definition (`docs/reporting-module.md` §6.3), e.g.
+```json
+{ "type": "solar", "groupBy": ["rep.name"],
+  "aggregates": [{ "fn": "count" }, { "fn": "sum", "field": "solar.contract_amount" }],
+  "filters": [{ "field": "solar.contract_date", "op": "between", "value": "ytd" }],
+  "sort": [{ "field": "sum_solar_contract_amount", "dir": "desc" }] }
+```
+→ `200`
+```json
+{ "type": "solar",
+  "columns": [{ "field": "rep.name", "label": "User Name", "type": "text", "object": "rep" },
+              { "field": "count", "label": "Count", "type": "number", "aggregate": "count" }, …],
+  "rows": [["Ann Rep", 12, 410000], …],
+  "aggregates": [{ "field": "count", "label": "Count", "type": "number", "aggregate": "count", "value": 57 }, …],
+  "truncated": false, "limit": 5000, "stripped": [], "asOf": "2026-11-03T17:05:00Z" }
+```
+- `rows` are arrays in `columns` order (≤ 5,000; `truncated: true` when more matched).
+- `aggregates` are **grand totals over every matching row**, not just the rows returned.
+- `stripped` names the gated fields removed for this caller.
+- `asOf` = the oldest of the joined objects' newest successful sync (`cache_sync_runs`), or null.
+
+Errors:
+- `400 { error: "invalid_report", code, field, message }`. `field` names the offending part, e.g. `filters[0].value`. The codes are `BAD_DEFINITION`, `UNKNOWN_TYPE`, `UNKNOWN_FIELD`, `FIELD_NOT_REPORTABLE`, `LONG_TEXT_NOT_SELECTABLE`, `BAD_FILTER`, `BAD_OPERATOR`, `BAD_VALUE`, `TOO_MANY_*`, `DUPLICATE_COLUMN`, `COLUMN_NOT_GROUPED`, `BAD_AGGREGATE`, `BAD_SORT`, `BAD_LIMIT`, `NO_COLUMNS`, plus `BODY_REQUIRED` / `BODY_TOO_LARGE` (100 KB) / `INVALID_JSON`.
+- `500 REPORT_CATALOG_MISMATCH`: the database's catalog is older than the Lambda's. Re-run the catalog SQL.
+
+### `GET /reports/types`
+→ `{ types: [{ key, label, base: { alias, object, label }, joins: [{ alias, object, label }], defaultColumns }] }`.
+No table names. R1a: `solar` only (aliases `solar`, `customer`, `rep`).
+
+### `GET /reports/catalog?type=solar`
+→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, picklistValues?, description, longText, operators, selectable }] }] }`.
+This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter, not a column). A missing or unknown `type` is `400 UNKNOWN_TYPE`.
 
 ---
 

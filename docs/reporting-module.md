@@ -1,6 +1,6 @@
 # Reporting Module — design (2026-10-30)
 
-> Status: DESIGN, agreed with Tim 2026-10-30. R0 is the first build increment.
+> Status: DESIGN, agreed with Tim 2026-10-30. R0 built and run 2026-11-02; R1a (the engine, solar type) built 2026-11-03 — D-088.
 > Decision to record in DECISIONS.md: **D-087 — reports run on the Supabase cache; Salesforce is never the report engine.** Supersedes CLAUDE.md "Key UI Components" item 11 ("Reporting — Salesforce reports surfaced in portal UI").
 
 ## 1. What Harmon needs
@@ -13,7 +13,7 @@
 ## 2. Decisions
 
 - **D-087.** Every report is a query against the Supabase cache tables. Salesforce is the source of truth and the sync keeps the cache current (D-079: every 5 min for the hot objects); it is never queried by a report run. Native Salesforce reports, the Analytics REST API and SF dashboards are out of scope permanently (API budget, no per-user scoping, and Harmon holds no SF licenses).
-- **v1 scope is the office portal, tenant-scope roles only** (Admin / Executive / Manager and the other `TENANT_ACCESS_LEVELS`). Sales Rep / Sales Dealer are excluded from v1 — they have the dealer app and the manifests; the reporting routes answer them `404 RECORD_NOT_FOUND` / module denial like any other module they lack. Nothing in the engine assumes this forever: the row filter and the field manifest plug in at the same point the list reads use them.
+- **v1 scope is the office portal, tenant-scope roles only** (Admin / Executive / Manager and the other `TENANT_ACCESS_LEVELS`). Sales Rep / Sales Dealer are excluded from v1 — they have the dealer app and the manifests; the reporting routes answer them `403 MODULE_FORBIDDEN` like any other module they lack (D-088; `404` once a route names a saved report). Nothing in the engine assumes this forever: the row filter and the field manifest plug in at the same point the list reads use them.
 - **The cache becomes reporting-grade (R0):** every field a detail layout shows is a cache column. Width does not change what the portal reads (§4).
 - **The engine has no per-field code.** What a report may select, filter or group on comes only from the generated field catalog and the report-type definitions. A column name hard-coded in the engine or the UI is a review rejection.
 - **The AI front door generates definitions, never data or SQL.** The same validated definition is what the engine runs; a saved report never consults the model again.
@@ -90,31 +90,38 @@ Column names follow `sfFieldToColumn()` exactly (`lib/cache-row.js`): lowercase,
 - The sync costs no extra Salesforce API calls (same SOQL, same row counts); only payload size grows, which the page-wise upsert absorbs.
 - The cache tables are not in a Realtime publication; invalidations are broadcasts.
 
-## 6. R1 — the engine (for the next session; R0 does not depend on it)
+## 6. R1 — the engine (D-088; R1a built 2026-11-03, `feature/reports-engine`)
 
-### 6.1 Field catalog
-`scripts/generate-report-catalog.mjs` → `lib/report-catalog/<object>.json`: for every cache column of a reportable object — `column`, `sfField`, `label` (workbook label), `section`, `type` (text | number | boolean | date | datetime | picklist | multipicklist | reference), `picklistValues` (from describe), `description` (workbook description / help text — this is also what the AI reads), `gate` (`service.costing.read` for the price-book / line cost columns and markup, `service.payroll.read` for pay rates — reuse `lib/cost-gate.js`'s lists), `reportable: true|false`. The engine allowlists against this file; the picker and the AI prompt are generated from it; nothing else is a source of column names.
+R1 is split. **R1a (built):** the catalog, the report-type shape, the definition validator, the executor, and `POST /reports/run` / `GET /reports/types` / `GET /reports/catalog` for the `solar` type only. **R1b (next):** a dealer cache table, the other eight report types, saved reports + sharing, CSV.
 
-### 6.2 Report types (v1)
-Fixed joins, named like Salesforce report types; each is `{ key, label, base: { table, alias }, joins: [{ table, alias, on, kind: "left" }], defaultColumns }`:
-1. `customers` — customer
-2. `customers_solar` — customer ⟕ solar (`sundial_customer_sf_id`), most recent solar leads
-3. `solar` — solar ⟕ customer ⟕ dealer (`dealer_sf_id`) ⟕ user as rep (`sales_rep_sf_id`) ⟕ user as PM
-4. `roofing` — roofing ⟕ customer
-5. `service_jobs` — job ⟕ customer ⟕ estimate ⟕ invoice (one per job) ⟕ payments (aggregated)
-6. `service_calls` — service call ⟕ job ⟕ user as tech
-7. `estimates` — estimate ⟕ customer ⟕ job
-8. `estimate_lines` — line ⟕ estimate ⟕ price-book item
-9. `invoices_payments` — invoice ⟕ job ⟕ payment rows
+### 6.1 Field catalog (built)
+`scripts/generate-report-catalog.mjs` (decisions in `lib/report-catalog-build.js`) writes `lib/report-catalog/<object>.json` for all 14 cached objects, plus `lib/report-catalog/index.js`, plus **`sql/2026-11-03_report_catalog.sql`**, which creates and seeds `public.sundial_report_catalog (object_key, table_name, column_name, data_type, gate, reportable)`. JSON and SQL come from the same entries; a test pins that they agree.
+- **Columns come only from `lib/report-columns.js` `planTable()`.** That means its `existing` columns plus `type_mismatch` ones (with the live type), plus the two control columns `sf_id` (a join key, `reportable: false`) and `created_date`. A cache column with no Salesforce field behind it is not in the catalog. `client_sf_id` never is: the tenant clause belongs to the function. Workbooks, `OBJECTS` and the live-column reader are shared with R0's generator (`scripts/lib/report-sources.mjs`).
+- **Each entry:** `column`, `sfField`, `label` (workbook, else describe), `section`, `type` (text | number | boolean | date | datetime | picklist | multipicklist | reference), `pgType` (live), `picklistValues` (active, from describe), `description` (the workbook's description / help text column, else describe help text — also what the R4 AI reads), `gate`, `reportable`, `longText` (textarea > 255).
+- **Gates:** `service.costing.read` on the `lib/cost-gate.js` columns (price-book `labor_cost` / `material_cost`, line `unit_labor_cost` / `unit_material_cost`, estimate `markup_type` / `markup_value` / `markup_amount`). There is **no payroll-gated column**: `Hourly_Cost_Rate__c` is not cached (R0 refused it as sensitive).
+- **`reportable: false`:** `sf_id`, credentials (`sensitiveReason`), and the bookkeeping fields `IsDeleted` / `LastViewedDate` / `LastReferencedDate`.
+- **Re-run the generator after any new cache column**, then run its SQL and redeploy `sundial-reports`. Until then the column is not reportable.
 
-### 6.3 Report definition (JSON)
+### 6.2 Report types
+Shape (`lib/report-types.js`): `{ key, label, base: { object, alias }, joins: [{ object, alias, label, kind: "left", on: { left: "<alias>.<column>", right: "<column>" } }], defaultColumns }`. `on` is data; the function builds the ON clause (with the tenant clause inside it) after checking each part against the catalog.
+1. `customers` — customer *(R1b)*
+2. `customers_solar` — customer ⟕ solar (`sundial_customer_sf_id`), most recent solar leads *(R1b)*
+3. **`solar` (built)** — solar ⟕ customer (`sundial_customer_sf_id`) ⟕ user as `rep` (`sales_rep_sf_id`). **No dealer join** (no dealer cache table yet; use `solar.dealer_display_name`). **No PM join:** `Project_Manager__c` on Solar is a multipicklist in the live org and `project_manager_sf_id` / `_name` are empty, so the PM is `solar.project_manager`.
+4. `roofing` — roofing ⟕ customer *(R1b)*
+5. `service_jobs` — job ⟕ customer ⟕ estimate ⟕ invoice (one per job) ⟕ payments (aggregated) *(R1b)*
+6. `service_calls` — service call ⟕ job ⟕ user as tech *(R1b)*
+7. `estimates` — estimate ⟕ customer ⟕ job *(R1b)*
+8. `estimate_lines` — line ⟕ estimate ⟕ price-book item *(R1b)*
+9. `invoices_payments` — invoice ⟕ job ⟕ payment rows *(R1b)*
+
+### 6.3 Report definition (JSON) — `lib/report-def.js`
 ```json
 {
   "type": "solar",
   "columns": ["solar.project_name", "customer.name", "solar.stage", "rep.name", "solar.contract_amount"],
   "filters": [
     { "field": "solar.stage", "op": "in", "value": ["Sold", "Sold - Pending Review"] },
-    { "field": "solar.contract_date", "op": "between", "value": ["2026-09-01", "2026-09-30"] }
+    { "field": "solar.contract_date", "op": "between", "value": "this_quarter" }
   ],
   "groupBy": ["rep.name"],
   "aggregates": [{ "fn": "sum", "field": "solar.contract_amount" }, { "fn": "count" }],
@@ -123,19 +130,47 @@ Fixed joins, named like Salesforce report types; each is `{ key, label, base: { 
   "chart": { "kind": "bar", "x": "rep.name", "y": "sum_solar_contract_amount" }
 }
 ```
-Operators per type: text/picklist `eq, neq, in, not_in, contains, starts_with, is_blank, not_blank`; number `eq, neq, gt, gte, lt, lte, between, is_blank`; date/datetime `eq, before, after, between, is_blank` plus relative tokens (`this_month`, `last_month`, `this_quarter`, `ytd`, `last_n_days:30`) resolved on the server in the tenant's zone (Arizona). One group level in v1; aggregates `count, sum, avg, min, max`. Relative dates are what make a saved report re-runnable.
+- **Fields** are `<alias>.<column>`. The alias must be the type's, and the column a reportable catalog column. Any other top-level key is refused, so a tenant cannot be smuggled in.
+- **Operators:**
+  - text / picklist / multipicklist: `eq, neq, in, not_in, contains, starts_with, is_blank, not_blank`
+  - reference: `eq, neq, in, not_in, is_blank, not_blank`
+  - number: `eq, neq, gt, gte, lt, lte, between, is_blank`
+  - date / datetime: `eq, before, after, between, is_blank`
+  - boolean: `eq, is_blank`
 
-### 6.4 Execution
-Two viable paths; decide at the start of R1 after a spike on the first report type:
-- **(a) plpgsql** `public.sundial_report_run(p_client_sf_id text, p_def jsonb)` — dynamic SQL with `format('%I')`, re-validating every identifier against a `sundial_report_catalog` table seeded from the catalog JSON; SECURITY DEFINER, `revoke execute from public`, like `sundial_customer_pipeline`. No new dependency. Harder to unit-test.
-- **(b) `pg` from the Lambda** over the Supabase session pooler (connection string in Secrets Manager `sundial/supabase-db`), SQL compiled and parameterised in JS against the catalog (unit-testable like everything else in `lib/`). One new dependency; the first direct Postgres connection in the codebase.
-Either way: the tenant clause `client_sf_id = $1` is always the first predicate on the base table and every joined table; identifiers only from the catalog; values only as parameters; `limit` capped (5,000 rows on screen, 50,000 in a CSV, streamed).
+  `neq` / `not_in` include blank rows. `contains` / `starts_with` are case-insensitive, with wildcards in the value taken literally.
+- **Relative dates** (`this_month`, `last_month`, `this_quarter`, `ytd`, `last_n_days:N` = N days ending today) are resolved on the server in **America/Phoenix** (UTC-07:00 all year), as a value of `eq` or `between`. A datetime filter means whole Arizona days. This is what makes a saved report re-runnable.
+- **Shape:**
+  - One group level. When grouped, the columns are the group, then the aggregates.
+  - Aggregates are `count` (no field), `sum` / `avg` (numbers) and `min` / `max` (numbers, dates). Each is named `<fn>_<alias>_<column>`, or `count`.
+  - Sort only on what the report shows, with aggregates only when grouped.
+  - Limits: `limit` ≤ 5,000; ≤ 50 columns, 50 filters, 10 aggregates, 5 sorts.
+- **Long text** can be filtered on but not shown, grouped or sorted in R1a. **It becomes selectable again in R1b, for CSV only** (the screen's 6 MB response is why).
+- **Gated columns** are removed for a caller without the gate (`stripped` names them), never refused.
+- Every rejection is a **400 that names the field** (`{ error: "invalid_report", code, field, message }`).
+
+### 6.4 Execution — plpgsql (D-088)
+`public.sundial_report_run(p_client_sf_id text, p_def jsonb)` (`sql/sundial_report_run.sql`, with the helper `sundial_report_column`). SECURITY DEFINER; EXECUTE revoked from public / anon / authenticated.
+- **It receives the normalized "wire" definition.** That is the base table, the resolved joins, the columns, the filters (already in Arizona dates), the aggregates, the sort as output positions, the limit, and `allowedGates`.
+- **It re-checks every identifier** against `sundial_report_catalog` and **RAISES** on an unknown table / alias / column / operator / aggregate, a non-reportable column, or a gated column whose gate is not in `allowedGates`. It builds SQL with `%I` / `%L` only.
+- **The tenant clause** `client_sf_id = p_client_sf_id` is the first predicate on the base table and is inside every join's ON.
+- **Sort and cap.** Rows are sorted with a deterministic tiebreak (the record id, or the group value) and fetched `limit + 1` for `truncated`.
+- **It returns** `{ rows: [[…]], aggregates: { name: value }, truncated }`. The aggregates are grand totals over **every** matching row.
+- **Tests:** `sql/sundial_report_run.test.js` (PGlite) loads the real function and the real catalog seed and builds its definitions with the real `normalizeDefinition`.
+
+Option (b) (`pg` from the Lambda) is not used. CSV (R1b) streams up to 50,000 rows through the same function family.
 
 ### 6.5 Routes and actions (`sundial-reports` Lambda)
-`GET /reports` (saved, visible to the caller: own + shared-to-department + tenant), `POST /reports` / `PATCH /reports/{id}` (save a definition, name, description, sharing, schedule), `POST /reports/run` (ad hoc definition → `{ columns, rows, aggregates, asOf }`), `GET /reports/{id}/run`, `GET /reports/{id}/csv`, `GET /reports/catalog` (the catalog projected for the caller — gated columns removed), `GET /reports/types`, `GET /dashboards/me` (the caller's department / level → its report ids + layout). Actions: `reports.read`, `reports.write` (tenant scope), `reports.admin` (dashboard config, Admin / Executive), `reports.ai` (R4, with a per-tenant monthly budget in `sundial/anthropic`). `asOf` = the object's last ok sync run (`cache_sync_runs`), shown on every report ("data as of 2:35 PM").
+**Built (R1a):**
+- `POST /reports/run` → `{ type, columns: [{ field, label, type }], rows, aggregates: [{ field, label, type, aggregate, value }], truncated, limit, stripped, asOf }`
+- `GET /reports/types`
+- `GET /reports/catalog?type=solar` (the type's fields per alias, projected for the caller: gated and non-reportable removed, with each field's operators)
 
-### 6.6 Storage
-`public.sundial_reports` (id, client_sf_id, owner profile_id, name, description, definition jsonb, sharing: private | department | tenant, department text, schedule jsonb, created/updated), `public.sundial_dashboards` (client_sf_id, department, access_level, layout jsonb of report ids + sizes). Service-role only, like the caches; the browser talks to the Lambda.
+Action **`reports.read`** = tenant scope (Executive / Admin / Manager), always enforced. Anyone else gets **403 `MODULE_FORBIDDEN`** on every route. `asOf` = the oldest of the joined objects' newest successful sync (`cache_sync_runs`), shown on every report ("data as of 2:35 PM"). A RAISE from the function is `500 REPORT_CATALOG_MISMATCH` (the database's catalog is older than the Lambda's).
+**R1b+:** `GET /reports` (saved, visible to the caller: own + tenant-shared), `POST /reports` / `PATCH /reports/{id}`, `GET /reports/{id}/run`, `GET /reports/{id}/csv`, `GET /dashboards/me` (R2). Actions `reports.write`, `reports.admin` (dashboard config, Admin / Executive), `reports.ai` (R4, with a per-tenant monthly budget in `sundial/anthropic`).
+
+### 6.6 Storage (R1b / R2)
+`public.sundial_reports` (id, client_sf_id, owner profile_id, name, description, definition jsonb, **sharing: private | tenant** (D-088), schedule jsonb, created/updated). `public.sundial_dashboards` keyed on **`Default_Department__c`** (D-088), with a layout jsonb of report ids + sizes. Service-role only, like the caches; the browser talks to the Lambda.
 
 ## 7. R2–R4 (sketch)
 - **R2** — Tim authors the starter set as saved definitions (pipeline by stage / rep, solar by PM and stage with contract totals, service jobs by status and payer, invoices + balances, estimates sent / approved, calls per tech per week) and pins them per department in `sundial_dashboards`. The Dashboard page gains a "My Dashboard" built from `GET /dashboards/me`; the existing stat cards stay.

@@ -1,5 +1,14 @@
 # Sundial — Progress Log
 
+## 2026-11-04 — Sundial_Solar__c field audit for deletion (read-only)
+
+**Why.** Harmon is out of custom fields on `Sundial_Solar__c` (500 of 500). Before anything is deleted, every field needs its data, its last touch and every reference listed.
+
+**Built.**
+- **`scripts/audit-solar-fields.mjs`** (read-only: describe + SELECT only). Per field: type / formula / required / external id / lookup, count of records holding a value (booleans: ticked) + MAX(LastModifiedDate) of those records, token-matched references in both repos (API name, `__r`, and the cache column), the three xlsx sheets by sheet + row, and flags for cache sync, LIST_PROJECTION, the solar pipeline SQL, generated portal configs, Aurora / HCP, the report catalog and the customer → solar copy.
+- **Output:** `docs/audits/solar-fields-2026-11.csv` (500 rows), `.md` (buckets), `-backup.csv` (the 38 values held by A/B fields). **A 2 · B 30 · C 468.** Tim's 12 Permit / Web Inspection 3–4 fields are all B (each is on the Solar page config + Fields-by-Section sheet).
+- **Limits found:** the integration user cannot use the Tooling API (`INVALID_TYPE` on CustomField / MetadataComponentDependency), so created dates and Salesforce-side references are blank — "Where is this used?" in Setup on the shortlist. The integration user sees exactly 500 custom fields. Every "last touched" date is ≥ 2026-08-25 (the migration), so A means no data at all.
+
 ## 2026-11-04 — Julie's eight county tax-zone aliases; San Tan Valley waits for its own zone (D-083)
 
 **Why.** Julie (Harmon CFO) gave the zones for eight of the unincorporated places the job backfill could not match. Each is a county-only retail zone. San Tan Valley has its own AZDOR tax since 2026-10-01, so it is not aliased; its zone will come from Acumatica.

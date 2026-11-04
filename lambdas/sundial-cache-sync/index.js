@@ -50,7 +50,7 @@ import { getSalesforceToken, sfQuery, sfQueryPages } from "../../lib/salesforce.
 import { getSupabaseClient, getSupabaseConfig } from "../../lib/supabase.js";
 import { parentModstampPaths, incrementalWhere, readPath } from "../../lib/formula-parents.js";
 import { getAcumaticaEntity } from "../../lib/acumatica.js";
-import { pullAcumaticaTax, syncTaxTables } from "../../lib/tax-zones.js";
+import { pullAcumaticaTax, syncTaxTables, logNewZones } from "../../lib/tax-zones.js";
 import { primaryTenantSlug } from "../../lib/tenant-guard.js";
 
 // --- Object allowlist / map (mirrors sundial-sf-query) ---------------------
@@ -804,7 +804,9 @@ export async function runTaxZoneRefresh(supabase, event = {}, deps = {}) {
   });
   // Drift is a fact about Acumatica's setup (codes + descriptions only), logged every day so it stays visible.
   if (result.drift) console.log("cache-sync taxzones drift:", JSON.stringify(result.drift));
-  console.log("cache-sync taxzones:", JSON.stringify({ tenant, ...result, drift: undefined }));
+  // A retail city zone the city map has no entry for (San Tan Valley, …): info, so we notice.
+  logNewZones(result.newZones);
+  console.log("cache-sync taxzones:", JSON.stringify({ tenant, ...result, drift: undefined, newZones: undefined }));
   return { task: "taxzones", tenant, ...result };
 }
 

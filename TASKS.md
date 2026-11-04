@@ -428,6 +428,14 @@ Runbook: `docs/integrations/acumatica-tax.md`.
   - GRIC and SRIC: the same.
   - Apache Junction: carries Pinal County *Contracting* instead of Retail, so it charges 2.4% instead of 9.1%.
   - The refresh picks each fix up the next morning, and `node scripts/acumatica-pull-tax.mjs` shows what is still open.
+- [x] **Julie's eight county aliases (2026-11-04).** Arizona City → Pinal County; Waddell, Wittmann, New River, Sun Lakes, Morristown → Maricopa County; Black Canyon City, Lake Montezuma → Yavapai County. They are in `lib/acumatica-tax-zones.js`, with a test per alias. The builder now aliases every city of a county zone (it used to drop the first). The backfill re-reads before each write and never overwrites a hand-picked zone. A new city zone is logged as `new zone available: <label> <code>`.
+- [ ] **TIM: deploy the eight aliases.** `.\deploy.ps1 sundial-cache-sync` (writes the alias rows) and `.\deploy.ps1 sundial-acumatica-push` (city → TaxZone on the Acumatica customer). The estimate and public Lambdas read aliases from Supabase, so they need no redeploy. Then `node scripts/seed-tax-zones.mjs --pull --apply` (writes the alias rows now instead of at 5 AM), then `node scripts/backfill-job-tax-zones.mjs` (dry run) and `--apply`.
+- [ ] **TIM: San Tan Valley, once Julie has created its zone in Acumatica** (its own AZDOR tax since 2026-10-01; **never alias it to Pinal County**).
+  1. Run the refresh (`node scripts/seed-tax-zones.mjs --pull --apply`, or wait for 5 AM). Look for `new zone available: San Tan Valley <code>` in its output or in CloudWatch.
+  2. Ask Claude to add `"SAN TAN VALLEY": "<its code>"` to `lib/acumatica-tax-zones.js`, with a test.
+  3. Redeploy `sundial-cache-sync` and `sundial-acumatica-push`, and re-run the seed so the alias row lands.
+  4. Re-run the job backfill: `node scripts/backfill-job-tax-zones.mjs`, then `--apply`. It touches only open jobs that are still blank.
+- [ ] **Still unmatched after the eight:** Gadsden, and 3 jobs whose address has no city (ZIP 85301). The office picks these by hand, unless Julie gives an alias.
 
 ## HCP lead customers' notes restored (2026-10-14, Harmon — Ben: "migrated without the historical notes")
 

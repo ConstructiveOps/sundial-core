@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-11-04 — Julie's eight county tax-zone aliases; San Tan Valley waits for its own zone (D-083)
+
+**Why.** Julie (Harmon CFO) gave the zones for eight of the unincorporated places the job backfill could not match. Each is a county-only retail zone. San Tan Valley has its own AZDOR tax since 2026-10-01, so it is not aliased; its zone will come from Acumatica.
+
+**Built.**
+- **`lib/acumatica-tax-zones.js`:** Arizona City → `12PINALCOR`; Waddell, Wittmann, New River, Sun Lakes, Morristown → `08MARICOPR`; Black Canyon City, Lake Montezuma → `14YAVAPAIR`. All three codes were verified in `sundial_tax_zones` as county-only retail zones.
+- **Bug fixed in the builder** (`buildTaxTableRows`). Alias rows were made only from a zone's second and later map cities, because the first one is its `city_key`. County zones have no `city_key`, so a county's first city was silently dropped: Arizona City, Pinal's only city, would never have reached the resolver. Now every map city that is not its zone's `city_key` is an alias.
+- **`newZonesAvailable` / `logNewZones`.** A retail city zone whose label is no city in the map, and whose code no city points at, is logged at info level by the daily refresh and the seed: `new zone available: <label> <code>`. County zones and the three reservation zones (`NOT_A_CITY_ZONES`) are excluded. Today that prints nothing.
+- **`scripts/backfill-job-tax-zones.mjs` never overwrites a hand-picked zone.** This was already true at read time: the SOQL asks for `Tax_Zone_Code__c = null` and `planJobZones` skips a set zone. Now each batch of 100, and the canary, is also re-read right before it is written (`stillBlankJobs`), and a job zoned or closed in the meantime is skipped and listed.
+- **Tests:** one per alias (push map + resolver), the county-alias builder rule, San Tan Valley unmatched, the new-zone notice, and the re-read guard. `lib/tax-zones.test.js` 33/33. The sync test now expects alias upserts, which is the bug fix showing.
+- **Docs:** `docs/integrations/acumatica-tax.md` (the eight, their source, San Tan Valley, the notice, the backfill guard); TASKS has the deploy and the San Tan Valley follow-up.
+
 ## 2026-11-04 — Reporting R1b: dealer cache, ten report types, asynchronous CSV, saved reports (D-089, `feature/reports-r1b`)
 
 **Why.** R1a proved the engine on one report type. R1b finishes R1: every report type Harmon needs, a CSV export of up to 50,000 rows, and saved reports that can be shared with the tenant. Tim reviewed the plan and answered every question (D-089).

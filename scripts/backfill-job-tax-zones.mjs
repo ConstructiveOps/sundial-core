@@ -13,6 +13,9 @@
 // Writes ONLY Tax_Zone_Code__c and Tax_Zone_Label__c on Sundial_Service_Job__c. CANARY FIRST
 // (CLAUDE.md, bulk data fixes): one job is written and re-read, and the run aborts if any
 // field it did not write has changed. Idempotent: a re-run only sees jobs still blank.
+// NEVER overwrites a zone: the SOQL reads only blank jobs, the planner skips any that is set,
+// and each batch is re-read right before it is written (stillBlankJobs) so a zone the office
+// picked by hand in the meantime is left alone (2026-11-04).
 // The unmatched list is also saved to _delivery/acumatica-tax/backfill-unmatched.csv
 // (git-ignored — it holds customer names).
 //
@@ -29,7 +32,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { sfQuery, sfUpdateRecord, soqlEscapeString } from "../lib/salesforce.js";
 import { getSupabaseClient } from "../lib/supabase.js";
-import { loadTaxTables, planJobZones, CLOSED_JOB_STATUSES } from "../lib/tax-zones.js";
+import { loadTaxTables, planJobZones, stillBlankJobs, CLOSED_JOB_STATUSES } from "../lib/tax-zones.js";
 import { primaryTenantSlug } from "../lib/tenant-guard.js";
 
 const args = process.argv.slice(2);
@@ -88,8 +91,29 @@ if (!plan.matched.length) {
 const readWatched = async (id) => (await sfQuery(`SELECT Id, Tax_Zone_Code__c, Tax_Zone_Label__c, ${WATCHED.join(", ")} FROM ${JOB} WHERE Id = '${soqlEscapeString(id)}' LIMIT 1`))?.[0];
 const fieldsFor = (m) => ({ Tax_Zone_Code__c: m.zoneCode, Tax_Zone_Label__c: m.label });
 
+// NEVER OVERWRITE A HAND-PICKED ZONE: the plan was read a moment ago, and the office may have
+// set a zone on the job page since. Re-read each batch right before writing it and keep only
+// the jobs still open and still blank (stillBlankJobs). The window that remains is one
+// update call wide.
+let skippedNowSet = 0;
+const recheck = async (batch) => {
+  const ids = batch.map((m) => `'${soqlEscapeString(m.id)}'`).join(", ");
+  const fresh = await sfQuery(`SELECT Id, Status__c, Tax_Zone_Code__c FROM ${JOB} WHERE Id IN (${ids}) AND Client__c = '${soqlEscapeString(tenantId)}'`);
+  const { write, nowSet } = stillBlankJobs(batch, fresh);
+  for (const m of nowSet) console.log(`  skipped ${m.number} (${m.id}): no longer open and blank — left as the office set it`);
+  skippedNowSet += nowSet.length;
+  return write;
+};
+
 // --- canary ---------------------------------------------------------------------------------
-const [canary, ...rest] = plan.matched;
+const queue = [...plan.matched];
+let canary = null;
+while (!canary && queue.length) [canary] = await recheck([queue.shift()]);
+if (!canary) {
+  console.log("\nNothing to write: every planned job got a zone since the plan was read.");
+  process.exit(0);
+}
+const rest = queue;
 const before = await readWatched(canary.id);
 await sfUpdateRecord(JOB, canary.id, fieldsFor(canary));
 const after = await readWatched(canary.id);
@@ -103,15 +127,17 @@ console.log(`\ncanary ok: ${canary.number} → ${canary.zoneCode} (${canary.labe
 // --- the rest ---------------------------------------------------------------------------------
 let written = 1;
 const failures = [];
-for (const m of rest) {
-  try {
-    await sfUpdateRecord(JOB, m.id, fieldsFor(m));
-    written += 1;
-  } catch (e) {
-    failures.push({ m, error: e?.sfBody ? JSON.stringify(e.sfBody) : e?.message || String(e) });
+for (let i = 0; i < rest.length; i += 100) {
+  for (const m of await recheck(rest.slice(i, i + 100))) {
+    try {
+      await sfUpdateRecord(JOB, m.id, fieldsFor(m));
+      written += 1;
+    } catch (e) {
+      failures.push({ m, error: e?.sfBody ? JSON.stringify(e.sfBody) : e?.message || String(e) });
+    }
   }
 }
-console.log(`written: ${written} of ${plan.matched.length}`);
+console.log(`written: ${written} of ${plan.matched.length}${skippedNowSet ? ` (${skippedNowSet} skipped: a zone was set since the plan)` : ""}`);
 for (const f of failures) console.error(`  FAILED ${f.m.number} (${f.m.id}): ${f.error}`);
 if (failures.length) {
   console.error("Re-run the script: it only picks up jobs still blank.");

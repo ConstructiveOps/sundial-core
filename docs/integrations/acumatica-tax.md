@@ -31,7 +31,24 @@ proportionally before tax, as before (`totals.js`).
 How the resolver (`lib/tax-zones.js`) matches a city:
 
 1. It normalizes the city: uppercase, punctuation becomes a space, spaces are collapsed (the same `normalizeCity` the Acumatica customer push uses).
-2. It looks for an alias in `sundial_tax_zone_aliases`. The CFO's four (2026-10-06) are Sun City → Maricopa County, Sun City West → Maricopa County, Anthem → Phoenix, and Laveen → Phoenix. The other spellings from `lib/acumatica-tax-zones.js` are also aliases.
+2. It looks for an alias in `sundial_tax_zone_aliases`. The CFO's four (2026-10-06) are Sun City → Maricopa County, Sun City West → Maricopa County, Anthem → Phoenix, and Laveen → Phoenix. The other spellings from `lib/acumatica-tax-zones.js` are also aliases, and so is **every** map city that points at a county-only zone (a county zone has no `city_key`, so all of its cities become alias rows).
+
+**The CFO's eight county aliases (source: Julie, Harmon CFO, 2026-11-04).** These are unincorporated places that are not their own Acumatica zone. They live in `lib/acumatica-tax-zones.js`, so the customer push gets them too, and the refresh writes them as alias rows:
+
+| City | Zone | County |
+|---|---|---|
+| Arizona City | `12PINALCOR` | Pinal County - Retail |
+| Waddell | `08MARICOPR` | Maricopa County - Retail |
+| Wittmann | `08MARICOPR` | Maricopa County - Retail |
+| New River | `08MARICOPR` | Maricopa County - Retail |
+| Sun Lakes | `08MARICOPR` | Maricopa County - Retail |
+| Morristown | `08MARICOPR` | Maricopa County - Retail |
+| Black Canyon City | `14YAVAPAIR` | Yavapai County - Retail |
+| Lake Montezuma | `14YAVAPAIR` | Yavapai County - Retail |
+
+All three codes were checked in `sundial_tax_zones` (2026-11-04) as county-only retail zones.
+
+**San Tan Valley is deliberately NOT aliased.** It has its own AZDOR tax from 2026-10-01, and Julie will create its zone in Acumatica. Until that zone exists, San Tan Valley stays unmatched ("Tax zone needed"). It must never be pointed at Pinal County. When the zone arrives, the refresh logs `new zone available: San Tan Valley <code>` (see *The refresh*), and the follow-up is in TASKS.md.
 3. It looks for a retail zone whose `city_key` matches. `city_key` comes from `lib/acumatica-tax-zones.js`, the same map the customer push uses.
 4. Otherwise it returns `{ matched: false }`. County-only zones are reached only by an alias or the picker, never by their own name.
 
@@ -95,6 +112,7 @@ and invoice issue is refused. It never borrows Harmon's.
 - **Pruning.** It deletes zones, taxes and categories that Acumatica no longer has. It skips this if the pull came back with fewer than half the stored zones, so a partial read never empties the table.
 - **Logging.** One `cache_sync_runs` row per run: `object = 'taxzones'`, `mode = 'full'`, `expected_interval_s = 86400`.
 - **Drift.** Every run logs the drift report to CloudWatch (`cache-sync taxzones drift:`).
+- **New city zones** (2026-11-04). Some retail city zones have no entry in `lib/acumatica-tax-zones.js`: the label is no city in the map and no city points at the code. For each one, the refresh (and `seed-tax-zones.mjs`) logs, at info level, `new zone available: <label> <code>` (`newZonesAvailable` / `logNewZones`). County zones and the reservation zones (`NOT_A_CITY_ZONES`: CRIR, GRIC, SRIC) are never reported. Nothing is mapped automatically: a person adds the city to the map and redeploys.
 - **The Lambda's role** needs `secretsmanager:GetSecretValue` on `sundial/acumatica/connected-app`.
 
 Check it ran:
@@ -120,13 +138,14 @@ check the refresh logs. As of 2026-10-15:
 | `node scripts/acumatica-pull-tax.mjs [--offline]` | Read-only pull to `_delivery/acumatica-tax/` (git-ignored) and the report. |
 | `node scripts/seed-tax-zones.mjs [--pull] [--apply]` | The first load, using the refresh's own writer. A dry run unless `--apply`. |
 | `node scripts/backfill-line-tax-categories.mjs [--apply]` | 2026-10-16: an untaxed blank material line / price-book item → SOLAR (restores the pre-D-083 tax). A dry run by default (counts by estimate status + a sample); `--apply` writes canary first, then batches of 200. Then run a full cache-sync for `serviceline` and `pricebookitem`. |
-| `node scripts/backfill-job-tax-zones.mjs [--apply]` | For open jobs (not Closed / Cancelled / Paid) with a blank zone, resolves the service address's city with the same resolver. A dry run by default: the matched count by zone and the unmatched list (job, customer, city, reason), also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. `--apply` writes **exact matches only**, canary first. |
+| `node scripts/backfill-job-tax-zones.mjs [--apply]` | For open jobs (not Closed / Cancelled / Paid) with a blank zone, resolves the service address's city with the same resolver. A dry run by default: the matched count by zone and the unmatched list (job, customer, city, reason), also saved as `_delivery/acumatica-tax/backfill-unmatched.csv`. `--apply` writes **exact matches only**, canary first. **It never overwrites a zone:** the query reads only blank jobs, the planner skips any job that has one, and each batch of 100 is re-read just before it is written (`stillBlankJobs`). A job the office zoned by hand in the meantime is skipped and listed. |
 
 **Backfill preview (2026-10-15, from the job cache).** Of 892 open jobs, **865 match exactly** and
 **27 do not**, after "LAKE HAVASU CITY" was added to the map. The 27 are unincorporated places that
 are not an Acumatica zone: Arizona City (6), Waddell (4), Wittmann (4), San Tan Valley (3), New River
 (3), Morristown, Gadsden, Lake Montezuma, Sun Lakes, and 3 whose address has no city (ZIP 85301).
 Each is either picked by hand or given an alias, and **an alias is the CFO's call** (like her four).
+**2026-11-04:** Julie aliased eight of them (the table above). San Tan Valley waits for its own zone. Gadsden and the three with no city still need a hand pick on the job page.
 
 ## Routes (`sundial-service-estimate`, action `service.estimate.write`)
 

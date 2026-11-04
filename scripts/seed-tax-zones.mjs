@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { buildTaxTableRows, syncTaxTables, pullAcumaticaTax } from "../lib/tax-zones.js";
+import { buildTaxTableRows, syncTaxTables, pullAcumaticaTax, logNewZones } from "../lib/tax-zones.js";
 import { primaryTenantSlug } from "../lib/tenant-guard.js";
 
 const APPLY = process.argv.includes("--apply");
@@ -35,6 +35,7 @@ const retail = built.zones.filter((z) => z.is_retail);
 console.log(`tenant ${tenant}: ${built.zones.length} zones (${retail.length} retail), ${built.rates.length} taxes, ${built.categories.length} categories, ${built.aliases.length} map-spelling aliases`);
 console.log(`drift: ${built.drift.cityTaxNotRetail.length} city taxes outside RETAIL, ${built.drift.contractingTaxOnRetail.length} contracting taxes on retail zones`);
 for (const z of retail.slice(0, 5)) console.log(`   e.g. ${z.zone_code} ${z.city_key ?? "(county)"} ${z.combined_rate}%`);
+logNewZones(built.newZones);
 
 if (!APPLY) {
   console.log("\nDry run — nothing written. Re-run with --apply.");
@@ -43,6 +44,6 @@ if (!APPLY) {
 const { getSupabaseClient } = await import("../lib/supabase.js");
 const supabase = await getSupabaseClient();
 const result = await syncTaxTables({ supabase, tenant, raw, today });
-console.log(`written: ${JSON.stringify({ ...result, drift: undefined })}`);
+console.log(`written: ${JSON.stringify({ ...result, drift: undefined, newZones: undefined })}`);
 const { data } = await supabase.from("sundial_tax_zones").select("zone_code", { count: "exact" }).eq("tenant", tenant).eq("is_retail", true);
 console.log(`re-read: ${data?.length ?? "?"} retail zones for ${tenant}`);

@@ -1,5 +1,45 @@
 # Sundial — Progress Log
 
+## 2026-11-03 — Reporting R1a: the report engine, solar type (D-088, `feature/reports-engine`)
+
+**Why.** D-087 put every report on the Supabase cache and R0 made the cache reporting-grade. R1a is the engine spike: one report type end to end, and the shape the other eight will reuse. Tim's decisions (D-088): execution in plpgsql, 5,000 rows on screen, `reports.read` for every tenant-scope level, gated columns stripped before Postgres, dashboards on `Default_Department__c`, sharing private | tenant.
+
+**Built.**
+- **The catalog, generated** (`scripts/generate-report-catalog.mjs`, decisions in `lib/report-catalog-build.js`). For each of the 14 cached objects, `planTable()`'s live columns (+ `type_mismatch` with the live type, + `sf_id` as a join key, + `created_date`), with label / section / description from the workbook, type and picklist values from the describe, `gate` from `lib/cost-gate.js` and `reportable` / `longText`. This gives `lib/report-catalog/*.json` + `index.js` and **`sql/2026-11-03_report_catalog.sql`**: 1,354 rows; 7 gated columns, all `service.costing.read` (price-book / line costs, estimate markup). The workbook / OBJECTS / live-column code moved to `scripts/lib/report-sources.mjs` and R0's generator imports it (its `--check` is clean; the coverage doc's one diff is `invoice_date` moving from "Added" to "Already cached" now that its SQL has run).
+- **`lib/report-types.js`.** The shape: base + aliased left joins with a structured `on`. **`solar` = solar ⟕ customer ⟕ user as rep.**
+  - **No dealer join:** there is no dealer cache table yet (the first R1b item).
+  - **No PM join:** the live describe shows `Project_Manager__c` on Solar is a multipicklist; the cache's `project_manager_sf_id` / `_name` are empty on all 4,595 rows and have no field behind them. Tim chose to drop the join; the PM is `solar.project_manager`.
+- **`lib/report-def.js`** turns a definition into the wire form or a 400 that names the field:
+  - operators per type (§6.3 + boolean / reference / multipicklist);
+  - `neq` / `not_in` keep blanks;
+  - relative dates in America/Phoenix, with whole Arizona days for datetimes;
+  - one group level; count / sum / avg / min / max;
+  - sort only on what is shown; ≤ 5,000 rows / 50 columns;
+  - long text is filter-only;
+  - gated columns are removed from everything and named in `stripped`.
+- **`sql/sundial_report_run.sql`** (`sundial_report_run` + helper `sundial_report_column`, both service-role only):
+  - It re-checks every table / alias / column / operator / aggregate / gate against `sundial_report_catalog` and RAISES otherwise.
+  - Identifiers go through `%I`, values through `%L` (LIKE wildcards in values are escaped).
+  - The tenant clause is on the base table and inside every ON.
+  - The tiebreak sort is deterministic; it fetches `limit + 1` for `truncated`, and the grand totals cover every matching row.
+- **`lambdas/sundial-reports`:** `POST /reports/run`, `GET /reports/types`, `GET /reports/catalog?type=`.
+  - `reports.read` is always enforced; everyone else gets 403 `MODULE_FORBIDDEN` before any read.
+  - The held gates come from `canAction`. `asOf` = the stalest joined object's last ok sync.
+  - A function RAISE is `500 REPORT_CATALOG_MISMATCH`.
+  - esbuild bundles the JSON catalog (1.5 MB).
+- **Also:** `scripts/wire-reports-routes.ps1`; `scripts/verify-report-run.mjs` (three solar definitions as zz-exec / zz-admin / zz-manager, 403 for zz-rep-a1 / zz-mgr-a / zz-tech, refusals, the catalog).
+
+**Tests.** `npm test`: **1,884 / 1,884** pass, and the standalone budget check is 214 / 214.
+- **New:**
+  - `lib/report-def.test.js` 13
+  - `lib/report-types.test.js` 4
+  - `lib/report-catalog-build.test.js` 7 (incl. "the committed SQL equals the committed JSON" and "every cost / markup column gated, nothing else")
+  - `sql/sundial_report_run.test.js` 17 (PGlite, the real function + the real seed; tenant isolation incl. a cross-tenant join key, every operator, group / aggregate / totals, sort, the 5,000 cap, the RAISEs, the revokes)
+  - `lambdas/sundial-reports/test.js` 10
+- **Changed:** `lib/access.test.js` +1 (`reports.read` = exactly `TENANT_ACCESS_LEVELS`).
+
+**Not run yet (Tim):** the two SQL files, the Lambda create + deploy, the routes, the auth-proxy deploy and the verify script (TASKS.md, Reporting R1a). No portal screen yet, so there's no feature-inventory row; that comes with the Reports page (R1b / R4).
+
 ## 2026-11-02 — The invoice date is the office's (Harmon): `Invoice_Date__c` on the card, the document and the report
 
 **Ask.** Harmon often needs to change the date on an invoice; Sundial only had the instant of issue. Tim added `Invoice_Date__c` (Date) on `Sundial_Service_Invoice__c`.

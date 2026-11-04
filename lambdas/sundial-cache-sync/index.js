@@ -166,13 +166,19 @@ const FIRST_RUN_LOOKBACK_MS = 24 * 60 * 60 * 1000; // 24 hours
 const UPSERT_CHUNK = 500;
 const VERSION_FETCH_CHUNK = 500;
 
-// --- Salesforce describe (module-scope cached per object) ------------------
-const rawDescribeCache = new Map();
-const describeCache = new Map();
+// --- Salesforce describe (module-scope cached per object, WITH TTL) --------
+// TTL per D-045, added here by D-090 (2026-11-04): this Lambda runs every 5 minutes, so
+// its container stays warm for hours. Without a TTL a describe taken before a field was
+// DELETED in Salesforce kept the field in every SELECT — INVALID_FIELD on every sync of
+// that object until the container recycled. Every other describe cache already had one.
+const DESCRIBE_TTL_MS = 5 * 60 * 1000;
+const rawDescribeCache = new Map(); // sfObject -> { meta, at }
+const describeCache = new Map(); // sfObject -> { fields } (derived; cleared on refresh)
 const EXCLUDED_FIELD_TYPES = new Set(["address", "location", "base64"]);
 
 async function getRawDescribe(sfObject) {
-  if (rawDescribeCache.has(sfObject)) return rawDescribeCache.get(sfObject);
+  const cached = rawDescribeCache.get(sfObject);
+  if (cached && Date.now() - cached.at < DESCRIBE_TTL_MS) return cached.meta;
 
   async function run(forceRefresh) {
     const { access_token, instance_url } = await getSalesforceToken({
@@ -189,14 +195,16 @@ async function getRawDescribe(sfObject) {
   }
 
   const meta = await resp.json();
-  rawDescribeCache.set(sfObject, meta);
+  rawDescribeCache.set(sfObject, { meta, at: Date.now() });
+  describeCache.delete(sfObject); // rebuild the derived field list from the fresh describe
   return meta;
 }
 
 async function getQueryableFields(sfObject) {
+  // Re-check the raw describe's age first, so a stale derived list is never served.
+  const meta = await getRawDescribe(sfObject);
   if (describeCache.has(sfObject)) return describeCache.get(sfObject);
 
-  const meta = await getRawDescribe(sfObject);
   const fields = (meta.fields || [])
     .filter((f) => !EXCLUDED_FIELD_TYPES.has(f.type))
     .map((f) => ({ name: f.name, type: f.type }));

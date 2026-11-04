@@ -72,8 +72,7 @@ const OVERRIDES = [
     "Permit_in_Office__c",
     "Permit_Received__c",
     "Permit_Received_2__c",
-    "Permit_Received_3__c",
-    "Permit_Received_4__c",
+    // Permit_Received_3__c / _4__c deleted from Salesforce (D-090, 2026-11).
     "Utility_Application_Approved_Date__c",
     "Utility_Application_Revisions_Approved__c",
   ]),

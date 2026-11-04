@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Solar field cleanup (D-090, 2026-11). DESTRUCTIVE: this package deploys nothing; the
+  fields to delete are in destructiveChanges.xml beside it. See README.md for the order.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <version>62.0</version>
+</Package>

@@ -4,6 +4,33 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-04 — Solar field cleanup: 25 fields off Sundial_Solar__c (D-090)
+
+- [x] Audit (`scripts/audit-solar-fields.mjs`, `docs/audits/solar-fields-2026-11.*`) + the value backup
+- [x] The 25 out of the Fields-by-Section sheet (21 rows) and the Dealer sheet (5 rows) — `scripts/remove-sheet-fields.mjs`; `apply-dealer-visibility.mjs`; field manifest regenerated
+- [x] `sundial-cache-sync` describe cache: 5-minute TTL (it had none — would have kept selecting the deleted fields)
+- [x] harmon-crm `feature/solar-field-cleanup`, merged to `main`: solar / dealer page configs regenerated, `NSA__c` out of the copy map, test fixtures; tsc + build + 710 tests green
+- [x] `salesforce/solar-field-cleanup-2026-11/` (destructive package + zip), `sql/2026-11-04_drop_solar_columns.sql`
+- [x] Docs: D-090, CLAUDE.md, `docs/salesforce-schema.md`
+
+**Tim — in this order** (PowerShell, sundial-core repo root, on `master`):
+- [ ] **1. Deploy the backend Lambdas** (the regenerated field manifest, plus the cache-sync TTL):
+  - [ ] `.\deploy.ps1 sundial-sf-query`
+  - [ ] `.\deploy.ps1 sundial-sf-update`
+  - [ ] `.\deploy.ps1 sundial-dealer`
+  - [ ] `.\deploy.ps1 sundial-auth-proxy`
+  - [ ] `.\deploy.ps1 sundial-reports`
+  - [ ] `.\deploy.ps1 sundial-cache-sync`
+- [ ] **2. Portal:** harmon-crm `main` is merged and pushed, so Vercel deploys it on its own. Check that the deployment is Ready, then open a Solar project: Permitting should show only Permits 1 and 2.
+- [ ] **3. Setup → Object Manager → Sundial Solar → each of the 25 fields → "Where is this used?"** (`salesforce/solar-field-cleanup-2026-11/fields.json`). Remove any Flow, formula or validation-rule use. Also look at reports and list views: the deploy will not stop for those. If `Sundial_Sales_Rep_ID__c`'s related list is on a Sundial User layout, take it off.
+- [ ] **4. Check Only:** Workbench → Deploy `salesforce/solar-field-cleanup-2026-11/solar-field-cleanup-2026-11.zip`, ticking **Check Only** + **Single Package**, with **Purge On Delete unticked**. It must succeed with 25 components.
+- [ ] **5. Delete:** the same zip, with Check Only unticked. Then straight away give cache-sync a fresh container, so it re-reads the field list at once instead of within 5 minutes:
+  `aws lambda update-function-configuration --function-name sundial-cache-sync --description "D-090 solar field cleanup 2026-11-04"`
+- [ ] **6. SQL:** paste `sql/2026-11-04_drop_solar_columns.sql` whole into the Supabase SQL editor and Run. The check at the bottom must return 0 rows.
+- [ ] **7. The report catalog** (Claude can do this part): `node scripts/generate-report-catalog.mjs` and `node scripts/generate-report-columns.mjs`, commit, then run `sql/2026-11-03_report_catalog.sql` (`catalog_rows` should be **1,351**, 21 fewer) and `.\deploy.ps1 sundial-reports`.
+- [ ] **8. Full Solar cache sync:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "solar", "mode": "full" }`. Then check the `cache_sync_runs` row for solar says ok.
+- [ ] **9. Make room and create the two new fields:** Setup → Sundial Solar → Fields & Relationships → **Deleted Fields** → **Erase** the 25. Deleted fields count against the 500 until they are erased or 15 days pass, and erasing cannot be undone (the backup CSV holds the 38 values). Then create the two new fields by hand.
+
 ## 2026-11-04 — Reporting R1b: dealer cache, ten report types, CSV export, saved reports (D-089, `feature/reports-r1b`)
 
 - [x] `sql/sundial_dealer_cache.sql` (reports-only, 23 columns): **run by Tim 2026-11-04** ("dealer table is in")

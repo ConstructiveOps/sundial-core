@@ -1,0 +1,257 @@
+// sundial-reports/csv.js — the CSV export (D-089, Reporting R1b; docs/reporting-module.md §6.7).
+//
+//   POST /reports/csv              a report definition → 202 { exportId, status: "queued" }
+//   GET  /reports/{id}/csv         the same for a saved report (saved.js calls startExport)
+//   GET  /reports/csv/{exportId}   → { status, url, rowCount, truncated, stripped, asOf, expiresAt }
+//   { task: "csv", exportId }      the worker: this Lambda invoking itself (InvocationType Event)
+//
+// WHY ASYNCHRONOUS (measured 2026-11-04, Tim's decision 9). One 5,000-row page of customers
+// costs 0.4–0.8 s end to end (12 → 50 columns, ~1.9 MB of JSON), but the database re-sorts
+// everything before the page for every OFFSET: the page at 34,000 took 2.1 s in Postgres alone
+// with 50 columns. A 50,000-row export is 10 of those, a long-text export 25 pages of 2,000 —
+// it does not fit reliably inside API Gateway's 29 s, so the request only queues it. The
+// worker has the Lambda's whole timeout (300 s; it stops itself 20 s before the end with
+// CSV_TOO_SLOW rather than be killed mid-upload).
+//
+// MEMORY. Nothing holds the whole file: each page (≤ 5,000 rows, ≤ ~2 MB of JSON; 2,000 rows
+// when long text is selected) is turned into CSV text and appended to an 8 MB part buffer;
+// a full buffer is uploaded as one part of an S3 multipart upload and dropped. Peak memory is
+// one page + one part (~20 MB), so 1,024 MB is for CPU (Lambda CPU scales with memory), not
+// for space. A file under 8 MB is one PutObject.
+//
+// WHERE: sfsolproj, REPORTS/<client_sf_id>/<yyyy-mm-dd>/<exportId>.csv (lib/report-csv.js
+// exportKey) — never SUNDIAL/ (XFiles Pro / Dropbox read that tree; these files hold contact
+// details). Encrypted at rest (SSE-S3); deleted by the bucket after 7 days (REPORTS/ lifecycle
+// rule). The URL is a presigned GET made when the status is read, good for 15 minutes.
+//
+// WHO: reports.read, then the export row's owner in its tenant — anyone else's export is 404
+// RECORD_NOT_FOUND, the saved-report rule. NEVER LOGGED: a row, a value, a filter, the URL.
+
+import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+import { getSupabaseClient } from "../../lib/supabase.js";
+import { jsonResponse } from "../../lib/http.js";
+import { DENY } from "../../lib/access.js";
+import { normalizeDefinition } from "../../lib/report-def.js";
+import { reportType } from "../../lib/report-types.js";
+import { csvHeader, csvRows, exportKey, downloadName, REPORTS_BUCKET, REPORTS_REGION } from "../../lib/report-csv.js";
+import { isUuid } from "../../lib/saved-reports.js";
+
+export const EXPORTS_TABLE = "sundial_report_exports";
+export const URL_TTL_SECONDS = 15 * 60;
+export const PART_BYTES = 8 * 1024 * 1024;
+export const STOP_BEFORE_END_MS = 20_000;
+// A queued / running export older than this was lost (the worker died without marking it).
+export const LOST_AFTER_MS = 10 * 60_000;
+
+let s3;
+let lambda;
+const s3Client = () => (s3 ??= new S3Client({ region: REPORTS_REGION }));
+const lambdaClient = () => (lambda ??= new LambdaClient({}));
+
+const notFound = (cors) => jsonResponse(404, cors, { error: "not_found", code: DENY.RECORD_NOT_FOUND });
+
+/**
+ * Validate a definition for CSV and queue its export. Shared by POST /reports/csv and
+ * GET /reports/{id}/csv. `def` is the definition; `reportId` the saved report, if any.
+ */
+export async function startExport({ def, reportId = null, tenantId, profileId, heldGates, cors, now = new Date() }) {
+  const n = normalizeDefinition(def, { heldGates, now, mode: "csv" });
+  if (!n.ok) return jsonResponse(n.status, cors, n.body);
+
+  const supabase = await getSupabaseClient();
+  const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects };
+  const { data, error } = await supabase
+    .from(EXPORTS_TABLE)
+    .insert({ client_sf_id: tenantId, owner_profile_id: profileId, report_id: reportId, report_type: def.type, status: "queued", job })
+    .select("id")
+    .single();
+  if (error || !data?.id) {
+    console.error("reports csv: could not queue the export:", error?.message || "no id");
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  try {
+    await lambdaClient().send(new InvokeCommand({
+      FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
+      InvocationType: "Event", // fire and forget: the worker runs after this response
+      Payload: Buffer.from(JSON.stringify({ task: "csv", exportId: data.id })),
+    }));
+  } catch (err) {
+    console.error("reports csv: self-invoke failed:", err?.message || String(err));
+    await supabase.from(EXPORTS_TABLE).update({ status: "failed", error_code: "WORKER_INVOKE_FAILED", finished_at: new Date().toISOString() }).eq("id", data.id);
+    return jsonResponse(502, cors, { error: "worker_invoke_failed", code: "WORKER_INVOKE_FAILED" });
+  }
+  console.log(JSON.stringify({ csv: "queued", exportId: data.id, report: def.type, saved: !!reportId, columns: n.output.length, rowLimit: n.rowLimit }));
+  return jsonResponse(202, cors, { exportId: data.id, status: "queued", stripped: n.stripped });
+}
+
+/** GET /reports/csv/{exportId}. */
+export async function exportStatus({ exportId, tenantId, profileId, cors, now = new Date() }) {
+  if (!isUuid(exportId)) return notFound(cors);
+  const supabase = await getSupabaseClient();
+  const { data: row, error } = await supabase
+    .from(EXPORTS_TABLE)
+    .select("*")
+    .eq("id", exportId)
+    .eq("client_sf_id", tenantId)
+    .maybeSingle();
+  if (error) {
+    console.error("reports csv: status read failed:", error.message);
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  // Exports are never shared: someone else's is the same 404 as one that does not exist.
+  if (!row || row.owner_profile_id !== profileId) return notFound(cors);
+
+  const base = { exportId: row.id, type: row.report_type, stripped: row.job?.stripped ?? [], createdAt: row.created_at };
+  if (row.status === "done") {
+    const url = await getSignedUrl(
+      s3Client(),
+      new GetObjectCommand({
+        Bucket: REPORTS_BUCKET,
+        Key: row.s3_key,
+        ResponseContentDisposition: `attachment; filename="${downloadName(row.report_type, new Date(row.created_at))}"`,
+        ResponseContentType: "text/csv; charset=utf-8",
+      }),
+      { expiresIn: URL_TTL_SECONDS }
+    );
+    return jsonResponse(200, cors, {
+      ...base, status: "done", url, rowCount: row.row_count, truncated: row.truncated === true, asOf: row.as_of,
+      expiresAt: new Date(now.getTime() + URL_TTL_SECONDS * 1000).toISOString(),
+    });
+  }
+  if (row.status === "failed") return jsonResponse(200, cors, { ...base, status: "failed", code: row.error_code || "CSV_FAILED" });
+  if (now.getTime() - Date.parse(row.created_at) > LOST_AFTER_MS) {
+    return jsonResponse(200, cors, { ...base, status: "failed", code: "CSV_EXPORT_LOST" });
+  }
+  return jsonResponse(200, cors, { ...base, status: row.status, url: null, rowCount: null, truncated: null });
+}
+
+/** Buffers CSV text and uploads it as one object, or as 8 MB multipart parts. */
+export class S3CsvWriter {
+  constructor(client, { key, fileName }) {
+    this.client = client;
+    this.params = {
+      Bucket: REPORTS_BUCKET,
+      Key: key,
+      ContentType: "text/csv; charset=utf-8",
+      ContentDisposition: `attachment; filename="${fileName}"`,
+      ServerSideEncryption: "AES256",
+    };
+    this.chunks = [];
+    this.size = 0;
+    this.uploadId = null;
+    this.parts = [];
+    this.bytes = 0;
+  }
+  async write(text) {
+    const b = Buffer.from(text, "utf8");
+    this.chunks.push(b);
+    this.size += b.length;
+    this.bytes += b.length;
+    if (this.size >= PART_BYTES) await this.#flushPart();
+  }
+  async #flushPart() {
+    if (!this.uploadId) {
+      const r = await this.client.send(new CreateMultipartUploadCommand(this.params));
+      this.uploadId = r.UploadId;
+    }
+    const PartNumber = this.parts.length + 1;
+    const body = Buffer.concat(this.chunks);
+    this.chunks = [];
+    this.size = 0;
+    const r = await this.client.send(new UploadPartCommand({ Bucket: this.params.Bucket, Key: this.params.Key, UploadId: this.uploadId, PartNumber, Body: body }));
+    this.parts.push({ ETag: r.ETag, PartNumber });
+  }
+  async finish() {
+    if (!this.uploadId) {
+      await this.client.send(new PutObjectCommand({ ...this.params, Body: Buffer.concat(this.chunks) }));
+      return;
+    }
+    if (this.size > 0) await this.#flushPart();
+    await this.client.send(new CompleteMultipartUploadCommand({
+      Bucket: this.params.Bucket, Key: this.params.Key, UploadId: this.uploadId, MultipartUpload: { Parts: this.parts },
+    }));
+  }
+  async abort() {
+    if (!this.uploadId) return;
+    try {
+      await this.client.send(new AbortMultipartUploadCommand({ Bucket: this.params.Bucket, Key: this.params.Key, UploadId: this.uploadId }));
+    } catch (err) {
+      console.warn("reports csv: abort multipart failed:", err?.message || String(err));
+    }
+  }
+}
+
+class ExportError extends Error {
+  constructor(code, message) {
+    super(message || code);
+    this.code = code;
+  }
+}
+
+/**
+ * The worker. Claims the queued row (so a retried async invoke never runs twice), pages
+ * sundial_report_run with the stored wire definition, streams the CSV to S3, and marks the row.
+ * `remainingMs` is the Lambda context's clock.
+ */
+export async function runExport(exportId, { remainingMs = () => Infinity, asOfFor = async () => null, now = () => new Date() } = {}) {
+  if (!isUuid(exportId)) return { ok: false, skipped: "bad id" };
+  const supabase = await getSupabaseClient();
+  const { data: claimed, error: claimErr } = await supabase
+    .from(EXPORTS_TABLE)
+    .update({ status: "running", started_at: now().toISOString() })
+    .eq("id", exportId)
+    .eq("status", "queued")
+    .select("*");
+  if (claimErr) throw new Error(`claim failed: ${claimErr.message}`);
+  const row = claimed?.[0];
+  if (!row) {
+    console.log(JSON.stringify({ csv: "skipped", exportId, why: "not queued" }));
+    return { ok: false, skipped: "not queued" };
+  }
+
+  const started = Date.now();
+  const job = row.job;
+  const type = reportType(job.type);
+  const key = exportKey(row.client_sf_id, row.id, new Date(row.created_at));
+  const writer = new S3CsvWriter(s3Client(), { key, fileName: downloadName(job.type, new Date(row.created_at)) });
+  let rows = 0;
+  let pages = 0;
+  let truncated = false;
+  try {
+    if (!type) throw new ExportError("UNKNOWN_TYPE");
+    const asOf = await asOfFor(supabase, job.objects ?? []);
+    await writer.write(csvHeader(job.output, type));
+    for (;;) {
+      if (remainingMs() < STOP_BEFORE_END_MS) throw new ExportError("CSV_TOO_SLOW");
+      const limit = Math.min(job.wire.limit, job.rowLimit - rows);
+      const { data, error } = await supabase.rpc("sundial_report_run", { p_client_sf_id: row.client_sf_id, p_def: { ...job.wire, limit, offset: rows, totals: false } });
+      if (error) {
+        const msg = String(error.message || "");
+        throw new ExportError(msg.startsWith("sundial_report_run:") ? "REPORT_CATALOG_MISMATCH" : "CSV_FAILED", msg);
+      }
+      const page = data?.rows ?? [];
+      pages += 1;
+      if (page.length) await writer.write(csvRows(page, job.output));
+      rows += page.length;
+      if (!data?.truncated) break;
+      if (rows >= job.rowLimit) {
+        truncated = true; // more rows matched than the export may hold
+        break;
+      }
+    }
+    await writer.finish();
+    await supabase.from(EXPORTS_TABLE).update({
+      status: "done", s3_key: key, row_count: rows, truncated, as_of: asOf, finished_at: now().toISOString(),
+    }).eq("id", row.id);
+    console.log(JSON.stringify({ csv: "done", exportId: row.id, report: job.type, rows, pages, truncated, bytes: writer.bytes, ms: Date.now() - started }));
+    return { ok: true, rows, pages, truncated, key };
+  } catch (err) {
+    await writer.abort();
+    const code = err instanceof ExportError ? err.code : "CSV_FAILED";
+    console.error(`reports csv: export ${row.id} failed (${code}) after ${rows} rows / ${pages} pages / ${Date.now() - started} ms:`, err?.message || String(err));
+    await supabase.from(EXPORTS_TABLE).update({ status: "failed", error_code: code, row_count: rows, finished_at: now().toISOString() }).eq("id", row.id);
+    return { ok: false, code, rows };
+  }
+}

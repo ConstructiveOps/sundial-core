@@ -1,34 +1,53 @@
 // node --experimental-test-module-mocks --test lambdas/sundial-reports/test.js
 //
-// Drives the real handler with a fake identity and a fake Supabase; lib/access.js,
-// lib/report-def.js, lib/report-types.js and the GENERATED catalog run unmocked.
+// Drives the real handler with a fake identity, an in-memory Supabase, a fake S3 and a fake
+// Lambda client; lib/access.js, lib/report-def.js, lib/report-types.js, lib/saved-reports.js,
+// lib/report-csv.js and the GENERATED catalog run unmocked.
 //
-// Pinned:
+// Pinned (R1a):
 //   - routes and methods (OPTIONS 204, wrong method 405, unknown 404, stage prefix tolerated);
-//   - reports.read: Executive / Admin / Manager in; Sales Rep, Sales Dealer, Technician and
-//     a no-dealer rep get 403 MODULE_FORBIDDEN on all three routes, before any database call;
+//   - reports.read: Executive / Admin / Manager in; Sales Rep, Sales Dealer, Technician and a
+//     no-dealer rep get 403 MODULE_FORBIDDEN on EVERY route, before any database call;
 //     no tenant = 403 NO_TENANT; identity errors map as everywhere else;
-//   - run: the tenant comes from the identity (never the body), the wire definition is what
-//     reaches the rpc, a 400 never reaches the rpc, a Manager's cost column is stripped and
-//     named, an Admin's is not; the response shape; asOf = the oldest object's newest ok run;
-//   - a function RAISE is 500 REPORT_CATALOG_MISMATCH; any other rpc error is a plain 500;
-//   - catalog: projected per caller (gated + non-reportable gone), operators per field.
+//   - run: the tenant from the identity (never the body), the wire definition to the rpc, a 400
+//     never reaches the rpc, gates per caller; the response shape; asOf; RAISE → 500
+//     REPORT_CATALOG_MISMATCH; catalog projected per caller.
+// Pinned (R1b, D-089):
+//   - CSV: POST validates in CSV mode, writes a queued export row OWNED by the caller and
+//     invokes this Lambda with { task: "csv", exportId } — nothing else; a bad definition never
+//     queues; a failed invoke marks the row failed (502);
+//   - the worker claims the row once (a second invoke is a no-op), pages the rpc with offset /
+//     totals:false until not truncated, stops at rowLimit (truncated), writes ONE object under
+//     REPORTS/<tenant>/<date>/<id>.csv (BOM + header first), multipart past 8 MB, marks done;
+//     an rpc RAISE fails it REPORT_CATALOG_MISMATCH, a short clock CSV_TOO_SLOW (multipart
+//     aborted);
+//   - status: the owner gets a 15-minute presigned GET of that key; another user, another
+//     tenant, a bad id → 404 RECORD_NOT_FOUND; a stuck row reads CSV_EXPORT_LOST;
+//   - saved reports: a Manager's private report is invisible (404 on read / edit / delete /
+//     run / csv) to an Admin until the Manager shares it through the API (Managers share —
+//     D-089) and visible after; the owner can unshare; a report someone else owns is
+//     read-only to everyone, Admins included (403 REPORT_READ_ONLY — managing others' reports
+//     is R2's reports.admin); the owner is the JWT's, never the body's;
+//     a saved report runs with the RUNNER's gates; the list is mine + shared, newest first.
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
+import { randomUUID } from "node:crypto";
 import { resolveScope, accessBlock } from "../../lib/access.js";
 
 const TENANT = "a1W7y000007AszBEAS";
+const OTHER_TENANT = "a1W7y000008UvsHEAS";
 const DEALER = "a2D000000000DLRAAA";
 const USERS = {
-  Executive: { id: "a0U0000000000EXEC", accessLevel: "Executive", dealer: null },
-  Admin: { id: "a0U00000000000ADM", accessLevel: "Admin", dealer: null },
-  Manager: { id: "a0U00000000000MGR", accessLevel: "Manager", dealer: null },
-  "Sales Rep": { id: "a0U00000000000REP", accessLevel: "Sales Rep", dealer: { id: DEALER, active: true, isInternal: false } },
-  "Sales Dealer": { id: "a0U00000000000DLR", accessLevel: "Sales Dealer", dealer: { id: DEALER, active: true, isInternal: false } },
-  Technician: { id: "a0U00000000000TEC", accessLevel: "Technician", dealer: null },
-  NoDealerRep: { id: "a0U00000000000NDR", accessLevel: "Sales Rep", dealer: null },
+  Executive: { id: "a0U0000000000EXEC", accessLevel: "Executive", dealer: null, profile: "e0000000-0000-4000-8000-000000000001" },
+  Admin: { id: "a0U00000000000ADM", accessLevel: "Admin", dealer: null, profile: "a0000000-0000-4000-8000-000000000002" },
+  Manager: { id: "a0U00000000000MGR", accessLevel: "Manager", dealer: null, profile: "b0000000-0000-4000-8000-000000000003" },
+  Manager2: { id: "a0U0000000000MGR2", accessLevel: "Manager", dealer: null, profile: "b0000000-0000-4000-8000-000000000004" },
+  "Sales Rep": { id: "a0U00000000000REP", accessLevel: "Sales Rep", dealer: { id: DEALER, active: true, isInternal: false }, profile: "c0000000-0000-4000-8000-000000000005" },
+  "Sales Dealer": { id: "a0U00000000000DLR", accessLevel: "Sales Dealer", dealer: { id: DEALER, active: true, isInternal: false }, profile: "c0000000-0000-4000-8000-000000000006" },
+  Technician: { id: "a0U00000000000TEC", accessLevel: "Technician", dealer: null, profile: "c0000000-0000-4000-8000-000000000007" },
+  NoDealerRep: { id: "a0U00000000000NDR", accessLevel: "Sales Rep", dealer: null, profile: "c0000000-0000-4000-8000-000000000008" },
 };
 
 const ctx = {};
@@ -38,14 +57,24 @@ function reset(level = "Admin") {
   ctx.identityError = null;
   ctx.rpcCalls = [];
   ctx.rpcResult = { data: { rows: [["A", 1]], aggregates: { count: 7 }, truncated: false }, error: null };
-  ctx.syncRuns = [
-    { object: "solar", finished_at: "2026-11-03T17:05:00Z" },
-    { object: "customer", finished_at: "2026-11-03T17:04:00Z" },
-    { object: "solar", finished_at: "2026-11-03T17:00:00Z" },
-    { object: "user", finished_at: "2026-11-03T16:45:00Z" },
-  ];
-  ctx.fromCalls = [];
+  ctx.rpcPages = null; // when set: the rpc answers from these pages by offset
+  ctx.tables = {
+    cache_sync_runs: [
+      { object: "solar", ok: true, finished_at: "2026-11-03T17:05:00Z" },
+      { object: "customer", ok: true, finished_at: "2026-11-03T17:04:00Z" },
+      { object: "solar", ok: true, finished_at: "2026-11-03T17:00:00Z" },
+      { object: "user", ok: true, finished_at: "2026-11-03T16:45:00Z" },
+      { object: "dealer", ok: true, finished_at: "2026-11-03T16:50:00Z" },
+    ],
+    sundial_reports: [],
+    sundial_report_exports: [],
+  };
+  ctx.dbCalls = [];
+  ctx.s3 = [];
+  ctx.invokes = [];
+  ctx.invokeFails = false;
 }
+const as = (level) => { ctx.level = level; };
 
 mock.module("../../lib/identity.js", {
   namedExports: {
@@ -56,40 +85,109 @@ mock.module("../../lib/identity.js", {
         throw e;
       }
       const user = USERS[ctx.level];
-      return { tenantId: ctx.tenant, tenantSlug: "harmon", user, access: accessBlock(resolveScope(user, ctx.tenant)) };
+      return { tenantId: ctx.tenant, tenantSlug: "harmon", authUserId: user.profile, user, access: accessBlock(resolveScope(user, ctx.tenant)) };
     },
   },
 });
 
-function syncRunsQuery() {
-  const q = {
-    select() { return q; },
-    eq() { return q; },
-    in(_c, objects) { q._objects = objects; return q; },
-    not() { return q; },
-    order() { return q; },
-    limit() {
-      return Promise.resolve({ data: ctx.syncRuns.filter((r) => q._objects.includes(r.object)), error: null });
-    },
+// --- an in-memory PostgREST builder: exactly the calls the Lambda makes ----------------------
+function builder(name) {
+  const st = { op: "select", filters: [], single: null, order: null, limit: null };
+  const b = {
+    select() { return b; },
+    insert(rows) { st.op = "insert"; st.rows = Array.isArray(rows) ? rows : [rows]; return b; },
+    update(patch) { st.op = "update"; st.patch = patch; return b; },
+    delete() { st.op = "delete"; return b; },
+    eq(c, v) { st.filters.push((r) => r[c] === v); return b; },
+    in(c, vs) { st.filters.push((r) => vs.includes(r[c])); return b; },
+    not(c) { st.filters.push((r) => r[c] !== null && r[c] !== undefined); return b; },
+    order(c, { ascending = true } = {}) { st.order = [c, ascending]; return b; },
+    limit(n) { st.limit = n; return b; },
+    single() { st.single = "one"; return b; },
+    maybeSingle() { st.single = "maybe"; return b; },
+    then(resolve, reject) { return Promise.resolve().then(exec).then(resolve, reject); },
   };
-  return q;
+  function exec() {
+    ctx.dbCalls.push({ table: name, op: st.op });
+    const rows = (ctx.tables[name] ??= []);
+    let out;
+    if (st.op === "insert") {
+      out = st.rows.map((r) => ({ id: randomUUID(), created_at: new Date().toISOString(), ...r }));
+      rows.push(...out);
+    } else {
+      const hit = rows.filter((r) => st.filters.every((f) => f(r)));
+      if (st.op === "update") { hit.forEach((r) => Object.assign(r, st.patch)); out = hit; }
+      else if (st.op === "delete") { for (const r of hit) rows.splice(rows.indexOf(r), 1); out = hit; }
+      else {
+        out = [...hit];
+        if (st.order) { const [c, asc] = st.order; out.sort((x, y) => (x[c] < y[c] ? -1 : x[c] > y[c] ? 1 : 0) * (asc ? 1 : -1)); }
+        if (st.limit) out = out.slice(0, st.limit);
+      }
+    }
+    out = structuredClone(out);
+    if (st.single === "one") return out.length === 1 ? { data: out[0], error: null } : { data: null, error: { message: "not one row" } };
+    if (st.single === "maybe") return { data: out[0] ?? null, error: null };
+    return { data: out, error: null };
+  }
+  return b;
 }
 mock.module("../../lib/supabase.js", {
   namedExports: {
     getSupabaseClient: async () => ({
       rpc: async (name, args) => {
-        ctx.rpcCalls.push({ name, args });
+        ctx.rpcCalls.push({ name, args: structuredClone(args) });
+        if (ctx.rpcPages) {
+          const off = args.p_def.offset ?? 0;
+          const all = ctx.rpcPages.rows;
+          const slice = all.slice(off, off + args.p_def.limit);
+          return { data: { rows: slice, aggregates: {}, truncated: off + args.p_def.limit < all.length }, error: ctx.rpcPages.error ?? null };
+        }
         return ctx.rpcResult;
       },
-      from: (t) => {
-        ctx.fromCalls.push(t);
-        return syncRunsQuery();
-      },
+      from: (t) => builder(t),
     }),
   },
 });
 
+// --- S3, the presigner, Lambda ----------------------------------------------------------
+const cmd = (kind) => class { constructor(input) { this.kind = kind; this.input = input; } };
+mock.module("@aws-sdk/client-s3", {
+  namedExports: {
+    S3Client: class {
+      async send(c) {
+        ctx.s3.push({ kind: c.kind, input: c.input });
+        if (c.kind === "CreateMultipartUpload") return { UploadId: "up-1" };
+        if (c.kind === "UploadPart") return { ETag: `etag-${c.input.PartNumber}` };
+        return {};
+      }
+    },
+    PutObjectCommand: cmd("PutObject"),
+    CreateMultipartUploadCommand: cmd("CreateMultipartUpload"),
+    UploadPartCommand: cmd("UploadPart"),
+    CompleteMultipartUploadCommand: cmd("CompleteMultipartUpload"),
+    AbortMultipartUploadCommand: cmd("AbortMultipartUpload"),
+    GetObjectCommand: cmd("GetObject"),
+  },
+});
+mock.module("@aws-sdk/s3-request-presigner", {
+  namedExports: { getSignedUrl: async (_c, command, { expiresIn }) => `https://signed.example/${command.input.Bucket}/${command.input.Key}?ttl=${expiresIn}` },
+});
+mock.module("@aws-sdk/client-lambda", {
+  namedExports: {
+    LambdaClient: class {
+      async send(c) {
+        if (ctx.invokeFails) throw new Error("AccessDenied");
+        ctx.invokes.push({ ...c.input, Payload: JSON.parse(Buffer.from(c.input.Payload).toString("utf8")) });
+        return { StatusCode: 202 };
+      }
+    },
+    InvokeCommand: cmd("Invoke"),
+  },
+});
+
+process.env.AWS_LAMBDA_FUNCTION_NAME = "sundial-reports";
 const { handler, matchRoute, catalogFor, CATALOG_GATES } = await import("./index.js");
+const { S3CsvWriter, PART_BYTES } = await import("./csv.js");
 
 const ev = (path, { method = "GET", body, qs } = {}) => ({
   httpMethod: method,
@@ -109,29 +207,52 @@ const GROUPED = {
   filters: [{ field: "solar.contract_date", op: "between", value: "this_quarter" }],
   sort: [{ field: "count", dir: "desc" }],
 };
+const SIMPLE = { type: "customers", columns: ["customer.name", "customer.city"] };
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+// =========================================================================================
+// R1a
+// =========================================================================================
 test("routes and methods", async () => {
   reset();
   assert.equal((await handler(ev("/reports/run", { method: "OPTIONS" }))).statusCode, 204);
   assert.equal((await call("/reports/run")).status, 405);
   assert.equal((await call("/reports/types", { method: "POST", body: {} })).status, 405);
-  assert.equal((await call("/reports/elsewhere")).status, 404);
-  assert.deepEqual(matchRoute("/prod/reports/types"), { name: "types", method: "GET" });
-  assert.equal(matchRoute("/reports"), null);
+  assert.equal((await call("/elsewhere")).status, 404);
+  assert.equal((await call("/reports/a/b/c")).status, 404);
+  assert.deepEqual(matchRoute("/prod/reports/types"), { name: "types", methods: ["GET"], id: null });
+  assert.equal(matchRoute("/reports").name, "saved");
+  assert.equal(matchRoute("/prod/reports").name, "saved");
+  assert.equal(matchRoute("/reports/csv").name, "csv");
+  assert.deepEqual(matchRoute("/reports/csv/abc"), { name: "csvStatus", methods: ["GET"], id: "abc" });
+  assert.deepEqual(matchRoute("/reports/abc"), { name: "savedOne", methods: ["GET", "PATCH", "DELETE"], id: "abc" });
+  assert.equal(matchRoute("/reports/abc/run").name, "savedRun");
+  assert.equal(matchRoute("/reports/abc/csv").name, "savedCsv");
+  assert.equal(matchRoute("/reports/run").name, "run", "a fixed word is never an id");
+  assert.equal((await call("/reports/csv")).status, 405);
+  assert.equal((await call("/reports", { method: "DELETE" })).status, 405);
 });
 
-test("reports.read: tenant levels in; sales, tech and none get 403 MODULE_FORBIDDEN on every route, before any read", async () => {
+test("reports.read: tenant levels in; sales, tech and none get 403 MODULE_FORBIDDEN on EVERY route, before any read", async () => {
   for (const level of ["Executive", "Admin", "Manager"]) {
     reset(level);
     assert.equal((await call("/reports/types")).status, 200, level);
   }
+  const id = "33333333-3333-4333-8333-333333333333";
+  const routes = [
+    ["/reports/types"], ["/reports/catalog", { qs: { type: "solar" } }], ["/reports/run", { method: "POST", body: GROUPED }],
+    ["/reports/csv", { method: "POST", body: SIMPLE }], [`/reports/csv/${id}`],
+    ["/reports"], ["/reports", { method: "POST", body: { name: "x", definition: SIMPLE } }],
+    [`/reports/${id}`], [`/reports/${id}`, { method: "PATCH", body: { name: "y" } }], [`/reports/${id}`, { method: "DELETE" }],
+    [`/reports/${id}/run`], [`/reports/${id}/csv`],
+  ];
   for (const level of ["Sales Rep", "Sales Dealer", "Technician", "NoDealerRep"]) {
-    for (const [path, opts] of [["/reports/types"], ["/reports/catalog", { qs: { type: "solar" } }], ["/reports/run", { method: "POST", body: GROUPED }]]) {
+    for (const [path, opts] of routes) {
       reset(level);
       const r = await call(path, opts);
-      assert.equal(r.status, 403, `${level} ${path}`);
+      assert.equal(r.status, 403, `${level} ${opts?.method ?? "GET"} ${path}`);
       assert.deepEqual(r.body, { error: "forbidden", code: "MODULE_FORBIDDEN" });
-      assert.equal(ctx.rpcCalls.length + ctx.fromCalls.length, 0, `${level} ${path}: touched the database`);
+      assert.equal(ctx.rpcCalls.length + ctx.dbCalls.length + ctx.invokes.length + ctx.s3.length, 0, `${level} ${path}: touched something`);
     }
   }
 });
@@ -161,6 +282,8 @@ test("run: the tenant from the identity, the wire definition to the rpc, the res
   assert.equal(args.p_client_sf_id, TENANT);
   assert.equal(args.p_def.base.table, "sundial_solar_cache");
   assert.equal(args.p_def.grouped, true);
+  assert.equal(args.p_def.totals, true);
+  assert.equal(args.p_def.offset, 0);
   assert.equal(args.p_def.filters[0].op, "between");
   assert.match(args.p_def.filters[0].value[0], /^\d{4}-(01|04|07|10)-01$/);
   assert.deepEqual(ok.body.columns.map((c) => c.field), ["solar.stage", "count"]);
@@ -169,13 +292,13 @@ test("run: the tenant from the identity, the wire definition to the rpc, the res
   assert.equal(ok.body.truncated, false);
   assert.equal(ok.body.limit, 5000);
   assert.deepEqual(ok.body.stripped, []);
-  // solar 17:05, customer 17:04, user 16:45 → the oldest newest run
+  // solar 17:05, customer 17:04, user 16:45, dealer 16:50 → the oldest newest run
   assert.equal(ok.body.asOf, "2026-11-03T16:45:00Z");
 });
 
 test("run: asOf is null when an object has no ok run on record", async () => {
   reset("Admin");
-  ctx.syncRuns = ctx.syncRuns.filter((r) => r.object !== "user");
+  ctx.tables.cache_sync_runs = ctx.tables.cache_sync_runs.filter((r) => r.object !== "dealer");
   assert.equal((await call("/reports/run", { method: "POST", body: GROUPED })).body.asOf, null);
 });
 
@@ -189,16 +312,19 @@ test("run: a bad definition is a 400 that never reaches the database", async () 
   }
 });
 
-test("run: a Manager's cost column is stripped and named; an Admin keeps it", async () => {
+test("run: the gates the caller holds ride on the wire", async () => {
   assert.deepEqual(CATALOG_GATES, ["service.costing.read"]);
-  // The solar type has no gated column, so drive the gate through the catalog projection and
-  // the held-gate list the wire carries.
   reset("Manager");
   await call("/reports/run", { method: "POST", body: GROUPED });
   assert.deepEqual(ctx.rpcCalls[0].args.p_def.allowedGates, []);
   reset("Admin");
   await call("/reports/run", { method: "POST", body: GROUPED });
   assert.deepEqual(ctx.rpcCalls[0].args.p_def.allowedGates, ["service.costing.read"]);
+  // a Manager's cost column is stripped and named
+  reset("Manager");
+  const r = await call("/reports/run", { method: "POST", body: { type: "estimate_lines", columns: ["line.name", "line.unit_labor_cost"] } });
+  assert.deepEqual(r.body.stripped, ["line.unit_labor_cost"]);
+  assert.deepEqual(ctx.rpcCalls[0].args.p_def.columns, [{ alias: "line", column: "name" }]);
 });
 
 test("run: a function RAISE is REPORT_CATALOG_MISMATCH; another rpc error a plain 500", async () => {
@@ -213,18 +339,19 @@ test("run: a function RAISE is REPORT_CATALOG_MISMATCH; another rpc error a plai
   assert.deepEqual(r2.body, { error: "server_error" });
 });
 
-test("types: no table names", async () => {
+test("types: all ten, no table names", async () => {
   reset("Manager");
   const r = await call("/reports/types");
-  assert.equal(r.body.types[0].key, "solar");
+  assert.equal(r.body.types.length, 10);
+  assert.ok(r.body.types.some((t) => t.key === "solar"));
   assert.doesNotMatch(r.raw.body, /_cache/);
 });
 
-test("catalog: per caller — gated and non-reportable fields are absent; operators per field", async () => {
+test("catalog: per caller — gated and non-reportable fields are absent; rollup measures; operators per field", async () => {
   reset("Manager");
   const r = await call("/reports/catalog", { qs: { type: "solar" } });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.body.aliases.map((a) => a.alias), ["solar", "customer", "rep"]);
+  assert.deepEqual(r.body.aliases.map((a) => a.alias), ["solar", "customer", "rep", "dealer"]);
   const solar = r.body.aliases[0].fields;
   assert.ok(!solar.some((f) => f.field === "solar.sf_id"));
   const stage = solar.find((f) => f.field === "solar.stage");
@@ -235,10 +362,291 @@ test("catalog: per caller — gated and non-reportable fields are absent; operat
   assert.equal((await call("/reports/catalog", { qs: { type: "nope" } })).status, 400);
   assert.equal((await call("/reports/catalog")).status, 400);
 
-  // The gate, on the projection itself (the price book's cost columns).
-  const fakeType = (held) => {
-    const out = catalogFor("solar", held);
-    return out.aliases.flatMap((a) => a.fields.map((f) => f.field));
-  };
-  assert.deepEqual(fakeType([]), fakeType(["service.costing.read"])); // solar has no gated column
+  const fields = (type, held) => catalogFor(type, held).aliases.flatMap((a) => a.fields.map((f) => f.field));
+  assert.ok(!fields("estimate_lines", []).includes("line.unit_labor_cost"), "a Manager never sees the cost column");
+  assert.ok(fields("estimate_lines", ["service.costing.read"]).includes("line.unit_labor_cost"));
+  const pay = catalogFor("service_jobs", []).aliases.find((a) => a.alias === "payments");
+  assert.deepEqual(pay.fields.map((f) => f.field), ["payments.payment_count", "payments.amount_paid", "payments.deposits_paid", "payments.refunds", "payments.last_paid_at"]);
+  assert.ok(pay.fields.every((f) => f.operators.length > 0));
+});
+
+// =========================================================================================
+// R1b — CSV
+// =========================================================================================
+const lastExport = () => ctx.tables.sundial_report_exports.at(-1);
+
+test("csv POST: validates in CSV mode, queues a row owned by the caller, invokes the worker — nothing else", async () => {
+  reset("Manager");
+  const r = await call("/reports/csv", { method: "POST", body: { ...SIMPLE, limit: 20000 } });
+  assert.equal(r.status, 202);
+  assert.match(r.body.exportId, UUID_RE);
+  assert.equal(r.body.status, "queued");
+  const row = lastExport();
+  assert.equal(row.id, r.body.exportId);
+  assert.equal(row.client_sf_id, TENANT);
+  assert.equal(row.owner_profile_id, USERS.Manager.profile);
+  assert.equal(row.status, "queued");
+  assert.equal(row.report_type, "customers");
+  assert.equal(row.job.rowLimit, 20000);
+  assert.equal(row.job.wire.limit, 5000);
+  assert.equal(row.job.wire.totals, false);
+  assert.deepEqual(ctx.invokes, [{ FunctionName: "sundial-reports", InvocationType: "Event", Payload: { task: "csv", exportId: r.body.exportId } }]);
+  assert.equal(ctx.rpcCalls.length, 0, "the POST runs no report");
+  assert.equal(ctx.s3.length, 0);
+
+  // long text is allowed in a CSV, and a CSV may ask for up to 50,000 rows
+  reset("Manager");
+  const lt = await call("/reports/csv", { method: "POST", body: { type: "service_jobs", columns: ["job.name", "job.office_notes"], limit: 50000 } });
+  assert.equal(lt.status, 202);
+  assert.equal(lastExport().job.wire.limit, 2000);
+  // a bad definition never queues
+  reset("Manager");
+  const bad = await call("/reports/csv", { method: "POST", body: { ...SIMPLE, limit: 50001 } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.code, "BAD_LIMIT");
+  assert.equal(ctx.tables.sundial_report_exports.length + ctx.invokes.length, 0);
+});
+
+test("csv POST: a failed self-invoke marks the row failed and answers 502", async () => {
+  reset("Admin");
+  ctx.invokeFails = true;
+  const r = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  assert.equal(r.status, 502);
+  assert.equal(r.body.code, "WORKER_INVOKE_FAILED");
+  assert.equal(lastExport().status, "failed");
+  assert.equal(lastExport().error_code, "WORKER_INVOKE_FAILED");
+});
+
+const worker = (exportId, remaining = 250_000) => handler({ task: "csv", exportId }, { getRemainingTimeInMillis: () => remaining });
+const fakeRows = (n) => Array.from({ length: n }, (_, i) => [`Name ${i}`, i % 2 ? "Mesa" : "=cmd"]);
+
+test("csv worker: pages until not truncated, one object under REPORTS/, BOM + header first, marks done", async () => {
+  reset("Admin");
+  const q = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  ctx.rpcPages = { rows: fakeRows(12001) };
+  const res = await worker(q.body.exportId);
+  assert.equal(res.ok, true);
+  // 5,000 + 5,000 + 2,001: offsets 0 / 5000 / 10000, never the grand totals
+  assert.deepEqual(ctx.rpcCalls.map((c) => [c.args.p_def.offset, c.args.p_def.limit, c.args.p_def.totals, c.args.p_client_sf_id]), [
+    [0, 5000, false, TENANT], [5000, 5000, false, TENANT], [10000, 5000, false, TENANT],
+  ]);
+  const put = ctx.s3.filter((s) => s.kind === "PutObject");
+  assert.equal(put.length, 1);
+  const day = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Phoenix" }).format(new Date(lastExport().created_at));
+  assert.equal(put[0].input.Bucket, "sfsolproj");
+  assert.equal(put[0].input.Key, `REPORTS/${TENANT}/${day}/${q.body.exportId}.csv`);
+  assert.equal(put[0].input.ServerSideEncryption, "AES256");
+  const text = put[0].input.Body.toString("utf8");
+  assert.ok(text.startsWith("﻿Customer: "), "the BOM and the header come first");
+  const lines = text.split("\r\n");
+  assert.equal(lines.length, 1 + 12001 + 1); // header, rows, the empty string after the last CRLF
+  assert.equal(lines[1], "Name 0,'=cmd", "the formula guard ran");
+  const row = lastExport();
+  assert.equal(row.status, "done");
+  assert.equal(row.row_count, 12001);
+  assert.equal(row.truncated, false);
+  assert.equal(row.s3_key, put[0].input.Key);
+  assert.equal(row.as_of, "2026-11-03T16:45:00Z"); // customers joins customer 17:04, dealer 16:50, user 16:45 → the oldest
+});
+
+test("csv worker: claims once; stops at the row limit (truncated); a RAISE fails it; a short clock is CSV_TOO_SLOW", async () => {
+  reset("Admin");
+  const q = await call("/reports/csv", { method: "POST", body: { ...SIMPLE, limit: 7000 } });
+  ctx.rpcPages = { rows: fakeRows(9000) };
+  await worker(q.body.exportId);
+  assert.deepEqual(ctx.rpcCalls.map((c) => [c.args.p_def.offset, c.args.p_def.limit]), [[0, 5000], [5000, 2000]]);
+  assert.equal(lastExport().row_count, 7000);
+  assert.equal(lastExport().truncated, true);
+  const again = await worker(q.body.exportId);
+  assert.equal(again.skipped, "not queued", "a retried invoke never runs twice");
+  assert.equal(ctx.rpcCalls.length, 2);
+
+  reset("Admin");
+  const q2 = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  ctx.rpcPages = { rows: [], error: { message: "sundial_report_run: unknown column customer.x" } };
+  await worker(q2.body.exportId);
+  assert.equal(lastExport().status, "failed");
+  assert.equal(lastExport().error_code, "REPORT_CATALOG_MISMATCH");
+
+  reset("Admin");
+  const q3 = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  ctx.rpcPages = { rows: fakeRows(10) };
+  await worker(q3.body.exportId, 5_000);
+  assert.equal(lastExport().error_code, "CSV_TOO_SLOW");
+  assert.equal(ctx.rpcCalls.length, 0);
+  assert.equal(ctx.s3.filter((s) => s.kind === "PutObject").length, 0, "nothing half-written");
+
+  reset("Admin");
+  assert.equal((await worker("not-a-uuid")).skipped, "bad id");
+});
+
+test("csv writer: multipart past 8 MB, parts in order; abort on failure", async () => {
+  reset();
+  const { S3Client } = await import("@aws-sdk/client-s3");
+  const w = new S3CsvWriter(new S3Client(), { key: `REPORTS/${TENANT}/2026-11-04/x.csv`, fileName: "x.csv" });
+  const chunk = "x".repeat(1024 * 1024);
+  for (let i = 0; i < 9; i++) await w.write(chunk);
+  await w.write("tail");
+  await w.finish();
+  assert.deepEqual(ctx.s3.map((s) => s.kind), ["CreateMultipartUpload", "UploadPart", "UploadPart", "CompleteMultipartUpload"]);
+  assert.equal(ctx.s3[1].input.Body.length, PART_BYTES);
+  assert.deepEqual(ctx.s3[3].input.MultipartUpload.Parts, [{ ETag: "etag-1", PartNumber: 1 }, { ETag: "etag-2", PartNumber: 2 }]);
+  reset();
+  const w2 = new S3CsvWriter(new S3Client(), { key: "REPORTS/k.csv", fileName: "k.csv" });
+  for (let i = 0; i < 9; i++) await w2.write(chunk);
+  await w2.abort();
+  assert.equal(ctx.s3.at(-1).kind, "AbortMultipartUpload");
+});
+
+test("csv status: the owner gets a 15-minute link; anyone else, another tenant or a bad id is 404", async () => {
+  reset("Manager");
+  const q = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  const queued = await call(`/reports/csv/${q.body.exportId}`);
+  assert.equal(queued.status, 200);
+  assert.equal(queued.body.status, "queued");
+  assert.equal(queued.body.url, null);
+  ctx.rpcPages = { rows: fakeRows(3) };
+  await worker(q.body.exportId);
+  const done = await call(`/reports/csv/${q.body.exportId}`);
+  assert.equal(done.body.status, "done");
+  assert.equal(done.body.rowCount, 3);
+  assert.equal(done.body.truncated, false);
+  assert.match(done.body.url, new RegExp(`^https://signed\\.example/sfsolproj/REPORTS/${TENANT}/\\d{4}-\\d{2}-\\d{2}/${q.body.exportId}\\.csv\\?ttl=900$`));
+  assert.ok(Date.parse(done.body.expiresAt) - Date.now() <= 900_000);
+
+  for (const level of ["Manager2", "Admin", "Executive"]) {
+    as(level);
+    const r = await call(`/reports/csv/${q.body.exportId}`);
+    assert.equal(r.status, 404, level);
+    assert.deepEqual(r.body, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
+  as("Manager");
+  ctx.tenant = OTHER_TENANT;
+  assert.equal((await call(`/reports/csv/${q.body.exportId}`)).status, 404);
+  ctx.tenant = TENANT;
+  assert.equal((await call("/reports/csv/not-a-uuid")).status, 404);
+  assert.equal((await call(`/reports/csv/${randomUUID()}`)).status, 404);
+
+  // a row nobody finished is reported lost after 10 minutes
+  lastExport().status = "running";
+  lastExport().created_at = new Date(Date.now() - 11 * 60_000).toISOString();
+  const lost = await call(`/reports/csv/${q.body.exportId}`);
+  assert.equal(lost.body.status, "failed");
+  assert.equal(lost.body.code, "CSV_EXPORT_LOST");
+});
+
+// =========================================================================================
+// R1b — saved reports
+// =========================================================================================
+test("saved: a Manager's private report is invisible to an Admin until the Manager shares it", async () => {
+  reset("Manager");
+  const created = await call("/reports", { method: "POST", body: { name: "My pipeline", definition: SIMPLE } });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  assert.equal(created.body.sharing, "private");
+  assert.equal(created.body.mine, true);
+  const row = ctx.tables.sundial_reports[0];
+  assert.equal(row.owner_profile_id, USERS.Manager.profile);
+  assert.equal(row.created_by, USERS.Manager.profile);
+  assert.equal(row.client_sf_id, TENANT);
+
+  as("Admin");
+  assert.deepEqual((await call("/reports")).body.reports, []);
+  for (const [path, opts] of [[`/reports/${id}`], [`/reports/${id}`, { method: "PATCH", body: { name: "mine now" } }], [`/reports/${id}`, { method: "DELETE" }], [`/reports/${id}/run`], [`/reports/${id}/csv`]]) {
+    const r = await call(path, opts);
+    assert.equal(r.status, 404, `${opts?.method ?? "GET"} ${path}`);
+    assert.deepEqual(r.body, { error: "not_found", code: "RECORD_NOT_FOUND" });
+  }
+  assert.equal(ctx.tables.sundial_reports[0].name, "My pipeline");
+  assert.equal(ctx.rpcCalls.length + ctx.invokes.length, 0);
+
+  // the Manager shares it, through the API
+  as("Manager");
+  const share = await call(`/reports/${id}`, { method: "PATCH", body: { sharing: "tenant" } });
+  assert.equal(share.status, 200);
+  assert.equal(share.body.sharing, "tenant");
+  as("Admin");
+  const list = await call("/reports");
+  assert.deepEqual(list.body.reports.map((r) => [r.id, r.mine, r.canEdit]), [[id, false, false]], "visible, read-only to the Admin");
+  assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "taken" } })).body.code, "REPORT_READ_ONLY");
+  assert.equal((await call(`/reports/${id}`)).status, 200);
+  const run = await call(`/reports/${id}/run`);
+  assert.equal(run.status, 200);
+  assert.deepEqual(run.body.report, { id, name: "My pipeline" });
+  // and the owner may always take it back to private
+  as("Manager");
+  const unshare = await call(`/reports/${id}`, { method: "PATCH", body: { sharing: "private" } });
+  assert.equal(unshare.status, 200);
+  assert.equal(unshare.body.sharing, "private");
+  as("Admin");
+  assert.equal((await call(`/reports/${id}`)).status, 404);
+  // another tenant never sees it, shared or not
+  ctx.tables.sundial_reports[0].sharing = "tenant";
+  ctx.tenant = OTHER_TENANT;
+  assert.equal((await call(`/reports/${id}`)).status, 404);
+  assert.deepEqual((await call("/reports")).body.reports, []);
+});
+
+test("saved: a shared report is read-only to everyone but its owner (Admins too, until reports.admin)", async () => {
+  reset("Admin");
+  const c = await call("/reports", { method: "POST", body: { name: "Team", description: "everyone", definition: SIMPLE, sharing: "tenant" } });
+  assert.equal(c.status, 201);
+  const id = c.body.id;
+  as("Manager");
+  const seen = await call(`/reports/${id}`);
+  assert.equal(seen.body.canEdit, false);
+  assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "x" } })).body.code, "REPORT_READ_ONLY");
+  assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 403);
+  as("Executive");
+  assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "x" } })).body.code, "REPORT_READ_ONLY");
+  assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 403);
+  as("Admin");
+  const e = await call(`/reports/${id}`, { method: "PATCH", body: { name: "Team v2" } });
+  assert.equal(e.status, 200);
+  assert.equal(e.body.name, "Team v2");
+  assert.equal(ctx.tables.sundial_reports[0].updated_by, USERS.Admin.profile);
+  assert.equal(ctx.tables.sundial_reports[0].owner_profile_id, USERS.Admin.profile, "an edit never moves ownership");
+  assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 204);
+  assert.equal(ctx.tables.sundial_reports.length, 0);
+});
+
+test("saved: the owner is the JWT's; a bad body is a 400 naming the field; the list is mine + shared, newest first", async () => {
+  reset("Manager");
+  const smuggle = await call("/reports", { method: "POST", body: { name: "x", definition: SIMPLE, owner_profile_id: USERS.Admin.profile } });
+  assert.equal(smuggle.status, 400);
+  assert.equal(smuggle.body.field, "owner_profile_id");
+  assert.equal((await call("/reports", { method: "POST", body: { name: "x", definition: { type: "nope" } } })).body.field, "definition.type");
+  assert.equal(ctx.tables.sundial_reports.length, 0);
+
+  const mk = (name, sharing, profile, created_at) => ctx.tables.sundial_reports.push({
+    id: randomUUID(), client_sf_id: TENANT, owner_profile_id: profile, name, description: null, definition: SIMPLE, sharing, created_at, updated_at: created_at, created_by: profile, updated_by: profile,
+  });
+  mk("old mine", "private", USERS.Manager.profile, "2026-11-01T00:00:00Z");
+  mk("shared by admin", "tenant", USERS.Admin.profile, "2026-11-03T00:00:00Z");
+  mk("admin private", "private", USERS.Admin.profile, "2026-11-04T00:00:00Z");
+  mk("new mine shared", "tenant", USERS.Manager.profile, "2026-11-02T00:00:00Z");
+  ctx.tables.sundial_reports.push({ ...ctx.tables.sundial_reports[1], id: randomUUID(), client_sf_id: OTHER_TENANT, name: "other tenant" });
+  const list = await call("/reports");
+  assert.deepEqual(list.body.reports.map((r) => r.name), ["shared by admin", "new mine shared", "old mine"]);
+  assert.doesNotMatch(JSON.stringify(list.body), new RegExp(TENANT));
+});
+
+test("saved: runs with the RUNNER's gates; its CSV queues an export tied to the report", async () => {
+  reset("Admin");
+  const c = await call("/reports", { method: "POST", body: { name: "Costs", definition: { type: "estimate_lines", columns: ["line.name", "line.unit_labor_cost"] }, sharing: "tenant" } });
+  assert.deepEqual(ctx.tables.sundial_reports[0].definition.columns, ["line.name", "line.unit_labor_cost"], "an Admin's report keeps the cost column");
+  as("Manager");
+  const run = await call(`/reports/${c.body.id}/run`);
+  assert.equal(run.status, 200);
+  assert.deepEqual(run.body.stripped, ["line.unit_labor_cost"], "a Manager running it never sees the cost");
+  assert.deepEqual(ctx.rpcCalls[0].args.p_def.columns, [{ alias: "line", column: "name" }]);
+  const csv = await call(`/reports/${c.body.id}/csv`);
+  assert.equal(csv.status, 202);
+  assert.equal(lastExport().report_id, c.body.id);
+  assert.equal(lastExport().owner_profile_id, USERS.Manager.profile, "the export is the runner's");
+  assert.deepEqual(lastExport().job.wire.columns, [{ alias: "line", column: "name" }]);
+  // a Manager's own save of the same definition stores it WITHOUT the cost column
+  const mine = await call("/reports", { method: "POST", body: { name: "Mine", definition: { type: "estimate_lines", columns: ["line.name", "line.unit_labor_cost"] } } });
+  assert.deepEqual(mine.body.stripped, ["line.unit_labor_cost"]);
+  assert.deepEqual(ctx.tables.sundial_reports.at(-1).definition.columns, ["line.name"]);
 });

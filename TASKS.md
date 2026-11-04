@@ -4,7 +4,36 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
-## 2026-11-03 — Reporting R1a: the engine, solar type (D-088, `feature/reports-engine`)
+## 2026-11-04 — Reporting R1b: dealer cache, ten report types, CSV export, saved reports (D-089, `feature/reports-r1b`)
+
+- [x] `sql/sundial_dealer_cache.sql` (reports-only, 23 columns): **run by Tim 2026-11-04** ("dealer table is in")
+- [x] `dealer` in `sundial-cache-sync` (`OBJECT_ALLOWLIST`, `CREATED_DATE_SOURCE`) + test, the cold 30-minute rule in `scripts/wire-cache-sync-schedule.ps1`, `OBJECTS` in `scripts/lib/report-sources.mjs`. Coverage doc regenerated (`--check` clean); catalog regenerated from the live table (`lib/report-catalog/dealer.json`, seed 1,372 rows). Not in sf-query's allowlist, by design.
+- [x] Engine: `lookup` / `latest` / `rollup` joins, `offset`, `totals`, CSV mode (`lib/report-def.js`, `sql/sundial_report_run.sql` + helpers `sundial_report_join_where` / `sundial_report_ref`)
+- [x] The ten report types (`lib/report-types.js`) + tests; the PGlite test runs every type with its default columns on seeded rows and exercises every join
+- [x] CSV export, asynchronous (`lambdas/sundial-reports/csv.js`, `lib/report-csv.js`): 5,000-row page measured at 0.4–0.8 s, offset 34,000 at 2.1 s in Postgres → async (Tim's decision 9)
+- [x] Saved reports (`sql/sundial_reports.sql`, `lambdas/sundial-reports/saved.js`, `lib/saved-reports.js`); actions `reports.write` / `reports.share` + `lib/access.test.js`
+- [x] `scripts/wire-reports-routes.ps1` (new routes + Lambda 1,024 MB / 300 s + no async retries + IAM `sundial-reports-export`), **`scripts/add-reports-lifecycle.ps1`** (merge, never replace), `scripts/verify-report-run.mjs` extended
+- [x] Docs: D-089, `docs/reporting-module.md` §6, `docs/api-endpoints.md`, `docs/access-model.md` §3.6, `docs/caching-architecture.md`, CLAUDE.md item 11
+
+**Tim — in this order** (PowerShell, from the repo root, on `feature/reports-r1b`):
+- [ ] **1. SQL (Supabase SQL editor), three files**, each pasted whole and Run:
+  - [ ] **1a.** `sql/2026-11-03_report_catalog.sql` (regenerated: the dealer rows). The last line must say `catalog_rows` = **1,372**.
+  - [ ] **1b.** `sql/sundial_report_run.sql` (the R1b engine). The check at the bottom must show **false** in all **eight** columns.
+  - [ ] **1c.** `sql/sundial_reports.sql` (saved reports + export jobs). The check must show **two rows**, `sundial_report_exports` and `sundial_reports`, each with `rls` **true** and both privilege columns **false**.
+- [ ] **2. Deploys**, after the SQL (the new Lambda sends join kinds the old function would refuse):
+  - [ ] `.\deploy.ps1 sundial-reports`
+  - [ ] `.\deploy.ps1 sundial-cache-sync` (knows `dealer`)
+  - [ ] `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` lists `reports.write` / `reports.share`)
+- [ ] **3. Wire scripts:**
+  - [ ] `.\scripts\wire-reports-routes.ps1`. It adds the routes, sets the Lambda to 1,024 MB / 300 s with no async retries, and adds the inline policy `sundial-reports-export` (self-invoke + `sfsolproj/REPORTS/*`). Answer **y** to deploy the API to prod.
+  - [ ] `.\scripts\wire-cache-sync-schedule.ps1`. It puts `dealer` on the cold 30-minute rule. **Answer N to the one-time full resync of customer / solar / roofing**: that was for first-time setup, and only dealer is new.
+- [ ] **4. Dealer resync event:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "dealer", "mode": "full" }`. Then, in the SQL editor, `select client_sf_id, count(*) from public.sundial_dealer_cache group by 1;` should show **62** for Harmon (`a1W7y000007AszBEAS`) and **3** for the demo tenant.
+- [ ] **5. Lifecycle script:** `.\scripts\add-reports-lifecycle.ps1`. It prints the rules BEFORE: today one, `archive-old-files` (SUNDIAL/ → Glacier at 365 days). Answer **y**. The AFTER list read back from S3 must show **both** `archive-old-files` and `sundial-reports-csv-expire-7d` (prefix `REPORTS/`, 7 days). Re-running it is safe; it then changes nothing.
+- [ ] **6. Verify:** `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users, writes only its own "ZZ VERIFY" saved reports and exports, and deletes them (and their CSV files) at the end.
+- [x] **Decided (Tim, 2026-11-04): Managers can share.** `reports.share` is every tenant level; only the owner edits or deletes; `reports.admin` (R2, Admin / Executive) will see and manage every report in the tenant.
+- [ ] **R2:** `reports.admin`: Admin / Executive see, edit, delete and share / unshare every report in the tenant.
+
+## 2026-11-03 — Reporting R1a: the engine, solar type (D-088, `feature/reports-engine`) — DONE, run 2026-11-04
 
 - [x] `lib/access.js`: action `reports.read` = tenant scope (Executive / Admin / Manager); no `ACTION_LEVELS` row (tenant scope already is that set) + test
 - [x] Catalog: `scripts/generate-report-catalog.mjs` + `lib/report-catalog-build.js` → `lib/report-catalog/*.json` (14 objects) + `sql/2026-11-03_report_catalog.sql`; `--check` shows no change on a re-run. Shared inputs moved to `scripts/lib/report-sources.mjs` (R0's generator imports them; its `--check` is clean)
@@ -12,9 +41,9 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] `sql/sundial_report_run.sql` + PGlite test against the real function and the real catalog seed
 - [x] `lambdas/sundial-reports` (`POST /reports/run`, `GET /reports/types`, `GET /reports/catalog`) + test; `scripts/wire-reports-routes.ps1`; `scripts/verify-report-run.mjs`
 - [x] Docs: D-088, `docs/reporting-module.md` §6, CLAUDE.md item 11, `docs/api-endpoints.md`
-- [ ] **TIM (a): Supabase SQL editor** — open `sql/2026-11-03_report_catalog.sql`, paste the whole file, Run. The last line must say `catalog_rows` = **1,354**. Safe to run again: it replaces the whole catalog.
-- [ ] **TIM (b): Supabase SQL editor** — open `sql/sundial_report_run.sql`, paste, Run. The check at the bottom must show **false** in all four columns.
-- [ ] **TIM (c): create the Lambda** (PowerShell, from the repo root). This copies `sundial-sf-query`'s live role, runtime, architecture and environment (read 2026-11-03) and starts from a placeholder that the deploy in (d) replaces:
+- [x] **TIM (a): Supabase SQL editor** — open `sql/2026-11-03_report_catalog.sql`, paste the whole file, Run. The last line must say `catalog_rows` = **1,354**. Safe to run again: it replaces the whole catalog.
+- [x] **TIM (b): Supabase SQL editor** — open `sql/sundial_report_run.sql`, paste, Run. The check at the bottom must show **false** in all four columns.
+- [x] **TIM (c): create the Lambda** (PowerShell, from the repo root). This copies `sundial-sf-query`'s live role, runtime, architecture and environment (read 2026-11-03) and starts from a placeholder that the deploy in (d) replaces:
   ```powershell
   New-Item -ItemType Directory -Force .build\reports-placeholder | Out-Null
   Set-Content -Path .build\reports-placeholder\index.mjs -Value 'export const handler = async () => ({ statusCode: 503, body: "deploying" });' -Encoding ascii
@@ -23,18 +52,14 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
   aws lambda wait function-active --function-name sundial-reports --region us-west-1
   Remove-Item .build\reports-placeholder, .build\reports-placeholder.zip -Recurse -Force
   ```
-- [ ] **TIM (d): deploy** — `.\deploy.ps1 sundial-reports`
-- [ ] **TIM (e): wire the routes** — `.\scripts\wire-reports-routes.ps1` (answer `y` to deploy the API to prod)
-- [ ] **TIM (f): deploy** — `.\deploy.ps1 sundial-auth-proxy` (so `/auth/me` lists `reports.read` in `access.actions`)
-- [ ] **TIM (g): verify** — `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users and is read-only.
+- [x] **TIM (d): deploy** — `.\deploy.ps1 sundial-reports`
+- [x] **TIM (e): wire the routes** — `.\scripts\wire-reports-routes.ps1` (answer `y` to deploy the API to prod)
+- [x] **TIM (f): deploy** — `.\deploy.ps1 sundial-auth-proxy` (so `/auth/me` lists `reports.read` in `access.actions`)
+- [x] **TIM (g): verify** — `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users and is read-only.
 - [ ] **From now on:** after any new cache column (an R0 follow-on SQL file), run `node scripts/generate-report-catalog.mjs`, re-run `sql/2026-11-03_report_catalog.sql` and `.\deploy.ps1 sundial-reports`, in that order. Until then the column is not reportable, and a mismatch shows as `500 REPORT_CATALOG_MISMATCH`.
 - [ ] **TIM: Project Manager on Solar.** The integration user's describe says `Sundial_Solar__c.Project_Manager__c` is a **multipicklist**, but `docs/salesforce-schema.md` says it is a lookup. The cache's `project_manager_sf_id` / `project_manager_name` columns are empty on all 4,595 rows. If a PM *lookup* field is meant to exist, check it in Setup (does it exist? FLS for the integration user?) and tell Claude: the `pm` join is then one entry in `lib/report-types.js` after a catalog re-run.
 
-### Reporting R1b — next
-- [ ] **Dealer cache table** — `sundial_dealer_cache` + a `sundial-cache-sync` entry + an `OBJECTS` entry in `scripts/lib/report-sources.mjs`, so report types can join Dealer
-- [ ] The other eight report types (`docs/reporting-module.md` §6.2)
-- [ ] Saved reports (`sundial_reports`, sharing private | tenant), `GET/POST/PATCH /reports[/{id}]`, `GET /reports/{id}/run` (404 for a report you cannot see)
-- [ ] CSV (`GET /reports/{id}/csv`, ≤ 50,000 rows, streamed); long-text columns selectable for CSV only
+### Reporting R1b: built, see the 2026-11-04 section above
 
 ## 2026-11-02 — The invoice date (Harmon)
 

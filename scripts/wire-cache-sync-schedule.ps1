@@ -2,7 +2,7 @@
 .SYNOPSIS
     Puts sundial-cache-sync on a schedule (D-079): two EventBridge rules, one per tier.
       sundial-cache-sync-incremental       rate(5 minutes)   customer, solar, job, estimate, servicecall, serviceinvoice
-      sundial-cache-sync-incremental-cold  rate(30 minutes)  roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership
+      sundial-cache-sync-incremental-cold  rate(30 minutes)  roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership, dealer
     Each rule passes its own input: { "objects": [...], "intervalMinutes": 5 | 30 }.
     The Lambda records the interval on every cache_sync_runs row, and sundial-sf-query
     judges each object by ITS OWN schedule (healthy = last ok run within 3 x interval),
@@ -24,8 +24,8 @@
     existed must be corrected first. Each full run takes a few minutes (customer is the
     long one, ~39k rows).
 
-    API cost (D-079 runbook): 6 hot objects x 288 runs/day + 8 cold objects x 48 runs/day
-    = 1,728 + 384 = ~2,112 Salesforce queries a day when nothing changes (one query per
+    API cost (D-079 runbook): 6 hot objects x 288 runs/day + 9 cold objects x 48 runs/day
+    = 1,728 + 432 = ~2,160 Salesforce queries a day when nothing changes (one query per
     object per run, no cache writes). Before: ~2,300 a day for the customer list alone.
 
     Needs events:PutRule, events:PutTargets, events:DescribeRule, lambda:AddPermission,
@@ -48,7 +48,7 @@ $Tiers = @(
     @{ Rule = "sundial-cache-sync-incremental";      Rate = "rate(5 minutes)";  Minutes = 5;
        Objects = @("customer", "solar", "job", "estimate", "servicecall", "serviceinvoice") },
     @{ Rule = "sundial-cache-sync-incremental-cold"; Rate = "rate(30 minutes)"; Minutes = 30;
-       Objects = @("roofing", "po", "user", "pricebookitem", "serviceline", "servicepayment", "serviceplan", "membership") }
+       Objects = @("roofing", "po", "user", "pricebookitem", "serviceline", "servicepayment", "serviceplan", "membership", "dealer") }
 )
 
 # JSON with commas cannot go through the AWS CLI's shorthand syntax from PowerShell;

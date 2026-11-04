@@ -968,7 +968,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
-| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`) |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1262,7 +1262,7 @@ Wire script: `scripts/wire-dealer-routes.ps1` (resources `/dealer/customers` +
 
 ---
 
-## Reports — the engine (D-087 / D-088, Reporting R1a, 2026-11-03) — `sundial-reports`
+## Reports — the engine, CSV, saved reports (D-087 / D-088 R1a 2026-11-03 / D-089 R1b 2026-11-04) — `sundial-reports`
 
 Every report reads the **Supabase cache** (D-087) through `public.sundial_report_run`
 (`sql/sundial_report_run.sql`); Salesforce is never queried. Design: `docs/reporting-module.md` §6.
@@ -1270,8 +1270,8 @@ Every report reads the **Supabase cache** (D-087) through `public.sundial_report
 **Access, every request:** the verified JWT → the tenant (never request input; no tenant =
 `403 NO_TENANT`) → action **`reports.read`** = tenant scope (Executive / Admin / Manager).
 **Always on**, not behind `ACCESS_MODEL_MODE`. A Sales Rep, Sales Dealer, Technician or a
-`none`-scope user gets **`403 { error: "forbidden", code: "MODULE_FORBIDDEN" }`** on all three
-routes, before anything is read. **Column gates:** a catalog column with a `gate` (the
+`none`-scope user gets **`403 { error: "forbidden", code: "MODULE_FORBIDDEN" }`** on EVERY
+route below, before anything is read. **Column gates:** a catalog column with a `gate` (the
 `lib/cost-gate.js` cost / markup columns, `service.costing.read`) is removed for a caller
 without that action, from the catalog they are shown and from any definition they run.
 
@@ -1302,12 +1302,49 @@ Errors:
 - `500 REPORT_CATALOG_MISMATCH`: the database's catalog is older than the Lambda's. Re-run the catalog SQL.
 
 ### `GET /reports/types`
-→ `{ types: [{ key, label, base: { alias, object, label }, joins: [{ alias, object, label }], defaultColumns }] }`.
-No table names. R1a: `solar` only (aliases `solar`, `customer`, `rep`).
+→ `{ types: [{ key, label, base: { alias, object, label }, joins: [{ alias, object, label, kind }], defaultColumns }] }`.
+No table names. **Ten types (R1b):** `customers`, `customers_solar`, `solar`, `roofing`, `service_jobs`, `service_calls`, `estimates`, `estimate_lines`, `invoices_payments`, `payments` (joins in `docs/reporting-module.md` §6.2). `kind` is `lookup` | `latest` (the newest child) | `rollup` (one row of measures, e.g. `payments.amount_paid`).
 
 ### `GET /reports/catalog?type=solar`
-→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, picklistValues?, description, longText, operators, selectable }] }] }`.
-This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter, not a column). A missing or unknown `type` is `400 UNKNOWN_TYPE`.
+→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, picklistValues?, description, longText, operators, selectable, csvSelectable }] }] }`.
+This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter on screen; `csvSelectable: true` — a column in a CSV). A rollup alias lists its measures. A missing or unknown `type` is `400 UNKNOWN_TYPE`.
+
+### `POST /reports/csv` (R1b) — asynchronous
+Body: a report definition, as for `/reports/run`, except that `limit` may be up to **50,000** (the default) and long-text fields may be columns.
+→ **`202 { exportId, status: "queued", stripped }`**. The export runs in the background: the Lambda invokes itself with `{ task: "csv", exportId }`. The 400s are those of `/reports/run`; a bad definition is never queued. `502 WORKER_INVOKE_FAILED` = the background run could not start (the export row is marked failed).
+
+### `GET /reports/csv/{exportId}` (R1b)
+→ `200 { exportId, type, status, url, rowCount, truncated, stripped, asOf, expiresAt, createdAt, code? }`.
+- `status` is `queued` | `running` | `done` | `failed`. Poll every few seconds.
+- **When `done`:** `url` is a **presigned S3 GET good for 15 minutes from this read** (`expiresAt`). The object is in `sfsolproj` at `REPORTS/<client_sf_id>/<yyyy-mm-dd>/<exportId>.csv`; it downloads as `<type>-<date>.csv` and S3 deletes it after 7 days. Read the status again for a fresh link.
+- **When `failed`:** `code` is `CSV_TOO_SLOW` (over the worker's ~280 s), `REPORT_CATALOG_MISMATCH`, `WORKER_INVOKE_FAILED`, `CSV_EXPORT_LOST` (queued / running for over 10 minutes) or `CSV_FAILED`.
+- `truncated: true` = more rows matched than the export's `limit`.
+
+**Only the export's owner, in its tenant, sees it.** Anyone else, or an unknown / malformed id, gets **`404 { error: "not_found", code: "RECORD_NOT_FOUND" }`**.
+File format: UTF-8 with a BOM, CRLF, RFC 4180. Headers are "`<object>: <field>`". A text value starting with `= + - @` TAB or CR gets a leading `'`. Datetimes are in Arizona time; booleans are Yes / No.
+
+### Saved reports (R1b) — `GET /reports`, `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `GET /reports/{id}/run`, `GET /reports/{id}/csv`
+A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`.
+
+**Visible** = same tenant AND (yours OR `sharing: "tenant"`). Anything else is **404 `RECORD_NOT_FOUND`**, including someone else's private report and another tenant's report.
+
+| Route | Needs | Answers |
+|---|---|---|
+| `GET /reports` | reports.read | `{ reports: [...] }`, mine + shared with my tenant, newest first (≤ 500) |
+| `POST /reports` `{ name, description?, definition, sharing? }` | reports.write (+ reports.share for `sharing: "tenant"`) | `201` the report + `stripped` |
+| `GET /reports/{id}` | visible | the report |
+| `PATCH /reports/{id}` (any of name / description / definition / sharing) | yours (reports.write; + reports.share to set `tenant`) | `200` the report + `stripped` |
+| `DELETE /reports/{id}` | as PATCH | `204` |
+| `GET /reports/{id}/run` | visible | the `/reports/run` response + `report: { id, name }`, run with **the caller's** gates |
+| `GET /reports/{id}/csv` | visible | `202 { exportId }`, as `POST /reports/csv` (the export is the caller's) |
+
+Errors:
+- `400 invalid_report` with `code` `BAD_NAME` (1–120 characters), `BAD_DESCRIPTION` (≤ 2,000), `BAD_SHARING`, `BAD_DEFINITION` (an unknown body key, e.g. `owner_profile_id`; the owner always comes from the JWT), or a definition error, whose `field` is prefixed `definition.`.
+- `403 SHARE_FORBIDDEN`: sharing needs `reports.share` (every office level has it). The owner may always set `sharing: "private"`.
+- `403 REPORT_READ_ONLY`: editing / deleting a report someone else owns. Only the owner changes a report until `reports.admin` (R2).
+- `403 ACTION_FORBIDDEN`: a create without `reports.write`.
+
+The stored definition is the saver's **visible** one: columns their gates strip are removed before saving.
 
 ---
 

@@ -16,7 +16,17 @@
 //   - a gated column RAISES unless its gate is held; an unknown table / column / alias /
 //     operator / aggregate RAISES; a non-reportable column RAISES;
 //   - the solar type's join aliases resolve (customer, rep);
-//   - anon and authenticated cannot execute either function.
+//   - anon and authenticated cannot execute any of the functions.
+// R1b (D-089), on a second fixture set (tenant RB, every object seeded):
+//   - EVERY report type runs with its default columns, and every join of every type matches
+//     a seeded row at least once (no join is dead);
+//   - latest = the newest child (created_date desc nulls last, sf_id), narrowed by its where;
+//     a customer with no solar keeps its row; tenant isolation inside latest and rollup;
+//   - rollup = Succeeded payments only, a refund subtracts, deposits / refunds / count / last
+//     paid; a job with no payments reads 0 paid, 0 count, blank last-paid; rollup measures
+//     filter, group and aggregate;
+//   - offset pages partition the result exactly; totals:false skips the grand totals;
+//   - the new join shapes RAISE on anything malformed.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -271,7 +281,7 @@ test("unknown identifiers RAISE", async () => {
   await raises({ ...w, base: { table: "pg_authid", alias: "solar" } }, /unknown table pg_authid/);
   await raises({ ...w, base: { table: "sundial_solar_cache", alias: "s; drop table x" } }, /bad base alias/);
   await raises({ ...w, joins: [{ ...w.joins[0], table: "profiles" }] }, /unknown table profiles/);
-  await raises({ ...w, joins: [{ ...w.joins[0], kind: "inner" }] }, /join kind must be left/);
+  await raises({ ...w, joins: [{ ...w.joins[0], kind: "inner" }] }, /join kind must be lookup, latest or rollup/);
   await raises({ ...w, joins: [{ ...w.joins[0], left_column: "nope" }] }, /unknown column solar\.nope/);
   await raises({ ...w, joins: [{ ...w.joins[0], right_column: "nope" }] }, /unknown column customer\.nope/);
   await raises({ ...w, joins: [w.joins[0], w.joins[0]] }, /bad join alias customer/);
@@ -293,11 +303,174 @@ test("the tenant is required", async () => {
 
 test("anon and authenticated cannot execute either function", async () => {
   for (const role of ["anon", "authenticated"]) {
-    for (const fn of ["public.sundial_report_run(text, jsonb)", "public.sundial_report_column(jsonb, text, text, text[], boolean)"]) {
+    for (const fn of ["public.sundial_report_run(text, jsonb)", "public.sundial_report_column(jsonb, text, text, text[], boolean)",
+      "public.sundial_report_join_where(text, jsonb, text[])", "public.sundial_report_ref(jsonb, text, text)"]) {
       const r = await db.query(`select has_function_privilege($1, $2, 'execute') as ok`, [role, fn]);
       assert.equal(r.rows[0].ok, false, `${role} ${fn}`);
     }
   }
   const r = await db.query(`select has_function_privilege('service_role', 'public.sundial_report_run(text, jsonb)', 'execute') as ok`);
   assert.equal(r.rows[0].ok, true);
+});
+
+// =============================================================================================
+// R1b (D-089): every report type, the latest and rollup joins, offset paging, totals:false.
+// A separate tenant (RB) so the R1a fixtures above keep their exact counts.
+// =============================================================================================
+import { REPORT_TYPES, aliasesOf } from "../lib/report-types.js";
+
+const RB = "a0Xrb";
+const rb = (table, row) => insert(table, { client_sf_id: RB, ...row });
+await rb("sundial_dealer_cache", { sf_id: "D1", name: "Desert Dealer", active: true, is_internal: false });
+await insert("sundial_dealer_cache", { sf_id: "DX", client_sf_id: OTHER, name: "Other Dealer" });
+await rb("sundial_user_cache", { sf_id: "RU1", name: "Rhea Rep" });
+await rb("sundial_user_cache", { sf_id: "RU2", name: "Tom Tech" });
+await rb("sundial_user_cache", { sf_id: "RU3", name: "Pam PM" });
+await rb("sundial_customer_cache", { sf_id: "RC1", name: "Cara One", dealer_sf_id: "D1", sales_rep_sf_id: "RU1", assigned_to_sf_id: "RU2", created_date: "2026-01-01T12:00:00Z" });
+await rb("sundial_customer_cache", { sf_id: "RC2", name: "Bo Two", dealer_sf_id: "DX", created_date: "2026-02-01T12:00:00Z" }); // DX is another tenant's dealer
+await rb("sundial_customer_cache", { sf_id: "RC3", name: "Biller Co", created_date: "2026-03-01T12:00:00Z" });
+// RC1's solar: RS2 is the newest of RB's; RS4 has no created date (nulls last); RS3 is newer
+// still but belongs to ANOTHER tenant and must never be picked.
+await rb("sundial_solar_cache", { sf_id: "RS1", project_name: "Old Solar", sundial_customer_sf_id: "RC1", created_date: "2026-01-05T12:00:00Z", stage: "Closed" });
+await rb("sundial_solar_cache", { sf_id: "RS2", project_name: "New Solar", sundial_customer_sf_id: "RC1", created_date: "2026-06-01T12:00:00Z", stage: "Permitting", dealer_sf_id: "D1", sales_rep_sf_id: "RU1", contract_amount: 25000 });
+await rb("sundial_solar_cache", { sf_id: "RS4", project_name: "Undated Solar", sundial_customer_sf_id: "RC1", created_date: null });
+await insert("sundial_solar_cache", { sf_id: "RS3", client_sf_id: OTHER, project_name: "Other tenant solar", sundial_customer_sf_id: "RC1", created_date: "2026-12-01T12:00:00Z" });
+await rb("sundial_roofing_cache", { sf_id: "RR1", name: "ROOF-1", project_name: "Roof One", sundial_customer_sf_id: "RC1", dealer_sf_id: "D1", sales_rep_sf_id: "RU1", project_manager_sf_id: "RU3" });
+await rb("sundial_estimate_cache", { sf_id: "RE1", name: "EST-1", sundial_customer_sf_id: "RC1", service_job_sf_id: "RJ1", sold_by_sf_id: "RU1", total: 500, status: "Approved" });
+await rb("sundial_service_job_cache", { sf_id: "RJ1", name: "SVC-1", sundial_customer_sf_id: "RC1", bill_to_customer_sf_id: "RC3", estimate_sf_id: "RE1", assigned_to_sf_id: "RU2", status: "Invoiced" });
+await rb("sundial_service_job_cache", { sf_id: "RJ2", name: "SVC-2", sundial_customer_sf_id: "RC2", status: "New" });
+// RJ1's invoices: RI1 is the newest but Void; RI2 is the newest NON-void; RI3 older; RIX is
+// another tenant's row pointing at RJ1.
+await rb("sundial_service_invoice_cache", { sf_id: "RI1", name: "SVC-1-INV", service_job_sf_id: "RJ1", status: "Void", total: 100, created_date: "2026-10-10T12:00:00Z" });
+await rb("sundial_service_invoice_cache", { sf_id: "RI2", name: "SVC-1-INV-2", service_job_sf_id: "RJ1", status: "Paid", total: 200, created_date: "2026-10-01T12:00:00Z", bill_to_customer_sf_id: "RC3" });
+await rb("sundial_service_invoice_cache", { sf_id: "RI3", name: "SVC-1-OLD", service_job_sf_id: "RJ1", status: "Sent", total: 300, created_date: "2026-09-01T12:00:00Z" });
+await insert("sundial_service_invoice_cache", { sf_id: "RIX", client_sf_id: OTHER, name: "Other inv", service_job_sf_id: "RJ1", status: "Sent", total: 9, created_date: "2026-11-01T12:00:00Z" });
+// RJ1's payments: a job-level deposit, a payment and a refund on RI2, a FAILED payment, and
+// another tenant's row keyed to RJ1.
+await rb("sundial_service_payment_cache", { sf_id: "RP1", name: "PAY-1", service_job_sf_id: "RJ1", type: "Deposit", status: "Succeeded", amount: 50, received_at: "2026-09-20T12:00:00Z" });
+await rb("sundial_service_payment_cache", { sf_id: "RP2", name: "PAY-2", service_job_sf_id: "RJ1", invoice_sf_id: "RI2", type: "Payment", status: "Succeeded", amount: 200, received_at: "2026-10-05T12:00:00Z", method: "Check" });
+await rb("sundial_service_payment_cache", { sf_id: "RP3", name: "PAY-3", service_job_sf_id: "RJ1", invoice_sf_id: "RI2", type: "Refund", status: "Succeeded", amount: 30, received_at: "2026-10-07T12:00:00Z" });
+await rb("sundial_service_payment_cache", { sf_id: "RP4", name: "PAY-4", service_job_sf_id: "RJ1", invoice_sf_id: "RI2", type: "Payment", status: "Failed", amount: 999, received_at: "2026-10-30T12:00:00Z" });
+await insert("sundial_service_payment_cache", { sf_id: "RPX", client_sf_id: OTHER, name: "Other pay", service_job_sf_id: "RJ1", invoice_sf_id: "RI2", type: "Payment", status: "Succeeded", amount: 5000 });
+await rb("sundial_service_call_cache", { sf_id: "RSC1", name: "SC-1", sundial_service_job_sf_id: "RJ1", tech_sf_id: "RU2", visit_type: "Service", status: "Complete" });
+await rb("sundial_service_call_cache", { sf_id: "RSC2", name: "SC-2", visit_type: "Event", tech_sf_id: "RU2", status: "Scheduled" }); // an event: no job
+await rb("sundial_price_book_item_cache", { sf_id: "RPB1", name: "Panel", item_code: "PNL" });
+await rb("sundial_service_line_cache", { sf_id: "RL1", name: "Panel x2", estimate_sf_id: "RE1", price_book_item_sf_id: "RPB1", quantity: 2, unit_price: 100, line_total: 200 });
+
+const rbRun = (def, opts = {}) => run(def, { tenant: RB, ...opts });
+
+test("R1b: every report type runs with its default columns on seeded rows", async () => {
+  for (const t of Object.values(REPORT_TYPES)) {
+    const r = await rbRun({ type: t.key });
+    assert.ok(r.rows.length > 0, `${t.key}: no rows`);
+    assert.equal(r.rows[0].length, t.defaultColumns.length, t.key);
+    assert.equal(r.truncated, false);
+  }
+});
+
+test("R1b: every join of every type matches a seeded row (no dead join)", async () => {
+  for (const t of Object.values(REPORT_TYPES)) {
+    for (const j of t.joins) {
+      const probe = j.kind === "rollup" ? `${j.alias}.payment_count` : `${j.alias}.${j.object === "solar" ? "project_name" : "name"}`;
+      const r = await rbRun({ type: t.key, columns: [probe] });
+      const hit = r.rows.some((row) => row[0] !== null && row[0] !== 0 && row[0] !== "0");
+      assert.ok(hit, `${t.key}.${j.alias} (${j.kind}) never matched`);
+    }
+  }
+});
+
+test("R1b: the joins are tenant-isolated too (another tenant's dealer / child rows never appear)", async () => {
+  const c = await rbRun({ type: "customers", columns: ["customer.name", "dealer.name"], sort: [{ field: "customer.name" }] });
+  assert.deepEqual(c.rows, [["Biller Co", null], ["Bo Two", null], ["Cara One", "Desert Dealer"]]);
+});
+
+test("R1b latest: the newest child, nulls last, never another tenant's; no child keeps the row", async () => {
+  const r = await rbRun({ type: "customers_solar", columns: ["customer.name", "solar.project_name", "dealer.name", "rep.name"], sort: [{ field: "customer.name" }] });
+  assert.deepEqual(r.rows, [
+    ["Biller Co", null, null, null],
+    ["Bo Two", null, null, null],
+    ["Cara One", "New Solar", "Desert Dealer", "Rhea Rep"],
+  ]);
+  // filter on the latest child's columns
+  const f = await rbRun({ type: "customers_solar", columns: ["customer.name"], filters: [{ field: "solar.stage", op: "eq", value: "Permitting" }] });
+  assert.deepEqual(f.rows, [["Cara One"]]);
+});
+
+test("R1b latest + where: service_jobs shows the newest NON-void invoice", async () => {
+  const r = await rbRun({ type: "service_jobs", columns: ["job.name", "invoice.name", "invoice.total", "invoice.status"], sort: [{ field: "job.name" }] });
+  assert.deepEqual(r.rows, [["SVC-1", "SVC-1-INV-2", 200, "Paid"], ["SVC-2", null, null, null]]);
+});
+
+test("R1b rollup: Succeeded only, refunds subtract, 0 when there are none", async () => {
+  const cols = ["payments.payment_count", "payments.amount_paid", "payments.deposits_paid", "payments.refunds", "payments.last_paid_at"];
+  const j = await rbRun({ type: "service_jobs", columns: ["job.name", ...cols], sort: [{ field: "job.name" }] });
+  assert.deepEqual(j.rows.map((r) => r.map((v) => (typeof v === "string" && v.includes("T") ? v.slice(0, 10) : v))), [
+    ["SVC-1", 3, 220, 50, 30, "2026-10-07"], // 50 + 200 − 30; the Failed 999 and the other tenant's 5000 do not count
+    ["SVC-2", 0, 0, 0, 0, null],
+  ]);
+  // by invoice: the deposit is the job's, not the invoice's
+  const i = await rbRun({ type: "invoices_payments", columns: ["invoice.name", "payments.payment_count", "payments.amount_paid"], sort: [{ field: "invoice.name" }] });
+  assert.deepEqual(i.rows, [["SVC-1-INV", 0, 0], ["SVC-1-INV-2", 2, 170], ["SVC-1-OLD", 0, 0]]);
+});
+
+test("R1b rollup measures filter, group and aggregate (0, not blank, for none)", async () => {
+  const f = await rbRun({ type: "service_jobs", columns: ["job.name"], filters: [{ field: "payments.amount_paid", op: "eq", value: 0 }] });
+  assert.deepEqual(f.rows, [["SVC-2"]]);
+  const blank = await rbRun({ type: "service_jobs", columns: ["job.name"], filters: [{ field: "payments.last_paid_at", op: "is_blank" }] });
+  assert.deepEqual(blank.rows, [["SVC-2"]]);
+  const g = await rbRun({ type: "invoices_payments", groupBy: ["payments.payment_count"], aggregates: [{ fn: "count" }, { fn: "sum", field: "payments.amount_paid" }], sort: [{ field: "payments.payment_count" }] });
+  assert.deepEqual(g.rows, [[0, 2, 0], [2, 1, 170]]);
+  assert.deepEqual(g.aggregates, { count: 3, sum_payments_amount_paid: 170 });
+});
+
+test("R1b offset: pages partition the result exactly; totals:false skips the grand totals", async () => {
+  const all = await run({ type: "solar", columns: ["solar.project_name"], aggregates: [{ fn: "count" }], limit: 5000 }, { tenant: BIG });
+  const n = normalizeDefinition({ type: "solar", columns: ["solar.project_name"], aggregates: [{ fn: "count" }] }, { now: NOW, mode: "csv" });
+  assert.equal(n.wire.totals, false);
+  const pages = [];
+  for (let offset = 0; ; offset += n.wire.limit) {
+    const page = await runWire({ ...n.wire, offset }, BIG);
+    assert.deepEqual(page.aggregates, {}, "a CSV page carries no totals");
+    pages.push(...page.rows);
+    if (!page.truncated) break;
+  }
+  assert.equal(pages.length, 5001);
+  assert.equal(new Set(pages.map((r) => r[0])).size, 5001, "no row twice, none missed");
+  assert.deepEqual(pages.slice(0, 5000), all.rows);
+  await raises({ ...n.wire, offset: 50000 }, /offset must be 0\.\.49999/, BIG);
+  await raises({ ...n.wire, offset: "10" }, /offset must be a number/, BIG);
+  await raises({ ...n.wire, totals: "no" }, /totals must be true or false/, BIG);
+});
+
+test("R1b: malformed latest / rollup joins RAISE", async () => {
+  const sj = normalizeDefinition({ type: "service_jobs", columns: ["job.name"] }, { now: NOW }).wire;
+  const swap = (alias, patch) => ({ ...sj, joins: sj.joins.map((j) => (j.alias === alias ? { ...j, ...patch } : j)) });
+  const inv = sj.joins.find((j) => j.alias === "invoice");
+  const pay = sj.joins.find((j) => j.alias === "payments");
+  await raises(swap("invoice", { where: [{ column: "nope", op: "in", value: ["x"] }] }), /unknown column sundial_service_invoice_cache\.nope/, RB);
+  await raises(swap("invoice", { where: [{ column: "total", op: "in", value: ["1"] }] }), /needs a text column/, RB);
+  await raises(swap("invoice", { where: [{ column: "status", op: "like", value: ["x"] }] }), /op must be in or not_in/, RB);
+  await raises(swap("invoice", { where: [{ column: "status", op: "in", value: "Void" }] }), /list of 1\.\.500 strings/, RB);
+  await raises(swap("invoice", { measures: pay.measures }), /latest join takes no measures/, RB);
+  await raises(swap("customer", { where: inv.where }), /lookup join takes no where/, RB);
+  await raises(swap("payments", { measures: [] }), /1\.\.20 measures/, RB);
+  await raises(swap("payments", { measures: [{ name: "x", fn: "string_agg", column: "name" }] }), /unknown measure function/, RB);
+  await raises(swap("payments", { measures: [{ name: "x", fn: "sum", column: "type" }] }), /sum measure needs a number column/, RB);
+  await raises(swap("payments", { measures: [{ name: "x", fn: "count", column: "amount" }] }), /count measure takes no column/, RB);
+  await raises(swap("payments", { measures: [{ name: "Bad Name", fn: "count" }] }), /bad measure name/, RB);
+  await raises(swap("payments", { measures: [{ name: "x", fn: "count" }, { name: "x", fn: "count" }] }), /bad measure name x/, RB);
+  await raises(swap("payments", { measures: [{ name: "x", fn: "max", column: "amount", negate_when: { column: "type", value: ["Refund"] } }] }), /negate_when is for a sum/, RB);
+  // a rollup's measures are its only columns
+  await raises({ ...sj, columns: [{ alias: "payments", column: "amount" }] }, /unknown column payments\.amount/, RB);
+  await raises({ ...sj, columns: [{ alias: "payments", column: "__key" }] }, /unknown column payments\.__key/, RB);
+  // and a latest still checks its child table
+  await raises(swap("invoice", { table: "profiles" }), /unknown table profiles/, RB);
+  await raises(swap("invoice", { right_column: "nope" }), /unknown column invoice\.nope/, RB);
+});
+
+test("R1b: the aliases the types declare are the ones the wire carries", () => {
+  for (const t of Object.values(REPORT_TYPES)) {
+    const n = normalizeDefinition({ type: t.key }, { now: NOW });
+    assert.deepEqual([n.wire.base.alias, ...n.wire.joins.map((j) => j.alias)], [...aliasesOf(t).keys()]);
+  }
 });

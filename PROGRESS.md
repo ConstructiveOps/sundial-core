@@ -1,5 +1,52 @@
 # Sundial — Progress Log
 
+## 2026-11-04 — Reporting R1b: dealer cache, ten report types, asynchronous CSV, saved reports (D-089, `feature/reports-r1b`)
+
+**Why.** R1a proved the engine on one report type. R1b finishes R1: every report type Harmon needs, a CSV export of up to 50,000 rows, and saved reports that can be shared with the tenant. Tim reviewed the plan and answered every question (D-089).
+
+**Built.**
+- **The dealer cache** (`sql/sundial_dealer_cache.sql`, run by Tim). `dealer` is in `sundial-cache-sync` and on the cold 30-minute rule, and in the report sources. It is reports-only (never in sf-query's allowlist), with no new gate on redlines or vendor ids. The coverage doc and the catalog were regenerated from the live table: dealer adds 18 catalog rows (1,372 in all).
+- **Three join kinds** (`lib/report-types.js`, `lib/report-def.js`, `sql/sundial_report_run.sql`):
+  - `lookup`;
+  - `latest`: the newest child, with a `where`;
+  - `rollup`: declared measures, with `where` / `negateWhen`.
+
+  Each yields at most one row per base row. `latest` / `rollup` are one pass over the child table followed by a hash join: measured live, a per-row LATERAL took 14 s for customers × solar, the single pass 0.7 s. The wire gained `offset` (0–49,999) and `totals`. Two new helpers, both service-role only: `sundial_report_join_where` and `sundial_report_ref` (a rollup count / sum reads 0, not blank).
+- **Ten report types:** customers, customers_solar (the newest solar), solar (+ dealer), roofing (+ dealer, rep, `pm`), service_jobs (newest non-Void invoice + payments rollup by job), service_calls, estimates, estimate_lines, invoices_payments (payments rollup by invoice), **payments** (new). Payments count only when Succeeded, and a Refund subtracts.
+- **The CSV export, asynchronous.** The first step was the timing:
+  - **one 5,000-row customer page takes 0.4–0.8 s** end to end (12–50 columns);
+  - **but the page at offset 34,000 takes 2.1 s** in Postgres with 50 columns, and 19 s with every column;
+  - so a 50,000-row export is not safe inside 25 s, and per Tim's decision 9 it is asynchronous.
+
+  How it works:
+  - `POST /reports/csv` → 202 `{ exportId }`, and the Lambda invokes itself `{ task: "csv", exportId }`.
+  - The worker claims the row once, pages the function and streams 8 MB multipart parts to **`sfsolproj/REPORTS/<client_sf_id>/<date>/<id>.csv`**, never SUNDIAL/.
+  - `GET /reports/csv/{exportId}` → `{ status, url (15-minute presigned GET), rowCount, truncated, … }`.
+  - The file has a BOM, CRLF, RFC 4180 quoting, "`<object>: <field>`" headers, the formula guard on text, and Arizona datetimes.
+  - The Lambda is 1,024 MB / 300 s (set by the wire script), with async retries 0.
+- **Saved reports** (`sql/sundial_reports.sql`: `sundial_reports` + `sundial_report_exports`; `lambdas/sundial-reports/saved.js`; rules in `lib/saved-reports.js`). `GET` / `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `/{id}/run` and `/{id}/csv`.
+  - **Visible** = same tenant AND (owner OR shared). Anything else is 404 `RECORD_NOT_FOUND`, exports included.
+  - **New actions:** `reports.write` and `reports.share`, both every tenant level (amended the same day: Managers can share). Only the owner edits or deletes; `reports.admin` (R2) will let Admin / Executive manage every report.
+  - **The stored definition is the saver's visible one**, re-validated with the runner's gates.
+- **Scripts:**
+  - `wire-reports-routes.ps1`: the routes, the Lambda config and the narrow IAM policy `sundial-reports-export`.
+  - **`add-reports-lifecycle.ps1`**: fetches, merges and prints before / after; it never replaces a rule. Today the bucket has one rule, `archive-old-files`, which it keeps.
+  - `verify-report-run.mjs`: every type as zz-admin, a 12,000-row CSV downloaded and checked, the saved-report visibility both ways, 403 for the sales / tech users on every new route, and it cleans up after itself.
+
+**Tests.** `npm test`: **1,927 / 1,927** pass (was 1,884), and the standalone budget check is 214 / 214. New and changed tests:
+- `sql/sundial_report_run.test.js`: 17 → 27. Every type with its default columns, every join matched, latest = newest non-Void and never another tenant's, the rollup maths, offset pages partitioning 5,001 rows exactly, the new RAISEs.
+- `lambdas/sundial-reports/test.js`: 10 → 20. CSV queue / worker / multipart / status / 404s; saved-report visibility, share, read-only, the runner's gates.
+- `lib/report-types.test.js`: 4 → 7.
+- `lib/report-def.test.js`: 13 → 16.
+- `lib/report-csv.test.js`: 7, new.
+- `lib/saved-reports.test.js`: 7, new.
+- `lib/access.test.js`: +2.
+- `lambdas/sundial-cache-sync/test.js`: +1.
+
+**Found on the way.** The solar cache's customer index is on `(tenant_id, sundial_customer_sf_id)`, not `client_sf_id`, which is why a per-row join was slow. The single-pass join does not need it. **A gap, closed the same day:** with `reports.share` limited to Admin / Executive, nobody could share a Manager's report. Tim decided Managers can share. Sharing someone else's report never let anyone edit it: until `reports.admin`, only the owner changes a report. The verify script now shares as zz-manager through the API.
+
+**Not run yet (Tim):** the three SQL files, three deploys, the two wire scripts, the dealer full sync, the lifecycle script and the verify script (TASKS.md, Reporting R1b, in order). There is no portal screen yet, so no feature-inventory row.
+
 ## 2026-11-03 — Reporting R1a: the report engine, solar type (D-088, `feature/reports-engine`)
 
 **Why.** D-087 put every report on the Supabase cache and R0 made the cache reporting-grade. R1a is the engine spike: one report type end to end, and the shape the other eight will reuse. Tim's decisions (D-088): execution in plpgsql, 5,000 rows on screen, `reports.read` for every tenant-scope level, gated columns stripped before Postgres, dashboards on `Default_Department__c`, sharing private | tenant.

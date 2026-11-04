@@ -3896,3 +3896,46 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **A RAISE from the function** means the Lambda's catalog and the database's disagree (the SQL seed was not re-run after a regeneration): **500 `REPORT_CATALOG_MISMATCH`**.
 
 **Consequences.** A new cache column becomes reportable only after `node scripts/generate-report-catalog.mjs`, re-running its SQL and redeploying `sundial-reports`. Option (b) (`pg`, a direct Postgres connection) is not needed. There is no statement timeout inside the function: Lambda's 30 s and API Gateway's 29 s bound a run, and the tenant clause plus the 5,000 cap bound the result.
+
+## D-089 (2026-11-04): Reporting R1b: the dealer cache, three join kinds, ten report types, an asynchronous CSV export, saved reports
+
+**Context.** R1a (D-088) built the engine on one report type. R1b adds the rest of R1: a dealer table to join, the other report types, a CSV export and saved reports with sharing. Tim reviewed the plan on 2026-11-04 and answered every open question.
+
+**Decision.**
+1. **`sundial_dealer_cache` is a reports-only cache** (`sql/sundial_dealer_cache.sql`, every readable `Sundial_Dealer__c` field, 23 columns). It syncs on the 30-minute cold schedule (`sundial-cache-sync` `OBJECT_ALLOWLIST.dealer`). **It is deliberately not in `sundial-sf-query`'s allowlist**: the roster is an admin lookup (`sundial-user-admin`), not something every portal user reads. **There is no new gate on dealer redlines or Acumatica vendor ids** (Tim): for tenant scope they are ordinary reportable columns.
+2. **There are three join kinds, and each yields at most one row per base row**, so a report always has its base object's rows:
+   - **`lookup`**: R1a's `left`, still accepted.
+   - **`latest`**: the newest child, by `created_date desc nulls last, sf_id`, with an optional `where`.
+   - **`rollup`**: one row of declared measures per parent: count / sum (with `negateWhen`) / max, each with an optional `where`, and the join's `where` over all of them. A rollup's count or sum over no children reads 0.
+   - **How they are built:** `latest` and `rollup` are one pass over the child table (`DISTINCT ON` / `GROUP BY`) followed by hash joins, never a subquery per base row. Measured live: the per-row LATERAL took 14 s for customers × solar, the single pass 0.7 s.
+3. **Ten report types:** customers, customers_solar, solar (+ dealer), roofing (+ a `pm` user: roofing's PM is a real lookup), service_jobs, service_calls, estimates, estimate_lines, invoices_payments and **payments** (new: payment ⟕ invoice ⟕ job ⟕ customer through the job).
+   - **service_jobs shows the newest non-Void invoice.** 76 HCP jobs have 2–3 non-Void invoices.
+   - **Payments are a rollup by job** on service_jobs, so a deposit before the invoice counts. On **invoices_payments**, they are one row per invoice with a rollup by invoice.
+   - **Only Succeeded payments count**, and a Refund (stored positive) subtracts from `amount_paid`.
+4. **The CSV export is asynchronous.** Tim's rule was to build the async version if a full 50,000-row customer export could not finish inside a 25-second stop. The measurement said it cannot:
+   - one 5,000-row page takes 0.4–0.8 s;
+   - but offset paging re-sorts everything before each page: offset 34,000 took 2.1 s in Postgres with 50 columns, and 19 s with every column;
+   - a long-text export is 25 pages of 2,000.
+
+   So:
+   - **`POST /reports/csv`** answers **202 `{ exportId }`** and invokes the Lambda itself (`{ task: "csv", exportId }`).
+   - **The worker** claims the row in `public.sundial_report_exports` (queued → running, so it runs once), pages `sundial_report_run` with the new `offset` / `totals: false`, and streams 8 MB multipart parts to S3.
+   - **`GET /reports/csv/{exportId}`** returns `{ status, url, rowCount, truncated, … }`. The url is a presigned GET valid 15 minutes from that read.
+   - **The Lambda** is 1,024 MB / 300 s with async retries 0, and the worker stops itself 20 s before the timeout (`CSV_TOO_SLOW`).
+   - **Up to 50,000 rows**, and long text is selectable in a CSV only.
+5. **The CSV lives at `sfsolproj` `REPORTS/<client_sf_id>/<yyyy-mm-dd>/<uuid>.csv`, never under `SUNDIAL/`** (Tim). `SUNDIAL/` is the Salesforce-record tree that XFiles Pro and the Dropbox copy-back read, and these files hold contact details.
+   - **The files expire after 7 days**, by a lifecycle rule scoped to `REPORTS/`.
+   - **The rule is added by `scripts/add-reports-lifecycle.ps1`**, which fetches the bucket's configuration, adds the rule only if its id is absent, writes the merged configuration back and prints the rules before and after. It never uses a bare put, which would replace the bucket's existing `archive-old-files` rule (SUNDIAL/ → Glacier at 365 days).
+6. **Saved reports:** `public.sundial_reports` (service-role only, no FK on the owner).
+   - **Visible** = same tenant AND (owner OR `sharing = 'tenant'`). Anything else is **404 `RECORD_NOT_FOUND`**, exports included: an export is visible to its owner only.
+   - **`reports.write`** (every tenant level): create a report, and edit / delete your own.
+   - **`reports.share`** (every tenant level, Managers included; no `ACTION_LEVELS` row): the owner sets their report's sharing to `tenant`. *Amended 2026-11-04 (Tim): it was first Admin / Executive only, which left a Manager's report unshareable by anyone.*
+   - **Only the owner edits or deletes a report.** A report someone else shared is read-only (403 `REPORT_READ_ONLY`), for Admins too.
+   - **The owner can always set their own report back to private.**
+   - **The stored definition is the saver's visible one**, with gated references removed. It is re-validated with the runner's gates on every run.
+   - **`reports.admin` (R2, Admin / Executive) is how Admins will see and manage every report in the tenant**: anyone's, shared or private (edit, delete, share / unshare). The `schedule` column comes in R3 (Tim).
+
+**Consequences.**
+- **Every office user can publish a report to the whole tenant**, and until `reports.admin` nobody but the owner can take a shared report down. `scripts/verify-report-run.mjs` proves the sharing rule entirely through the API: zz-manager shares, and zz-admin sees the report read-only.
+- **The engine has two more helper functions.** `sundial_report_join_where` and `sundial_report_ref` are service-role only, like `sundial_report_run` and `sundial_report_column`.
+- **A deleted saved report keeps its exports.** An export row stays until it is deleted, and its file is gone after 7 days.

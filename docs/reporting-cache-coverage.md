@@ -20,6 +20,7 @@
 | `sundial_user_cache` | every field the integration user can read (no workbook) | 30 | 0 | 1 | 0 | 767 |
 | `sundial_membership_cache` | every field the integration user can read (no workbook) | 38 | 0 | 0 | 0 | 1,074 |
 | `sundial_service_plan_cache` | every field the integration user can read (no workbook) | 30 | 0 | 0 | 0 | 801 |
+| `sundial_dealer_cache` | every field the integration user can read (no workbook) | 17 | 0 | 0 | 0 | 524 |
 
 *Sync query URI* = the length of the incremental sync's GET once the columns exist (the parent-modstamp
 OR included). Salesforce refuses a URI over 16,384 bytes; a table marked **OVER** must not get its
@@ -211,6 +212,18 @@ none
 Source: every field the integration user can read (no workbook).
 
 **Already cached (30):** `ownerid_sf_id`, `isdeleted`, `name`, `createddate`, `createdbyid_sf_id`, `lastmodifieddate`, `lastmodifiedbyid_sf_id`, `systemmodstamp`, `availability`, `client_sf_id`, `discount_description`, `discount_scope`, `discount_type`, `discount_value`, `features`, `highlight`, `includes_cleaning`, `includes_tune_up`, `kind`, `monthly_price`, `notes`, `plan_code`, `price_book_item_code`, `price`, `sort_order`, `stripe_monthly_price_id`, `stripe_product_id`, `stripe_yearly_price_id`, `tagline`, `yearly_price`
+
+**Added (0):**
+none
+
+**Skipped (0):**
+none
+
+## `sundial_dealer_cache` — Sundial_Dealer__c
+
+Source: every field the integration user can read (no workbook).
+
+**Already cached (17):** `ownerid_sf_id`, `isdeleted`, `name`, `createddate`, `createdbyid_sf_id`, `lastmodifieddate`, `lastmodifiedbyid_sf_id`, `systemmodstamp`, `lastvieweddate`, `lastreferenceddate`, `active`, `client_sf_id`, `is_internal`, `acumatica_vendor_id`, `acumatica_vendor_name`, `redline_lightreach_ppw`, `redline_ppw`
 
 **Added (0):**
 none

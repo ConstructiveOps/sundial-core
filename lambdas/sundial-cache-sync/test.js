@@ -383,3 +383,8 @@ test("an unknown object is rejected before any work", async () => {
   assert.equal(res.error, "OBJECT_NOT_ALLOWED");
   assert.equal(ctx.soqlCalls.length, 0);
 });
+
+test("dealer is a synced object (D-089: the reports-only dealer cache)", async () => {
+  const { OBJECT_ALLOWLIST } = await import("./index.js");
+  assert.deepEqual(OBJECT_ALLOWLIST.dealer, { sfObject: "Sundial_Dealer__c", cacheTable: "sundial_dealer_cache" });
+});

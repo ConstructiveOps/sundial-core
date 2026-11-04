@@ -471,7 +471,7 @@ stopped covering.
 | Rule | Rate | Objects | Healthy bar |
 |---|---|---|---|
 | `sundial-cache-sync-incremental` | 5 min | customer, solar, job, estimate, servicecall, serviceinvoice | 15 min |
-| `sundial-cache-sync-incremental-cold` | 30 min | roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership | 90 min |
+| `sundial-cache-sync-incremental-cold` | 30 min | roofing, po, user, pricebookitem, serviceline, servicepayment, serviceplan, membership, dealer | 90 min |
 
 Each rule passes `{ "objects": [...], "intervalMinutes": N }`; the interval rides on the
 run row, so each object is judged by its own schedule. **Pause the hot rule during a full
@@ -482,7 +482,7 @@ that is slow-but-correct, by design. **Lag:** a change made directly
 in Salesforce shows in the portal within one interval (≤5 min hot, ≤30 min cold) — the
 old TTL allowed up to 10 minutes for everything.
 
-**API cost.** A zero-change run is one SOQL per object: 6 × 288 + 8 × 48 = **~2,112
+**API cost.** A zero-change run is one SOQL per object: 6 × 288 + 9 × 48 = **~2,160
 queries a day**, plus whatever actually changed (paged at 2,000 rows per query). Before:
 the customer list alone re-fetched ~197 queries per stale Sales load — **~2,300 a day**
 on the 2026-09-21 → 10-05 average, plus every other list. The win is latency and
@@ -663,3 +663,15 @@ the vacuum**, never straight after the resync.
 
 **Result (run 2026-11-02):** customer 85 → 85 ms; solar 22 → 179 ms right after the resync
 (dead tuples), 32 ms after `vacuum (analyze)`. No sibling table — the wide tables stand.
+
+## The dealer cache — reports only (D-089, 2026-11-04)
+
+`sundial_dealer_cache` (`sql/sundial_dealer_cache.sql`) holds every readable
+`Sundial_Dealer__c` field: name, active, internal, the two Acumatica vendor fields and the two
+redline rates. It syncs on the cold 30-minute rule like any other object
+(`OBJECT_ALLOWLIST.dealer`, created date = `CreatedDate`). **It exists so report types can join
+the dealer** (customers, customers_solar, solar, roofing). It is **not** in `sundial-sf-query`'s
+allowlist: the dealer roster stays an admin lookup served by `sundial-user-admin` from
+Salesforce. **Seed it once** after the table exists with a full run of
+`{ "object": "dealer", "mode": "full" }` (TASKS.md, Reporting R1b). After that the schedule
+keeps it current.

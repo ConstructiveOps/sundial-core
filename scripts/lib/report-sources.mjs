@@ -38,6 +38,7 @@ export const OBJECTS = [
   { key: "user", sfObject: "Sundial_User__c", cacheTable: "sundial_user_cache" },
   { key: "membership", sfObject: "Sundial_Membership__c", cacheTable: "sundial_membership_cache" },
   { key: "serviceplan", sfObject: "Sundial_Service_Plan__c", cacheTable: "sundial_service_plan_cache" },
+  { key: "dealer", sfObject: "Sundial_Dealer__c", cacheTable: "sundial_dealer_cache" },
 ];
 
 /** Where the field list came from, for the coverage report. */

@@ -1422,7 +1422,28 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('serviceplan', 'sundial_service_plan_cache', 'created_date', 'timestamp with time zone', null, true),
   ('serviceplan', 'sundial_service_plan_cache', 'sf_id', 'text', null, false);
 
+-- sundial_dealer_cache (Sundial_Dealer__c) — 18 column(s)
+insert into public.sundial_report_catalog (object_key, table_name, column_name, data_type, gate, reportable) values
+  ('dealer', 'sundial_dealer_cache', 'ownerid_sf_id', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'isdeleted', 'boolean', null, false),
+  ('dealer', 'sundial_dealer_cache', 'name', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'createddate', 'timestamp with time zone', null, true),
+  ('dealer', 'sundial_dealer_cache', 'createdbyid_sf_id', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'lastmodifieddate', 'timestamp with time zone', null, true),
+  ('dealer', 'sundial_dealer_cache', 'lastmodifiedbyid_sf_id', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'systemmodstamp', 'timestamp with time zone', null, true),
+  ('dealer', 'sundial_dealer_cache', 'lastvieweddate', 'timestamp with time zone', null, false),
+  ('dealer', 'sundial_dealer_cache', 'lastreferenceddate', 'timestamp with time zone', null, false),
+  ('dealer', 'sundial_dealer_cache', 'active', 'boolean', null, true),
+  ('dealer', 'sundial_dealer_cache', 'is_internal', 'boolean', null, true),
+  ('dealer', 'sundial_dealer_cache', 'acumatica_vendor_id', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'acumatica_vendor_name', 'text', null, true),
+  ('dealer', 'sundial_dealer_cache', 'redline_lightreach_ppw', 'numeric', null, true),
+  ('dealer', 'sundial_dealer_cache', 'redline_ppw', 'numeric', null, true),
+  ('dealer', 'sundial_dealer_cache', 'created_date', 'timestamp with time zone', null, true),
+  ('dealer', 'sundial_dealer_cache', 'sf_id', 'text', null, false);
+
 commit;
 
--- 1354 column(s) in all. Check (must be 1354):
+-- 1372 column(s) in all. Check (must be 1372):
 select count(*) as catalog_rows from public.sundial_report_catalog;

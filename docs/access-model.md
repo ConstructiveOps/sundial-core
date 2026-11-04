@@ -777,6 +777,11 @@ The same predicate is materialized for RLS (§5.2) so the mentions picker and th
 | Dealer shell — `GET /dealer/customers`, `GET /dealer/customers/{id}` (`dealer.read`, `sundial-dealer`, 2026-10-23) | ✔ | ✔ | ✔ **rows by the customer row filter only**; the customer's solar is read THROUGH the customer (by `Sundial_Customer__c`, never its own `Dealer__c` / `Sales_Rep__c` — D-086, the same rule as `record_visible_for` v4); fields per the customer and solar manifests. The gate is always on (not behind `ACCESS_MODEL_MODE`) |
 | Solar files: any | ✔ | ✔ | ✘ 403 (all four file Lambdas, including `list-related-files` which is ungated today) |
 | Copy files to Solar | ✔ | ✔ | ✘ |
+| Reports — run, types, catalog (`reports.read`, `sundial-reports`, D-088) | ✔ | ✔ (gated cost / markup columns stripped without `service.costing.read`) | ✘ 403 `MODULE_FORBIDDEN` on every reports route |
+| Reports — CSV export (`POST /reports/csv`, `GET /reports/csv/{id}`, D-089) | ✔ own exports | ✔ own exports | ✘ 403 `MODULE_FORBIDDEN` |
+| Saved reports — create, edit / delete your own (`reports.write`, D-089) | ✔ | ✔ | ✘ 403 `MODULE_FORBIDDEN` |
+| Saved reports — share with the tenant; edit / delete any shared report (`reports.share`, D-089) | ✔ Admin | ✔ Executive · ✘ Manager (403 `SHARE_FORBIDDEN` / `REPORT_READ_ONLY`) | ✘ |
+| Saved reports / exports someone else owns and has not shared (or another tenant's) | 404 `RECORD_NOT_FOUND` | 404 | 403 (reports.read first) |
 | Manage Users | Super Admin only | — | — |
 | Welcome Call / Retell, Aurora inbound, comment-notify | webhooks; unchanged | | |
 

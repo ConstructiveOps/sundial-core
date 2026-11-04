@@ -104,6 +104,13 @@ export const OBJECT_ALLOWLIST = {
     sfObject: "Sundial_Membership__c",
     cacheTable: "sundial_membership_cache",
   },
+  // Dealers (D-064 / D-085). A REPORTS-ONLY cache (D-089, Reporting R1b): report types join
+  // it; it is deliberately NOT in sundial-sf-query's allowlist (the roster is an admin
+  // lookup, served by sundial-user-admin straight from Salesforce).
+  dealer: {
+    sfObject: "Sundial_Dealer__c",
+    cacheTable: "sundial_dealer_cache",
+  },
 };
 
 const SF_API_VERSION = "v60.0";
@@ -131,6 +138,7 @@ const CREATED_DATE_SOURCE = {
   servicepayment: ["CreatedDate"],
   serviceplan: ["CreatedDate"],
   membership: ["CreatedDate"],
+  dealer: ["CreatedDate"],
 };
 const DEFAULT_CREATED_DATE_SOURCE = ["CreatedDate"];
 

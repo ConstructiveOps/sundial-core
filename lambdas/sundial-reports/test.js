@@ -24,9 +24,10 @@
 //   - status: the owner gets a 15-minute presigned GET of that key; another user, another
 //     tenant, a bad id → 404 RECORD_NOT_FOUND; a stuck row reads CSV_EXPORT_LOST;
 //   - saved reports: a Manager's private report is invisible (404 on read / edit / delete /
-//     run / csv) to an Admin until shared; a Manager cannot share (403 SHARE_FORBIDDEN) but can
-//     unshare their own; a shared report is read-only to a Manager who does not own it
-//     (403 REPORT_READ_ONLY) and editable by an Admin; the owner is the JWT's, never the body's;
+//     run / csv) to an Admin until the Manager shares it through the API (Managers share —
+//     D-089) and visible after; the owner can unshare; a report someone else owns is
+//     read-only to everyone, Admins included (403 REPORT_READ_ONLY — managing others' reports
+//     is R2's reports.admin); the owner is the JWT's, never the body's;
 //     a saved report runs with the RUNNER's gates; the list is mine + shared, newest first.
 
 import test from "node:test";
@@ -537,7 +538,7 @@ test("csv status: the owner gets a 15-minute link; anyone else, another tenant o
 // =========================================================================================
 // R1b — saved reports
 // =========================================================================================
-test("saved: a Manager's private report is invisible to an Admin until it is shared", async () => {
+test("saved: a Manager's private report is invisible to an Admin until the Manager shares it", async () => {
   reset("Manager");
   const created = await call("/reports", { method: "POST", body: { name: "My pipeline", definition: SIMPLE } });
   assert.equal(created.status, 201);
@@ -549,12 +550,6 @@ test("saved: a Manager's private report is invisible to an Admin until it is sha
   assert.equal(row.created_by, USERS.Manager.profile);
   assert.equal(row.client_sf_id, TENANT);
 
-  // a Manager cannot share
-  const share = await call(`/reports/${id}`, { method: "PATCH", body: { sharing: "tenant" } });
-  assert.equal(share.status, 403);
-  assert.equal(share.body.code, "SHARE_FORBIDDEN");
-  assert.equal(ctx.tables.sundial_reports[0].sharing, "private");
-
   as("Admin");
   assert.deepEqual((await call("/reports")).body.reports, []);
   for (const [path, opts] of [[`/reports/${id}`], [`/reports/${id}`, { method: "PATCH", body: { name: "mine now" } }], [`/reports/${id}`, { method: "DELETE" }], [`/reports/${id}/run`], [`/reports/${id}/csv`]]) {
@@ -565,10 +560,15 @@ test("saved: a Manager's private report is invisible to an Admin until it is sha
   assert.equal(ctx.tables.sundial_reports[0].name, "My pipeline");
   assert.equal(ctx.rpcCalls.length + ctx.invokes.length, 0);
 
-  // shared (by whoever may — here the row is flipped as an Admin share would), the Admin sees it
-  ctx.tables.sundial_reports[0].sharing = "tenant";
+  // the Manager shares it, through the API
+  as("Manager");
+  const share = await call(`/reports/${id}`, { method: "PATCH", body: { sharing: "tenant" } });
+  assert.equal(share.status, 200);
+  assert.equal(share.body.sharing, "tenant");
+  as("Admin");
   const list = await call("/reports");
-  assert.deepEqual(list.body.reports.map((r) => [r.id, r.mine, r.canEdit]), [[id, false, true]]);
+  assert.deepEqual(list.body.reports.map((r) => [r.id, r.mine, r.canEdit]), [[id, false, false]], "visible, read-only to the Admin");
+  assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "taken" } })).body.code, "REPORT_READ_ONLY");
   assert.equal((await call(`/reports/${id}`)).status, 200);
   const run = await call(`/reports/${id}/run`);
   assert.equal(run.status, 200);
@@ -587,7 +587,7 @@ test("saved: a Manager's private report is invisible to an Admin until it is sha
   assert.deepEqual((await call("/reports")).body.reports, []);
 });
 
-test("saved: an Admin shares; a non-owner Manager reads it but cannot change it; an Executive can", async () => {
+test("saved: a shared report is read-only to everyone but its owner (Admins too, until reports.admin)", async () => {
   reset("Admin");
   const c = await call("/reports", { method: "POST", body: { name: "Team", description: "everyone", definition: SIMPLE, sharing: "tenant" } });
   assert.equal(c.status, 201);
@@ -598,10 +598,13 @@ test("saved: an Admin shares; a non-owner Manager reads it but cannot change it;
   assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "x" } })).body.code, "REPORT_READ_ONLY");
   assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 403);
   as("Executive");
+  assert.equal((await call(`/reports/${id}`, { method: "PATCH", body: { name: "x" } })).body.code, "REPORT_READ_ONLY");
+  assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 403);
+  as("Admin");
   const e = await call(`/reports/${id}`, { method: "PATCH", body: { name: "Team v2" } });
   assert.equal(e.status, 200);
   assert.equal(e.body.name, "Team v2");
-  assert.equal(ctx.tables.sundial_reports[0].updated_by, USERS.Executive.profile);
+  assert.equal(ctx.tables.sundial_reports[0].updated_by, USERS.Admin.profile);
   assert.equal(ctx.tables.sundial_reports[0].owner_profile_id, USERS.Admin.profile, "an edit never moves ownership");
   assert.equal((await call(`/reports/${id}`, { method: "DELETE" })).status, 204);
   assert.equal(ctx.tables.sundial_reports.length, 0);

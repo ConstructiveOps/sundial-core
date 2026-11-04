@@ -3929,12 +3929,13 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 6. **Saved reports:** `public.sundial_reports` (service-role only, no FK on the owner).
    - **Visible** = same tenant AND (owner OR `sharing = 'tenant'`). Anything else is **404 `RECORD_NOT_FOUND`**, exports included: an export is visible to its owner only.
    - **`reports.write`** (every tenant level): create a report, and edit / delete your own.
-   - **`reports.share`** (Admin / Executive, an `ACTION_LEVELS` row): set sharing to `tenant`, and edit / delete any report shared with the tenant.
+   - **`reports.share`** (every tenant level, Managers included; no `ACTION_LEVELS` row): the owner sets their report's sharing to `tenant`. *Amended 2026-11-04 (Tim): it was first Admin / Executive only, which left a Manager's report unshareable by anyone.*
+   - **Only the owner edits or deletes a report.** A report someone else shared is read-only (403 `REPORT_READ_ONLY`), for Admins too.
    - **The owner can always set their own report back to private.**
    - **The stored definition is the saver's visible one**, with gated references removed. It is re-validated with the runner's gates on every run.
-   - **`reports.admin` comes in R2 and the `schedule` column in R3** (Tim).
+   - **`reports.admin` (R2, Admin / Executive) is how Admins will see and manage every report in the tenant**: anyone's, shared or private (edit, delete, share / unshare). The `schedule` column comes in R3 (Tim).
 
 **Consequences.**
-- **Nobody can share a Manager's report until R2.** A Manager lacks `reports.share`, and an Admin cannot see another user's private report. `scripts/verify-report-run.mjs` therefore proves the "visible once shared" rule by setting its own test row to shared with the service role.
+- **Every office user can publish a report to the whole tenant**, and until `reports.admin` nobody but the owner can take a shared report down. `scripts/verify-report-run.mjs` proves the sharing rule entirely through the API: zz-manager shares, and zz-admin sees the report read-only.
 - **The engine has two more helper functions.** `sundial_report_join_where` and `sundial_report_ref` are service-role only, like `sundial_report_run` and `sundial_report_column`.
 - **A deleted saved report keeps its exports.** An export row stays until it is deleted, and its file is gone after 7 days.

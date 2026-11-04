@@ -968,7 +968,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
-| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`). 1,024 MB / 300 s (the CSV worker self-invokes) |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1333,15 +1333,15 @@ A saved report: `{ id, name, description, type, definition, sharing: "private" |
 | `GET /reports` | reports.read | `{ reports: [...] }`, mine + shared with my tenant, newest first (≤ 500) |
 | `POST /reports` `{ name, description?, definition, sharing? }` | reports.write (+ reports.share for `sharing: "tenant"`) | `201` the report + `stripped` |
 | `GET /reports/{id}` | visible | the report |
-| `PATCH /reports/{id}` (any of name / description / definition / sharing) | yours + reports.write, or shared + reports.share | `200` the report + `stripped` |
+| `PATCH /reports/{id}` (any of name / description / definition / sharing) | yours (reports.write; + reports.share to set `tenant`) | `200` the report + `stripped` |
 | `DELETE /reports/{id}` | as PATCH | `204` |
 | `GET /reports/{id}/run` | visible | the `/reports/run` response + `report: { id, name }`, run with **the caller's** gates |
 | `GET /reports/{id}/csv` | visible | `202 { exportId }`, as `POST /reports/csv` (the export is the caller's) |
 
 Errors:
 - `400 invalid_report` with `code` `BAD_NAME` (1–120 characters), `BAD_DESCRIPTION` (≤ 2,000), `BAD_SHARING`, `BAD_DEFINITION` (an unknown body key, e.g. `owner_profile_id`; the owner always comes from the JWT), or a definition error, whose `field` is prefixed `definition.`.
-- `403 SHARE_FORBIDDEN`: sharing needs Admin / Executive. The owner may always set `sharing: "private"`.
-- `403 REPORT_READ_ONLY`: a report someone else shared, edited without `reports.share`.
+- `403 SHARE_FORBIDDEN`: sharing needs `reports.share` (every office level has it). The owner may always set `sharing: "private"`.
+- `403 REPORT_READ_ONLY`: editing / deleting a report someone else owns. Only the owner changes a report until `reports.admin` (R2).
 - `403 ACTION_FORBIDDEN`: a create without `reports.write`.
 
 The stored definition is the saver's **visible** one: columns their gates strip are removed before saving.

@@ -10,7 +10,8 @@
 //
 // Every rule is lib/saved-reports.js: visible = same tenant AND (owner OR shared); anything
 // else 404 RECORD_NOT_FOUND. reports.read was checked by index.js before any of this; writing
-// needs reports.write, sharing with the tenant reports.share (Admin / Executive).
+// needs reports.write and only the owner may edit / delete (reports.admin is R2); sharing your
+// own report with the tenant needs reports.share (every tenant level).
 // The owner, created_by and updated_by are the caller's profile id from the verified JWT —
 // never a body field (validateInput refuses unknown keys).
 

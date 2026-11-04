@@ -187,14 +187,14 @@ Action **`reports.read`** = tenant scope (Executive / Admin / Manager), always e
 
 Actions:
 - **`reports.write`** = every tenant level: create a report, and edit / delete your own.
-- **`reports.share`** = tenant scope AND Admin / Executive (`ACTION_LEVELS`): set sharing to `tenant`, and edit / delete any report shared with the tenant.
+- **`reports.share`** = every tenant level, Managers included (Tim, 2026-11-04; no `ACTION_LEVELS` row): **the owner** sets their report's sharing to `tenant`.
 - **The owner may always set their own report back to private.**
+- **Only the owner edits or deletes a report.** A report someone else shared is read-only to everyone, Admins included, until `reports.admin` (R2).
 
 **The 404 rule:** a saved report or an export the caller may not see (another tenant's, someone else's private one, someone else's export) answers **404 `RECORD_NOT_FOUND`**, the same as one that does not exist. `reports.read` is checked first, so a sales user gets 403 `MODULE_FORBIDDEN` on every route.
-Error codes: a report someone else shared, edited by a caller without `reports.share`, is **403 `REPORT_READ_ONLY`**. A share without `reports.share` is **403 `SHARE_FORBIDDEN`**.
+Error codes: editing or deleting a report someone else owns (and shared) is **403 `REPORT_READ_ONLY`**. A share without `reports.share` is **403 `SHARE_FORBIDDEN`**; no office level hits it today.
 
-**R2+:** `GET /dashboards/me`. Actions `reports.admin` (dashboards, and anyone's private report: Admin / Executive), `reports.ai` (R4, with a per-tenant monthly budget in `sundial/anthropic`).
-**Known gap until `reports.admin` (R2):** nobody can share a Manager's report. A Manager lacks `reports.share`, and an Admin cannot see another user's private report to share it. A Manager's report stays private until then; a report meant for everyone is saved by an Admin or Executive.
+**R2+:** `GET /dashboards/me`. Actions **`reports.admin`** (Admin / Executive): **see and manage every report in the tenant**, anyone's, shared or private, plus the dashboards. Also `reports.ai` (R4, with a per-tenant monthly budget in `sundial/anthropic`).
 
 ### 6.6 Storage — saved reports (built, R1b) / dashboards (R2)
 `sql/sundial_reports.sql`: **`public.sundial_reports`** (id uuid, client_sf_id, owner_profile_id, name ≤ 120, description ≤ 2,000, definition jsonb, **sharing `private` | `tenant`**, created_at / updated_at / created_by / updated_by). There is no foreign key on the owner: a deleted login must not delete reports others rely on, and the id always comes from the verified JWT. `schedule` is R3. Rules in `lib/saved-reports.js`:

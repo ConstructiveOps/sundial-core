@@ -780,7 +780,8 @@ The same predicate is materialized for RLS (§5.2) so the mentions picker and th
 | Reports — run, types, catalog (`reports.read`, `sundial-reports`, D-088) | ✔ | ✔ (gated cost / markup columns stripped without `service.costing.read`) | ✘ 403 `MODULE_FORBIDDEN` on every reports route |
 | Reports — CSV export (`POST /reports/csv`, `GET /reports/csv/{id}`, D-089) | ✔ own exports | ✔ own exports | ✘ 403 `MODULE_FORBIDDEN` |
 | Saved reports — create, edit / delete your own (`reports.write`, D-089) | ✔ | ✔ | ✘ 403 `MODULE_FORBIDDEN` |
-| Saved reports — share with the tenant; edit / delete any shared report (`reports.share`, D-089) | ✔ Admin | ✔ Executive · ✘ Manager (403 `SHARE_FORBIDDEN` / `REPORT_READ_ONLY`) | ✘ |
+| Saved reports — share your own with the tenant (`reports.share`, D-089) | ✔ | ✔ (Managers too) | ✘ |
+| Saved reports — edit / delete a report someone else owns | ✘ 403 `REPORT_READ_ONLY` until `reports.admin` (R2, Admin / Executive: see and manage every report) | ✘ 403 `REPORT_READ_ONLY` | ✘ |
 | Saved reports / exports someone else owns and has not shared (or another tenant's) | 404 `RECORD_NOT_FOUND` | 404 | 403 (reports.read first) |
 | Manage Users | Super Admin only | — | — |
 | Welcome Call / Retell, Aurora inbound, comment-notify | webhooks; unchanged | | |

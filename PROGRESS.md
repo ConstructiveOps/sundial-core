@@ -26,7 +26,7 @@
   - The Lambda is 1,024 MB / 300 s (set by the wire script), with async retries 0.
 - **Saved reports** (`sql/sundial_reports.sql`: `sundial_reports` + `sundial_report_exports`; `lambdas/sundial-reports/saved.js`; rules in `lib/saved-reports.js`). `GET` / `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `/{id}/run` and `/{id}/csv`.
   - **Visible** = same tenant AND (owner OR shared). Anything else is 404 `RECORD_NOT_FOUND`, exports included.
-  - **New actions:** `reports.write` (every tenant level) and `reports.share` (Admin / Executive).
+  - **New actions:** `reports.write` and `reports.share`, both every tenant level (amended the same day: Managers can share). Only the owner edits or deletes; `reports.admin` (R2) will let Admin / Executive manage every report.
   - **The stored definition is the saver's visible one**, re-validated with the runner's gates.
 - **Scripts:**
   - `wire-reports-routes.ps1`: the routes, the Lambda config and the narrow IAM policy `sundial-reports-export`.
@@ -43,7 +43,7 @@
 - `lib/access.test.js`: +2.
 - `lambdas/sundial-cache-sync/test.js`: +1.
 
-**Found on the way.** The solar cache's customer index is on `(tenant_id, sundial_customer_sf_id)`, not `client_sf_id`, which is why a per-row join was slow. The single-pass join does not need it. **A gap for R2:** nobody can share a Manager's report, because a Manager lacks `reports.share` and an Admin cannot see another user's private report. Tim to decide. The verify script proves the visibility rule by setting its own test row to shared with the service role.
+**Found on the way.** The solar cache's customer index is on `(tenant_id, sundial_customer_sf_id)`, not `client_sf_id`, which is why a per-row join was slow. The single-pass join does not need it. **A gap, closed the same day:** with `reports.share` limited to Admin / Executive, nobody could share a Manager's report. Tim decided Managers can share. Sharing someone else's report never let anyone edit it: until `reports.admin`, only the owner changes a report. The verify script now shares as zz-manager through the API.
 
 **Not run yet (Tim):** the three SQL files, three deploys, the two wire scripts, the dealer full sync, the lifecycle script and the verify script (TASKS.md, Reporting R1b, in order). There is no portal screen yet, so no feature-inventory row.
 

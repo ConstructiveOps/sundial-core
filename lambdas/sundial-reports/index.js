@@ -23,7 +23,7 @@
 //      removed from the catalog this caller sees and from any definition they run, unless
 //      canAction(gate) — lib/report-def.js does the removing and names it in `stripped`.
 //   3b. Saved reports and exports: visible = same tenant AND (owner OR shared); anything else
-//      is 404 RECORD_NOT_FOUND (lib/saved-reports.js). reports.write / reports.share for writes.
+//      is 404 RECORD_NOT_FOUND (lib/saved-reports.js). reports.write / reports.share (owner only) for writes.
 //   4. sundial_report_run re-checks every identifier against public.sundial_report_catalog
 //      and RAISES on anything it does not know. The Lambda has already checked the same
 //      things, so a RAISE means the deployed catalog and the database disagree (the SQL seed

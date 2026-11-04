@@ -30,7 +30,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **4. Dealer resync event:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "dealer", "mode": "full" }`. Then, in the SQL editor, `select client_sf_id, count(*) from public.sundial_dealer_cache group by 1;` should show **62** for Harmon (`a1W7y000007AszBEAS`) and **3** for the demo tenant.
 - [ ] **5. Lifecycle script:** `.\scripts\add-reports-lifecycle.ps1`. It prints the rules BEFORE: today one, `archive-old-files` (SUNDIAL/ → Glacier at 365 days). Answer **y**. The AFTER list read back from S3 must show **both** `archive-old-files` and `sundial-reports-csv-expire-7d` (prefix `REPORTS/`, 7 days). Re-running it is safe; it then changes nothing.
 - [ ] **6. Verify:** `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users, writes only its own "ZZ VERIFY" saved reports and exports, and deletes them (and their CSV files) at the end.
-- [ ] **Decide for R2:** nobody can share a Manager's report yet. A Manager lacks `reports.share`, and an Admin cannot see another user's private report. Is `reports.admin` (Admin / Executive: see and share anyone's report) the R2 answer, or should a Manager be able to share?
+- [x] **Decided (Tim, 2026-11-04): Managers can share.** `reports.share` is every tenant level; only the owner edits or deletes; `reports.admin` (R2, Admin / Executive) will see and manage every report in the tenant.
+- [ ] **R2:** `reports.admin`: Admin / Executive see, edit, delete and share / unshare every report in the tenant.
 
 ## 2026-11-03 — Reporting R1a: the engine, solar type (D-088, `feature/reports-engine`) — DONE, run 2026-11-04
 

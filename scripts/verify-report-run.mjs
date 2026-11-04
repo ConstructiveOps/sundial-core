@@ -24,13 +24,13 @@
 //               status is polled until done, the presigned URL downloads, its first line is the
 //               header (BOM, "<object>: <field>") and it holds rowCount rows. Nothing is written
 //               to disk and no value is printed.
-//   G. SAVED    zz-manager saves a PRIVATE report: zz-admin cannot list, read or run it (404);
-//               zz-manager's own attempt to share it is 403 SHARE_FORBIDDEN. The script then
-//               flips that one row to shared with the service role (no one can through the API
-//               yet: an Admin cannot see another's private report — reports.admin is R2) and
-//               zz-admin can list, read and run it; zz-manager takes it back to private and it
-//               is 404 again. Then zz-admin saves a private report, zz-manager cannot see it,
-//               zz-admin shares it, zz-manager sees it read-only (PATCH 403 REPORT_READ_ONLY).
+//   G. SAVED    zz-manager saves a PRIVATE report: zz-admin cannot list, read, edit, delete,
+//               run or export it (404). zz-manager shares it THROUGH THE API (Managers share,
+//               D-089): zz-admin can list, read and run it, but not change it (403
+//               REPORT_READ_ONLY — managing others' reports is R2's reports.admin). zz-manager
+//               takes it back to private and it is 404 again. Then zz-admin saves a private
+//               report, zz-manager cannot see it, zz-admin shares it, zz-manager sees it
+//               read-only (PATCH 403 REPORT_READ_ONLY) and can export it.
 //   H. DENIED   zz-rep-a1, zz-mgr-a and zz-tech get 403 MODULE_FORBIDDEN from every R1b route.
 //   CLEANUP     every "ZZ VERIFY" report deleted (through the API, then any leftover by the
 //               service role), and every export this run made: its CSV file in S3 and its row.
@@ -278,14 +278,12 @@ let mgrReportId = null;
       check(`zz-admin ${m} ${path.replace(mgrReportId, "{id}")} → 404 while private`, r.status === 404 && r.body?.code === "RECORD_NOT_FOUND", `${r.status}`);
     }
     const share = await api(tokens.manager, "PATCH", `/reports/${mgrReportId}`, { sharing: "tenant" });
-    check("zz-manager cannot share (403 SHARE_FORBIDDEN)", share.status === 403 && share.body?.code === "SHARE_FORBIDDEN", `${share.status} ${share.body?.code}`);
-    // No API path shares another user's private report yet (reports.admin is R2): flip our own
-    // test row with the service role to prove the visibility rule once it IS shared.
-    const { error } = await supabase.from("sundial_reports").update({ sharing: "tenant" }).eq("id", mgrReportId).like("name", `${VERIFY_PREFIX}%`);
-    check("(service role) the test row is set to shared", !error, error?.message);
+    check("zz-manager shares it through the API (200)", share.status === 200 && share.body?.sharing === "tenant", `${share.status} ${share.body?.code ?? ""}`);
     check("zz-admin lists it once shared", (await listIds("admin")).includes(mgrReportId));
     const g = await api(tokens.admin, "GET", `/reports/${mgrReportId}`);
-    check("zz-admin reads it once shared (and may edit it: reports.share)", g.status === 200 && g.body?.mine === false && g.body?.canEdit === true, `${g.status}`);
+    check("zz-admin reads it once shared, read-only", g.status === 200 && g.body?.mine === false && g.body?.canEdit === false, `${g.status}`);
+    const ro = await api(tokens.admin, "PATCH", `/reports/${mgrReportId}`, { name: "taken" });
+    check("zz-admin's edit is 403 REPORT_READ_ONLY (reports.admin is R2)", ro.status === 403 && ro.body?.code === "REPORT_READ_ONLY", `${ro.status} ${ro.body?.code}`);
     const run = await api(tokens.admin, "GET", `/reports/${mgrReportId}/run`);
     check("zz-admin runs it once shared", run.status === 200 && Array.isArray(run.body?.rows), `${run.status}`);
     const back = await api(tokens.manager, "PATCH", `/reports/${mgrReportId}`, { sharing: "private" });

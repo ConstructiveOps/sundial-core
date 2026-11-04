@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- D-090: 25 Sundial_Solar__c custom fields, from docs/audits/solar-fields-2026-11.md (fields.json). -->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Solar__c.Adder_Price_Per_Watt__c</members>
+        <members>Sundial_Solar__c.Additional_Phone__c</members>
+        <members>Sundial_Solar__c.Change_Order_Received__c</members>
+        <members>Sundial_Solar__c.Contract_Utility_Account_Holder_Name_2__c</members>
+        <members>Sundial_Solar__c.Dealer_Fee_Amount__c</members>
+        <members>Sundial_Solar__c.Inverter_2_Quantity__c</members>
+        <members>Sundial_Solar__c.Job_Call_Comments__c</members>
+        <members>Sundial_Solar__c.NSA__c</members>
+        <members>Sundial_Solar__c.Permit_Applied_Date_3__c</members>
+        <members>Sundial_Solar__c.Permit_Applied_Date_4__c</members>
+        <members>Sundial_Solar__c.Permit_Fee_3__c</members>
+        <members>Sundial_Solar__c.Permit_Fee_4__c</members>
+        <members>Sundial_Solar__c.Permit_Number_3__c</members>
+        <members>Sundial_Solar__c.Permit_Number_4__c</members>
+        <members>Sundial_Solar__c.Permit_Received_3__c</members>
+        <members>Sundial_Solar__c.Permit_Received_4__c</members>
+        <members>Sundial_Solar__c.Permit_Type_3__c</members>
+        <members>Sundial_Solar__c.Permit_Type_4__c</members>
+        <members>Sundial_Solar__c.Project_Resold__c</members>
+        <members>Sundial_Solar__c.Re_Audit_Upload_Date__c</members>
+        <members>Sundial_Solar__c.Sales_Rep_Email__c</members>
+        <members>Sundial_Solar__c.Second_Address__c</members>
+        <members>Sundial_Solar__c.Sundial_Sales_Rep_ID__c</members>
+        <members>Sundial_Solar__c.Web_Inspection_Key_Code_3__c</members>
+        <members>Sundial_Solar__c.Web_Inspection_Key_Code_4__c</members>
+        <name>CustomField</name>
+    </types>
+    <version>62.0</version>
+</Package>

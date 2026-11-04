@@ -1,0 +1,32 @@
+{
+  "object": "Sundial_Solar__c",
+  "decision": "D-090",
+  "source": "docs/audits/solar-fields-2026-11.md (buckets A + B, minus Attribute_Sync_Error__c and the six NS Adder 4/5 fields)",
+  "fields": [
+    "Adder_Price_Per_Watt__c",
+    "Additional_Phone__c",
+    "Change_Order_Received__c",
+    "Contract_Utility_Account_Holder_Name_2__c",
+    "Dealer_Fee_Amount__c",
+    "Inverter_2_Quantity__c",
+    "Job_Call_Comments__c",
+    "NSA__c",
+    "Permit_Applied_Date_3__c",
+    "Permit_Applied_Date_4__c",
+    "Permit_Fee_3__c",
+    "Permit_Fee_4__c",
+    "Permit_Number_3__c",
+    "Permit_Number_4__c",
+    "Permit_Received_3__c",
+    "Permit_Received_4__c",
+    "Permit_Type_3__c",
+    "Permit_Type_4__c",
+    "Project_Resold__c",
+    "Re_Audit_Upload_Date__c",
+    "Sales_Rep_Email__c",
+    "Second_Address__c",
+    "Sundial_Sales_Rep_ID__c",
+    "Web_Inspection_Key_Code_3__c",
+    "Web_Inspection_Key_Code_4__c"
+  ]
+}

@@ -1,5 +1,32 @@
 # Sundial — Progress Log
 
+## 2026-11-04 — Solar field cleanup: 25 fields leave Sundial_Solar__c, references first (D-090, `feature/solar-field-cleanup`)
+
+**Why.** Solar is at the 500-field cap and Harmon needs two new fields. From the audit below, Tim chose the A + B buckets minus `Attribute_Sync_Error__c` and the six NS Adder 4/5 cost fields: 25 fields. This change takes every reference out first. The Salesforce delete and the column drop are Tim's steps (TASKS, D-090).
+
+**Built.**
+- **The list lives once:** `salesforce/solar-field-cleanup-2026-11/fields.json`.
+- **`scripts/remove-sheet-fields.mjs`**: removes a row only when its "API Name" cell is exactly a listed field, and reports rows that merely mention one. It re-reads the file and fails on any difference. Results:
+  - Fields-by-Section: 480 → 459 rows.
+  - Dealer sheet: 217 → 212 rows.
+  - Budget sheet: 0 rows (none of the 25 are in it).
+  - Only `NSA__c` also exists on Customer, and the Customer field stays.
+- **Regenerated:**
+  - `lib/field-manifest/*.json` (5 Solar fields gone);
+  - `lib/report-catalog/*` and the catalog SQL (the 21 still appear, because the catalog keeps any field whose cache column exists; it is re-run after the drop);
+  - `docs/reporting-cache-coverage.md`.
+  - `apply-dealer-visibility.mjs` no longer names Permit Received 3/4, and its dry run shows 0 cell changes.
+- **`sundial-cache-sync` describe TTL.** It cached the describe for the life of a warm container. A Lambda that runs every 5 minutes would have kept the deleted fields in every Solar SELECT (INVALID_FIELD). It now has the same 5-minute TTL as every other describe cache. 36/36 cache-sync tests pass.
+- **`salesforce/solar-field-cleanup-2026-11/`**: an empty `package.xml`, `destructiveChanges.xml` with the 25 fields, a Workbench zip, and a README (Check Only first, the `sf` CLI equivalents, the 15-day restore window, and erasing to free the slots).
+- **`sql/2026-11-04_drop_solar_columns.sql`**: drops the 21 columns and deletes their catalog rows in one transaction. Checked live first: no saved report and no view uses them.
+- **harmon-crm** (`feature/solar-field-cleanup` → `main`):
+  - the solar and dealer page configs were regenerated from the edited sheets (147 lines removed);
+  - `NSA__c` is out of the customer → solar copy map;
+  - two fields are out of the measured fixture.
+  - tsc, build and 710/710 tests pass.
+- **Tests:** sundial-core `npm test` 1,939/1,939.
+- **Docs:** D-090, CLAUDE.md (the cap and the delete order), `docs/salesforce-schema.md`, TASKS.
+
 ## 2026-11-04 — Sundial_Solar__c field audit for deletion (read-only)
 
 **Why.** Harmon is out of custom fields on `Sundial_Solar__c` (500 of 500). Before anything is deleted, every field needs its data, its last touch and every reference listed.

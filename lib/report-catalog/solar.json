@@ -237,18 +237,6 @@
       "longText": false
     },
     {
-      "column": "additional_phone",
-      "sfField": "Additional_Phone__c",
-      "label": "Additional Phone",
-      "section": "Customer/Site Details",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores an additional phone number for project communications.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "best_method_to_contact",
       "sfField": "Best_Method_to_Contact__c",
       "label": "Best Method to Contact",
@@ -273,18 +261,6 @@
       "type": "text",
       "pgType": "text",
       "description": "Stores the primary street address for the project site.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "second_address",
-      "sfField": "Second_Address__c",
-      "label": "Second Address",
-      "section": "Customer/Site Details",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores a secondary address line such as unit, suite, or additional address information.",
       "gate": null,
       "reportable": true,
       "longText": false
@@ -583,18 +559,6 @@
       "longText": true
     },
     {
-      "column": "project_resold",
-      "sfField": "Project_Resold__c",
-      "label": "Project Resold",
-      "section": "Customer/Site Details",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when project resold occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "sent_to_sales_to_resell",
       "sfField": "Sent_to_Sales_to_Resell__c",
       "label": "Sent to Sales to Resell",
@@ -650,18 +614,6 @@
       "type": "text",
       "pgType": "text",
       "description": "Stores detailed notes about miscellaneous notes for internal project coordination.",
-      "gate": null,
-      "reportable": true,
-      "longText": true
-    },
-    {
-      "column": "job_call_comments",
-      "sfField": "Job_Call_Comments__c",
-      "label": "Job Call Comments",
-      "section": "Customer/Site Details",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores detailed information about job call comments for internal project context.",
       "gate": null,
       "reportable": true,
       "longText": true
@@ -1461,18 +1413,6 @@
       "longText": false
     },
     {
-      "column": "re_audit_upload_date",
-      "sfField": "Re_Audit_Upload_Date__c",
-      "label": "Re-Audit Upload Date",
-      "section": "Audit",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when re-audit upload date occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "roof_review_required",
       "sfField": "Roof_Review_Required__c",
       "label": "Roof Review Required",
@@ -1968,18 +1908,6 @@
       "longText": false
     },
     {
-      "column": "adder_price_per_watt",
-      "sfField": "Adder_Price_Per_Watt__c",
-      "label": "Adder Price Per Watt",
-      "section": "PM/NTP/Adder Review",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores the price-per-watt adder value or pricing notes for additional scope.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "adders_sent_to_salesperson_dealer",
       "sfField": "Adders_Sent_to_Salesperson_Dealer__c",
       "label": "Adders Sent to Salesperson / Dealer",
@@ -1999,18 +1927,6 @@
       "type": "date",
       "pgType": "date",
       "description": "Stores the date when dealer responded occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "change_order_received",
-      "sfField": "Change_Order_Received__c",
-      "label": "Change Order Received",
-      "section": "PM/NTP/Adder Review",
-      "type": "boolean",
-      "pgType": "boolean",
-      "description": "Indicates whether a signed or approved change order has been received for the project.",
       "gate": null,
       "reportable": true,
       "longText": false
@@ -2102,44 +2018,6 @@
       ]
     },
     {
-      "column": "permit_type_3",
-      "sfField": "Permit_Type_3__c",
-      "label": "Permit Type 3",
-      "section": "Permitting",
-      "type": "picklist",
-      "pgType": "text",
-      "description": "Categorizes the type of permit tracked in permit slot 3 for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false,
-      "picklistValues": [
-        "PV",
-        "Fire",
-        "MPU",
-        "Minor Electrical",
-        "EV"
-      ]
-    },
-    {
-      "column": "permit_type_4",
-      "sfField": "Permit_Type_4__c",
-      "label": "Permit Type 4",
-      "section": "Permitting",
-      "type": "picklist",
-      "pgType": "text",
-      "description": "Categorizes the type of permit tracked in permit slot 4 for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false,
-      "picklistValues": [
-        "PV",
-        "Fire",
-        "MPU",
-        "Minor Electrical",
-        "EV"
-      ]
-    },
-    {
       "column": "permit_applied_date",
       "sfField": "Permit_Applied_Date__c",
       "label": "Permit Applied Date 1",
@@ -2159,30 +2037,6 @@
       "type": "date",
       "pgType": "date",
       "description": "Stores the date when permit applied date 2 occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_applied_date_3",
-      "sfField": "Permit_Applied_Date_3__c",
-      "label": "Permit Applied Date 3",
-      "section": "Permitting",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when permit applied date 3 occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_applied_date_4",
-      "sfField": "Permit_Applied_Date_4__c",
-      "label": "Permit Applied Date 4",
-      "section": "Permitting",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when permit applied date 4 occurs or is completed for the project.",
       "gate": null,
       "reportable": true,
       "longText": false
@@ -2224,30 +2078,6 @@
       "longText": false
     },
     {
-      "column": "permit_received_3",
-      "sfField": "Permit_Received_3__c",
-      "label": "Permit Received 3",
-      "section": "Permitting",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when permit received 3 occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_received_4",
-      "sfField": "Permit_Received_4__c",
-      "label": "Permit Received 4",
-      "section": "Permitting",
-      "type": "date",
-      "pgType": "date",
-      "description": "Stores the date when permit received 4 occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "permit_number",
       "sfField": "Permit_Number__c",
       "label": "Permit Number 1",
@@ -2272,30 +2102,6 @@
       "longText": false
     },
     {
-      "column": "permit_number_3",
-      "sfField": "Permit_Number_3__c",
-      "label": "Permit Number 3",
-      "section": "Permitting",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores the permit number for permit slot 3 on the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_number_4",
-      "sfField": "Permit_Number_4__c",
-      "label": "Permit Number 4",
-      "section": "Permitting",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores the permit number for permit slot 4 on the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "permit_fee",
       "sfField": "Permit_Fee__c",
       "label": "Permit Fee 1",
@@ -2315,30 +2121,6 @@
       "type": "number",
       "pgType": "numeric",
       "description": "Stores the second permit fee amount for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_fee_3",
-      "sfField": "Permit_Fee_3__c",
-      "label": "Permit Fee 3",
-      "section": "Permitting",
-      "type": "number",
-      "pgType": "numeric",
-      "description": "Stores the third permit fee amount for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "permit_fee_4",
-      "sfField": "Permit_Fee_4__c",
-      "label": "Permit Fee 4",
-      "section": "Permitting",
-      "type": "number",
-      "pgType": "numeric",
-      "description": "Stores the fourth permit fee amount for the project.",
       "gate": null,
       "reportable": true,
       "longText": false
@@ -2969,18 +2751,6 @@
       ]
     },
     {
-      "column": "inverter_2_quantity",
-      "sfField": "Inverter_2_Quantity__c",
-      "label": "Inverter 2 Quantity",
-      "section": "Materials",
-      "type": "number",
-      "pgType": "numeric",
-      "description": "Stores the quantity of the second inverter model included in the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "inverter_3",
       "sfField": "Inverter_3__c",
       "label": "Inverter 3",
@@ -3357,30 +3127,6 @@
       "longText": false
     },
     {
-      "column": "web_inspection_key_code_3",
-      "sfField": "Web_Inspection_Key_Code_3__c",
-      "label": "Web Inspection Key Code 3",
-      "section": "Post Install/PTO",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores web inspection access key code 3 used for scheduling or checking inspections online.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "web_inspection_key_code_4",
-      "sfField": "Web_Inspection_Key_Code_4__c",
-      "label": "Web Inspection Key Code 4",
-      "section": "Post Install/PTO",
-      "type": "text",
-      "pgType": "text",
-      "description": "Stores web inspection access key code 4 used for scheduling or checking inspections online.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
       "column": "qaqc_inspection_confirmed_with_customer",
       "sfField": "QAQC_Inspection_Confirmed_with_Customer__c",
       "label": "QAQC Inspection Confirmed with Customer",
@@ -3628,18 +3374,6 @@
       "type": "date",
       "pgType": "date",
       "description": "Stores the date when bill out in acumatica requested occurs or is completed for the project.",
-      "gate": null,
-      "reportable": true,
-      "longText": false
-    },
-    {
-      "column": "dealer_fee_amount",
-      "sfField": "Dealer_Fee_Amount__c",
-      "label": "Dealer Fee Amount",
-      "section": "Billing",
-      "type": "number",
-      "pgType": "numeric",
-      "description": "Stores the dealer fee amount associated with financing or sales pricing.",
       "gate": null,
       "reportable": true,
       "longText": false
@@ -6157,12 +5891,278 @@
       "longText": false
     },
     {
+      "column": "adder_price_per_watt",
+      "sfField": "Adder_Price_Per_Watt__c",
+      "label": "Adder Price Per Watt",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "additional_phone",
+      "sfField": "Additional_Phone__c",
+      "label": "Additional Phone",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "change_order_received",
+      "sfField": "Change_Order_Received__c",
+      "label": "Change Order Received",
+      "section": "",
+      "type": "boolean",
+      "pgType": "boolean",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
       "column": "contract_amount_2",
       "sfField": "Contract_Amount_2__c",
       "label": "Contract Amount2",
       "section": "",
       "type": "number",
       "pgType": "numeric",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "dealer_fee_amount",
+      "sfField": "Dealer_Fee_Amount__c",
+      "label": "Dealer Fee Amount",
+      "section": "",
+      "type": "number",
+      "pgType": "numeric",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "inverter_2_quantity",
+      "sfField": "Inverter_2_Quantity__c",
+      "label": "Inverter 2 Quantity",
+      "section": "",
+      "type": "number",
+      "pgType": "numeric",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "job_call_comments",
+      "sfField": "Job_Call_Comments__c",
+      "label": "Job Call Comments",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": true
+    },
+    {
+      "column": "permit_applied_date_3",
+      "sfField": "Permit_Applied_Date_3__c",
+      "label": "Permit Applied Date 3",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_applied_date_4",
+      "sfField": "Permit_Applied_Date_4__c",
+      "label": "Permit Applied Date 4",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_fee_3",
+      "sfField": "Permit_Fee_3__c",
+      "label": "Permit Fee 3",
+      "section": "",
+      "type": "number",
+      "pgType": "numeric",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_fee_4",
+      "sfField": "Permit_Fee_4__c",
+      "label": "Permit Fee 4",
+      "section": "",
+      "type": "number",
+      "pgType": "numeric",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_number_3",
+      "sfField": "Permit_Number_3__c",
+      "label": "Permit Number 3",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_number_4",
+      "sfField": "Permit_Number_4__c",
+      "label": "Permit Number 4",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_received_3",
+      "sfField": "Permit_Received_3__c",
+      "label": "Permit Received 3",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_received_4",
+      "sfField": "Permit_Received_4__c",
+      "label": "Permit Received 4",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "permit_type_3",
+      "sfField": "Permit_Type_3__c",
+      "label": "Permit Type 3",
+      "section": "",
+      "type": "picklist",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false,
+      "picklistValues": [
+        "PV",
+        "Fire",
+        "MPU",
+        "Minor Electrical",
+        "EV"
+      ]
+    },
+    {
+      "column": "permit_type_4",
+      "sfField": "Permit_Type_4__c",
+      "label": "Permit Type 4",
+      "section": "",
+      "type": "picklist",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false,
+      "picklistValues": [
+        "PV",
+        "Fire",
+        "MPU",
+        "Minor Electrical",
+        "EV"
+      ]
+    },
+    {
+      "column": "project_resold",
+      "sfField": "Project_Resold__c",
+      "label": "Project Resold",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "re_audit_upload_date",
+      "sfField": "Re_Audit_Upload_Date__c",
+      "label": "Re-Audit Upload Date",
+      "section": "",
+      "type": "date",
+      "pgType": "date",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "second_address",
+      "sfField": "Second_Address__c",
+      "label": "Second Address",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "web_inspection_key_code_3",
+      "sfField": "Web_Inspection_Key_Code_3__c",
+      "label": "Web Inspection Key Code 3",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
+      "description": "",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "web_inspection_key_code_4",
+      "sfField": "Web_Inspection_Key_Code_4__c",
+      "label": "Web Inspection Key Code 4",
+      "section": "",
+      "type": "text",
+      "pgType": "text",
       "description": "",
       "gate": null,
       "reportable": true,

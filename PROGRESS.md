@@ -1,5 +1,14 @@
 # Sundial — Progress Log
 
+## 2026-11-04 — D-090 step 7: report catalog regenerated after the column drop
+
+The 21 Solar cache columns were confirmed gone in Supabase first (`information_schema`: 0 of 21), and the drop SQL had already taken the live catalog to 1,351 rows. Re-ran `scripts/generate-report-catalog.mjs` and `scripts/generate-report-columns.mjs`:
+- `lib/report-catalog/solar.json` and `sql/2026-11-03_report_catalog.sql`: exactly the 21 columns removed. Solar has 455 catalog columns and the whole catalog 1,351, which matches the live table. No other object changed.
+- `docs/reporting-cache-coverage.md`: Solar 474 → 453 cached. The solar sync URI dropped from 14,278 to 13,725 of 16,384 bytes (room for about 75 more fields, was 60), updated in `docs/caching-architecture.md` and TASKS.
+- No missing column, so no new R0 SQL file. `npm test` 1,939/1,939.
+
+Tim still needs to run `sql/2026-11-03_report_catalog.sql` and deploy `sundial-reports`, so the Lambda's catalog matches the table.
+
 ## 2026-11-04 — D-090 amendment 1: `Sales_Rep_Email__c` stays on Sundial_Solar__c
 
 Tim ran into too many problems in Salesforce removing `Sales_Rep_Email__c` and chose to keep it. It is out of `salesforce/solar-field-cleanup-2026-11/fields.json` and `destructiveChanges.xml`, and the Workbench zip was rebuilt (24 components; the zip is git-ignored, so it was rebuilt on disk only). The counts in the README, the drop SQL's header comment, D-090, CLAUDE.md, `docs/salesforce-schema.md` and TASKS now say 24. Nothing in code changes: the field was never in a sheet, a page config, the manifest or the cache. The README's zip-rebuild line now names `C:\Windows\System32\tar.exe`, because Git Bash's `tar` writes a TAR file with a .zip name. The audit files (`docs/audits/solar-fields-2026-11.*`) are left as the audit found things.

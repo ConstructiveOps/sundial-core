@@ -631,7 +631,7 @@ next (`lib/salesforce.js` `sfQueryPages`), in full and incremental mode. A full 
 **The query-length ceiling.** `sfQuery` / `sfQueryPages` send the SOQL as a GET, and
 Salesforce refuses a URI over 16,384 bytes. Every selected field adds its name to that URI.
 The generator reports each table's incremental-sync URI length once its new columns exist.
-After R0, solar is the widest at 14,278 bytes. A future wide addition to solar must be
+After R0, solar is the widest at 14,278 bytes (13,725 after the D-090 field cleanup, 2026-11-04). A future wide addition to solar must be
 checked against that column of the coverage report; past the limit, the sync has to split its
 SELECT before the column can be added.
 

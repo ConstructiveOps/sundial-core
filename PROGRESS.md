@@ -1,5 +1,19 @@
 # Sundial — Progress Log
 
+## 2026-11-05 — Portrait photos come out upright in both report PDFs and the job-page thumbnails — DEPLOYED (sundial-service-estimate, sundial-service-board)
+
+**The bug (found live).** Portrait phone photos were SIDEWAYS in the photo report's preview and PDF, in the OLD job report's PDF (**since 2026-10-12**, when the photo shrink arrived) and in the job page's thumbnails (since 2026-10-22), while upright in the browser. A phone stores a portrait photo as landscape pixels plus an EXIF orientation tag (0x0112); `lib/image-resize.js` decoded with jpeg-js (ignores the tag) and re-encoded without it, and pdf-lib's `embedJpg` ignores EXIF too. Nothing in the pipeline read the orientation.
+
+**Fixed.**
+- `lib/image-resize.js`: `jpegOrientation()` reads the tag from the APP1 segment (TIFF header, IFD0, both byte orders, SHORT or LONG) without decoding; `orientRgb()` turns the decoded pixels for orientations 2–8; `resizeJpegForReport` turns first, THEN box-filters and encodes; the output carries no EXIF. A small JPEG is returned untouched ONLY at orientation 1 — copied as-is, a turned photo is upright in a browser and sideways in a PDF. PNGs are unaffected.
+- Every cache writer already goes through that one function (the 1,600 px report copies — both reports, prepare and the worker — and the 400 px thumbnails at upload and in the backfill); cache keys unchanged.
+- Tests: `lib/image-resize.test.js` (+5: orientation parsing in both byte orders, 6 swaps dimensions and moves a known corner to the top-right, 3 and 8, orientation 1 unchanged, a small orientation-6 JPEG still turned, every orientation's mapping), `lib/photo-thumbs.test.js` (+1: a turned thumbnail), the estimate Lambda (+1: the photo-report PDF embeds the image at its upright 32 × 64 — fails on the old code). Fixtures in `lib/jpeg-test-fixtures.js`. Suite 1,977 / 1,977.
+
+**The repair — `scripts/fix-photo-orientation.mjs`.** For every photo under `SUNDIAL/{jobId}/photos/` with a thumbnail or a report copy, it range-reads the first 64 KB of the original, parses the orientation, and when it is not 1 re-makes the EXISTING cached copies upright at the same keys, marking each with S3 metadata `sundial-orientation: upright` (that marker is what makes it resumable). Dry run by default; `--apply`, `--job <id>`, `--shard k/n` (decoding takes one core per process, so shards run side by side).
+- ZZ job SVC-02279 first: 11 cached photos, 9 turned (orientation 6), 9 report copies re-made — now 1071 × 1428 portrait; a re-run finds them all done.
+- Dry run over everything: **1,527 jobs, 35,223 cached photos scanned, 16,344 turned** (orientation 6: 14,561 · 3: 1,448 · 8: 335; 1: 18,879), **16,505 cache objects to re-make**, 0 failures. Far more than "most are upright": nearly half of the techs' and HCP's photos were taken in portrait.
+- `--apply` over everything, 6 shards side by side: **stopped part-way** — Claude Code killed the run because the laptop ran low on memory (6 processes × 16 whole originals in flight). Before the stop: 94 of 1,527 jobs done, **673 cache objects re-made**, 34 failed (27 "aborted", 7 "ECONNABORTED" — network aborts under the same pressure, not bad photos; unmarked, so a re-run retries them). `--apply` now holds 4 photos at a time per process (a dry run still reads 16). **To finish:** `node scripts/fix-photo-orientation.mjs --apply --shard 1/2` and `--shard 2/2` in two PowerShell windows (or one plain `--apply`); done copies are skipped.
+
 ## 2026-11-05 — Job report PDFs get their Files rows; no file-metadata insert fails on the uploader id any more — DEPLOYED (sundial-service-estimate; sundial-service-board pending)
 
 **Why.** The old job report's `registerFileMetadata` call never landed a row (found while building the photo report). The logs showed THREE causes, not one:

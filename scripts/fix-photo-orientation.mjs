@@ -4,6 +4,8 @@
 //   node scripts/fix-photo-orientation.mjs                          # DRY RUN: counts, writes nothing
 //   node scripts/fix-photo-orientation.mjs --job a1c7y00000SDkUmAAL --apply   # one job
 //   node scripts/fix-photo-orientation.mjs --apply                  # every job (resumable)
+//   node scripts/fix-photo-orientation.mjs --apply --shard 1/4      # a quarter of the jobs: run 1/4 … 4/4 side by side
+//                                                                  # (decoding is one CPU core per process)
 //
 // WHY. Until 2026-11-05 lib/image-resize.js ignored the EXIF orientation tag, so a portrait phone
 // photo's ~400 px thumbnail (SUNDIAL/_cache/photo-thumbs/) and its 1,600 px report copy
@@ -37,8 +39,12 @@ const opt = (n, d = null) => {
 };
 const APPLY = args.includes("--apply");
 const ONLY = opt("--job");
+const SHARD = /^(\d+)\/(\d+)$/.exec(opt("--shard", "") || ""); // k/n: every n-th job from the k-th
+
 const HEAD_BYTES = 64 * 1024;
-const CONCURRENCY = 16;
+// A dry run only range-reads 64 KB, so it can run wide; --apply holds whole originals (3–7 MB) and
+// a ~100 MB decode each — 6 shards × 16 ran the laptop out of memory on 2026-11-05.
+const CONCURRENCY = APPLY ? 4 : 16;
 const MARK = "sundial-orientation"; // S3 user metadata (x-amz-meta-sundial-orientation)
 
 const s3 = new S3Client({ region: S3_REGION });
@@ -93,8 +99,9 @@ async function jobIds() {
   return [...ids].filter(Boolean).sort();
 }
 
-const jobs = await jobIds();
-console.log(`${APPLY ? "APPLY" : "DRY RUN"} — ${jobs.length} job(s) with cached photo copies`);
+const allJobs = await jobIds();
+const jobs = SHARD ? allJobs.filter((_, i) => i % Number(SHARD[2]) === Number(SHARD[1]) - 1) : allJobs;
+console.log(`${APPLY ? "APPLY" : "DRY RUN"} — ${jobs.length} job(s) with cached photo copies${SHARD ? ` (shard ${SHARD[0]} of ${allJobs.length})` : ""}`);
 const total = { scanned: 0, rotated: 0, toRegenerate: 0, alreadyFixed: 0, regenerated: 0, failed: 0 };
 const byOrientation = {};
 

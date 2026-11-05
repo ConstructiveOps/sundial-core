@@ -21,9 +21,19 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] harmon-crm: the editor (cover, sections, big-tile picker with checkboxes, list / grid), Download (poll a 202), Send box, `/photo-report/:token`; fill in inventory S63 / H5's portal columns
 - [ ] After Harmon's grace period: retire the old job report (report.js, `Report_Sections__c` routes, `/report/:token`)
 - [x] The OLD report's file metadata: report.js fixed (key names, tenant, await, profile uuid) + `scripts/backfill-job-report-files.mjs --apply`: 51 rows (PROGRESS)
-- [ ] `.deploy.ps1 sundial-service-board` — picks up `registerFileMetadata` no longer writing the uploader id; until then every tech photo upload's metadata insert fails
+- [x] `.\deploy.ps1 sundial-service-board` — picks up `registerFileMetadata` no longer writing the uploader id (deployed 2026-11-05 with the photo-orientation fix)
 - [ ] Tim's call: `sundial_file_metadata.uploaded_by_user_id` / `deleted_by_user_id` reference `portal_users` (0 rows, must stay empty — A4). Repoint them at `profiles` (then callers pass `ctx.profileId`), or drop the constraint; until then no file row records WHO by id, only by name
 - [ ] Backfill the other rows the uuid bug dropped: the tech app's photo uploads, invoice PDFs (`{invoice}.pdf`, `…-before-edit-…`), estimate PDFs (`estimate-v{n}.pdf`) — same shape as the job report script
+
+## 2026-11-05 — Portrait photos upright (EXIF orientation)
+
+- [x] `lib/image-resize.js` reads the EXIF orientation and turns the pixels before the shrink; no EXIF in the output; small turned JPEGs are no longer passed through untouched
+- [x] Tests: image-resize (+5), photo-thumbs (+1), the photo-report PDF's upright image (+1). Suite 1,977 / 1,977
+- [x] `.\deploy.ps1 sundial-service-estimate` · `.\deploy.ps1 sundial-service-board`
+- [x] `node scripts/fix-photo-orientation.mjs --job a1c7y00000SDkUmAAL --apply` (ZZ job: 9 re-made)
+- [x] Dry run over everything: 16,344 turned photos, 16,505 cache objects to re-make
+- [~] `--apply` over everything — stopped for low memory after 673 of 16,505 re-made (94 / 1,527 jobs). Finish: `node scripts/fix-photo-orientation.mjs --apply --shard 1/2` + `--shard 2/2` in two PowerShell windows (resumable)
+- [ ] Photos with no cached copy yet need nothing: their thumbnail / report copy will be made upright when it is made
 
 ## 2026-11-05 — Two new Solar fields: Extended Install Reason, PTO Approved Date
 

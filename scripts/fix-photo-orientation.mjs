@@ -24,6 +24,12 @@
 // S3 metadata `sundial-orientation: upright`, which is how a re-run knows it is done
 // (resumable: a marked copy is skipped). Writes ONLY under SUNDIAL/_cache/; the originals are
 // never written, moved or re-encoded. Nothing touches Salesforce or Supabase.
+//
+// TOUCH (--apply only). For an UPRIGHT photo (orientation 1) whose report copy predates
+// ORIENTATION_FIX_AT, the copy is copied onto itself with its own metadata (lib/cache-touch.js),
+// which bumps LastModified — so the reports' self-heal check (cachedCopyNeedsRemake) trusts it
+// and stops re-reading the original on every request. Only report copies: thumbnails are not
+// checked by anything. Resumable the same way: a copy dated after the fix is not touched again.
 // ⚠️ DO NOT PIPE THE OUTPUT through head/tail on a real run — a stop must be seen.
 
 import { S3Client, ListObjectsV2Command, GetObjectCommand, HeadObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -31,6 +37,7 @@ import { S3_BUCKET, S3_REGION } from "../lib/file-access.js";
 import { jpegOrientation, resizeJpegForReport } from "../lib/image-resize.js";
 import { THUMB_MAX_EDGE, THUMB_JPEG_QUALITY, thumbKey, thumbPrefix, THUMB_PREFIX } from "../lib/photo-thumbs.js";
 import { REPORT_IMAGE_CACHE_PREFIX, reportImageCacheKey, reportImageCachePrefix } from "../lib/photo-report-document.js";
+import { predatesOrientationFix, touchObject } from "../lib/cache-touch.js";
 
 const args = process.argv.slice(2);
 const opt = (n, d = null) => {
@@ -51,15 +58,19 @@ const s3 = new S3Client({ region: S3_REGION });
 
 async function list(prefix, delimiter) {
   const keys = [];
+  const dates = new Map(); // key → LastModified
   const prefixes = [];
   let ContinuationToken;
   do {
     const page = await s3.send(new ListObjectsV2Command({ Bucket: S3_BUCKET, Prefix: prefix, Delimiter: delimiter, ContinuationToken }));
-    for (const o of page.Contents || []) if (o.Key && !o.Key.endsWith("/")) keys.push(o.Key);
+    for (const o of page.Contents || []) if (o.Key && !o.Key.endsWith("/")) {
+      keys.push(o.Key);
+      dates.set(o.Key, o.LastModified ?? null);
+    }
     for (const p of page.CommonPrefixes || []) prefixes.push(p.Prefix);
     ContinuationToken = page.IsTruncated ? page.NextContinuationToken : undefined;
   } while (ContinuationToken);
-  return { keys, prefixes };
+  return { keys, prefixes, dates };
 }
 
 async function getBytes(key, range) {
@@ -102,23 +113,33 @@ async function jobIds() {
 const allJobs = await jobIds();
 const jobs = SHARD ? allJobs.filter((_, i) => i % Number(SHARD[2]) === Number(SHARD[1]) - 1) : allJobs;
 console.log(`${APPLY ? "APPLY" : "DRY RUN"} — ${jobs.length} job(s) with cached photo copies${SHARD ? ` (shard ${SHARD[0]} of ${allJobs.length})` : ""}`);
-const total = { scanned: 0, rotated: 0, toRegenerate: 0, alreadyFixed: 0, regenerated: 0, failed: 0 };
+const total = { scanned: 0, rotated: 0, toRegenerate: 0, alreadyFixed: 0, regenerated: 0, toTouch: 0, touched: 0, failed: 0 };
 const byOrientation = {};
 
 for (const [i, jobId] of jobs.entries()) {
   const photos = (await list(`SUNDIAL/${jobId}/photos/`)).keys.filter((k) => /\.jpe?g$/i.test(k));
   const thumbs = new Set((await list(thumbPrefix(jobId))).keys);
-  const copies = new Set((await list(reportImageCachePrefix(jobId))).keys);
+  const copyList = await list(reportImageCachePrefix(jobId));
+  const copies = new Set(copyList.keys);
   const cached = photos
     .map((key) => ({ key, targets: [thumbs.has(thumbKey(jobId, key)) && "thumb", copies.has(reportImageCacheKey(jobId, key)) && "copy"].filter(Boolean) }))
     .filter((p) => p.targets.length);
-  const tally = { scanned: cached.length, rotated: 0, toRegenerate: 0, alreadyFixed: 0, regenerated: 0, failed: 0 };
+  const tally = { scanned: cached.length, rotated: 0, toRegenerate: 0, alreadyFixed: 0, regenerated: 0, toTouch: 0, touched: 0, failed: 0 };
 
   await pool(cached, async (p) => {
     try {
       const o = jpegOrientation(await getBytes(p.key, `bytes=0-${HEAD_BYTES - 1}`));
       byOrientation[o] = (byOrientation[o] || 0) + 1;
-      if (o === 1) return;
+      if (o === 1) {
+        // upright: its report copy is right — touch it if it predates the fix, so the reports stop checking it
+        const ck = reportImageCacheKey(jobId, p.key);
+        if (!p.targets.includes("copy") || !predatesOrientationFix(copyList.dates.get(ck))) return;
+        tally.toTouch++;
+        if (!APPLY) return;
+        await touchObject(s3, S3_BUCKET, ck);
+        tally.touched++;
+        return;
+      }
       tally.rotated++;
       const keys = p.targets.map((t) => (t === "thumb" ? thumbKey(jobId, p.key) : reportImageCacheKey(jobId, p.key)));
       const todo = [];
@@ -150,14 +171,14 @@ for (const [i, jobId] of jobs.entries()) {
 
   for (const k of Object.keys(total)) total[k] += tally[k];
   console.log(
-    `[${i + 1}/${jobs.length}] ${jobId}: ${tally.scanned} cached photo(s), ${tally.rotated} turned, ${tally.toRegenerate} cache object(s) to re-make, ${tally.alreadyFixed} already fixed` +
-      (APPLY ? `, re-made ${tally.regenerated}, failed ${tally.failed}` : tally.failed ? `, failed ${tally.failed}` : "")
+    `[${i + 1}/${jobs.length}] ${jobId}: ${tally.scanned} cached photo(s), ${tally.rotated} turned, ${tally.toRegenerate} cache object(s) to re-make, ${tally.alreadyFixed} already fixed, ${tally.toTouch} upright copy(ies) to touch` +
+      (APPLY ? `, re-made ${tally.regenerated}, touched ${tally.touched}, failed ${tally.failed}` : tally.failed ? `, failed ${tally.failed}` : "")
   );
 }
 
 console.log(
-  `\n${APPLY ? "DONE" : "DRY RUN"} — photos scanned ${total.scanned}, turned (orientation ≠ 1) ${total.rotated}, cache objects to re-make ${total.toRegenerate}, already fixed ${total.alreadyFixed}` +
-    (APPLY ? `, re-made ${total.regenerated}` : "") +
+  `\n${APPLY ? "DONE" : "DRY RUN"} — photos scanned ${total.scanned}, turned (orientation ≠ 1) ${total.rotated}, cache objects to re-make ${total.toRegenerate}, already fixed ${total.alreadyFixed}, upright copies to touch ${total.toTouch}` +
+    (APPLY ? `, re-made ${total.regenerated}, touched ${total.touched}` : "") +
     `, failed ${total.failed}`
 );
 console.log(`orientations seen: ${JSON.stringify(byOrientation)}`);

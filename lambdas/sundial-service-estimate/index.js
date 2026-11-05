@@ -106,7 +106,7 @@ import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../..
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
 import { renderPhotoReportPdf as realRenderPhotoReportPdf } from "../../lib/photo-report-pdf.js";
-import { resizeJpegForReport as realResizeJpegForReport } from "../../lib/image-resize.js";
+import { resizeJpegForReport as realResizeJpegForReport, ORIENTATION_HEAD_BYTES } from "../../lib/image-resize.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
 import { alertAssigned, alertUnassignedCustomer } from "../../lib/service-intake-alerts.js";
@@ -124,6 +124,7 @@ import {
   buildKey,
   listRecordFiles,
   listKeysUnder,
+  listObjectsUnder,
   publicUrlForKey,
   registerFileMetadata,
   findFileMetadataByKey,
@@ -597,12 +598,18 @@ export function createHandler(deps = {}) {
     // The job report reads the job's photos back out of S3 for the PDF, and lists the job's folder for the picker.
     getObject: async ({ key }) => {
       const r = await s3().send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
-      return { bytes: new Uint8Array(await r.Body.transformToByteArray()), contentType: r.ContentType ?? null };
+      return { bytes: new Uint8Array(await r.Body.transformToByteArray()), contentType: r.ContentType ?? null, lastModified: r.LastModified ? new Date(r.LastModified).toISOString() : null };
+    },
+    // The first `bytes` of an object (a range GET) — enough to read a photo's EXIF orientation (2026-11-05).
+    getObjectHead: async ({ key, bytes = ORIENTATION_HEAD_BYTES }) => {
+      const r = await s3().send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key, Range: `bytes=0-${bytes - 1}` }));
+      return new Uint8Array(await r.Body.transformToByteArray());
     },
     listFiles: async (recordId) => listRecordFiles(s3(), recordId),
     // The photo report (D-072 am. 17): which cached copies / thumbnails exist, a signed link to a
     // big download, and the background render (this Lambda invoking itself, like sundial-reports).
     listKeys: async (prefix) => listKeysUnder(s3(), prefix),
+    listObjects: async (prefix) => listObjectsUnder(s3(), prefix), // with LastModified: the orientation re-make check
     presignGet: async ({ key, fileName }) =>
       getSignedUrl(s3(), new GetObjectCommand({ Bucket: S3_BUCKET, Key: key, ResponseContentDisposition: `attachment; filename="${String(fileName || "photo-report.pdf").replace(/"/g, "")}"`, ResponseContentType: "application/pdf" }), { expiresIn: 15 * 60 }),
     invokeSelf: async (payload) =>

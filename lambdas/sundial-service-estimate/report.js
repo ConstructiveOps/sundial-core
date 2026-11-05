@@ -26,7 +26,7 @@ import { buildJobReportModel, normalizeReportSections, renderJobReportDocument, 
 import { INVOICE_JOB_SELECT } from "./invoice.js";
 import { JOB_SF_OBJECT } from "./fields.js";
 import { createHash } from "node:crypto";
-import { REPORT_MAX_EDGE } from "../../lib/image-resize.js";
+import { REPORT_MAX_EDGE, cachedCopyNeedsRemake } from "../../lib/image-resize.js";
 
 export const REPORT_JOB_SELECT =
   INVOICE_JOB_SELECT +
@@ -121,7 +121,10 @@ export function createReportHandlers(d, h) {
     const cacheKey = reportImageCacheKey(jobId, key);
     try {
       const cached = await d.getObject({ key: cacheKey }).catch(() => null);
-      if (cached?.bytes?.length) return { status: "cached", image: { bytes: cached.bytes, contentType: "image/jpeg" } };
+      // A copy made before the orientation fix is re-made when the original is turned (2026-11-05):
+      // treated as missing, so it goes down the shrink path below like an uncached photo.
+      const stale = cached?.bytes?.length && d.getObjectHead ? await cachedCopyNeedsRemake(cached.lastModified, () => d.getObjectHead({ key })) : false;
+      if (cached?.bytes?.length && !stale) return { status: "cached", image: { bytes: cached.bytes, contentType: "image/jpeg" } };
       if (Date.now() - startedAt >= budgetMs) {
         if (!wantBytes) return { status: "pending" };
       } else {

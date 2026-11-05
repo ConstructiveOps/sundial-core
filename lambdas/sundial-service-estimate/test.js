@@ -522,6 +522,8 @@ export const TEST_TAX_ROWS = {
 };
 const TEST_TAX_TABLES = tablesFromRows(TEST_TAX_ROWS);
 
+/** When a put made during a test "happened": after the orientation fix (lib/image-resize.js ORIENTATION_FIX_AT). */
+const FAKE_NOW_ISO = "2026-11-06T00:00:00.000Z";
 const JPG_1x1 = Buffer.from("/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==", "base64");
 
 function makeHandler(fake, identityOverrides = {}) {
@@ -558,6 +560,17 @@ function makeHandler(fake, identityOverrides = {}) {
     // The photo report (D-072 am. 17): what is in the cache / thumbnail folders, a signed link,
     // the self-invoke (recorded; the test runs the worker itself), and an optional PDF stub.
     listKeys: async (prefix) => [...new Set([...(fake.puts || []).map((p) => p.key), ...(fake.thumbKeys || [])])].filter((k) => k.startsWith(prefix)),
+    // With dates (the orientation re-make check, 2026-11-05): a put made in the test is "now"; a
+    // test seeds a pre-fix copy by pushing { key, body, lastModified } into fake.puts itself.
+    listObjects: async (prefix) => {
+      const seen = new Map();
+      for (const p of fake.puts || []) if (p.key.startsWith(prefix)) seen.set(p.key, p.lastModified ?? FAKE_NOW_ISO);
+      return [...seen].map(([key, lastModified]) => ({ key, lastModified }));
+    },
+    getObjectHead: async ({ key }) => {
+      (fake.headReads = fake.headReads || []).push(key);
+      return (fake.photoBytes ?? JPG_1x1).subarray(0, 64 * 1024);
+    },
     presignGet: async ({ key, fileName }) => `https://signed.example.com/${key}?name=${encodeURIComponent(fileName)}`,
     invokeSelf: async (payload) => {
       if (fake.invokeFails) throw new Error("lambda down");
@@ -567,9 +580,9 @@ function makeHandler(fake, identityOverrides = {}) {
     getObject: async ({ key }) => {
       // The report's shrunk-photo cache (2026-10-12): served from what this run put there, else "no such key".
       if (key.startsWith("SUNDIAL/_cache/")) {
-        const hit = (fake.puts || []).find((p) => p.key === key);
+        const hit = (fake.puts || []).findLast((p) => p.key === key);
         if (!hit) throw Object.assign(new Error("NoSuchKey"), { name: "NoSuchKey" });
-        return { bytes: hit.body ?? JPG_1x1, contentType: "image/jpeg" };
+        return { bytes: hit.body ?? JPG_1x1, contentType: "image/jpeg", lastModified: hit.lastModified ?? FAKE_NOW_ISO };
       }
       (fake.gets = fake.gets || []).push(key);
       if (fake.getFails) throw new Error("s3 read failed");
@@ -4290,6 +4303,91 @@ test("photo report PDF: a portrait phone photo (EXIF orientation 6) is embedded 
     dims.push([Number(String(obj.dict.get(PDFName.of("Width")))), Number(String(obj.dict.get(PDFName.of("Height"))))]);
   }
   assert.deepEqual(dims, [[32, 64]], "the upright dimensions");
+});
+
+// --- a cached copy made BEFORE the orientation fix heals itself (2026-11-05) --------------------
+// The repair script takes hours; until it reaches a job, the report path re-makes an old copy
+// whose original is turned, keeps an old copy whose original is upright, and trusts a new copy
+// without reading the original (lib/image-resize.js cachedCopyNeedsRemake / ORIENTATION_FIX_AT).
+async function seedOldCopy(fake, jobId, photoKey, { lastModified = "2026-11-01T00:00:00.000Z" } = {}) {
+  const { markedPhoto } = await import("../../lib/jpeg-test-fixtures.js");
+  const { reportImageCacheKey: cacheKeyOf } = await import("../../lib/photo-report-document.js");
+  const key = cacheKeyOf(jobId, photoKey);
+  fake.puts.push({ key, bytes: 1, contentType: "image/jpeg", body: markedPhoto(), lastModified }); // stored sideways: 64 × 32
+  return key;
+}
+const putsTo = (fake, key) => fake.puts.filter((p) => p.key === key && !p.lastModified);
+
+test("orientation heal, photo report: an OLD cached copy of a TURNED photo is treated as missing — prepare re-makes it upright, the PDF embeds the upright copy", async () => {
+  const { markedPhoto, withOrientation } = await import("../../lib/jpeg-test-fixtures.js");
+  const { jpegDimensions } = await import("../../lib/image-resize.js");
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  const { job, keys } = await seedPhotoJob(fake, h, { photos: 1 });
+  fake.photoBytes = withOrientation(markedPhoto(), 6);
+  const cacheKey = await seedOldCopy(fake, job.Id, keys[0]);
+  await call(h, "PUT", `/service/jobs/${job.Id}/photo-report`, { sections: [{ photos: [{ key: keys[0] }] }] });
+  const r = await call(h, "POST", `/service/jobs/${job.Id}/photo-report/prepare`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.total, r.body.ready, r.body.shrunk, r.body.done], [1, 1, 1, true], "re-made, not trusted");
+  assert.ok(fake.headReads.includes(keys[0]), "the original's first 64 KB was read");
+  const fresh = putsTo(fake, cacheKey);
+  assert.equal(fresh.length, 1, "written again at the SAME key");
+  assert.deepEqual(jpegDimensions(fresh[0].body), { width: 32, height: 64 }, "upright");
+  // the next request finds the new copy and trusts it without reading the original again
+  fake.headReads = [];
+  const again = await call(h, "POST", `/service/jobs/${job.Id}/photo-report/prepare`, {});
+  assert.deepEqual([again.body.ready, again.body.shrunk], [1, 0]);
+  assert.deepEqual(fake.headReads, []);
+});
+
+test("orientation heal, photo report: an OLD copy of an UPRIGHT photo is kept (one 64 KB read, nothing re-made); a copy NEWER than the fix is kept without reading the original", async () => {
+  const { markedPhoto, withOrientation } = await import("../../lib/jpeg-test-fixtures.js");
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  const { job, keys } = await seedPhotoJob(fake, h, { photos: 1 });
+  fake.photoBytes = markedPhoto(); // orientation 1
+  const cacheKey = await seedOldCopy(fake, job.Id, keys[0]);
+  await call(h, "PUT", `/service/jobs/${job.Id}/photo-report`, { sections: [{ photos: [{ key: keys[0] }] }] });
+  fake.headReads = []; // the save reads too (its own photo index); count the prepare alone
+  let r = await call(h, "POST", `/service/jobs/${job.Id}/photo-report/prepare`, {});
+  assert.deepEqual([r.body.ready, r.body.shrunk], [1, 0], "kept");
+  assert.deepEqual(fake.headReads, [keys[0]], "one 64 KB read per request");
+  assert.equal(putsTo(fake, cacheKey).length, 0, "nothing written");
+  // newer than ORIENTATION_FIX_AT, original turned: still kept, and the original is never read
+  const fake2 = fakeSalesforce();
+  const h2 = makeHandler(fake2);
+  const s2 = await seedPhotoJob(fake2, h2, { photos: 1 });
+  fake2.photoBytes = withOrientation(markedPhoto(), 6);
+  const key2 = await seedOldCopy(fake2, s2.job.Id, s2.keys[0], { lastModified: "2026-11-05T20:30:00.000Z" });
+  await call(h2, "PUT", `/service/jobs/${s2.job.Id}/photo-report`, { sections: [{ photos: [{ key: s2.keys[0] }] }] });
+  r = await call(h2, "POST", `/service/jobs/${s2.job.Id}/photo-report/prepare`, {});
+  assert.deepEqual([r.body.ready, r.body.shrunk], [1, 0]);
+  assert.equal((fake2.headReads || []).length, 0, "no read of the original");
+  assert.equal(putsTo(fake2, key2).length, 0);
+});
+
+test("orientation heal, OLD job report: an old cached copy of a turned photo is re-made upright by /report/prepare; an old copy of an upright one is kept", async () => {
+  const { markedPhoto, withOrientation } = await import("../../lib/jpeg-test-fixtures.js");
+  const { jpegDimensions } = await import("../../lib/image-resize.js");
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  const job = await seedReportJob(fake, h);
+  fake.photoBytes = withOrientation(markedPhoto(), 6);
+  const k0 = await seedOldCopy(fake, job.Id, fake.files[0].key);
+  let r = await call(h, "POST", `/service/jobs/${job.Id}/report/prepare`, {});
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.done, true);
+  assert.deepEqual(jpegDimensions(putsTo(fake, k0)[0].body), { width: 32, height: 64 }, "re-made upright at the same key");
+  // upright original: the old copy stays
+  const fake2 = fakeSalesforce();
+  const h2 = makeHandler(fake2);
+  const job2 = await seedReportJob(fake2, h2);
+  fake2.photoBytes = markedPhoto();
+  const k2 = await seedOldCopy(fake2, job2.Id, fake2.files[0].key);
+  await call(h2, "POST", `/service/jobs/${job2.Id}/report/prepare`, {});
+  assert.equal(putsTo(fake2, k2).length, 0, "kept");
+  assert.ok(fake2.headReads.includes(fake2.files[0].key));
 });
 
 test("photo report send: when the photos cannot all be shrunk inside the request it is queued, the worker finishes them and sends ONLY once the PDF exists; a photo that cannot be read fails the render, it is never left out", async () => {

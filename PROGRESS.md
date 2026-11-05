@@ -1,5 +1,17 @@
 # Sundial — Progress Log
 
+## 2026-11-05 — Reports heal sideways cached photos themselves — DEPLOYED (sundial-service-estimate)
+
+**Why.** The orientation repair of the already-cached copies (`scripts/fix-photo-orientation.mjs`, entry below) takes hours. Until it reaches a job, that job's next report PDF — photo report AND old job report — would still embed the sideways cached copy.
+
+**Fixed.** `lib/image-resize.js` `ORIENTATION_FIX_AT` (`2026-11-05T19:56:28Z`, the orientation fix's sundial-service-estimate deploy) + `cachedCopyNeedsRemake(lastModified, readOriginalHead)` — the one rule both reports call:
+- a cached 1,600 px copy written at or after that moment (the fix's own copies, the repair script's) is trusted, nothing read;
+- an older copy costs one 64 KB range read of the original (`getObjectHead`, the same read the repair script uses). Orientation ≠ 1 → treated as missing and re-made upright at the same key; orientation 1 → kept; a failed read keeps it.
+- **Photo report:** `photoIndex` lists the cache with dates (`listObjects` → `lib/file-access.js` `listObjectsUnder`) and leaves the stale copies out of `cachedKeys`, so prepare / send / download / the worker re-make them and the preview shows the original meanwhile. The old copies are checked 16 at a time, once per request.
+- **Old job report:** `reportImage` reads the copy's `lastModified` from `getObject` and sends a stale one down the uncached shrink path.
+- An upright photo's old copy is never rewritten, so it costs that 64 KB read on every report request for its job. That is cheap, and accepted.
+- **Tests:** +4 (estimate Lambda: an old copy + turned original is re-made upright, for both reports; an old copy + upright original is kept; a copy newer than the constant is kept without reading the original. image-resize: the rule itself). All of them fail on the old code. Suite **1,981 / 1,981**.
+
 ## 2026-11-05 — Portrait photos come out upright in both report PDFs and the job-page thumbnails — DEPLOYED (sundial-service-estimate, sundial-service-board)
 
 **The bug (found live).** Portrait phone photos were SIDEWAYS in the photo report's preview and PDF, in the OLD job report's PDF (**since 2026-10-12**, when the photo shrink arrived) and in the job page's thumbnails (since 2026-10-22), while upright in the browser. A phone stores a portrait photo as landscape pixels plus an EXIF orientation tag (0x0112); `lib/image-resize.js` decoded with jpeg-js (ignores the tag) and re-encoded without it, and pdf-lib's `embedJpg` ignores EXIF too. Nothing in the pipeline read the orientation.

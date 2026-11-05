@@ -39,6 +39,7 @@ import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, registerFileMetadata } from "../../lib/file-access.js";
 import { PhotoNotReadyError } from "../../lib/photo-report-pdf.js";
 import { thumbPrefix } from "../../lib/photo-thumbs.js";
+import { cachedCopyNeedsRemake } from "../../lib/image-resize.js";
 import { resolveRecipients, sendDefaults, viaFrom, needsEmail, needsPhone } from "../../lib/send-to.js";
 import {
   buildPhotoReportModel, emptyPhotoReport, isEmbeddable, isPhotoReportEmpty, normalizePhotoReport, photoReportChoices,
@@ -55,6 +56,8 @@ export const PHOTO_REPORT_TOKEN_DAYS = 365;
 export const EMAIL_ATTACH_MAX_BYTES = 20 * 1024 * 1024;
 /** The download comes back as base64 up to this (Lambda's response cap is 6 MB; base64 adds a third). */
 export const DOWNLOAD_INLINE_MAX_BYTES = 4 * 1024 * 1024;
+/** How many originals' first 64 KB are read at once when old cached copies are checked for orientation. */
+const ORIENTATION_CHECK_CONCURRENCY = 16;
 /** A send / download is made in the request only when every photo is cached and there are at most this many. */
 export const INLINE_MAX_PHOTOS = 60;
 /** How long a send / download spends shrinking photos inside the request before handing the rest to the worker. */
@@ -175,16 +178,49 @@ export function createPhotoReportHandlers(d, h) {
     return n.ok ? n.value : emptyPhotoReport();
   };
 
-  /** The job's photo folder, its cached copies and its thumbnails — three listings, nothing read. */
+  /**
+   * The job's photo folder, its cached copies and its thumbnails — three listings. A cached copy
+   * made before the orientation fix is dropped from the index (so prepare re-makes it, and the
+   * preview shows the original meanwhile) when its original is turned — 64 KB of the original
+   * read for each such OLD copy only (lib/image-resize.js cachedCopyNeedsRemake, 2026-11-05).
+   */
   async function photoIndex(job, tenantId) {
     const [files, calls, cached, thumbs] = await Promise.all([
       d.listFiles(job.Id).catch((e) => (console.error("photo report: photo list failed:", e?.message || e), [])),
       h.loadJobCalls(job.Id, tenantId).catch(() => []),
-      d.listKeys(reportImageCachePrefix(job.Id)).catch(() => []),
+      listCached(job.Id).catch(() => []),
       d.listKeys(thumbPrefix(job.Id)).catch(() => []),
     ]);
-    const cachedKeys = new Set(cached);
+    const cachedKeys = new Set(await currentCopies(job.Id, files, cached));
     return { ...photoReportChoices({ files, jobId: job.Id, calls, cachedKeys, thumbKeys: new Set(thumbs) }), cachedKeys };
+  }
+
+  /** The cached copies with their S3 dates (listObjects), or bare keys from a deps that has none. */
+  async function listCached(jobId) {
+    if (d.listObjects) return d.listObjects(reportImageCachePrefix(jobId));
+    return (await d.listKeys(reportImageCachePrefix(jobId))).map((key) => ({ key, lastModified: null, undated: true }));
+  }
+
+  /** The cache keys to trust: every copy except an OLD one whose original is turned. */
+  async function currentCopies(jobId, files, cached) {
+    if (!d.getObjectHead) return cached.map((c) => c.key);
+    const originalOf = new Map((files || []).filter((f) => f.key).map((f) => [reportImageCacheKey(jobId, f.key), f.key]));
+    const keep = [];
+    const toCheck = [];
+    for (const c of cached) {
+      const original = originalOf.get(c.key);
+      if (c.undated || !original) keep.push(c.key); // no date to go on / no original left to read
+      else toCheck.push({ ...c, original });
+    }
+    for (let i = 0; i < toCheck.length; i += ORIENTATION_CHECK_CONCURRENCY) {
+      await Promise.all(
+        toCheck.slice(i, i + ORIENTATION_CHECK_CONCURRENCY).map(async (c) => {
+          if (await cachedCopyNeedsRemake(c.lastModified, () => d.getObjectHead({ key: c.original }))) console.log("photo report: re-making a pre-fix copy of a turned photo:", c.original);
+          else keep.push(c.key);
+        })
+      );
+    }
+    return keep;
   }
 
   /** The live invoice + its lines and payments, and the estimate — for the receipt. */

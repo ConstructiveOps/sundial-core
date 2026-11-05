@@ -2836,6 +2836,18 @@
       "longText": false
     },
     {
+      "column": "extended_install_reason",
+      "sfField": "Extended_Install_Reason__c",
+      "label": "Extended Install Reason",
+      "section": "Installation",
+      "type": "text",
+      "pgType": "text",
+      "description": "Why the install is taking longer than usual. Shown only when Days to Glass on Roof is over 69.",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
       "column": "reviewed_job_for_scheduling",
       "sfField": "Reviewed_Job_for_Scheduling__c",
       "label": "Install Ready to Be Scheduled",
@@ -3194,6 +3206,18 @@
       "type": "date",
       "pgType": "date",
       "description": "Stores the date when meter set requested notification received occurs or is completed for the project.",
+      "gate": null,
+      "reportable": true,
+      "longText": false
+    },
+    {
+      "column": "pto_approved_date",
+      "sfField": "PTO_Approved_Date__c",
+      "label": "PTO Approved Date",
+      "section": "Post Install/PTO",
+      "type": "date",
+      "pgType": "date",
+      "description": "Stores the date the utility approved Permission to Operate (PTO) for the system.",
       "gate": null,
       "reportable": true,
       "longText": false

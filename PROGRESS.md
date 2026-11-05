@@ -1,5 +1,9 @@
 # Sundial — Progress Log
 
+## 2026-11-05 — Solar new fields: report catalog regenerated after the column SQL ran
+
+Both columns were confirmed live first (`information_schema`: `extended_install_reason` text, `pto_approved_date` date). `sql/2026-11-05_solar_new_fields.sql` is now in `APPLIED_SQL_FILES` (`lib/report-columns.js`). Re-ran `generate-report-columns.mjs`: the coverage doc shows Solar 455 cached and 0 to add. Re-ran `generate-report-catalog.mjs`: the two columns are in `lib/report-catalog/solar.json` and `sql/2026-11-03_report_catalog.sql`, ungated and reportable. Solar has 457 catalog columns and the catalog **1,353** in all. `npm test` 1,945/1,945.
+
 ## 2026-11-05 — Two new Solar fields: Extended Install Reason (shown after 69 days to glass) and PTO Approved Date
 
 **Why.** Harmon wants both fields. Tim created them in Setup after the D-090 cleanup made room (`Extended_Install_Reason__c` Text 255, `PTO_Approved_Date__c` Date). A read-only describe as the integration user confirmed both are createable and updateable, and that Solar has 478 custom fields.

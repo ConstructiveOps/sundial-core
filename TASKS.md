@@ -15,8 +15,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] harmon-crm `ff12945` (merged `46279ce`): Solar page config regenerated, Visible When operators, 21 tests, 731/731
 
 **Tim — in this order** (PowerShell, sundial-core repo root, on `master`):
-- [ ] **1. SQL:** paste `sql/2026-11-05_solar_new_fields.sql` whole into the Supabase SQL editor and Run. It adds two empty columns; safe to re-run.
-- [ ] **2. Tell Claude it ran.** Claude regenerates the report catalog (expect `catalog_rows` **1,353**), lists the SQL file as applied in `lib/report-columns.js`, commits, and hands you `sql/2026-11-03_report_catalog.sql`. Run that file in the SQL editor.
+- [x] **1. SQL:** (run 2026-11-05, both columns confirmed live) paste `sql/2026-11-05_solar_new_fields.sql` whole into the Supabase SQL editor and Run. It adds two empty columns; safe to re-run.
+- [~] **2. Catalog** — Claude done 2026-11-05 (1,353 rows, SQL file marked applied); **Tim: run the catalog SQL.** Was: Claude regenerates the report catalog (expect `catalog_rows` **1,353**), lists the SQL file as applied in `lib/report-columns.js`, commits, and hands you `sql/2026-11-03_report_catalog.sql`. Run that file in the SQL editor.
 - [ ] **3. Deploy three Lambdas** (after step 2, so each starts up seeing the new columns):
   - [ ] `.\deploy.ps1 sundial-cache-sync` — the column-list refresh (code change)
   - [ ] `.\deploy.ps1 sundial-sf-query` — no code change; the redeploy restarts it, and its stale-row refresh holds the Solar cache's column list until it restarts

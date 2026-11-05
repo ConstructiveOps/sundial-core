@@ -360,7 +360,7 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('customer', 'sundial_customer_cache', 'created_date', 'timestamp with time zone', null, true),
   ('customer', 'sundial_customer_cache', 'sf_id', 'text', null, false);
 
--- sundial_solar_cache (Sundial_Solar__c) — 455 column(s)
+-- sundial_solar_cache (Sundial_Solar__c) — 457 column(s)
 insert into public.sundial_report_catalog (object_key, table_name, column_name, data_type, gate, reportable) values
   ('solar', 'sundial_solar_cache', 'project_kickoff_date_job', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'last_contact_date', 'date', null, true),
@@ -560,6 +560,7 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('solar', 'sundial_solar_cache', 'domestic_content', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'purchase_order_number', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'days_to_glass_on_roof', 'numeric', null, true),
+  ('solar', 'sundial_solar_cache', 'extended_install_reason', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'reviewed_job_for_scheduling', 'boolean', null, true),
   ('solar', 'sundial_solar_cache', 'assigned_crew', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'solar_installer', 'text', null, true),
@@ -589,6 +590,7 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('solar', 'sundial_solar_cache', 'inspection_pass_date', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'fire_inspection_date', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'meter_set_requested_notification', 'date', null, true),
+  ('solar', 'sundial_solar_cache', 'pto_approved_date', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'commission_of_system', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'active_system_monitoring', 'boolean', null, true),
   ('solar', 'sundial_solar_cache', 'closeout_documents_sent_to_homeowner', 'date', null, true),
@@ -1424,5 +1426,5 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
 
 commit;
 
--- 1351 column(s) in all. Check (must be 1351):
+-- 1353 column(s) in all. Check (must be 1353):
 select count(*) as catalog_rows from public.sundial_report_catalog;

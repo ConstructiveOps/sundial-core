@@ -11,7 +11,7 @@
 >
 > Built 2026-10-09 from harmon-crm's git log and PROGRESS.md, 2026-09-10 (`7dcab07`, the
 > Service module's first screens) through 2026-10-07 (`a9abd1e`); rows added since as features
-> land (latest: D12–D15, 2026-10-12, `0c57be4`). Everything before that is
+> land (latest: §11 Reports, 2026-11-05). Everything before that is
 > summarised at feature-area grain in [Baseline](#baseline--before-2026-09-10). How to stand
 > a client up: `docs/multi-client-deployment.md` → *Spinning Up a New Client*.
 
@@ -250,6 +250,16 @@ A client with no club removes C1–C3 and records it (`conops-demo` § 3 is the 
 
 **Verified end to end 2026-10-27** (dealer module step 8, ZZ users only): `node scripts/verify-dealer-module.mjs` — D2 lists, D3's solar-through-customer read, D4's comment rules, D8's stage push (one bell row per recipient, none on a re-sync) and the tech app's 403 for a sales login. A stage push follows the cache row's next refresh (the office's re-read, else the 5-minute sync), `docs/access-model.md` §13.4. A new client's dealer setup is DEALER + DEALER-PWA; checklist step 1.3, 5, 6, 7.6 and 10.10 in `docs/multi-client-deployment.md`.
 
+## 11. Reports (`/reports`)
+
+| # | Feature | Since | harmon-crm files | sundial-core dependency | Kind | New-client step |
+|---|---|---|---|---|---|---|
+| R1 | **The Reports tab, for the office's managers only**: shown when `/auth/me` lists `reports.read` (Executive / Admin / Manager); a sales login on the office shell opening `/reports` gets a denial card and no request is sent (a 403 `MODULE_FORBIDDEN` shows the same); a Technician / dealer-app login is sent to its own shell. Nav items can now be gated on an action key (`NavItem.action`) | harmon-crm `817877b` 11-05 (`feature/reports-page`) | `config/nav.ts` (`action`, `visibleNavItems(canRead, can)`), `components/AppLayout.tsx`, `components/MobileNav.tsx`, `App.tsx` (lazy routes), `components/reports/ReportModals.tsx` (`ReportsDenied`) | `GET /auth/me` `access.actions` (`lib/access.js` `reports.read` / `reports.write` / `reports.share`; `sundial-auth-proxy` deployed with them) | Platform | — |
+| R2 | **Saved reports**: My reports + Shared with everyone (newest change first, owner name, type, last updated in Arizona time); the owner renames, shares / makes private and deletes; anyone else's is Read-only (open, Save as). **New report** picks one of the ten report types | harmon-crm `817877b` 11-05 (`feature/reports-page`) | `pages/reports/ReportsHomePage.tsx`, `components/reports/ReportModals.tsx`, `components/reports/report-ui.ts` (`ownerText`), `lib/reports-api.ts` | `GET` / `POST /reports`, `PATCH` / `DELETE /reports/{id}`, `GET /reports/types` → `sundial-reports` (`scripts/wire-reports-routes.ps1`); `sql/sundial_reports.sql`; `ownerName` on the list (2026-11-05) | Platform | — (the Supabase project and `sundial-reports` are shared; reports are tenant-scoped by the JWT) |
+| R3 | **The report editor**: columns from the caller's catalog, grouped by alias then section, with search (link fields never columns; long text "CSV only"); filters with the catalog's own operators and a value input per type (picklist values, any-of tick boxes, number ranges, dates, relative dates this month / last month / this quarter / YTD / last N days); one group-by + Count / Sum / Avg / Min / Max; sort; limit; Run; Save / Save as; **every 400 next to the control it names** | harmon-crm `817877b` 11-05 (`feature/reports-page`) | `pages/reports/ReportEditorPage.tsx`, `lib/report-definition.ts`, `components/reports/{ColumnPicker,FilterRow,FieldSelect,EditorPanels}.tsx` | `GET /reports/catalog?type=`, `POST /reports/run`, `GET /reports/{id}` → `sundial-reports`; `sql/2026-11-03_report_catalog.sql` (re-run after a catalog regeneration), `sql/sundial_report_run.sql`; relative dates resolved in America/Phoenix by `lib/report-def.js` | Platform | — |
+| R4 | **Results, totals and one chart**: a windowed table (5,000 rows), the grand-totals row, the "showing 5,000 of more" banner, "data as of" (`asOf`), currency / percent from the catalog's `format`; when grouped, a bar chart (a line when the group is a date), Recharts 3 in its own lazily loaded chunk | harmon-crm `817877b` 11-05 (`feature/reports-page`) | `components/reports/ResultsTable.tsx`, `components/reports/ResultsChart.tsx`, `hooks/useVirtualRows.ts`, `lib/report-format.ts` (`REPORT_TIME_ZONE`) | `POST /reports/run` columns `format` (2026-11-05); the cache sync (`cache_sync_runs` → `asOf`) | **Code** (Arizona time zone) | CLIENT_DIVERGENCE §4 "Locale": the client's zone in `report-format.ts` (and a per-tenant zone in the engine, a backend change) |
+| R5 | **Export CSV**: up to 50,000 rows with long text, built in the background, checked every 2 s, downloaded without leaving the page; **Download again** fetches a fresh 15-minute link; failures in plain words | harmon-crm `817877b` 11-05 (`feature/reports-page`) | `components/reports/useCsvExport.ts`, `pages/reports/ReportEditorPage.tsx` | `POST /reports/csv`, `GET /reports/csv/{id}` → `sundial-reports` (1,024 MB / 300 s, self-invoke, IAM `sundial-reports-export`); `sql/sundial_reports.sql` (`sundial_report_exports`); `sfsolproj/REPORTS/` + the 7-day lifecycle rule (`scripts/add-reports-lifecycle.ps1`) | Platform | ORIGIN (the browser follows the presigned S3 link — bucket CORS is not involved for a plain download) |
+
 ---
 
 ## Baseline — before 2026-09-10
@@ -289,7 +299,7 @@ features a fork could lose without the area table above showing it.
 | B8 | **Partial-load banner**: a list that lost pages shows what loaded and says so | `e826bc5` 08-10 | `components/ui/partial-load-banner.tsx`, `lib/api.ts`, the list pages | none, client-side only | Platform | — |
 | B9 | Detail-page **section rail** (phone: chip row) | `e74f56b` 08-31 | `components/detail/section-rail.ts`, the three detail pages | none, client-side only | Platform | — |
 | B10 | **@-mention picker** shows everyone, ranked, greying out who cannot see the record | `a29c1f9` 08-31 | `components/comments/CommentThread.tsx`, `mention-ranking.ts` | Supabase `comments` RLS; `GET /sf/users` | Platform | — |
-| B11 | **Coming soon** pages (Commercial, Reports) | `9973554` 07-01 | `pages/ComingSoonPage.tsx`, `App.tsx`, `config/nav.ts` | none | **Code** (which modules are placeholders) | Point the routes at what the client has |
+| B11 | **Coming soon** pages (Commercial; Reports until 2026-11-05 — now §11) | `9973554` 07-01 | `pages/ComingSoonPage.tsx`, `App.tsx`, `config/nav.ts` | none | **Code** (which modules are placeholders) | Point the routes at what the client has |
 | B12 | **Dashboard** page (tiles since L5 from the solar pipeline call) | `e1782ac` 06-30 (shell `9973554` 07-01) | `pages/DashboardPage.tsx` | `GET /sf/solar/pipeline` (see L5) | Platform | — |
 
 ## Backend-only capabilities (no portal screen)

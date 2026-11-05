@@ -214,11 +214,18 @@ async function getQueryableFields(sfObject) {
   return result;
 }
 
-// --- Cache column introspection (module-scope cached) ----------------------
-let openApiSpecPromise = null;
+// --- Cache column introspection (module-scope cached, WITH TTL) ------------
+// Same TTL as the describe (2026-11-05, the two new Solar fields): this container stays
+// warm for hours, and a column list read before a column was ADDED kept the new column
+// out of every sync until the container recycled — silently, since a missing column is
+// simply not written. The spec and the per-table lists expire together, and a failed
+// fetch is never cached.
+const CACHE_COLUMNS_TTL_MS = DESCRIBE_TTL_MS;
+let openApiSpec = null; // { promise, at }
+const cacheColumnsCache = new Map(); // table -> cols (derived from the current spec)
 async function getOpenApiSpec() {
-  if (!openApiSpecPromise) {
-    openApiSpecPromise = (async () => {
+  if (!openApiSpec || Date.now() - openApiSpec.at >= CACHE_COLUMNS_TTL_MS) {
+    const promise = (async () => {
       const cfg = await getSupabaseConfig();
       const resp = await fetch(`${cfg.url}/rest/v1/`, {
         headers: {
@@ -229,14 +236,19 @@ async function getOpenApiSpec() {
       if (!resp.ok) throw new Error(`OpenAPI fetch failed (${resp.status})`);
       return resp.json();
     })();
+    const entry = { promise, at: Date.now() };
+    openApiSpec = entry;
+    cacheColumnsCache.clear(); // derived lists belong to the old spec
+    promise.catch(() => {
+      if (openApiSpec === entry) openApiSpec = null;
+    });
   }
-  return openApiSpecPromise;
+  return openApiSpec.promise;
 }
 
-const cacheColumnsCache = new Map();
 async function getCacheColumns(table) {
+  const spec = await getOpenApiSpec(); // re-checks the spec's age first
   if (cacheColumnsCache.has(table)) return cacheColumnsCache.get(table);
-  const spec = await getOpenApiSpec();
   const def = spec?.definitions?.[table] || spec?.components?.schemas?.[table];
   const cols = new Set(def?.properties ? Object.keys(def.properties) : []);
   cacheColumnsCache.set(table, cols);

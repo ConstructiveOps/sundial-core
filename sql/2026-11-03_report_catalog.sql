@@ -360,7 +360,7 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('customer', 'sundial_customer_cache', 'created_date', 'timestamp with time zone', null, true),
   ('customer', 'sundial_customer_cache', 'sf_id', 'text', null, false);
 
--- sundial_solar_cache (Sundial_Solar__c) — 476 column(s)
+-- sundial_solar_cache (Sundial_Solar__c) — 455 column(s)
 insert into public.sundial_report_catalog (object_key, table_name, column_name, data_type, gate, reportable) values
   ('solar', 'sundial_solar_cache', 'project_kickoff_date_job', 'date', null, true),
   ('solar', 'sundial_solar_cache', 'last_contact_date', 'date', null, true),
@@ -811,28 +811,7 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
   ('solar', 'sundial_solar_cache', 'lastmodifieddate', 'timestamp with time zone', null, true),
   ('solar', 'sundial_solar_cache', 'project_name', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'sales_rep_name', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'adder_price_per_watt', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'additional_phone', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'change_order_received', 'boolean', null, true),
   ('solar', 'sundial_solar_cache', 'contract_amount_2', 'numeric', null, true),
-  ('solar', 'sundial_solar_cache', 'dealer_fee_amount', 'numeric', null, true),
-  ('solar', 'sundial_solar_cache', 'inverter_2_quantity', 'numeric', null, true),
-  ('solar', 'sundial_solar_cache', 'job_call_comments', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_applied_date_3', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_applied_date_4', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_fee_3', 'numeric', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_fee_4', 'numeric', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_number_3', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_number_4', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_received_3', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_received_4', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_type_3', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'permit_type_4', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'project_resold', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 're_audit_upload_date', 'date', null, true),
-  ('solar', 'sundial_solar_cache', 'second_address', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'web_inspection_key_code_3', 'text', null, true),
-  ('solar', 'sundial_solar_cache', 'web_inspection_key_code_4', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'solar_project_sf_id', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'dealer_sf_id', 'text', null, true),
   ('solar', 'sundial_solar_cache', 'number_of_panels', 'integer', null, true),
@@ -1445,5 +1424,5 @@ insert into public.sundial_report_catalog (object_key, table_name, column_name, 
 
 commit;
 
--- 1372 column(s) in all. Check (must be 1372):
+-- 1351 column(s) in all. Check (must be 1351):
 select count(*) as catalog_rows from public.sundial_report_catalog;

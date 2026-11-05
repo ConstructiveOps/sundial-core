@@ -28,7 +28,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **5. Delete:** the same zip, with Check Only unticked. Then straight away give cache-sync a fresh container, so it re-reads the field list at once instead of within 5 minutes:
   `aws lambda update-function-configuration --function-name sundial-cache-sync --description "D-090 solar field cleanup 2026-11-04"`
 - [ ] **6. SQL:** paste `sql/2026-11-04_drop_solar_columns.sql` whole into the Supabase SQL editor and Run. The check at the bottom must return 0 rows.
-- [ ] **7. The report catalog** (Claude can do this part): `node scripts/generate-report-catalog.mjs` and `node scripts/generate-report-columns.mjs`, commit, then run `sql/2026-11-03_report_catalog.sql` (`catalog_rows` should be **1,351**, 21 fewer) and `.\deploy.ps1 sundial-reports`.
+- [~] **7. The report catalog** (files regenerated and pushed by Claude 2026-11-04; Tim: run the SQL + deploy): `node scripts/generate-report-catalog.mjs` and `node scripts/generate-report-columns.mjs`, commit, then run `sql/2026-11-03_report_catalog.sql` (`catalog_rows` should be **1,351**, 21 fewer) and `.\deploy.ps1 sundial-reports`.
 - [ ] **8. Full Solar cache sync:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "solar", "mode": "full" }`. Then check the `cache_sync_runs` row for solar says ok.
 - [ ] **9. Make room and create the two new fields:** Setup → Sundial Solar → Fields & Relationships → **Deleted Fields** → **Erase** the 24. Deleted fields count against the 500 until they are erased or 15 days pass, and erasing cannot be undone (the backup CSV holds the 38 values). Then create the two new fields by hand.
 
@@ -143,7 +143,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] **2026-11-02 — all done:** SQL run, `sundial-sf-query` then `sundial-cache-sync` deployed, all 14 full resyncs + reconciles, stage hook restored, schedule re-enabled. Runbook fixes from the run (service_role timeouts; pause the 5-min rule; vacuum after a rewrite): `docs/caching-architecture.md` "Running a full resync"
 - [x] **Generator re-run 2026-11-02:** no table gained a column (nothing missing; no follow-on SQL written), no refusal or URI number changed (solar still 14,278 / 16,384). The script now writes the SQL only to a NEW file named with `--sql` and never rewrites `sql/2026-10-30_report_columns.sql`
 - [ ] Later (not R0): R1 — the engine (`docs/reporting-module.md` §6)
-- [ ] Later: split the solar sync SELECT (`sundial-cache-sync`) into two queries before roughly 60 more solar fields are cached — its URI is 14,278 of 16,384 bytes today (`docs/reporting-cache-coverage.md`)
+- [ ] Later: split the solar sync SELECT (`sundial-cache-sync`) into two queries before roughly 75 more solar fields are cached — its URI is 13,725 of 16,384 bytes since the D-090 cleanup (was 14,278) (`docs/reporting-cache-coverage.md`)
 - [ ] Later: `sundial-cache-sync` page upserts retry a statement timeout up to 3 times with backoff before failing the run, and a full run is resumable from the last written page (2026-11-02: one timed-out page threw away a ~7-minute customer run)
 
 ## 2026-10-30 — Harmon's first dealer-module feedback (folded stage + hidden fields)

@@ -219,7 +219,7 @@ All Sundial custom objects use the `Sundial_` prefix (e.g., `Sundial_User__c`, `
 
 ### Sundial_Solar__c is at the 500-field cap (D-090, 2026-11-04)
 
-Salesforce caps an Enterprise object at 500 custom fields, and Solar hit it. 25 unused fields were deleted (`salesforce/solar-field-cleanup-2026-11/`; audit `docs/audits/solar-fields-2026-11.md`, re-run with `node scripts/audit-solar-fields.mjs`). **To delete a field, take its references out and deploy them first, then delete it in Salesforce, then drop its cache column.** A field leaves the portal by leaving the sheets (`scripts/remove-sheet-fields.mjs`) and regenerating, never by hand-editing a generated config. The report catalog keeps any field that still has a cache column, so regenerate it after the drop.
+Salesforce caps an Enterprise object at 500 custom fields, and Solar hit it. 24 unused fields were deleted (`salesforce/solar-field-cleanup-2026-11/`; audit `docs/audits/solar-fields-2026-11.md`, re-run with `node scripts/audit-solar-fields.mjs`). **To delete a field, take its references out and deploy them first, then delete it in Salesforce, then drop its cache column.** A field leaves the portal by leaving the sheets (`scripts/remove-sheet-fields.mjs`) and regenerating, never by hand-editing a generated config. The report catalog keeps any field that still has a cache column, so regenerate it after the drop.
 
 ### Dealer terms (D-085, 2026-10-22, package `salesforce/v9-dealer-terms/`)
 

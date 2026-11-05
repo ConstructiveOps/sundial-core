@@ -1,7 +1,7 @@
--- D-090 (2026-11-04): drop the cache columns of the 25 Sundial_Solar__c fields deleted
--- by salesforce/solar-field-cleanup-2026-11/. 21 of the 25 had a column; the other four
--- (Contract_Utility_Account_Holder_Name_2__c, Sales_Rep_Email__c, NSA__c,
--- Sundial_Sales_Rep_ID__c) were never cached.
+-- D-090 (2026-11-04): drop the cache columns of the 24 Sundial_Solar__c fields deleted
+-- by salesforce/solar-field-cleanup-2026-11/. 21 of the 24 had a column; the other three
+-- (Contract_Utility_Account_Holder_Name_2__c, NSA__c, Sundial_Sales_Rep_ID__c) were never
+-- cached. (Sales_Rep_Email__c was taken off the delete list the same day; it was never cached.)
 --
 -- RUN ONLY AFTER the Salesforce delete has succeeded. Until then the sync still fills
 -- these columns. Once the fields are gone the describe-driven sync stops selecting them

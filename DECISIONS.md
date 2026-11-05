@@ -3940,17 +3940,17 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **The engine has two more helper functions.** `sundial_report_join_where` and `sundial_report_ref` are service-role only, like `sundial_report_run` and `sundial_report_column`.
 - **A deleted saved report keeps its exports.** An export row stays until it is deleted, and its file is gone after 7 days.
 
-## D-090 (2026-11-04): Sundial_Solar__c is at the 500-field cap; 25 unused fields deleted, references first
+## D-090 (2026-11-04): Sundial_Solar__c is at the 500-field cap; 24 unused fields deleted, references first
 
 **Context.** Harmon needs two new fields on `Sundial_Solar__c`, and the object holds 500 custom fields, which is Salesforce's Enterprise Edition cap. `scripts/audit-solar-fields.mjs` (read-only) audited all 500. For each field it recorded the data (records with a value, last touched) and every reference in both repos and the three design sheets. Its output is `docs/audits/solar-fields-2026-11.{csv,md}`. The result was A 2, B 30, C 468. Most of the object is in use, and the room to free is small.
 
 **Decision.**
-1. **Delete 25 fields**, the audit's A + B buckets minus seven that Tim kept: `Attribute_Sync_Error__c` (the Acumatica attribute sync writes it) and the six NS Adder 4/5 Description / Labor Hours / Material Cost fields. The list lives once, in `salesforce/solar-field-cleanup-2026-11/fields.json`. 16 of the fields are empty. The 9 that hold data (the Permit 3/4 set and Web Inspection Key Code 3) have their 38 values saved in `docs/audits/solar-fields-2026-11-backup.csv` first.
+1. **Delete 24 fields**, the audit's A + B buckets minus eight that Tim kept: `Attribute_Sync_Error__c` (the Acumatica attribute sync writes it), the six NS Adder 4/5 Description / Labor Hours / Material Cost fields, and `Sales_Rep_Email__c` (amendment 1 below). The list lives once, in `salesforce/solar-field-cleanup-2026-11/fields.json`. 15 of the fields are empty. The 9 that hold data (the Permit 3/4 set and Web Inspection Key Code 3) have their 38 values saved in `docs/audits/solar-fields-2026-11-backup.csv` first.
 2. **The references come out and are deployed BEFORE the Salesforce delete**, so nothing selects a field that no longer exists:
    - the rows leave the Fields-by-Section and Dealer sheets (`scripts/remove-sheet-fields.mjs`, which matches the exact API name only and verifies by re-reading the file);
    - the field manifest and the portal's page configs are regenerated from those sheets, never hand-edited;
    - the customer → solar copy stops copying `NSA__c` (the Customer's own `NSA__c` stays).
-3. **The cache columns go after the delete** (`sql/2026-11-04_drop_solar_columns.sql`, the 21 of the 25 fields that had a column). The same transaction deletes their `sundial_report_catalog` rows. The report catalog cannot drop them earlier, because it keeps any field whose cache column exists. It is regenerated after the drop. No saved report used any of the columns, and no view depends on them.
+3. **The cache columns go after the delete** (`sql/2026-11-04_drop_solar_columns.sql`, the 21 of the 24 fields that had a column). The same transaction deletes their `sundial_report_catalog` rows. The report catalog cannot drop them earlier, because it keeps any field whose cache column exists. It is regenerated after the drop. No saved report used any of the columns, and no view depends on them.
 4. **`sundial-cache-sync`'s describe cache gets the D-045 five-minute TTL.** It was the only describe cache without one. The Lambda runs every 5 minutes, so it stays warm, and a describe taken before the delete would have kept the deleted fields in every Solar SELECT (INVALID_FIELD on every sync) until the container recycled.
 
 **Consequences.**
@@ -3958,3 +3958,5 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **The fields stay restorable for 15 days**, and they still count against the 500 until erased. To create the two new fields at once, erase them from Deleted Fields (the backup CSV is then the only copy of the 38 values).
 - **The next squeeze starts from the audit's C bucket** (56 fields with ≤ 50 records). Every one of those holds real data, so the next round needs a migration or Harmon's agreement to lose it.
 - **Two historical mentions stay on purpose:** `harmon-crm/scripts/build-gap-analysis.mjs` (a one-off script) and `harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md`. So does `sql/2026-10-30_report_columns.sql`, which has already been run and is never rewritten.
+
+**Amendment 1 (2026-11-04, same day, before the delete ran): `Sales_Rep_Email__c` stays.** Tim hit too many problems in Salesforce trying to remove it and chose to keep it. It is off `fields.json`, `destructiveChanges.xml` and the zip, so the package now deletes 24 fields. Nothing else changes: the field was never in a sheet, the portal or the cache, so no config, manifest, catalog or SQL statement named it. It holds no data and keeps one of the 500 slots.

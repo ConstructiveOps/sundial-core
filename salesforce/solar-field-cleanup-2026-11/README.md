@@ -1,6 +1,6 @@
-# solar-field-cleanup-2026-11 — delete 25 Sundial_Solar__c fields (D-090)
+# solar-field-cleanup-2026-11 — delete 24 Sundial_Solar__c fields (D-090)
 
-**DESTRUCTIVE.** `destructiveChanges.xml` deletes 25 custom fields on `Sundial_Solar__c`.
+**DESTRUCTIVE.** `destructiveChanges.xml` deletes 24 custom fields on `Sundial_Solar__c`.
 `package.xml` is empty on purpose (a destructive deploy needs one). The list is
 `fields.json` — the single source the sheet edit, this package and the drop SQL were
 built from.
@@ -8,12 +8,12 @@ built from.
 ## Why
 
 `Sundial_Solar__c` is at Salesforce's 500 custom-field cap (Enterprise Edition), so no
-new field can be created. `docs/audits/solar-fields-2026-11.md` audited all 500. These 25
+new field can be created. `docs/audits/solar-fields-2026-11.md` audited all 500. These 24
 are its buckets A + B **minus** the seven Tim kept (`Attribute_Sync_Error__c` — the
-Acumatica attribute sync writes it — and the six NS Adder 4/5 Description / Labor Hours /
-Material Cost fields).
+Acumatica attribute sync writes it — the six NS Adder 4/5 Description / Labor Hours /
+Material Cost fields, and `Sales_Rep_Email__c`, which Salesforce would not let go cleanly).
 
-16 of the 25 hold no data at all. The other 9 (the Permit 3/4 set and
+15 of the 24 hold no data at all. The other 9 (the Permit 3/4 set and
 `Web_Inspection_Key_Code_3__c`) hold 38 values between them; every one is saved in
 `docs/audits/solar-fields-2026-11-backup.csv` (record Id, Name, field, value).
 
@@ -39,7 +39,7 @@ Nothing may still **select** a field when it is deleted. In order:
    `destructiveChanges.xml` at the zip root, nothing else).
 2. Workbench → Migration → Deploy → choose the zip → tick **Check Only** and
    **Single Package**; leave **Purge On Delete UNticked** (that keeps the fields
-   restorable). Deploy. It must say **Success** with 25 components.
+   restorable). Deploy. It must say **Success** with 24 components.
 3. Same zip, same settings, **Check Only unticked** → Deploy for real.
 
 Or with the Salesforce CLI, from this folder:
@@ -62,6 +62,6 @@ sf project deploy start --metadata-dir . --target-org <your-org-alias> --wait 30
 - Then `sql/2026-11-04_drop_solar_columns.sql`, the catalog regeneration and a full solar
   cache sync — the steps are in TASKS.md (D-090).
 
-If you ever rebuild the zip: `tar -a -c -f solar-field-cleanup-2026-11.zip package.xml destructiveChanges.xml`
-from this folder (Windows' built-in `tar` writes forward-slash entries). NEVER PowerShell 5.1
+If you ever rebuild the zip, in PowerShell: `C:\Windows\System32\tar.exe -a -c -f solar-field-cleanup-2026-11.zip package.xml destructiveChanges.xml`
+from this folder (Windows' own `tar` writes a real zip with forward-slash entries; Git Bash's `tar` writes a TAR file with a .zip name). NEVER PowerShell 5.1
 Compress-Archive.

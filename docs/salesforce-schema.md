@@ -294,7 +294,7 @@ The `-2` reissue re-snapshots; a void never rewrites. Cache columns: `bill_to_cu
 
 **Key Architectural Fields (this object will have hundreds of fields total; this section lists the architecturally important ones):**
 
-> **The 500-field cap (D-090, 2026-11-04).** `Sundial_Solar__c` reached Salesforce's 500 custom-field limit (Enterprise Edition). 25 unused fields were deleted to make room, listed in `salesforce/solar-field-cleanup-2026-11/fields.json`: the Permit Type / Applied Date / Received / Number / Fee 3 and 4 sets, Web Inspection Key Code 3 and 4, and 13 empty fields. The per-field audit is `docs/audits/solar-fields-2026-11.md`, and the values the deleted fields held are in `docs/audits/solar-fields-2026-11-backup.csv`. Before adding a field to this object, count what is left. When it is full again, start from the audit's C-bucket fields with ≤ 50 records (`node scripts/audit-solar-fields.mjs` re-runs it).
+> **The 500-field cap (D-090, 2026-11-04).** `Sundial_Solar__c` reached Salesforce's 500 custom-field limit (Enterprise Edition). 24 unused fields were deleted to make room, listed in `salesforce/solar-field-cleanup-2026-11/fields.json`: the Permit Type / Applied Date / Received / Number / Fee 3 and 4 sets, Web Inspection Key Code 3 and 4, and 12 empty fields (`Sales_Rep_Email__c` was kept). The per-field audit is `docs/audits/solar-fields-2026-11.md`, and the values the deleted fields held are in `docs/audits/solar-fields-2026-11-backup.csv`. Before adding a field to this object, count what is left. When it is full again, start from the audit's C-bucket fields with ≤ 50 records (`node scripts/audit-solar-fields.mjs` re-runs it).
 
 *Identity and snapshot:*
 - `Project_Name__c` — Text

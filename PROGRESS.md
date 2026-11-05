@@ -1,15 +1,19 @@
 # Sundial — Progress Log
 
-## 2026-11-04 — Solar field cleanup: 25 fields leave Sundial_Solar__c, references first (D-090, `feature/solar-field-cleanup`)
+## 2026-11-04 — D-090 amendment 1: `Sales_Rep_Email__c` stays on Sundial_Solar__c
 
-**Why.** Solar is at the 500-field cap and Harmon needs two new fields. From the audit below, Tim chose the A + B buckets minus `Attribute_Sync_Error__c` and the six NS Adder 4/5 cost fields: 25 fields. This change takes every reference out first. The Salesforce delete and the column drop are Tim's steps (TASKS, D-090).
+Tim ran into too many problems in Salesforce removing `Sales_Rep_Email__c` and chose to keep it. It is out of `salesforce/solar-field-cleanup-2026-11/fields.json` and `destructiveChanges.xml`, and the Workbench zip was rebuilt (24 components; the zip is git-ignored, so it was rebuilt on disk only). The counts in the README, the drop SQL's header comment, D-090, CLAUDE.md, `docs/salesforce-schema.md` and TASKS now say 24. Nothing in code changes: the field was never in a sheet, a page config, the manifest or the cache. The README's zip-rebuild line now names `C:\Windows\System32\tar.exe`, because Git Bash's `tar` writes a TAR file with a .zip name. The audit files (`docs/audits/solar-fields-2026-11.*`) are left as the audit found things.
+
+## 2026-11-04 — Solar field cleanup: 24 fields leave Sundial_Solar__c, references first (D-090, `feature/solar-field-cleanup`)
+
+**Why.** Solar is at the 500-field cap and Harmon needs two new fields. From the audit below, Tim chose the A + B buckets minus `Attribute_Sync_Error__c` and the six NS Adder 4/5 cost fields: 25 fields, 24 after `Sales_Rep_Email__c` was kept (amendment above). This change takes every reference out first. The Salesforce delete and the column drop are Tim's steps (TASKS, D-090).
 
 **Built.**
 - **The list lives once:** `salesforce/solar-field-cleanup-2026-11/fields.json`.
 - **`scripts/remove-sheet-fields.mjs`**: removes a row only when its "API Name" cell is exactly a listed field, and reports rows that merely mention one. It re-reads the file and fails on any difference. Results:
   - Fields-by-Section: 480 → 459 rows.
   - Dealer sheet: 217 → 212 rows.
-  - Budget sheet: 0 rows (none of the 25 are in it).
+  - Budget sheet: 0 rows (none of the fields are in it).
   - Only `NSA__c` also exists on Customer, and the Customer field stays.
 - **Regenerated:**
   - `lib/field-manifest/*.json` (5 Solar fields gone);
@@ -17,7 +21,7 @@
   - `docs/reporting-cache-coverage.md`.
   - `apply-dealer-visibility.mjs` no longer names Permit Received 3/4, and its dry run shows 0 cell changes.
 - **`sundial-cache-sync` describe TTL.** It cached the describe for the life of a warm container. A Lambda that runs every 5 minutes would have kept the deleted fields in every Solar SELECT (INVALID_FIELD). It now has the same 5-minute TTL as every other describe cache. 36/36 cache-sync tests pass.
-- **`salesforce/solar-field-cleanup-2026-11/`**: an empty `package.xml`, `destructiveChanges.xml` with the 25 fields, a Workbench zip, and a README (Check Only first, the `sf` CLI equivalents, the 15-day restore window, and erasing to free the slots).
+- **`salesforce/solar-field-cleanup-2026-11/`**: an empty `package.xml`, `destructiveChanges.xml` with the 24 fields, a Workbench zip, and a README (Check Only first, the `sf` CLI equivalents, the 15-day restore window, and erasing to free the slots).
 - **`sql/2026-11-04_drop_solar_columns.sql`**: drops the 21 columns and deletes their catalog rows in one transaction. Checked live first: no saved report and no view uses them.
 - **harmon-crm** (`feature/solar-field-cleanup` → `main`):
   - the solar and dealer page configs were regenerated from the edited sheets (147 lines removed);

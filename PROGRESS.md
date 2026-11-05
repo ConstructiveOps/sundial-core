@@ -1,15 +1,16 @@
 # Sundial — Progress Log
 
-## 2026-11-05 — Job report PDFs get their Files rows; no file-metadata insert fails on the uploader id any more — DEPLOYED (sundial-service-estimate)
+## 2026-11-05 — Job report PDFs get their Files rows; no file-metadata insert fails on the uploader id any more — DEPLOYED (sundial-service-estimate; sundial-service-board pending)
 
 **Why.** The old job report's `registerFileMetadata` call never landed a row (found while building the photo report). The logs showed THREE causes, not one:
 - **report.js** passed `objectKey` / `size` / `uploadedBy` / `uploadedByName` and no `tenantId` (`tenant_id` / `sf_object_type` are NOT NULL), and did not `await d.getSupabaseClient()` (`supabase.from is not a function`).
-- **The uploader id.** `uploaded_by_user_id` is a uuid (the Supabase profile), but the estimate and board Lambdas pass `ctx.userId` = the Sundial_User__c Salesforce id. Postgres refused the WHOLE row: `invalid input syntax for type uuid: "a1O…"`. Not one row in the table carries an uploader. It hit the photo report's two smoke-test sends, the invoice / estimate PDFs' calls (the "model" call too), and **the tech app's photo uploads** (the board Lambda's log has the same error for today's uploads).
+- **The uploader id.** `uploaded_by_user_id` is a uuid with a foreign key to **`public.portal_users` — 0 rows, and it must stay empty** (the load-bearing accident, DECISIONS A4 / access-model.md). The estimate and board Lambdas pass `ctx.userId` = the Sundial_User__c Salesforce id (`invalid input syntax for type uuid: "a1O…"`); a profile uuid fails the foreign key instead (tried first, proved live by a ZZ send). Either way Postgres refused the WHOLE row. Not one row in the table carries an uploader. It hit the photo report's two smoke-test sends, the invoice / estimate PDFs' calls (the "model" call too), and **the tech app's photo uploads** (the board Lambda's log has the same error for today's uploads).
 
 **Fixed.**
-- `lib/file-access.js` `registerFileMetadata` keeps `uploadedByUserId` only when it is a uuid (`isUuidLike`), otherwise the row lands without it, with the name. One change for every caller.
-- `report.js` uses the invoice call's key names + `tenantId` + `JOB_SF_OBJECT`, awaits the client, and passes `ctx.profileId` (the uuid). `photo-report.js` passes `ctx.profileId` too.
-- Tests: the job report test pins the exact Files row (every column; it fails on the old code); `lib/file-access.test.js` pins the uuid guard.
+- `lib/file-access.js` `registerFileMetadata` **never writes the uploader id** (the name carries who), for every caller, until the column points at `profiles` — a schema decision left to Tim.
+- `report.js` uses the invoice call's key names + `tenantId` + `JOB_SF_OBJECT` and awaits the client.
+- Tests: the job report test pins the exact Files row (every column; it fails on the old code); `lib/file-access.test.js` pins that no id is written.
+- **Proved live:** a ZZ photo-report send after the deploy lands its Files row.
 
 **Backfill.** `scripts/backfill-job-report-files.mjs` (dry run by default, `--apply` writes): the jobs that ever sent a report (Salesforce stamps + the activity log), their `SUNDIAL/{jobId}/job-report-{n}.pdf` in S3, a row for each with none — category "Job Report", tenant = the job's `Client__c`, the sender's name from the send's activity event, `uploaded_at` = the S3 LastModified. **Dry run: 51 PDFs missing a row on 42 jobs, all Harmon's** — exactly the 51 job-report sends in the activity log (the "~50" plus one sent today). **`--apply`: 51 registered, 0 skipped, 0 failed**, dated 2026-10-06 → 2026-11-05 with the senders' names. A second dry run: 0 missing.
 

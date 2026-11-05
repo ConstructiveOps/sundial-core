@@ -324,7 +324,6 @@ export function createReportHandlers(d, h) {
             tenantId,
             sfRecordId: job.Id,
             sfObjectType: JOB_SF_OBJECT,
-            uploadedByUserId: ctx.profileId ?? null, // the Supabase profile (a uuid column), never the Salesforce user id
             uploadedByUserName: ctx.actor?.name ?? "Sundial (job report)",
             fileSizeBytes: pdfBytes.byteLength,
             mimeType: "application/pdf",

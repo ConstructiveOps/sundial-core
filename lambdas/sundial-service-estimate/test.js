@@ -3025,7 +3025,7 @@ test("job report: photos to pick from, save (a stranger's photo refused), previe
   assert.ok(fake.activity.some((a) => a.event === "job_report_sent" && a.details.sentCount === 1 && a.details.receipt === true));
   assert.equal(texts.length, 0);
   // The PDF's Files row (2026-11-05): the key names lib/file-access.js reads, the tenant, the
-  // object, the uploader's PROFILE uuid (never the Salesforce user id) — every column pinned.
+  // object, the uploader's name (never an id) — every column pinned.
   // Until this date report.js passed objectKey / size / uploadedBy, no tenant, and never
   // awaited the client: 0 rows in production for ~50 sends.
   const reportMeta = fake.store.sundial_file_metadata.filter((m) => m.s3_key === job.Report_PDF_S3_Key__c);
@@ -3037,7 +3037,7 @@ test("job report: photos to pick from, save (a stranger's photo refused), previe
     tenant_id: TENANT,
     sf_record_id: job.Id,
     sf_object_type: "Sundial_Service_Job__c",
-    uploaded_by_user_id: "0b6f3c2e-6a1d-4c8e-9f51-2d7a4e0c9b11",
+    uploaded_by_user_id: null, // the FK to portal_users (0 rows) admits nothing — the name carries it
     uploaded_by_user_name: "Paige King",
     file_size_bytes: fake.puts.find((p) => p.key === job.Report_PDF_S3_Key__c).bytes,
     mime_type: "application/pdf",

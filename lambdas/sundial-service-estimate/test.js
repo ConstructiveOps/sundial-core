@@ -2955,7 +2955,7 @@ test("job report: photos to pick from, save (a stranger's photo refused), previe
   await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101", Street__c: "5 Fir", City__c: "Mesa", State__c: "AZ", Postal_Code__c: "85201" });
   const texts = [];
   fake.sms = { sendText: async (args) => { texts.push(args); return { ok: true, code: null, error: null, to: "+16025550101", message: { id: "m1" } }; } };
-  const h = makeHandler(fake);
+  const h = makeHandler(fake, { authUserId: "0b6f3c2e-6a1d-4c8e-9f51-2d7a4e0c9b11" }); // the signed-in profile (a uuid)
   const j = await call(h, "POST", "/service/jobs", { customer: { id: fake.store.Sundial_Customer__c[0].Id }, lines: [{ description: "Labor", kind: "Labor", unitPrice: 275 }] });
   assert.equal(j.status, 201);
   const job = fake.store.Sundial_Service_Job__c[0];
@@ -3024,6 +3024,27 @@ test("job report: photos to pick from, save (a stranger's photo refused), previe
   assert.equal(mail.attachments[0].fileName, `${job.Name}-report.pdf`);
   assert.ok(fake.activity.some((a) => a.event === "job_report_sent" && a.details.sentCount === 1 && a.details.receipt === true));
   assert.equal(texts.length, 0);
+  // The PDF's Files row (2026-11-05): the key names lib/file-access.js reads, the tenant, the
+  // object, the uploader's PROFILE uuid (never the Salesforce user id) — every column pinned.
+  // Until this date report.js passed objectKey / size / uploadedBy, no tenant, and never
+  // awaited the client: 0 rows in production for ~50 sends.
+  const reportMeta = fake.store.sundial_file_metadata.filter((m) => m.s3_key === job.Report_PDF_S3_Key__c);
+  assert.equal(reportMeta.length, 1, "one Files row for the sent PDF");
+  const { id: _metaId, ...metaRow } = reportMeta[0];
+  assert.deepEqual(metaRow, {
+    s3_key: `SUNDIAL/${job.Id}/job-report-1.pdf`,
+    file_name: "job-report-1.pdf",
+    tenant_id: TENANT,
+    sf_record_id: job.Id,
+    sf_object_type: "Sundial_Service_Job__c",
+    uploaded_by_user_id: "0b6f3c2e-6a1d-4c8e-9f51-2d7a4e0c9b11",
+    uploaded_by_user_name: "Paige King",
+    file_size_bytes: fake.puts.find((p) => p.key === job.Report_PDF_S3_Key__c).bytes,
+    mime_type: "application/pdf",
+    category: "Job Report",
+    description: null,
+    subfolder: null,
+  });
 
   // 5. Edited after the send → flagged; send again (via Both) → a second PDF, count 2, a text with the link.
   r = await call(h, "PUT", `/service/jobs/${job.Id}/report`, { sections: [{ id: "a", photoKey: fake.files[0].key, caption: "The failed breaker." }] });

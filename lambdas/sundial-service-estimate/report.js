@@ -314,8 +314,23 @@ export function createReportHandlers(d, h) {
         pdfBytes = await d.renderReportPdf(model, images);
         await d.putObject({ key: pdfKey, body: pdfBytes, contentType: "application/pdf" });
         try {
-          const supabase = d.getSupabaseClient();
-          await registerFileMetadata(supabase, { sfRecordId: job.Id, objectKey: "job", s3Key: pdfKey, fileName: `job-report-${sentCount}.pdf`, mimeType: "application/pdf", size: pdfBytes.byteLength, uploadedBy: ctx.userId ?? null, uploadedByName: ctx.actor?.name ?? null, category: "Job Report", subfolder: null });
+          // The key names lib/file-access.js reads (the invoice PDF's call is the model). Until
+          // 2026-11-05 this passed objectKey / size / uploadedBy / uploadedByName, no tenant, and
+          // did not await the client — every insert failed (TASKS: backfill-job-report-files).
+          const supabase = await d.getSupabaseClient();
+          await registerFileMetadata(supabase, {
+            s3Key: pdfKey,
+            fileName: `job-report-${sentCount}.pdf`,
+            tenantId,
+            sfRecordId: job.Id,
+            sfObjectType: JOB_SF_OBJECT,
+            uploadedByUserId: ctx.profileId ?? null, // the Supabase profile (a uuid column), never the Salesforce user id
+            uploadedByUserName: ctx.actor?.name ?? "Sundial (job report)",
+            fileSizeBytes: pdfBytes.byteLength,
+            mimeType: "application/pdf",
+            category: "Job Report",
+            subfolder: null,
+          });
         } catch (e) {
           console.error(`report: file metadata register failed for ${pdfKey}: ${e?.message || e}`);
         }

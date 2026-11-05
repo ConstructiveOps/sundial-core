@@ -350,7 +350,7 @@ export function createPhotoReportHandlers(d, h) {
     try {
       await registerFileMetadata(await db(), {
         s3Key: pdfKey, fileName: `photo-report-${sentCount}.pdf`, tenantId, sfRecordId: job.Id, sfObjectType: "job",
-        uploadedByUserId: ctx.userId ?? null, uploadedByUserName: senderName, fileSizeBytes: pdf.bytes.byteLength,
+        uploadedByUserId: ctx.profileId ?? null, uploadedByUserName: senderName, fileSizeBytes: pdf.bytes.byteLength,
         mimeType: "application/pdf", category: "Photo Report", description: pdf.model.title.slice(0, 255), subfolder: null,
       });
     } catch (e) {

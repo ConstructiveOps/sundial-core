@@ -20,7 +20,9 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] Live proof of `sendDefaults.source = billTo`: needs a ZZ job with a payer record (`Bill_To_Customer__c` → a ZZ company customer) — none exists yet
 - [ ] harmon-crm: the editor (cover, sections, big-tile picker with checkboxes, list / grid), Download (poll a 202), Send box, `/photo-report/:token`; fill in inventory S63 / H5's portal columns
 - [ ] After Harmon's grace period: retire the old job report (report.js, `Report_Sections__c` routes, `/report/:token`)
-- [ ] Tim's call: the OLD report registers its PDFs' file metadata with the wrong key names (no tenant / uploader / size on the row) — fix in report.js, or leave it until the old report is retired (see PROGRESS)
+- [x] The OLD report's file metadata: report.js fixed (key names, tenant, await, profile uuid) + `scripts/backfill-job-report-files.mjs --apply`: 51 rows (PROGRESS)
+- [ ] `.deploy.ps1 sundial-service-board` — picks up the uuid guard in `registerFileMetadata`; until then every tech photo upload's metadata insert fails
+- [ ] Backfill the other rows the uuid bug dropped: the tech app's photo uploads, invoice PDFs (`{invoice}.pdf`, `…-before-edit-…`), estimate PDFs (`estimate-v{n}.pdf`) — same shape as the job report script
 
 ## 2026-11-05 — Two new Solar fields: Extended Install Reason, PTO Approved Date
 

@@ -80,6 +80,9 @@ const OVERRIDES = [
     ["customer", "solar"],
     [1, 2, 3, 4, 5].flatMap((n) => [`NS_Adder_${n}_Markup_Percent__c`, `NS_Adder_${n}_Material_Cost__c`, `NS_Adder_${n}_Labor_Hours__c`])
   ),
+  // Internal-only Solar fields (Tim, 2026-11-05): office staff only, never a dealer or a
+  // rep. Not on Harmon's sheet; pinned here so a future sheet from Harmon cannot show them.
+  ...hiddenForSalesRoles(["solar"], ["Extended_Install_Reason__c", "PTO_Approved_Date__c"]),
 ];
 
 /** OVERRIDES rows hiding each field from both sales roles on each named object. */

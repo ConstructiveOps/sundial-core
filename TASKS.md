@@ -4,6 +4,27 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-05 — Two new Solar fields: Extended Install Reason, PTO Approved Date
+
+- [x] Confirmed live (read-only describe as the integration user): both exist, createable + updateable; Solar at 478 custom fields
+- [x] Fields-by-Section sheet: Extended Install Reason after Days to Glass on Roof (Visible When `Days_to_Glass_on_Roof__c > 69`), PTO Approved Date before Commission of System; both `hidden` for Sales Rep / Sales Dealer, pinned in `apply-dealer-visibility.mjs` OVERRIDES (dry run: 0 cell changes)
+- [x] Field manifest regenerated: byte-identical (a hidden field never enters it)
+- [x] `sql/2026-11-05_solar_new_fields.sql` (generated) + `docs/reporting-cache-coverage.md`
+- [x] `sundial-cache-sync`: the cache's column list now refreshes every 5 minutes, like the describe
+- [x] Tests: `lib/field-manifest/internal-only-fields.test.js` — rep, dealer, the sheet, Admin, Executive, Manager (6); the catalog seed test ignores CRLF; `npm test` 1,945/1,945
+- [x] harmon-crm `ff12945` (merged `46279ce`): Solar page config regenerated, Visible When operators, 21 tests, 731/731
+
+**Tim — in this order** (PowerShell, sundial-core repo root, on `master`):
+- [ ] **1. SQL:** paste `sql/2026-11-05_solar_new_fields.sql` whole into the Supabase SQL editor and Run. It adds two empty columns; safe to re-run.
+- [ ] **2. Tell Claude it ran.** Claude regenerates the report catalog (expect `catalog_rows` **1,353**), lists the SQL file as applied in `lib/report-columns.js`, commits, and hands you `sql/2026-11-03_report_catalog.sql`. Run that file in the SQL editor.
+- [ ] **3. Deploy three Lambdas** (after step 2, so each starts up seeing the new columns):
+  - [ ] `.\deploy.ps1 sundial-cache-sync` — the column-list refresh (code change)
+  - [ ] `.\deploy.ps1 sundial-sf-query` — no code change; the redeploy restarts it, and its stale-row refresh holds the Solar cache's column list until it restarts
+  - [ ] `.\deploy.ps1 sundial-reports` — the regenerated catalog
+  - Not needed: `sundial-sf-update` (holds no column list), `sundial-dealer` (reads the Customer view only), `sundial-auth-proxy` (the manifest did not change).
+- [ ] **4. Full Solar cache sync:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "solar", "mode": "full" }`; the `cache_sync_runs` row for solar says ok.
+- [ ] **5. Portal:** nothing to paste. harmon-crm `main` is merged and pushed, so Vercel deploys it on its own; check the deployment is Ready, then open a Solar project as an office user: Installation → Extended Install Reason only if Days to Glass is over 69; Post Install/PTO → PTO Approved Date above Commission of System.
+
 ## 2026-11-04 — Solar field cleanup: 24 fields off Sundial_Solar__c (D-090)
 
 - [x] Audit (`scripts/audit-solar-fields.mjs`, `docs/audits/solar-fields-2026-11.*`) + the value backup

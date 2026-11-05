@@ -68,7 +68,9 @@ function reset(level = "Admin") {
     ],
     sundial_reports: [],
     sundial_report_exports: [],
+    profiles: [],
   };
+  ctx.failTables = new Set(); // a table named here answers every read with an error
   ctx.dbCalls = [];
   ctx.s3 = [];
   ctx.invokes = [];
@@ -109,6 +111,7 @@ function builder(name) {
   };
   function exec() {
     ctx.dbCalls.push({ table: name, op: st.op });
+    if (ctx.failTables.has(name)) return { data: null, error: { message: `${name} unavailable` } };
     const rows = (ctx.tables[name] ??= []);
     let out;
     if (st.op === "insert") {
@@ -288,7 +291,7 @@ test("run: the tenant from the identity, the wire definition to the rpc, the res
   assert.match(args.p_def.filters[0].value[0], /^\d{4}-(01|04|07|10)-01$/);
   assert.deepEqual(ok.body.columns.map((c) => c.field), ["solar.stage", "count"]);
   assert.deepEqual(ok.body.rows, [["A", 1]]);
-  assert.deepEqual(ok.body.aggregates, [{ field: "count", label: "Count", type: "number", aggregate: "count", value: 7 }]);
+  assert.deepEqual(ok.body.aggregates, [{ field: "count", label: "Count", type: "number", format: null, aggregate: "count", value: 7 }]);
   assert.equal(ok.body.truncated, false);
   assert.equal(ok.body.limit, 5000);
   assert.deepEqual(ok.body.stripped, []);
@@ -368,6 +371,38 @@ test("catalog: per caller — gated and non-reportable fields are absent; rollup
   const pay = catalogFor("service_jobs", []).aliases.find((a) => a.alias === "payments");
   assert.deepEqual(pay.fields.map((f) => f.field), ["payments.payment_count", "payments.amount_paid", "payments.deposits_paid", "payments.refunds", "payments.last_paid_at"]);
   assert.ok(pay.fields.every((f) => f.operators.length > 0));
+});
+
+test("format: the catalog passes it through; a run's columns and aggregates carry it", async () => {
+  reset("Manager");
+  const cat = (await call("/reports/catalog", { qs: { type: "customers" } })).body;
+  const cf = (ref) => cat.aliases.flatMap((a) => a.fields).find((f) => f.field === ref);
+  assert.equal(cf("customer.referral_fee").format, "currency");
+  assert.equal(cf("customer.apr").format, "percent");
+  assert.equal(cf("customer.city").format, null);
+  assert.ok(cat.aliases.every((a) => a.fields.every((f) => f.format === null || f.format === "currency" || f.format === "percent")));
+  // A rollup: a count is a plain number, a sum or max keeps its column's format.
+  const pay = catalogFor("service_jobs", []).aliases.find((a) => a.alias === "payments").fields;
+  assert.deepEqual(pay.map((f) => [f.field, f.format]), [
+    ["payments.payment_count", null], ["payments.amount_paid", "currency"], ["payments.deposits_paid", "currency"],
+    ["payments.refunds", "currency"], ["payments.last_paid_at", null],
+  ]);
+
+  const run = await call("/reports/run", { method: "POST", body: { type: "customers", columns: ["customer.name", "customer.referral_fee", "customer.apr"] } });
+  assert.equal(run.status, 200);
+  assert.deepEqual(run.body.columns.map((c) => [c.field, c.format]), [["customer.name", null], ["customer.referral_fee", "currency"], ["customer.apr", "percent"]]);
+
+  const grouped = await call("/reports/run", { method: "POST", body: {
+    type: "customers", groupBy: ["customer.city"],
+    aggregates: [{ fn: "count" }, { fn: "sum", field: "customer.referral_fee" }, { fn: "avg", field: "customer.apr" }],
+  } });
+  assert.equal(grouped.status, 200);
+  assert.deepEqual(grouped.body.columns.map((c) => c.format), [null, null, "currency", "percent"]);
+
+  // A saved report's run carries it too.
+  const saved = await call("/reports", { method: "POST", body: { name: "Fees", definition: { type: "customers", columns: ["customer.referral_fee"] } } });
+  const savedRun = await call(`/reports/${saved.body.id}/run`);
+  assert.deepEqual(savedRun.body.columns.map((c) => c.format), ["currency"]);
 });
 
 // =========================================================================================
@@ -629,6 +664,43 @@ test("saved: the owner is the JWT's; a bad body is a 400 naming the field; the l
   const list = await call("/reports");
   assert.deepEqual(list.body.reports.map((r) => r.name), ["shared by admin", "new mine shared", "old mine"]);
   assert.doesNotMatch(JSON.stringify(list.body), new RegExp(TENANT));
+});
+
+test("saved: the list names each owner from profiles.full_name in ONE lookup; a gone profile is \"former user\"", async () => {
+  reset("Manager");
+  const GONE = "d0000000-0000-4000-8000-000000000009";
+  ctx.tables.profiles.push(
+    { id: USERS.Manager.profile, full_name: "Maggie Manager" },
+    { id: USERS.Admin.profile, full_name: "  Ada Admin " },
+  );
+  const mk = (name, profile, created_at) => ctx.tables.sundial_reports.push({
+    id: randomUUID(), client_sf_id: TENANT, owner_profile_id: profile, name, description: null, definition: SIMPLE, sharing: "tenant", created_at, updated_at: created_at, created_by: profile, updated_by: profile,
+  });
+  mk("mine", USERS.Manager.profile, "2026-11-01T00:00:00Z");
+  mk("admin's", USERS.Admin.profile, "2026-11-02T00:00:00Z");
+  mk("admin's again", USERS.Admin.profile, "2026-11-03T00:00:00Z");
+  mk("orphan", GONE, "2026-11-04T00:00:00Z");
+  ctx.dbCalls = [];
+  const list = await call("/reports");
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body.reports.map((r) => [r.name, r.ownerName]), [
+    ["orphan", "former user"], ["admin's again", "Ada Admin"], ["admin's", "Ada Admin"], ["mine", "Maggie Manager"],
+  ]);
+  assert.equal(ctx.dbCalls.filter((c) => c.table === "profiles").length, 1, "one profiles read for the whole list, not one per row");
+
+  // A failed lookup never fails the list: the names are null (unknown), not "former user".
+  ctx.failTables.add("profiles");
+  const degraded = await call("/reports");
+  assert.equal(degraded.status, 200);
+  assert.equal(degraded.body.reports.length, 4);
+  assert.ok(degraded.body.reports.every((r) => r.ownerName === null));
+
+  // No reports: no profiles read at all.
+  ctx.failTables.clear();
+  ctx.tables.sundial_reports.length = 0;
+  ctx.dbCalls = [];
+  assert.deepEqual((await call("/reports")).body.reports, []);
+  assert.equal(ctx.dbCalls.filter((c) => c.table === "profiles").length, 0);
 });
 
 test("saved: runs with the RUNNER's gates; its CSV queues an export tied to the report", async () => {

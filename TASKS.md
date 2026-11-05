@@ -84,7 +84,7 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [ ] **8. Full Solar cache sync:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "solar", "mode": "full" }`. Then check the `cache_sync_runs` row for solar says ok.
 - [ ] **9. Make room and create the two new fields:** Setup → Sundial Solar → Fields & Relationships → **Deleted Fields** → **Erase** the 24. Deleted fields count against the 500 until they are erased or 15 days pass, and erasing cannot be undone (the backup CSV holds the 38 values). Then create the two new fields by hand.
 
-## 2026-11-04 — Reporting R1b: dealer cache, ten report types, CSV export, saved reports (D-089, `feature/reports-r1b`)
+## 2026-11-04 — Reporting R1b: dealer cache, ten report types, CSV export, saved reports (D-089, `feature/reports-r1b`) — DONE, verified 2026-11-04, merged to master
 
 - [x] `sql/sundial_dealer_cache.sql` (reports-only, 23 columns): **run by Tim 2026-11-04** ("dealer table is in")
 - [x] `dealer` in `sundial-cache-sync` (`OBJECT_ALLOWLIST`, `CREATED_DATE_SOURCE`) + test, the cold 30-minute rule in `scripts/wire-cache-sync-schedule.ps1`, `OBJECTS` in `scripts/lib/report-sources.mjs`. Coverage doc regenerated (`--check` clean); catalog regenerated from the live table (`lib/report-catalog/dealer.json`, seed 1,372 rows). Not in sf-query's allowlist, by design.
@@ -95,21 +95,21 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] `scripts/wire-reports-routes.ps1` (new routes + Lambda 1,024 MB / 300 s + no async retries + IAM `sundial-reports-export`), **`scripts/add-reports-lifecycle.ps1`** (merge, never replace), `scripts/verify-report-run.mjs` extended
 - [x] Docs: D-089, `docs/reporting-module.md` §6, `docs/api-endpoints.md`, `docs/access-model.md` §3.6, `docs/caching-architecture.md`, CLAUDE.md item 11
 
-**Tim — in this order** (PowerShell, from the repo root, on `feature/reports-r1b`):
-- [ ] **1. SQL (Supabase SQL editor), three files**, each pasted whole and Run:
-  - [ ] **1a.** `sql/2026-11-03_report_catalog.sql` (regenerated: the dealer rows). The last line must say `catalog_rows` = **1,372**.
-  - [ ] **1b.** `sql/sundial_report_run.sql` (the R1b engine). The check at the bottom must show **false** in all **eight** columns.
-  - [ ] **1c.** `sql/sundial_reports.sql` (saved reports + export jobs). The check must show **two rows**, `sundial_report_exports` and `sundial_reports`, each with `rls` **true** and both privilege columns **false**.
-- [ ] **2. Deploys**, after the SQL (the new Lambda sends join kinds the old function would refuse):
-  - [ ] `.\deploy.ps1 sundial-reports`
-  - [ ] `.\deploy.ps1 sundial-cache-sync` (knows `dealer`)
-  - [ ] `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` lists `reports.write` / `reports.share`)
-- [ ] **3. Wire scripts:**
-  - [ ] `.\scripts\wire-reports-routes.ps1`. It adds the routes, sets the Lambda to 1,024 MB / 300 s with no async retries, and adds the inline policy `sundial-reports-export` (self-invoke + `sfsolproj/REPORTS/*`). Answer **y** to deploy the API to prod.
-  - [ ] `.\scripts\wire-cache-sync-schedule.ps1`. It puts `dealer` on the cold 30-minute rule. **Answer N to the one-time full resync of customer / solar / roofing**: that was for first-time setup, and only dealer is new.
-- [ ] **4. Dealer resync event:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "dealer", "mode": "full" }`. Then, in the SQL editor, `select client_sf_id, count(*) from public.sundial_dealer_cache group by 1;` should show **62** for Harmon (`a1W7y000007AszBEAS`) and **3** for the demo tenant.
-- [ ] **5. Lifecycle script:** `.\scripts\add-reports-lifecycle.ps1`. It prints the rules BEFORE: today one, `archive-old-files` (SUNDIAL/ → Glacier at 365 days). Answer **y**. The AFTER list read back from S3 must show **both** `archive-old-files` and `sundial-reports-csv-expire-7d` (prefix `REPORTS/`, 7 days). Re-running it is safe; it then changes nothing.
-- [ ] **6. Verify:** `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users, writes only its own "ZZ VERIFY" saved reports and exports, and deletes them (and their CSV files) at the end.
+**Tim — in this order** (all done; `verify-report-run.mjs` passed 2026-11-04) (PowerShell, from the repo root, on `feature/reports-r1b`):
+- [x] **1. SQL (Supabase SQL editor), three files**, each pasted whole and Run:
+  - [x] **1a.** `sql/2026-11-03_report_catalog.sql` (regenerated: the dealer rows). The last line must say `catalog_rows` = **1,372**.
+  - [x] **1b.** `sql/sundial_report_run.sql` (the R1b engine). The check at the bottom must show **false** in all **eight** columns.
+  - [x] **1c.** `sql/sundial_reports.sql` (saved reports + export jobs). The check must show **two rows**, `sundial_report_exports` and `sundial_reports`, each with `rls` **true** and both privilege columns **false**.
+- [x] **2. Deploys**, after the SQL (the new Lambda sends join kinds the old function would refuse):
+  - [x] `.\deploy.ps1 sundial-reports`
+  - [x] `.\deploy.ps1 sundial-cache-sync` (knows `dealer`)
+  - [x] `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` lists `reports.write` / `reports.share`)
+- [x] **3. Wire scripts:**
+  - [x] `.\scripts\wire-reports-routes.ps1`. It adds the routes, sets the Lambda to 1,024 MB / 300 s with no async retries, and adds the inline policy `sundial-reports-export` (self-invoke + `sfsolproj/REPORTS/*`). Answer **y** to deploy the API to prod.
+  - [x] `.\scripts\wire-cache-sync-schedule.ps1`. It puts `dealer` on the cold 30-minute rule. **Answer N to the one-time full resync of customer / solar / roofing**: that was for first-time setup, and only dealer is new.
+- [x] **4. Dealer resync event:** Lambda console → `sundial-cache-sync` → Test with `{ "object": "dealer", "mode": "full" }`. Then, in the SQL editor, `select client_sf_id, count(*) from public.sundial_dealer_cache group by 1;` should show **62** for Harmon (`a1W7y000007AszBEAS`) and **3** for the demo tenant.
+- [x] **5. Lifecycle script:** `.\scripts\add-reports-lifecycle.ps1`. It prints the rules BEFORE: today one, `archive-old-files` (SUNDIAL/ → Glacier at 365 days). Answer **y**. The AFTER list read back from S3 must show **both** `archive-old-files` and `sundial-reports-csv-expire-7d` (prefix `REPORTS/`, 7 days). Re-running it is safe; it then changes nothing.
+- [x] **6. Verify:** `node scripts/verify-report-run.mjs` (must end "All checks passed."). It uses the ZZ test users, writes only its own "ZZ VERIFY" saved reports and exports, and deletes them (and their CSV files) at the end.
 - [x] **Decided (Tim, 2026-11-04): Managers can share.** `reports.share` is every tenant level; only the owner edits or deletes; `reports.admin` (R2, Admin / Executive) will see and manage every report in the tenant.
 - [ ] **R2:** `reports.admin`: Admin / Executive see, edit, delete and share / unshare every report in the tenant.
 
@@ -146,8 +146,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] `Invoice_Date__c`: set at issue (`invoiceDate`, today by default, due counted from it), changed by `PATCH /service/invoices/{id}` (PDF re-rendered, activity row), printed on the document, the report's range + order. `scripts/backfill-invoice-date.mjs`.
 - [ ] **Tim:** `.\deploy.ps1 sundial-service-estimate`; `.\scripts\wire-service-estimate-routes.ps1` (PATCH); `node scripts/backfill-invoice-date.mjs --tenant harmon` (dry run) then `--apply`; harmon-crm `main`.
 - [x] `invoice_date` as a serviceinvoice cache column so the Invoices tab lists / sorts by it — the row added to the *Service Invoice Fields* sheet (Tim), `sql/2026-11-02_report_columns_followon.sql` (the one column), `invoice_date` in the serviceinvoice `LIST_PROJECTION` (+ `list-projection.test.js`).
-- [ ] **Tim:** Supabase SQL editor — run `sql/2026-11-02_report_columns_followon.sql`; `.deploy.ps1 sundial-sf-query`; Lambda console → sundial-cache-sync → Test `{ "object": "serviceinvoice", "mode": "full" }`. (The file is already in `APPLIED_SQL_FILES`, so the generator never rewrites it.)
-- [ ] harmon-crm: the Invoices tab shows / sorts by `invoice_date` (falling back to `issued_at` for an undated row).
+- [x] **Tim:** Supabase SQL editor — run `sql/2026-11-02_report_columns_followon.sql`; `.deploy.ps1 sundial-sf-query`; Lambda console → sundial-cache-sync → Test `{ "object": "serviceinvoice", "mode": "full" }`. (The file is already in `APPLIED_SQL_FILES`, so the generator never rewrites it.) **Done 2026-11-05:** the column was already in; the deployed sf-query (11-05) postdates 3a49fac; full resync 2,337 rows → `invoice_date` on 2,070 (was 15). The 267 blank are 257 Void + 10 live invoices with no `Invoice_Date__c` in Salesforce.
+- [x] harmon-crm: the Invoices tab shows / sorts by `invoice_date` (falling back to `issued_at` for an undated row). (`ServiceInvoicesPage.tsx` `invoiceDateOf`)
 
 ## 2026-10-30 — Invoice report for the GL (Harmon — Heather)
 

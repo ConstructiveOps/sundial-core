@@ -102,6 +102,7 @@ export function catalogFor(typeKey, held) {
           label: f.label,
           section: f.section,
           type: f.type,
+          format: f.format ?? null,
           ...(f.picklistValues ? { picklistValues: f.picklistValues } : {}),
           description: f.description,
           longText: f.longText,

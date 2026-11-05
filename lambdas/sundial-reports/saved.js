@@ -49,8 +49,31 @@ export async function listReports({ me, perms, cors }) {
   if (mine.error || shared.error) return serverError(cors, "list", mine.error || shared.error);
   const byId = new Map();
   for (const r of [...(mine.data ?? []), ...(shared.data ?? [])]) if (canSee(r, me)) byId.set(r.id, r);
-  const rows = [...byId.values()].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? -1 : 1));
-  return jsonResponse(200, cors, { reports: rows.slice(0, MAX_LIST).map((r) => present(r, me, perms)) });
+  const rows = [...byId.values()].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? -1 : 1)).slice(0, MAX_LIST);
+  const names = await ownerNames(supabase, rows.map((r) => r.owner_profile_id));
+  // A name is a label, never a reason to fail the list: on a failed lookup it is null (unknown),
+  // not "former user" (which would claim the profile is gone).
+  if (names.error) console.warn("reports saved: owner names lookup failed:", names.error?.message || String(names.error));
+  return jsonResponse(200, cors, {
+    reports: rows.map((r) => ({
+      ...present(r, me, perms),
+      ownerName: names.error ? null : names.byId.get(r.owner_profile_id) || FORMER_USER,
+    })),
+  });
+}
+
+/** Shown as the owner when the owner's profile is gone (or has no name). */
+export const FORMER_USER = "former user";
+
+/** profiles.full_name for every distinct owner, in ONE read for the whole list. */
+export async function ownerNames(supabase, profileIds) {
+  const ids = [...new Set(profileIds.filter(isUuid))];
+  const byId = new Map();
+  if (!ids.length) return { byId };
+  const { data, error } = await supabase.from("profiles").select("id, full_name").in("id", ids);
+  if (error) return { error };
+  for (const p of data ?? []) if (p.full_name && String(p.full_name).trim()) byId.set(p.id, String(p.full_name).trim());
+  return { byId };
 }
 
 export async function createReport({ body, me, perms, heldGates, cors }) {

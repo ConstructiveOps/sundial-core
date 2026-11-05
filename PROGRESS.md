@@ -1,5 +1,16 @@
 # Sundial — Progress Log
 
+## 2026-11-05 — Reports API: owner names on the saved list, money / percent format in the catalog and every run; invoice_date resynced — DEPLOYED (sundial-reports)
+
+**For the harmon-crm Reports page.**
+- **`GET /reports` → `ownerName`** on every saved report: `profiles.full_name` by `owner_profile_id`, in ONE `profiles` read for the whole list (none when the list is empty). A profile that is gone, or has no name, reads `"former user"`. If the lookup itself fails the names are `null` and the list still answers (a label is never a reason to fail it). `lambdas/sundial-reports/saved.js` `ownerNames`.
+- **`format`: `"currency"` | `"percent"` | `null`** from the Salesforce describe type on every catalog entry (`lib/report-catalog-build.js` `formatOf`; regenerated: 309 currency, 30 percent, 1,014 null). `GET /reports/catalog` passes it; `POST /reports/run` and `GET /reports/{id}/run` carry it on every column and aggregate (a count is null; sum / avg / min / max keep the field's format; a payments rollup's sums are currency). **JSON only:** the SQL seed has no format column, so `sql/2026-11-03_report_catalog.sql` is byte-identical and does not need re-running.
+- Tests: +4 (the owner-name list incl. one lookup / former user / degraded; format through catalog, run, grouped run and saved run; `formatOf` + the committed catalog's formats). Suite 1,988 / 1,988. `docs/api-endpoints.md` updated.
+
+**invoice_date (TASKS 2026-11-02).** The `sundial_service_invoice_cache.invoice_date` column was already in, and the deployed sf-query (2026-11-05) postdates 3a49fac. A full serviceinvoice resync (2,337 rows) took `invoice_date` from **15 rows to 2,070**. The 267 still blank are 257 Void and 10 live invoices with no `Invoice_Date__c` in Salesforce; the Invoices tab shows their issued date instead.
+
+**TASKS:** every R1b step ticked (verified 2026-11-04, merged).
+
 ## 2026-11-05 — Reports heal sideways cached photos themselves — DEPLOYED (sundial-service-estimate)
 
 **Why.** The orientation repair of the already-cached copies (`scripts/fix-photo-orientation.mjs`, entry below) takes hours. Until it reaches a job, that job's next report PDF — photo report AND old job report — would still embed the sideways cached copy.

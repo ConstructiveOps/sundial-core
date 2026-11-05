@@ -1286,12 +1286,14 @@ Body: a report definition (`docs/reporting-module.md` §6.3), e.g.
 → `200`
 ```json
 { "type": "solar",
-  "columns": [{ "field": "rep.name", "label": "User Name", "type": "text", "object": "rep" },
-              { "field": "count", "label": "Count", "type": "number", "aggregate": "count" }, …],
+  "columns": [{ "field": "rep.name", "label": "User Name", "type": "text", "format": null, "object": "rep" },
+              { "field": "count", "label": "Count", "type": "number", "format": null, "aggregate": "count" },
+              { "field": "sum_solar_contract_amount", "label": "Sum of Contract Amount", "type": "number", "format": "currency", "aggregate": "sum" }],
   "rows": [["Ann Rep", 12, 410000], …],
-  "aggregates": [{ "field": "count", "label": "Count", "type": "number", "aggregate": "count", "value": 57 }, …],
+  "aggregates": [{ "field": "count", "label": "Count", "type": "number", "format": null, "aggregate": "count", "value": 57 }, …],
   "truncated": false, "limit": 5000, "stripped": [], "asOf": "2026-11-03T17:05:00Z" }
 ```
+- `format` on every column (and aggregate) is `"currency"` | `"percent"` | `null`, from the field's Salesforce type (catalog). A sum / avg / min / max keeps its field's format; a count is `null`. A percent is the number shown (12.5 = 12.5 %), not a fraction. The same on `GET /reports/{id}/run`.
 - `rows` are arrays in `columns` order (≤ 5,000; `truncated: true` when more matched).
 - `aggregates` are **grand totals over every matching row**, not just the rows returned.
 - `stripped` names the gated fields removed for this caller.
@@ -1306,8 +1308,8 @@ Errors:
 No table names. **Ten types (R1b):** `customers`, `customers_solar`, `solar`, `roofing`, `service_jobs`, `service_calls`, `estimates`, `estimate_lines`, `invoices_payments`, `payments` (joins in `docs/reporting-module.md` §6.2). `kind` is `lookup` | `latest` (the newest child) | `rollup` (one row of measures, e.g. `payments.amount_paid`).
 
 ### `GET /reports/catalog?type=solar`
-→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, picklistValues?, description, longText, operators, selectable, csvSelectable }] }] }`.
-This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter on screen; `csvSelectable: true` — a column in a CSV). A rollup alias lists its measures. A missing or unknown `type` is `400 UNKNOWN_TYPE`.
+→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, format, picklistValues?, description, longText, operators, selectable, csvSelectable }] }] }`.
+This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter on screen; `csvSelectable: true` — a column in a CSV). A rollup alias lists its measures (a count's `format` is null; a sum / max takes its column's). `format` is `"currency"` | `"percent"` | `null` — it lives in `lib/report-catalog/*.json` only, not in the SQL catalog. A missing or unknown `type` is `400 UNKNOWN_TYPE`.
 
 ### `POST /reports/csv` (R1b) — asynchronous
 Body: a report definition, as for `/reports/run`, except that `limit` may be up to **50,000** (the default) and long-text fields may be columns.
@@ -1324,7 +1326,7 @@ Body: a report definition, as for `/reports/run`, except that `limit` may be up 
 File format: UTF-8 with a BOM, CRLF, RFC 4180. Headers are "`<object>: <field>`". A text value starting with `= + - @` TAB or CR gets a leading `'`. Datetimes are in Arizona time; booleans are Yes / No.
 
 ### Saved reports (R1b) — `GET /reports`, `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `GET /reports/{id}/run`, `GET /reports/{id}/csv`
-A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`.
+A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`. **`GET /reports` adds `ownerName`** to each: `profiles.full_name` of the owner, read in ONE lookup for the whole list; `"former user"` when the profile is gone (or has no name); `null` if that lookup failed (the list still answers).
 
 **Visible** = same tenant AND (yours OR `sharing: "tenant"`). Anything else is **404 `RECORD_NOT_FOUND`**, including someone else's private report and another tenant's report.
 

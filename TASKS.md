@@ -4,6 +4,24 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-05 — The photo report (D-072 amendment 17, `feature/photo-report`)
+
+- [x] `sql/2026-11-05_job_photo_reports.sql` (+ PGlite test): `sundial_job_photo_reports` (one per job, `sent_report`) + `sundial_job_photo_report_renders`; service role only
+- [x] `lib/photo-report-document.js` (normalise, picker index, model, HTML) + `lib/photo-report-pdf.js` (every photo or nothing; no split photo, no stranded heading) + 12 tests
+- [x] `lib/job-photos.js`: the photo grouping moved out of the board Lambda (re-exported; behaviour unchanged)
+- [x] `lambdas/sundial-service-estimate/photo-report.js`: 8 routes + the self-invoked render worker; 7 route tests
+- [x] `sundial-service-public`: `GET /public/photo-reports/{token}` (the report as sent); 1 test
+- [x] Wire scripts: the routes, timeout 300 s, no async retries, the self-invoke policy
+- [x] Docs: api-endpoints, D-072 am. 17, CLAUDE.md, service-workflows, feature inventory S63 + H5
+- [x] Run `sql/2026-11-05_job_photo_reports.sql` in Supabase (Tim)
+- [x] `.\deploy.ps1 sundial-service-estimate` · `.\deploy.ps1 sundial-service-public` · `.\deploy.ps1 sundial-service-board` (the moved grouping only)
+- [x] `.\scripts\wire-service-estimate-routes.ps1 -Yes` · `.\scripts\wire-service-public-routes.ps1 -Yes`
+- [x] Smoke test on ZZ jobs: `node scripts/verify-photo-report.mjs` + the background render on SVC-00001 (PROGRESS)
+- [ ] Live proof of `sendDefaults.source = billTo`: needs a ZZ job with a payer record (`Bill_To_Customer__c` → a ZZ company customer) — none exists yet
+- [ ] harmon-crm: the editor (cover, sections, big-tile picker with checkboxes, list / grid), Download (poll a 202), Send box, `/photo-report/:token`; fill in inventory S63 / H5's portal columns
+- [ ] After Harmon's grace period: retire the old job report (report.js, `Report_Sections__c` routes, `/report/:token`)
+- [ ] Tim's call: the OLD report registers its PDFs' file metadata with the wrong key names (no tenant / uploader / size on the row) — fix in report.js, or leave it until the old report is retired (see PROGRESS)
+
 ## 2026-11-05 — Two new Solar fields: Extended Install Reason, PTO Approved Date
 
 - [x] Confirmed live (read-only describe as the integration user): both exist, createable + updateable; Solar at 478 custom fields

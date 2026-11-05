@@ -105,6 +105,7 @@ import { canAction } from "../../lib/access.js";
 import { renderEstimateDocument, buildEstimateModel, DEFAULT_BRAND } from "../../lib/estimate-document.js";
 import { renderEstimatePdf as realRenderEstimatePdf } from "../../lib/estimate-pdf.js";
 import { renderJobReportPdf as realRenderJobReportPdf } from "../../lib/job-report-pdf.js";
+import { renderPhotoReportPdf as realRenderPhotoReportPdf } from "../../lib/photo-report-pdf.js";
 import { resizeJpegForReport as realResizeJpegForReport } from "../../lib/image-resize.js";
 import { createSmsSender } from "../../lib/sms-send.js";
 import { createNotifier } from "../../lib/notify.js";
@@ -122,6 +123,7 @@ import { costWriteGate, stripCost, stripMarkup, markupWriteGate, COSTING_READ, C
 import {
   buildKey,
   listRecordFiles,
+  listKeysUnder,
   publicUrlForKey,
   registerFileMetadata,
   findFileMetadataByKey,
@@ -129,6 +131,8 @@ import {
   S3_REGION,
 } from "../../lib/file-access.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import {
   EVENTS,
   recordActivity,
@@ -185,6 +189,7 @@ import { createInvoiceHandlers, createMoneyCore } from "./invoice.js";
 import { createStripeHandlers } from "./stripe.js";
 import { createLaborHandlers, CALL_SF_OBJECT } from "./labor.js";
 import { createReportHandlers } from "./report.js";
+import { createPhotoReportHandlers } from "./photo-report.js";
 import { createClubHandlers } from "./club.js";
 import { createAddressHandlers } from "./address.js";
 export { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT, ESTIMATE_SELECT };
@@ -265,6 +270,8 @@ function s3() {
   if (!_s3) _s3 = new S3Client({ region: S3_REGION });
   return _s3;
 }
+let _lambda = null;
+const lambdaClient = () => (_lambda ??= new LambdaClient({}));
 
 /** The customer email for an estimate send: what the customer record says today. */
 const CUSTOMER_EMAIL_SELECT = "Id, Primary_Email__c, Name";
@@ -482,6 +489,15 @@ const ROUTES = [
   ["GET", /^\/service\/jobs\/([^/]+)\/report\/preview\/?$/, "previewReport"],
   ["POST", /^\/service\/jobs\/([^/]+)\/report\/prepare\/?$/, "prepareReport"], // warm the PDF's photo cache before a send (2026-10-12)
   ["POST", /^\/service\/jobs\/([^/]+)\/report\/send\/?$/, "sendReport"],
+  // The photo report (photo-report.js, D-072 am. 17) — beside the job report above, never instead of it.
+  ["GET", /^\/service\/jobs\/([^/]+)\/photo-report\/?$/, "getPhotoReport"],
+  ["PUT", /^\/service\/jobs\/([^/]+)\/photo-report\/?$/, "savePhotoReport"],
+  ["DELETE", /^\/service\/jobs\/([^/]+)\/photo-report\/?$/, "deletePhotoReport"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/photo-report\/preview\/?$/, "previewPhotoReport"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/photo-report\/pdf\/?$/, "photoReportPdf"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/photo-report\/prepare\/?$/, "preparePhotoReport"],
+  ["POST", /^\/service\/jobs\/([^/]+)\/photo-report\/send\/?$/, "sendPhotoReport"],
+  ["GET", /^\/service\/jobs\/([^/]+)\/photo-report\/renders\/([^/]+)\/?$/, "photoReportRender"],
   ["POST", /^\/service\/estimates\/([^/]+)\/unlock\/?$/, "unlockEstimate"], // reopen an invoiced estimate (2026-09-30)
   ["POST", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "issueInvoice"],
   ["GET", /^\/service\/jobs\/([^/]+)\/invoice\/?$/, "getJobInvoice"],
@@ -584,6 +600,14 @@ export function createHandler(deps = {}) {
       return { bytes: new Uint8Array(await r.Body.transformToByteArray()), contentType: r.ContentType ?? null };
     },
     listFiles: async (recordId) => listRecordFiles(s3(), recordId),
+    // The photo report (D-072 am. 17): which cached copies / thumbnails exist, a signed link to a
+    // big download, and the background render (this Lambda invoking itself, like sundial-reports).
+    listKeys: async (prefix) => listKeysUnder(s3(), prefix),
+    presignGet: async ({ key, fileName }) =>
+      getSignedUrl(s3(), new GetObjectCommand({ Bucket: S3_BUCKET, Key: key, ResponseContentDisposition: `attachment; filename="${String(fileName || "photo-report.pdf").replace(/"/g, "")}"`, ResponseContentType: "application/pdf" }), { expiresIn: 15 * 60 }),
+    invokeSelf: async (payload) =>
+      lambdaClient().send(new InvokeCommand({ FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(payload)) })),
+    renderPhotoReportPdf: realRenderPhotoReportPdf,
     deleteObject: async ({ key }) => s3().send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: key })),
     now: () => new Date(),
     randomToken: () => randomBytes(24).toString("base64url"),
@@ -2366,6 +2390,10 @@ export function createHandler(deps = {}) {
   // The customer's job report + receipt (D-072 amendment 10). Texting goes through the same
   // sender the board uses (lib/sms-send.js) so the text lands on the job's conversation.
   if (!d.sms) d.sms = createSmsSender({ getSecret: d.getSecret, getSupabaseClient: d.getSupabaseClient, sfQuery: d.sfQuery, now: d.now, ...(d.sendSms ? { sendSms: d.sendSms } : {}), ...(d.broadcast ? { broadcast: d.broadcast } : {}) });
+  // The photo report (D-072 amendment 17): beside the job report, sharing its image cache and the send rules.
+  const photoReport = createPhotoReportHandlers(d, { publicBaseFor, noPublicUrlDetail, loadEstimate, loadLines, act, brandFor, jsonResponse, bad, notFound, money, recipientRecords, loadJobCalls: (jobId, tenantId) => d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 200`) });
+  const { photoReportWorker, ...photoReportRoutes } = photoReport;
+  Object.assign(H, photoReportRoutes);
   Object.assign(H, createReportHandlers(d, { publicBaseFor, noPublicUrlDetail, loadEstimate, loadLines, act, markStale, brandFor, jsonResponse, bad, notFound, sfError, CACHE, customerEmailFor, money, loadJobCalls: (jobId, tenantId) => d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM ${CALL_SF_OBJECT} WHERE Sundial_Service_Job__c = '${soqlEscapeString(jobId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 200`) }));
 
   // Action key per route family (lib/access.js ACTION_SCOPES — all tenant-only).
@@ -2392,6 +2420,8 @@ export function createHandler(deps = {}) {
     getLabor: "service.estimate.write", saveLabor: "service.invoice.write", setDefaultRate: "service.invoice.write",
     getCosting: "service.costing.read", setDefaultCostRate: "service.costing.write", listRates: "service.costing.read",
     getReport: "service.estimate.write", saveReport: "service.estimate.write", previewReport: "service.estimate.write", prepareReport: "service.estimate.send", sendReport: "service.estimate.send",
+    getPhotoReport: "service.estimate.write", savePhotoReport: "service.estimate.write", deletePhotoReport: "service.estimate.write", previewPhotoReport: "service.estimate.write", photoReportPdf: "service.estimate.write", photoReportRender: "service.estimate.write",
+    preparePhotoReport: "service.estimate.send", sendPhotoReport: "service.estimate.send",
     techAddLines: "service.tech.self",
     // Service Club (D-073): reads for anyone in the office, writes their own key.
     clubPlansOffice: "service.club.read", clubMemberships: "service.club.read", clubReport: "service.club.read", clubCustomer: ["service.club.read", "service.estimate.write"],
@@ -2399,7 +2429,15 @@ export function createHandler(deps = {}) {
     applyPlanDiscount: "service.estimate.write",
   };
 
-  return async function handler(event) {
+  return async function handler(event, context) {
+    // The photo report's background render (photo-report.js): this Lambda invoked by itself,
+    // never through API Gateway (an API Gateway event has a requestContext and a string body,
+    // so no request can put a top-level "task" here). It runs only a render row a signed-in
+    // office user's send / download already validated and queued.
+    if (event && event.task === "photo-report-render" && !event.requestContext && !event.httpMethod) {
+      await warmBrand(event.tenantSlug ?? null);
+      return photoReportWorker(event, { remainingMs: () => (typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : Infinity) });
+    }
     const method = httpMethod(event);
     const headers = normalizeHeaders(event?.headers);
     const cors = corsHeaders(headers["origin"]);

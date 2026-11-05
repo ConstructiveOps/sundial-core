@@ -459,3 +459,77 @@ test("2026-10-16: the hosted page / pay link shows a shown estimate's STORED tot
   const g = fake({ status: "Approved" });
   assert.equal((await call(createHandler(g.deps), "GET", `/public/estimates/${TOKEN}`)).body.total, 405.32, "nothing stored: live");
 });
+
+// ---------------------------------------------------------------------------
+// The photo report's public page (D-072 amendment 17)
+// ---------------------------------------------------------------------------
+test("photo report: the token finds the row; the page draws the report AS SENT (not later edits), the title line, a partner's page has no payer name and no receipt; wrong / expired tokens are 404 / 410", async () => {
+  const PTOKEN = "pho_abcdefghijklmnopqrstuvwxyz0123";
+  const JOB = "SVC000000000000009";
+  const P1 = `SUNDIAL/${JOB}/photos/SC1/before.jpg`;
+  const job = {
+    Id: JOB, Name: "SVC-00009", Client__c: TENANT, Bill_To_Type__c: "Customer", Estimate__c: "EST000000000000001",
+    Customer_Name_at_Creation__c: "Cy Diaz", Address_at_Creation__c: "3 Elm St, Phoenix, AZ 85001", Primary_Email_at_Creation__c: "cy@example.com",
+  };
+  const invoice = { Id: "INV1", Name: "SVC-00009", Client__c: TENANT, Service_Job__c: JOB, Status__c: "Paid", Subtotal__c: 395, Discount_Amount__c: 0, Tax_Amount__c: 0, Total__c: 395, Paid_Amount__c: 395, Bill_To_Type__c: "Customer" };
+  const sent = { cover: { title: "Breaker replacement", scope: "Swap the breaker.", coverPhotoKey: P1 }, sections: [{ id: "a", name: "Before", layout: "list", photos: [{ key: P1, description: "Arc marks on the bus." }] }], receipt: true };
+  const row = {
+    id: "00000000-0000-4000-8000-000000000001", client_sf_id: TENANT, job_sf_id: JOB, public_token: PTOKEN, token_expires_at: "2027-09-01T00:00:00Z",
+    cover: { title: "EDITED AFTER SENDING" }, sections: [], receipt: false, sent_report: sent, sent_at: "2026-09-16T18:00:00Z", sent_by_name: "Paige King", pdf_key: `SUNDIAL/${JOB}/photo-report-1.pdf`,
+  };
+  const lookups = [];
+  const f = fake();
+  const deps = {
+    ...f.deps,
+    getSupabaseClient: async () => ({
+      from: (table) => {
+        const filters = {};
+        const q = { select: () => q, eq: (c, v) => ((filters[c] = v), q), maybeSingle: async () => (lookups.push({ table, ...filters }), { data: table === "sundial_job_photo_reports" && filters.public_token === row.public_token ? { ...row } : null, error: null }) };
+        return q;
+      },
+    }),
+    sfQuery: async (soql) => {
+      if (soql.includes("FROM Sundial_Service_Job__c")) return soql.includes(`Id = '${JOB}'`) && soql.includes(`Client__c = '${TENANT}'`) ? [{ ...job }] : [];
+      if (soql.includes("FROM Sundial_Service_Invoice__c")) return [{ ...invoice }];
+      if (soql.includes("FROM Sundial_Service_Payment__c")) return [{ Id: "P1", Invoice__c: "INV1", Status__c: "Succeeded", Type__c: "Payment", Method__c: "Card", Amount__c: 395, Received_At__c: "2026-09-16T18:00:00Z" }];
+      if (soql.includes("FROM Sundial_Service_Call__c")) return [{ Id: "SC1", Name: "SC-00001", Scheduled_Start__c: "2026-09-14T16:00:00Z", Tech__r: { First_Name__c: "Jake", Last_Name__c: "Dorsey" } }];
+      if (soql.includes("FROM Sundial_Estimate__c") && soql.includes("Id = 'EST000000000000001'")) return [{ ...f.est }];
+      return f.deps.sfQuery(soql);
+    },
+    listFiles: async (id) => [{ key: `SUNDIAL/${id}/photos/SC1/before.jpg`, fileName: "photos/SC1/before.jpg", publicUrl: "https://s3/before.jpg", size: 10, lastModified: "2026-09-14T17:00:00Z" }],
+    listKeys: async () => [],
+  };
+  const h = createHandler(deps);
+  const r = await call(h, "GET", `/public/photo-reports/${PTOKEN}`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(lookups[0], { table: "sundial_job_photo_reports", public_token: PTOKEN });
+  assert.equal(r.body.title, "Photo report for 3 Elm St, Phoenix, AZ 85001");
+  assert.equal(r.body.customerName, "Cy Diaz");
+  assert.equal(r.body.paid, true);
+  assert.equal(r.body.sentAt, "2026-09-16T18:00:00Z");
+  assert.equal(r.body.pdfUrl, `https://sfsolproj.s3.us-west-1.amazonaws.com/SUNDIAL/${JOB}/photo-report-1.pdf`);
+  assert.ok(r.body.html.includes("Breaker replacement"), "the report as sent");
+  assert.ok(!r.body.html.includes("EDITED AFTER SENDING"), "never the office's later edits");
+  assert.ok(r.body.html.includes("Arc marks on the bus."));
+  assert.ok(r.body.html.includes("Prepared by Paige King · Sep 16, 2026"));
+  assert.ok(r.body.html.includes(">Download the PDF</a>"));
+  assert.ok(r.body.html.includes("Receipt · SVC-00009"));
+  assert.ok(r.body.html.includes("Cy Diaz"));
+  assert.ok(!r.body.html.includes("PREVIEW"));
+  // a partner pays: the service address only, no receipt
+  job.Bill_To_Type__c = "Manufacturer";
+  job.Bill_To_Name__c = "SMA America";
+  const p = await call(h, "GET", `/public/photo-reports/${PTOKEN}`);
+  assert.ok(!p.body.html.includes("Receipt ·"));
+  assert.ok(!p.body.html.includes("SMA America") && !p.body.html.includes("Cy Diaz"));
+  assert.ok(p.body.html.includes("3 Elm St"));
+  // unknown, malformed, expired
+  assert.equal((await call(h, "GET", "/public/photo-reports/pho_zzzzzzzzzzzzzzzzzzzzzzzzzzzz")).status, 404);
+  assert.equal((await call(h, "GET", "/public/photo-reports/short")).status, 404);
+  row.token_expires_at = "2026-01-01T00:00:00Z";
+  assert.equal((await call(h, "GET", `/public/photo-reports/${PTOKEN}`)).status, 410);
+  // a row whose job is in another tenant is a 404, never another tenant's job
+  row.token_expires_at = "2027-09-01T00:00:00Z";
+  row.client_sf_id = "a1W000000000OTHER1";
+  assert.equal((await call(h, "GET", `/public/photo-reports/${PTOKEN}`)).status, 404);
+});

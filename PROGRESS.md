@@ -1,6 +1,6 @@
 # Sundial — Progress Log
 
-## 2026-11-05 — The photo report: HCP's cover + sections of many photos, beside the job report (D-072 amendment 17, `feature/photo-report`)
+## 2026-11-05 — The photo report: HCP's cover + sections of many photos, beside the job report (D-072 amendment 17, `feature/photo-report`) — BUILT, NOT DEPLOYED (the SQL, deploys and wires are Tim's: TASKS)
 
 **Why.** Since day one Harmon has said the job report (one photo + one caption per section) is not what they had in Housecall Pro: a cover page, then sections that each hold many photos picked from big tiles, with an optional description per section and per photo. Tim's brief: build it beside the old report (both for a grace period, then the old one goes), in Supabase. Tim's amendment the same day:
 - the PDF always contains every photo — no placeholder, ever;

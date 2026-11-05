@@ -4272,6 +4272,26 @@ test("photo report PDF: an uncached photo is PREPARED (shrunk into the cache) be
   assert.ok(!fake.puts.some((p) => p.key.startsWith("SUNDIAL/") && p.contentType === "application/pdf"), "never under SUNDIAL/");
 });
 
+test("photo report PDF: a portrait phone photo (EXIF orientation 6) is embedded UPRIGHT — the cached copy and the PDF image are 32 × 64, not the stored 64 × 32 (2026-11-05)", async () => {
+  const { markedPhoto, withOrientation } = await import("../../lib/jpeg-test-fixtures.js");
+  const { PDFDocument, PDFName, PDFRawStream } = await import("pdf-lib");
+  const fake = fakeSalesforce();
+  fake.photoBytes = withOrientation(markedPhoto(), 6); // small: under KEEP_UNDER_BYTES, and still turned
+  const h = makeHandler(fake); // the REAL resizeJpegForReport
+  const { job, keys } = await seedPhotoJob(fake, h, { photos: 1 });
+  await call(h, "PUT", `/service/jobs/${job.Id}/photo-report`, { sections: [{ photos: [{ key: keys[0] }] }] });
+  const r = await call(h, "GET", `/service/jobs/${job.Id}/photo-report/pdf`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const doc = await PDFDocument.load(Buffer.from(r.body.base64, "base64"));
+  const dims = [];
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream) || String(obj.dict.get(PDFName.of("Subtype"))) !== "/Image") continue;
+    if (String(obj.dict.get(PDFName.of("Filter"))) !== "/DCTDecode") continue; // the photos, not a logo
+    dims.push([Number(String(obj.dict.get(PDFName.of("Width")))), Number(String(obj.dict.get(PDFName.of("Height"))))]);
+  }
+  assert.deepEqual(dims, [[32, 64]], "the upright dimensions");
+});
+
 test("photo report send: when the photos cannot all be shrunk inside the request it is queued, the worker finishes them and sends ONLY once the PDF exists; a photo that cannot be read fails the render, it is never left out", async () => {
   const fake = fakeSalesforce();
   let clock = 0;

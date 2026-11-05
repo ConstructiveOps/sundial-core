@@ -22,6 +22,10 @@
       POST   /service/jobs/{id}/payments                               (a check / ACH deposit before the invoice, 2026-10-27)
       GET    /service/tax-zones                                        (the office's zone picker, D-083)
       POST   /service/jobs/{id}/report/prepare                         (the PDF's photos, shrunk in rounds, 2026-10-12)
+      GET    /service/jobs/{id}/photo-report                           (the photo report, D-072 am. 17, 2026-11-05)
+      PUT    /service/jobs/{id}/photo-report | DELETE (start over)
+      GET    /service/jobs/{id}/photo-report/preview | pdf | renders/{renderId}
+      POST   /service/jobs/{id}/photo-report/prepare | send
       POST   /service/labor/default-rate | cost-rate                    (cost-rate: the tech's pay rate, 2026-10-05)
       GET    /service/labor/rates                                       (the rate sheet, 2026-10-05)
       GET    /service/invoices/report | /service/invoices/{id} | /service/invoices/{id}/preview
@@ -33,6 +37,13 @@
       POST   /service/price-book-items/{id}/new-version | deactivate
     plus OPTIONS everywhere for CORS. AWS_PROXY, authorization NONE at the gateway
     (auth + CORS 204 live IN the Lambda), same as every other Sundial route.
+
+    The photo report's background render (2026-11-05) also needs, and this script sets:
+      - timeout 300 s (memory stays 1769 MB) - API Gateway still cuts a request at 29 s;
+        only the self-invoked worker uses the rest;
+      - async invokes never retried (a failed render is marked failed on its row);
+      - inline policy sundial-service-estimate-self-invoke on the execution role:
+        lambda:InvokeFunction on this function only (S3 is already allowed).
 
 .DESCRIPTION
     Idempotent: resources/methods are checked/created before use. PS 5.1-safe
@@ -139,6 +150,21 @@ foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepSend $m }
 # Shrink the report's photos for the PDF ahead of a send, in rounds (2026-10-12 evening).
 $jobRepPrep = Ensure-Resource $jobRep "prepare"
 foreach ($m in @("POST", "OPTIONS")) { Wire-Method $jobRepPrep $m }
+# The photo report (D-072 amendment 17, 2026-11-05, photo-report.js): beside the job report above.
+Write-Host "==> /service/jobs/{id}/photo-report : GET, PUT, DELETE ; /preview /pdf : GET ; /prepare /send : POST ; /renders/{renderId} : GET" -ForegroundColor Cyan
+$jobPr = Ensure-Resource $jobId "photo-report"
+foreach ($m in @("GET", "PUT", "DELETE", "OPTIONS")) { Wire-Method $jobPr $m }
+foreach ($part in @("preview", "pdf")) {
+    $r = Ensure-Resource $jobPr $part
+    foreach ($m in @("GET", "OPTIONS")) { Wire-Method $r $m }
+}
+foreach ($part in @("prepare", "send")) {
+    $r = Ensure-Resource $jobPr $part
+    foreach ($m in @("POST", "OPTIONS")) { Wire-Method $r $m }
+}
+$jobPrRenders = Ensure-Resource $jobPr "renders"
+$jobPrRender = Ensure-Resource $jobPrRenders "{renderId}"
+foreach ($m in @("GET", "OPTIONS")) { Wire-Method $jobPrRender $m }
 Write-Host "==> /service/jobs/{id}/labor : GET, POST, OPTIONS" -ForegroundColor Cyan
 $jobLabor = Ensure-Resource $jobId "labor"
 foreach ($m in @("GET", "POST", "OPTIONS")) { Wire-Method $jobLabor $m }
@@ -217,6 +243,24 @@ $whArn = "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/POST/webhooks/strip
 aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-service-estimate-stripe" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn $whArn --output json 2>$null | Out-Null
+
+# The photo report's background render (2026-11-05): the Lambda invokes itself.
+Write-Host "==> Lambda: timeout 300 s (the photo report worker; memory unchanged at 1769 MB)" -ForegroundColor Cyan
+aws lambda update-function-configuration --function-name $Fn --region $Region --timeout 300 --output json | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "update-function-configuration failed" }
+aws lambda wait function-updated --function-name $Fn --region $Region
+Write-Host "==> Lambda: async invokes are never retried (a failed render is marked failed)" -ForegroundColor Cyan
+aws lambda put-function-event-invoke-config --function-name $Fn --region $Region --maximum-retry-attempts 0 --output json | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "put-function-event-invoke-config failed" }
+Write-Host "==> IAM: inline policy sundial-service-estimate-self-invoke on sundial-lambda-execution-role" -ForegroundColor Cyan
+$selfPolicy = @{ Version = "2012-10-17"; Statement = @(@{ Sid = "SelfInvokePhotoReport"; Effect = "Allow"; Action = "lambda:InvokeFunction"; Resource = "arn:aws:lambda:${Region}:${AcctId}:function:${Fn}" }) }
+$pf = Join-Path $env:TEMP ("sundial-" + [guid]::NewGuid().ToString() + ".json")
+[System.IO.File]::WriteAllText($pf, ($selfPolicy | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+aws iam put-role-policy --role-name "sundial-lambda-execution-role" --policy-name "sundial-service-estimate-self-invoke" --policy-document "file://$pf" --output json | Out-Null
+$ok = $LASTEXITCODE
+Remove-Item $pf -ErrorAction SilentlyContinue
+if ($ok -ne 0) { throw "put-role-policy failed (need iam:PutRolePolicy)" }
+Write-Host "  set (the role's other policies are unchanged)" -ForegroundColor Green
 
 if (-not $Yes) {
     $ans = Read-Host "Deploy API to '$Stage' now? LIVE production change. (y/N)"

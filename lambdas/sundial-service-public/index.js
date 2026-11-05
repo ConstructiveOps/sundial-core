@@ -55,7 +55,10 @@ import { INVOICE_SELECT, INVOICE_SF_OBJECT, PAYMENT_SELECT, PAYMENT_SF_OBJECT } 
 import { JOB_SF_OBJECT } from "../sundial-service-estimate/fields.js";
 import { REPORT_JOB_SELECT } from "../sundial-service-estimate/report.js";
 import { buildJobReportModel, normalizeReportSections, renderJobReportDocument, reportPhotoChoices } from "../../lib/job-report-document.js";
-import { listRecordFiles, S3_REGION } from "../../lib/file-access.js";
+import { listRecordFiles, listKeysUnder, S3_REGION } from "../../lib/file-access.js";
+import { buildPhotoReportModel, emptyPhotoReport, normalizePhotoReport, photoReportChoices, renderPhotoReportDocument, reportImageCachePrefix, withoutMissingPhotos } from "../../lib/photo-report-document.js";
+import { thumbPrefix } from "../../lib/photo-thumbs.js";
+import { PHOTO_REPORT_TABLE } from "../sundial-service-estimate/photo-report.js";
 import { S3Client } from "@aws-sdk/client-s3";
 
 const TOKEN_RE = /^[A-Za-z0-9_-]{20,128}$/;
@@ -68,6 +71,9 @@ const ROUTES = [
   // The customer's job report + receipt (D-072 amendment 10): the token is the job's
   // Report_Public_Token__c, issued by the estimate Lambda's send. Read-only.
   ["GET", /^\/public\/reports\/([^/]+)\/?$/, "report"],
+  // The photo report (D-072 amendment 17): the token is sundial_job_photo_reports.public_token,
+  // issued by the estimate Lambda's photo-report send. Read-only; shows the report AS SENT.
+  ["GET", /^\/public\/photo-reports\/([^/]+)\/?$/, "photoReport"],
 ];
 export const CHECKOUT_KINDS = Object.freeze(["setup", "deposit", "balance"]);
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
@@ -175,6 +181,7 @@ export function createHandler(deps = {}) {
     fetchUrl: undefined, // tests inject a fake Stripe; production uses fetch
     publicBaseUrl: process.env.SERVICE_PUBLIC_BASE_URL || "",
     listFiles: async (recordId) => listRecordFiles(s3Client(), recordId), // the job report's photos
+    listKeys: async (prefix) => listKeysUnder(s3Client(), prefix), // the photo report's shrunk copies + thumbnails
     now: () => new Date(),
     ...deps,
   };
@@ -525,6 +532,56 @@ export function createHandler(deps = {}) {
       pdfUrl,
       sections: model.sections.length,
       receipt: !!model.receipt,
+      paid: invoice?.Status__c === "Paid",
+    });
+  };
+
+  // --- the photo report (D-072 amendment 17) --------------------------------------------
+  // The row is found by its token (service role — the table has no browser policy), the job is
+  // read inside the row's own tenant, and the page draws the report AS SENT (sent_report), so an
+  // edit or a "start over" in the office never changes a page the customer already has.
+  H.photoReport = async ({ cors, token }) => {
+    const nf = () => jsonResponse(404, cors, { error: "not_found", code: "REPORT_NOT_FOUND" });
+    if (!TOKEN_RE.test(token || "")) return nf();
+    const { data: row, error } = await (await d.getSupabaseClient()).from(PHOTO_REPORT_TABLE).select("*").eq("public_token", token).maybeSingle();
+    if (error) throw new Error(`photo report lookup failed: ${error.message}`);
+    if (!row) return nf();
+    const exp = row.token_expires_at ? new Date(row.token_expires_at).getTime() : 0;
+    if (exp > 0 && exp < d.now().getTime()) return jsonResponse(410, cors, { error: "expired", code: "LINK_EXPIRED", message: "This report link has expired. Please contact us for a fresh one." });
+    const rows = await d.sfQuery(`SELECT ${REPORT_JOB_SELECT} FROM ${JOB_SF_OBJECT} WHERE Id = '${soqlEscapeString(row.job_sf_id)}' AND Client__c = '${soqlEscapeString(row.client_sf_id)}' LIMIT 1`);
+    const job = rows?.[0];
+    if (!job) return nf();
+    const listKeys = d.listKeys ?? (async () => []);
+    const [files, calls, invoice, cached, thumbs] = await Promise.all([
+      d.listFiles(job.Id).catch((e) => (console.error("public photo report: photo list failed:", e?.message || e), [])),
+      d.sfQuery(`SELECT Id, Name, Scheduled_Start__c, Actual_Start__c, Tech__c, Tech__r.First_Name__c, Tech__r.Last_Name__c FROM Sundial_Service_Call__c WHERE Sundial_Service_Job__c = '${soqlEscapeString(job.Id)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' LIMIT 200`).catch(() => []),
+      loadLiveInvoice(job),
+      listKeys(reportImageCachePrefix(job.Id)).catch(() => []),
+      listKeys(thumbPrefix(job.Id)).catch(() => []),
+    ]);
+    const payments = invoice ? ((await d.sfQuery(`SELECT ${PAYMENT_SELECT} FROM ${PAYMENT_SF_OBJECT} WHERE Service_Job__c = '${soqlEscapeString(job.Id)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' ORDER BY Received_At__c`)) || []).filter((p) => !p.Invoice__c || p.Invoice__c === invoice.Id) : [];
+    let estimate = null;
+    let lines = [];
+    if (invoice && job.Estimate__c) {
+      const est = await d.sfQuery(`SELECT ${ESTIMATE_SELECT} FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(job.Estimate__c)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' LIMIT 1`);
+      estimate = est?.[0] ?? null;
+      if (estimate) lines = (await loadLines(estimate)).filter((l) => l.Stage__c !== "Removed");
+    }
+    const choices = photoReportChoices({ files, jobId: job.Id, calls, cachedKeys: new Set(cached), thumbKeys: new Set(thumbs) });
+    const src = row.sent_report || { cover: row.cover, sections: row.sections, receipt: row.receipt };
+    const norm = normalizePhotoReport(src, { jobId: job.Id });
+    const { report } = withoutMissingPhotos(norm.ok ? norm.value : emptyPhotoReport(), new Set(choices.byKey.keys()));
+    const brand = await brandFor(job.Client__c);
+    const pdfUrl = row.pdf_key ? publicUrlForKey(row.pdf_key) : null;
+    const model = buildPhotoReportModel({ job, report, photos: choices.byKey, invoice, lines, payments, estimate, preparedBy: { name: row.sent_by_name ?? null, at: row.sent_at ?? null }, brand, options: { mode: "customer", pdfUrl } });
+    const { html, title } = renderPhotoReportDocument({ model });
+    return jsonResponse(200, cors, {
+      html,
+      title,
+      jobNumber: job.Name ?? null,
+      customerName: job.Customer_Name_at_Creation__c ?? null,
+      sentAt: row.sent_at ?? null,
+      pdfUrl,
       paid: invoice?.Status__c === "Paid",
     });
   };

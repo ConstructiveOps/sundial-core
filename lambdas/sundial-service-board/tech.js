@@ -50,6 +50,7 @@ import { customerDisplayName } from "../../lib/customer-name.js";
 import { EVENTS } from "../../lib/service-activity.js";
 import { buildKey, publicUrlForKey, sanitizeFileName, registerFileMetadata, findFileMetadataByKey, FILE_METADATA_TABLE, S3_BUCKET, S3_REGION } from "../../lib/file-access.js";
 import { syncCallNotesToJob } from "./job-notes.js";
+import { HCP_PHOTO_FOLDER, photoPrefix, jobPhotoPrefix, groupJobPhotos } from "../../lib/job-photos.js";
 import { CATEGORIES, fmtTime, jobLabel } from "../../lib/notify.js";
 // The job page's photo thumbnails (2026-10-22, D-072 amendment 15): made at upload, listed beside each photo.
 import { backfillThumbs, canThumbInline, makeThumb, thumbPrefix, withThumbUrls } from "../../lib/photo-thumbs.js";
@@ -519,48 +520,10 @@ export function onMyWayText({ customerName, techFirstName, brandName, jobNumber 
   return `Hi ${first}, ${who} is on the way to you now.${jobNumber ? ` (Job ${jobNumber})` : ""} Reply to this text if anything changes.`;
 }
 
-/** The HCP migration's photo folder under a job (lib/hcp-media.js PHOTO_FOLDER). */
-export const HCP_PHOTO_FOLDER = "hcp";
-/** Photos live under the job, in a folder per call. */
-export const photoPrefix = (jobId, callId) => `${buildKey(jobId, "photos")}/${callId}/`;
-/** The job's whole photo folder — every call's, plus what the office dropped at the top. */
-export const jobPhotoPrefix = (jobId) => `${buildKey(jobId, "photos")}/`;
-
-/**
- * Group a job's photo listing by the call each one belongs to (2026-09-18). A key
- * directly under photos/ (no call folder) is the office's; the tech app and the job
- * page both show the groups, so a tech sees the other techs' photos on the same job.
- */
-export function groupJobPhotos(photos, prefix, calls = []) {
-  const byCall = new Map();
-  for (const p of photos) {
-    const rest = p.key.startsWith(prefix) ? p.key.slice(prefix.length) : p.fileName;
-    const slash = rest.indexOf("/");
-    const callId = slash > 0 ? rest.slice(0, slash) : null;
-    const key = callId ?? "office";
-    if (!byCall.has(key)) byCall.set(key, []);
-    byCall.get(key).push({ ...p, fileName: slash > 0 ? rest.slice(slash + 1) : rest, callId });
-  }
-  const callInfo = new Map(calls.map((c) => [c.Id, c]));
-  const groups = [...byCall.entries()].map(([key, list]) => {
-    const c = key === "office" ? null : callInfo.get(key) ?? null;
-    const tech = c?.Tech__r ? [c.Tech__r.First_Name__c, c.Tech__r.Last_Name__c].filter(Boolean).join(" ") : null;
-    // `photos/hcp/` is the migration's pseudo-call (2026-10-05, lib/hcp-media.js): the
-    // photos Harmon's techs took in Housecall Pro, shown as their own group, oldest.
-    const migrated = key === HCP_PHOTO_FOLDER;
-    return {
-      callId: key === "office" ? null : key,
-      callNumber: c?.Name ?? null,
-      techName: tech,
-      start: migrated ? "" : c?.Scheduled_Start__c ?? c?.Actual_Start__c ?? null,
-      label: key === "office" ? "Office" : migrated ? "Housecall Pro" : [tech ?? "Visit", c?.Scheduled_Start__c ? new Date(c.Scheduled_Start__c).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null].filter(Boolean).join(" · "),
-      photos: list.sort((a, b) => String(b.lastModified).localeCompare(String(a.lastModified))),
-    };
-  });
-  // Newest group first; the office's folder at the top when it has anything; the HCP group last.
-  groups.sort((a, b) => (a.callId === null ? -1 : b.callId === null ? 1 : String(b.start ?? "").localeCompare(String(a.start ?? ""))));
-  return groups;
-}
+/** The HCP migration's photo folder, the job photo prefixes and the grouping live in
+ * lib/job-photos.js (2026-11-05) so the estimate Lambda's photo report shares them;
+ * re-exported here so every existing import keeps working. */
+export { HCP_PHOTO_FOLDER, photoPrefix, jobPhotoPrefix, groupJobPhotos };
 
 /** A search box's text → the SOQL LIKE literal, or null when there is nothing to search for. */
 export function likeFor(q) {

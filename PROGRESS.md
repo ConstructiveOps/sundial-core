@@ -1,5 +1,46 @@
 # Sundial — Progress Log
 
+## 2026-11-05 — The photo report: HCP's cover + sections of many photos, beside the job report (D-072 amendment 17, `feature/photo-report`)
+
+**Why.** Since day one Harmon has said the job report (one photo + one caption per section) is not what they had in Housecall Pro: a cover page, then sections that each hold many photos picked from big tiles, with an optional description per section and per photo. Tim's brief: build it beside the old report (both for a grace period, then the old one goes), in Supabase. Tim's amendment the same day:
+- the PDF always contains every photo — no placeholder, ever;
+- the email / text go out only once the PDF exists;
+- attach up to 20 MB, with link text rather than URLs;
+- the header is the customer's name + service address, or the address alone for any other payer;
+- the bill-to party is the default recipient.
+
+**Built.**
+- **`sql/2026-11-05_job_photo_reports.sql`** (PGlite test, 4):
+  - `sundial_job_photo_reports`: one row per job. `receipt` defaults false. `sent_report` holds the report AS SENT; the customer's link shows that, so a later edit or "start over" never changes it.
+  - `sundial_job_photo_report_renders`: the background renders.
+  - Both service-role only, RLS on, no policies.
+- **`lib/photo-report-document.js`:**
+  - `normalizePhotoReport` (version 2, the caps, keys under the job's photos);
+  - `photoReportChoices` (the job page's groups, with thumbnail, cached-copy URL and `embeddable`);
+  - `buildPhotoReportModel` and the HTML painter.
+- **`lib/photo-report-pdf.js`:** list rows (photo at 45% with its words beside it, full width without), a three-across grid, a photo never split, a heading kept with its first row, a repeated photo embedded once. A missing photo throws `PhotoNotReadyError`; there is no placeholder path.
+- **`lib/job-photos.js`:** `groupJobPhotos` / `jobPhotoPrefix` moved out of the board's `tech.js` (re-exported, behaviour unchanged).
+- **`lambdas/sundial-service-estimate/photo-report.js`:** GET / PUT / DELETE, preview, pdf, prepare, send and renders/{id}, plus the self-invoked worker (`{ task: "photo-report-render" }`, the sundial-reports CSV pattern).
+  - **Cache:** the PDF embeds only copies in the job report's own `_cache/report-images` cache. A JPEG is shrunk; a small JPEG or a PNG is copied as is; the bytes decide what a file is.
+  - **Inline or background:** send / download prepare first (≤ 12 s). If every photo is cached and there are ≤ 60, the PDF is made in the request. Otherwise it returns 202 and the worker prepares, hands itself on when low on time, renders, and then sends.
+  - **Email and text:** the email links "Click here for the report" and "Download the PDF" and attaches the PDF at ≤ 20 MB. `lib/email.js` is already SES v2 (40 MB a message), so it needed no change. The text is one short line with the hosted link.
+  - **Downloads:** a download over 4 MB goes to `REPORTS/` with a signed link.
+  - **Untouched:** the old report's code, routes and fields.
+- **`sundial-service-public`:** `GET /public/photo-reports/{token}`.
+- **Wire scripts:** the routes; on the estimate Lambda, timeout 29 → 300 s (memory stays 1,769 MB), no async retries, and the inline policy `sundial-service-estimate-self-invoke`.
+
+**Measured.**
+- A 300-photo PDF (busier-than-real 550 KB photos) is 162 MB, takes 0.7 s to draw, and peaks at 450 MB of memory. 60 photos: 32 MB, 0.2 s. Shrinking (~2 s a photo) is the slow part, about 120 photos per 300 s worker invocation.
+- Photo-folder files in `sundial_file_metadata`: 32,590 JPEG, 124 PNG, 116 MP4, 2 AVIF, no HEIC.
+
+**Found, not fixed (the brief freezes report.js).** The OLD job report's `registerFileMetadata` call uses the wrong key names: no `tenantId`, `objectKey` instead of `sfObjectType`, and the uploader / size keys are wrong too. `tenant_id` and `sf_object_type` are NOT NULL, so **every insert has failed**: 50 sends with a PDF in the activity log, 0 metadata rows. The PDFs are in S3, and any Files view that reads `sundial_file_metadata` does not list them. The photo report writes a correct row (tested). The old report's fix is two key names; it's Tim's call (TASKS).
+
+**Tests.** `npm test` **1,969 / 1,969** (was 1,945):
+- `lib/photo-report-document.test.js` (12);
+- the SQL test (4);
+- 7 route tests in the estimate Lambda: read / save / start over / old report untouched / tech 403; Email / SMS / Both and the recipient fallback, `RECIPIENT_REQUIRED`, `PHOTO_REPORT_EMPTY`, link text and no bare URL; partner `sendDefaults` and header; an uncached photo prepared, never a placeholder; the queued render and hand-on; the 20 MB boundary;
+- 1 public route test.
+
 ## 2026-11-05 — Solar new fields: report catalog regenerated after the column SQL ran
 
 Both columns were confirmed live first (`information_schema`: `extended_install_reason` text, `pto_approved_date` date). `sql/2026-11-05_solar_new_fields.sql` is now in `APPLIED_SQL_FILES` (`lib/report-columns.js`). Re-ran `generate-report-columns.mjs`: the coverage doc shows Solar 455 cached and 0 to add. Re-ran `generate-report-catalog.mjs`: the two columns are in `lib/report-catalog/solar.json` and `sql/2026-11-03_report_catalog.sql`, ungated and reportable. Solar has 457 catalog columns and the catalog **1,353** in all. `npm test` 1,945/1,945.

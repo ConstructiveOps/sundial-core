@@ -390,6 +390,10 @@ the fallback is "concatenate work notes, office edits", same field, no schema ch
   is a **receipt** and a **job report** (photos + tech-notes summary; HCP has this and
   Harmon uses it). The pretty customer-facing document is the **estimate/quote**; the
   invoice object remains the internal billing record and the partner deliverable.
+  *(2026-11-05, D-072 am. 17)* The job report shipped as one photo + one caption per
+  section (am. 10); Harmon's HCP **photo report** — a cover, then sections of many
+  photos, list or grid — now sits beside it (`photo-report.js`), and replaces it after a
+  grace period. Its PDF always carries every photo; it goes to the bill-to party.
 - **Partner invoices don't need to be pretty — and should eventually come from
   Acumatica.** Today every HCP invoice is manually re-keyed into Acumatica (AR lives
   there; payments are received only there), which is the double-entry to kill. Once

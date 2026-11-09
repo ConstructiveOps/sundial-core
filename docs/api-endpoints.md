@@ -997,7 +997,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
-| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes) |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); GET /reports/values — a text field's distinct values (D-089 am. 1); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1328,18 +1328,29 @@ Body: a report definition (`docs/reporting-module.md` §6.3), e.g.
 - `aggregates` are **grand totals over every matching row**, not just the rows returned.
 - `stripped` names the gated fields removed for this caller.
 - `asOf` = the oldest of the joined objects' newest successful sync (`cache_sync_runs`), or null.
+- **`records`** (D-089 am. 1) — **ungrouped runs only**, absent on a grouped one. Parallel to `rows`: one object per row, `{ "<alias>": { "sfId", "name" } | null }` for every record alias of the type (the base, every lookup and latest join; a rollup has no record). `null` = the left join found nothing. `name` is the object's name field (catalog `nameField`; solar's is `project_name`). Map an alias to its page with `GET /reports/types` (`recordPath`, or `linkVia` → use that alias's `sfId` and page). Not a column: never in `columns`, not filterable, not counted against the 50. The same on `GET /reports/{id}/run`. E.g. `"records": [{ "solar": { "sfId": "a1S…", "name": "Sunny Acres" }, "customer": { "sfId": "a1P…", "name": "Ada Lee" }, "rep": null, "dealer": null }]`.
 
 Errors:
 - `400 { error: "invalid_report", code, field, message }`. `field` names the offending part, e.g. `filters[0].value`. The codes are `BAD_DEFINITION`, `UNKNOWN_TYPE`, `UNKNOWN_FIELD`, `FIELD_NOT_REPORTABLE`, `LONG_TEXT_NOT_SELECTABLE`, `BAD_FILTER`, `BAD_OPERATOR`, `BAD_VALUE`, `TOO_MANY_*`, `DUPLICATE_COLUMN`, `COLUMN_NOT_GROUPED`, `BAD_AGGREGATE`, `BAD_SORT`, `BAD_LIMIT`, `NO_COLUMNS`, plus `BODY_REQUIRED` / `BODY_TOO_LARGE` (100 KB) / `INVALID_JSON`.
 - `500 REPORT_CATALOG_MISMATCH`: the database's catalog is older than the Lambda's. Re-run the catalog SQL.
 
 ### `GET /reports/types`
-→ `{ types: [{ key, label, base: { alias, object, label }, joins: [{ alias, object, label, kind }], defaultColumns }] }`.
+→ `{ types: [{ key, label, base: { alias, object, label, recordPath, linkVia }, joins: [{ alias, object, label, kind, recordPath, linkVia }], defaultColumns }] }`.
+`recordPath` (D-089 am. 1) is the portal page of that alias's record, `{id}` = its `sfId`: customer `/customers/{id}`, solar `/projects/solar/{id}`, roofing `/projects/roofing/{id}`, job `/service/jobs/{id}`, estimate `/service/estimates/{id}`. `linkVia` names the alias (of the same type) whose page the row opens instead — `job` for an invoice, a payment or a service call, `estimate` for a line. Both null = no page (user, dealer, price book item, a rollup). The map lives only in `lib/report-types.js`.
 No table names. **Ten types (R1b):** `customers`, `customers_solar`, `solar`, `roofing`, `service_jobs`, `service_calls`, `estimates`, `estimate_lines`, `invoices_payments`, `payments` (joins in `docs/reporting-module.md` §6.2). `kind` is `lookup` | `latest` (the newest child) | `rollup` (one row of measures, e.g. `payments.amount_paid`).
 
 ### `GET /reports/catalog?type=solar`
-→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, format, picklistValues?, description, longText, operators, selectable, csvSelectable }] }] }`.
+→ `{ type, label, aliases: [{ alias, object, label, fields: [{ field, label, section, type, format, picklistValues?, description, longText, nameField?, valuesLookup?, operators, selectable, csvSelectable }] }] }`.
+`nameField: true` (D-089 am. 1) marks the object's name field (one per alias of a table). `valuesLookup: true` marks a field `GET /reports/values` will list: a reportable, ungated, short `text` / `picklist` / `multipicklist` column of a table — never an id (`*_sf_id`), long text or a rollup measure.
 This is the fields of that report type, **projected for the caller**: non-reportable and gated columns are absent. `selectable: false` = long text (a filter on screen; `csvSelectable: true` — a column in a CSV). A rollup alias lists its measures (a count's `format` is null; a sum / max takes its column's). `format` is `"currency"` | `"percent"` | `null` — it lives in `lib/report-catalog/*.json` only, not in the SQL catalog. A missing or unknown `type` is `400 UNKNOWN_TYPE`.
+
+### `GET /reports/values?type=&field=<alias.column>&q=` (D-089 am. 1)
+A text field's distinct values, for a filter's picker. → `200 { type, field, values: [{ value, count }], totalDistinct, partial }`.
+- `values`: the tenant's distinct non-blank values of that column, most frequent first, then by value; **at most 200**. `q` (optional, ≤ 100 characters) narrows them: case-insensitive *contains*, `%` and `_` taken literally.
+- `totalDistinct`: how many distinct values matched in all; `partial: true` when that is more than the ones returned (type more of `q`).
+- `field` resolves through the type's aliases, as a run does: `rep.name` on `customers` lists sales reps' names.
+- Errors: `400 UNKNOWN_TYPE`; `400 UNKNOWN_FIELD` (not a field of the type, not reportable, or a gated field the caller does not hold); `400 VALUES_NOT_AVAILABLE` (not `valuesLookup`: a number, date, id, long text or rollup measure); `400 BAD_VALUE` (`q` too long); `500 REPORT_CATALOG_MISMATCH` (`sundial_report_values` refused what the Lambda accepted — re-run the catalog SQL and `sql/sundial_report_values.sql`).
+- Backed by `public.sundial_report_values` (`sql/sundial_report_values.sql`), service role only.
 
 ### `POST /reports/csv` (R1b) — asynchronous
 Body: a report definition, as for `/reports/run`, except that `limit` may be up to **50,000** (the default) and long-text fields may be columns.
@@ -1353,7 +1364,7 @@ Body: a report definition, as for `/reports/run`, except that `limit` may be up 
 - `truncated: true` = more rows matched than the export's `limit`.
 
 **Only the export's owner, in its tenant, sees it.** Anyone else, or an unknown / malformed id, gets **`404 { error: "not_found", code: "RECORD_NOT_FOUND" }`**.
-File format: UTF-8 with a BOM, CRLF, RFC 4180. Headers are "`<object>: <field>`". A text value starting with `= + - @` TAB or CR gets a leading `'`. Datetimes are in Arizona time; booleans are Yes / No.
+File format: UTF-8 with a BOM, CRLF, RFC 4180. Headers are "`<object>: <field>`". A text value starting with `= + - @` TAB or CR gets a leading `'`. Datetimes are in Arizona time; booleans are Yes / No. **Link columns (D-089 am. 1):** an ungrouped export ends each row with one `<alias label> link` column per record alias that has a page (e.g. `Customer link`, and `Payment link` → the payment's job), holding the full URL on the tenant's own portal (`lib/tenant-settings.js` `portalUrlFor`, resolved when the export is queued). Grouped exports, and a tenant with no portal address, have none.
 
 ### Saved reports (R1b) — `GET /reports`, `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `GET /reports/{id}/run`, `GET /reports/{id}/csv`
 A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`. **`GET /reports` adds `ownerName`** to each: `profiles.full_name` of the owner, read in ONE lookup for the whole list; `"former user"` when the profile is gone (or has no name); `null` if that lookup failed (the list still answers).

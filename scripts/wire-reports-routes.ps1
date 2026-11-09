@@ -5,6 +5,7 @@
       POST   /reports/run              run a report definition against the cache
       GET    /reports/types            the report types
       GET    /reports/catalog          the fields a report type offers this caller (?type=solar)
+      GET    /reports/values           a text field's distinct values (?type=&field=&q=)  (D-089 am. 1)
       POST   /reports/csv              queue a CSV export          (R1b)
       GET    /reports/csv/{exportId}   an export's status + link    (R1b)
       GET    /reports  POST /reports   saved reports: list / create (R1b)
@@ -89,6 +90,8 @@ Write-Host "==> /reports/types : GET" -ForegroundColor Cyan
 Wire-All (Ensure-Resource $reports "types") @("GET")
 Write-Host "==> /reports/catalog : GET" -ForegroundColor Cyan
 Wire-All (Ensure-Resource $reports "catalog") @("GET")
+Write-Host "==> /reports/values : GET" -ForegroundColor Cyan
+Wire-All (Ensure-Resource $reports "values") @("GET")
 
 Write-Host "==> /reports/csv : POST ; /reports/csv/{exportId} : GET" -ForegroundColor Cyan
 $csv = Ensure-Resource $reports "csv"
@@ -145,6 +148,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Report engine routes (R1b: CSV + saved reports) -> $Fn" --output json | Out-Null
+    --description "Report engine routes (R1b + D-089 am. 1 values) -> $Fn" --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
 Write-Host "SUCCESS. Next: .\scripts\add-reports-lifecycle.ps1, then node scripts/verify-report-run.mjs" -ForegroundColor Green

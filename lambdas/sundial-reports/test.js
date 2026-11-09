@@ -54,6 +54,8 @@ const ctx = {};
 function reset(level = "Admin") {
   ctx.level = level;
   ctx.tenant = TENANT;
+  ctx.slug = "harmon";
+  ctx.secretReads = 0;
   ctx.identityError = null;
   ctx.rpcCalls = [];
   ctx.rpcResult = { data: { rows: [["A", 1]], aggregates: { count: 7 }, truncated: false }, error: null };
@@ -87,8 +89,22 @@ mock.module("../../lib/identity.js", {
         throw e;
       }
       const user = USERS[ctx.level];
-      return { tenantId: ctx.tenant, tenantSlug: "harmon", authUserId: user.profile, user, access: accessBlock(resolveScope(user, ctx.tenant)) };
+      return { tenantId: ctx.tenant, tenantSlug: ctx.slug ?? "harmon", authUserId: user.profile, user, access: accessBlock(resolveScope(user, ctx.tenant)) };
     },
+  },
+});
+
+// Secrets Manager: only `sundial/brand` is read here (a non-primary tenant's portalUrl for CSV
+// links, through lib/tenant-settings.js). The primary tenant never reads it (D-078).
+mock.module("../../lib/secrets.js", {
+  namedExports: {
+    getSecret: async (name) => {
+      ctx.secretReads = (ctx.secretReads ?? 0) + 1;
+      if (name !== "sundial/brand") throw new Error(`unexpected secret ${name}`);
+      return { "conops-demo": { portalUrl: "https://demo.sundial.example/" } };
+    },
+    clearSecretCache: () => {},
+    SECRET_TIMEOUT_MS: 10_000,
   },
 });
 
@@ -143,7 +159,9 @@ mock.module("../../lib/supabase.js", {
           const off = args.p_def.offset ?? 0;
           const all = ctx.rpcPages.rows;
           const slice = all.slice(off, off + args.p_def.limit);
-          return { data: { rows: slice, aggregates: {}, truncated: off + args.p_def.limit < all.length }, error: ctx.rpcPages.error ?? null };
+          const page = { rows: slice, aggregates: {}, truncated: off + args.p_def.limit < all.length };
+          if (ctx.rpcPages.records) page.records = ctx.rpcPages.records.slice(off, off + args.p_def.limit);
+          return { data: page, error: ctx.rpcPages.error ?? null };
         }
         return ctx.rpcResult;
       },
@@ -475,7 +493,8 @@ test("csv worker: pages until not truncated, one object under REPORTS/, BOM + he
   assert.ok(text.startsWith("﻿Customer: "), "the BOM and the header come first");
   const lines = text.split("\r\n");
   assert.equal(lines.length, 1 + 12001 + 1); // header, rows, the empty string after the last CRLF
-  assert.equal(lines[1], "Name 0,'=cmd", "the formula guard ran");
+  // the formula guard ran; the trailing cell is the (empty: no records on this page) link column
+  assert.equal(lines[1], "Name 0,'=cmd,", "the formula guard ran");
   const row = lastExport();
   assert.equal(row.status, "done");
   assert.equal(row.row_count, 12001);
@@ -721,4 +740,213 @@ test("saved: runs with the RUNNER's gates; its CSV queues an export tied to the 
   const mine = await call("/reports", { method: "POST", body: { name: "Mine", definition: { type: "estimate_lines", columns: ["line.name", "line.unit_labor_cost"] } } });
   assert.deepEqual(mine.body.stripped, ["line.unit_labor_cost"]);
   assert.deepEqual(ctx.tables.sundial_reports.at(-1).definition.columns, ["line.name"]);
+});
+
+// =========================================================================================
+// D-089 amendment 1 (2026-11-09): record links; distinct values for filters
+// =========================================================================================
+const CUST_RECORDS = [{ alias: "customer", column: "name" }, { alias: "dealer", column: "name" }, { alias: "rep", column: "name" }, { alias: "assignee", column: "name" }];
+
+test("run: an ungrouped run carries records parallel to rows; a grouped one has none; not columns", async () => {
+  reset("Admin");
+  const recs = [{ customer: { sfId: "a1P000000000001AAA", name: "Ada" }, dealer: null, rep: null, assignee: null }];
+  ctx.rpcResult = { data: { rows: [["Ada", "Mesa"]], aggregates: {}, truncated: false, records: recs }, error: null };
+  const r = await call("/reports/run", { method: "POST", body: SIMPLE });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.records, recs);
+  assert.deepEqual(ctx.rpcCalls[0].args.p_def.records, CUST_RECORDS, "every record alias, each with its name column");
+  assert.equal(r.body.columns.length, 2, "records are not columns");
+  // 50 columns plus the records is still allowed: they never count against the cap.
+  const solar50 = catalogFor("solar", []).aliases[0].fields.filter((f) => f.selectable).slice(0, 50).map((f) => f.field);
+  reset("Admin");
+  assert.equal((await call("/reports/run", { method: "POST", body: { type: "solar", columns: solar50 } })).status, 200);
+
+  reset("Admin");
+  const g = await call("/reports/run", { method: "POST", body: GROUPED });
+  assert.ok(!("records" in g.body), "grouped: no records key");
+  assert.ok(!("records" in ctx.rpcCalls[0].args.p_def));
+
+  // A saved report's run passes them through the same way.
+  reset("Admin");
+  ctx.rpcResult = { data: { rows: [["Ada", "Mesa"]], aggregates: {}, truncated: false, records: recs }, error: null };
+  const saved = await call("/reports", { method: "POST", body: { name: "Mine", definition: SIMPLE } });
+  const run = await call(`/reports/${saved.body.id}/run`);
+  assert.deepEqual(run.body.records, recs);
+});
+
+test("types: each alias says which page its record opens — recordPath, linkVia (an alias of the same type), or neither", async () => {
+  reset("Manager");
+  const r = await call("/reports/types");
+  const t = (key) => r.body.types.find((x) => x.key === key);
+  const link = (key) => Object.fromEntries([t(key).base, ...t(key).joins].map((a) => [a.alias, [a.object, a.recordPath, a.linkVia]]));
+  assert.deepEqual(link("service_jobs"), {
+    job: ["job", "/service/jobs/{id}", null],
+    customer: ["customer", "/customers/{id}", null],
+    bill_to: ["customer", "/customers/{id}", null],
+    estimate: ["estimate", "/service/estimates/{id}", null],
+    invoice: ["serviceinvoice", null, "job"],
+    payments: ["servicepayment", null, null], // a rollup has no record
+    assignee: ["user", null, null],
+  });
+  assert.deepEqual(link("payments").payment, ["servicepayment", null, "job"]);
+  assert.deepEqual(link("service_calls").call, ["servicecall", null, "job"]);
+  assert.deepEqual(link("estimate_lines").line, ["serviceline", null, "estimate"]);
+  assert.deepEqual(link("estimate_lines").item, ["pricebookitem", null, null]);
+  assert.deepEqual(link("solar").solar, ["solar", "/projects/solar/{id}", null]);
+  assert.deepEqual(link("solar").dealer, ["dealer", null, null]);
+  assert.deepEqual(link("roofing").roofing, ["roofing", "/projects/roofing/{id}", null]);
+  // every linkVia names an alias of the same type that has a page of its own
+  for (const type of r.body.types) {
+    const all = [type.base, ...type.joins];
+    for (const a of all.filter((x) => x.linkVia)) {
+      assert.ok(all.find((x) => x.alias === a.linkVia)?.recordPath, `${type.key}.${a.alias} → ${a.linkVia}`);
+    }
+  }
+});
+
+test("catalog: the name field is flagged; text fields that qualify carry valuesLookup", async () => {
+  reset("Manager");
+  const cat = catalogFor("service_jobs", []);
+  const fld = (ref) => cat.aliases.flatMap((a) => a.fields).find((f) => f.field === ref);
+  assert.equal(fld("job.name").nameField, true);
+  assert.equal(fld("customer.name").nameField, true);
+  assert.equal(fld("job.status").nameField, undefined);
+  assert.equal(catalogFor("solar", []).aliases[0].fields.find((f) => f.nameField).field, "solar.project_name");
+  assert.equal(fld("job.status").valuesLookup, true, "a picklist");
+  assert.equal(fld("customer.city").valuesLookup, true, "text");
+  assert.equal(fld("job.office_notes").valuesLookup, undefined, "long text never");
+  assert.equal(fld("job.sundial_customer_sf_id").valuesLookup, undefined, "an id never");
+  assert.equal(fld("job.created_date").valuesLookup, undefined, "a date never");
+  assert.equal(fld("payments.amount_paid").valuesLookup, undefined, "a rollup measure never");
+});
+
+test("values: resolved through the type's aliases; the tenant, table and column to the rpc; partial when more exist", async () => {
+  reset("Manager");
+  ctx.rpcResult = { data: { values: [{ value: "Mesa", count: 3 }, { value: "Mesquite", count: 1 }], total_distinct: 250 }, error: null };
+  const r = await call("/reports/values", { qs: { type: "customers", field: "customer.city", q: "  mes " } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { type: "customers", field: "customer.city", values: [{ value: "Mesa", count: 3 }, { value: "Mesquite", count: 1 }], totalDistinct: 250, partial: true });
+  assert.deepEqual(ctx.rpcCalls, [{ name: "sundial_report_values", args: { p_client_sf_id: TENANT, p_table: "sundial_customer_cache", p_column: "city", p_search: "mes" } }]);
+  assert.doesNotMatch(r.raw.body, /_cache/);
+
+  // a joined alias reads ITS object's table; no q = no search; all of them = not partial
+  reset("Manager");
+  ctx.rpcResult = { data: { values: [{ value: "Ann Rep", count: 9 }], total_distinct: 1 }, error: null };
+  const j = await call("/reports/values", { qs: { type: "customers", field: "rep.name" } });
+  assert.equal(j.body.partial, false);
+  assert.equal(j.body.totalDistinct, 1);
+  assert.deepEqual(ctx.rpcCalls[0].args, { p_client_sf_id: TENANT, p_table: "sundial_user_cache", p_column: "name", p_search: null });
+});
+
+test("values: 400 before any read for an unknown type / field, a field that offers no values, a long search", async () => {
+  const cases = [
+    [{ field: "customer.city" }, "UNKNOWN_TYPE"],
+    [{ type: "nope", field: "customer.city" }, "UNKNOWN_TYPE"],
+    [{ type: "customers" }, "UNKNOWN_FIELD"],
+    [{ type: "customers", field: "city" }, "UNKNOWN_FIELD"],
+    [{ type: "customers", field: "nope.city" }, "UNKNOWN_FIELD"],
+    [{ type: "customers", field: "customer.nope" }, "UNKNOWN_FIELD"],
+    [{ type: "customers", field: "customer.sf_id" }, "UNKNOWN_FIELD"], // not reportable
+    [{ type: "customers", field: "customer.dealer_sf_id" }, "VALUES_NOT_AVAILABLE"], // an id
+    [{ type: "customers", field: "customer.created_date" }, "VALUES_NOT_AVAILABLE"], // a date
+    [{ type: "service_jobs", field: "job.office_notes" }, "VALUES_NOT_AVAILABLE"], // long text
+    [{ type: "service_jobs", field: "payments.amount_paid" }, "VALUES_NOT_AVAILABLE"], // a rollup
+    [{ type: "customers", field: "customer.city", q: "x".repeat(101) }, "BAD_VALUE"],
+  ];
+  for (const [qs, code] of cases) {
+    reset("Admin");
+    const r = await call("/reports/values", { qs });
+    assert.equal(r.status, 400, JSON.stringify(qs));
+    assert.equal(r.body.code, code, JSON.stringify(qs));
+    assert.equal(ctx.rpcCalls.length, 0, JSON.stringify(qs));
+  }
+  // A gated field the caller does not hold does not exist for them (the catalog's rule).
+  reset("Manager");
+  const g = await call("/reports/values", { qs: { type: "estimate_lines", field: "line.unit_labor_cost" } });
+  assert.equal(g.body.code, "UNKNOWN_FIELD");
+  reset("Admin"); // holds the gate, but a number never offers values
+  assert.equal((await call("/reports/values", { qs: { type: "estimate_lines", field: "line.unit_labor_cost" } })).body.code, "VALUES_NOT_AVAILABLE");
+});
+
+test("values: reports.read like every route; a function RAISE is REPORT_CATALOG_MISMATCH; every valuesLookup field is accepted", async () => {
+  for (const level of ["Sales Rep", "Sales Dealer", "Technician", "NoDealerRep"]) {
+    reset(level);
+    const r = await call("/reports/values", { qs: { type: "customers", field: "customer.city" } });
+    assert.equal(r.status, 403, level);
+    assert.equal(r.body.code, "MODULE_FORBIDDEN");
+    assert.equal(ctx.rpcCalls.length + ctx.dbCalls.length, 0);
+  }
+  reset("Admin");
+  ctx.rpcResult = { data: null, error: { message: "sundial_report_values: column sundial_customer_cache.city is long text" } };
+  const bad = await call("/reports/values", { qs: { type: "customers", field: "customer.city" } });
+  assert.equal(bad.status, 500);
+  assert.equal(bad.body.code, "REPORT_CATALOG_MISMATCH");
+
+  // the catalog's flag and the route agree, for every alias of every type
+  for (const t of ["customers", "service_jobs", "estimate_lines"]) {
+    for (const a of catalogFor(t, []).aliases) {
+      for (const f of a.fields.filter((x) => x.valuesLookup)) {
+        reset("Manager");
+        ctx.rpcResult = { data: { values: [], total_distinct: 0 }, error: null };
+        assert.equal((await call("/reports/values", { qs: { type: t, field: f.field } })).status, 200, `${t} ${f.field}`);
+      }
+    }
+  }
+});
+
+const PAY_RECORDS = [
+  { payment: { sfId: "a3P000000000001AAA", name: "PAY-1" }, invoice: { sfId: "a3I000000000001AAA", name: "INV-1" }, job: { sfId: "a3J000000000001AAA", name: "SVC-1" }, customer: { sfId: "a1P000000000001AAA", name: "Ada" } },
+  { payment: { sfId: "a3P000000000002AAA", name: "PAY-2" }, invoice: null, job: null, customer: null },
+];
+
+test("csv: an ungrouped export ends each row with the link columns — full URLs on the tenant's portal", async () => {
+  reset("Admin");
+  const q = await call("/reports/csv", { method: "POST", body: { type: "payments", columns: ["payment.name", "payment.amount"] } });
+  assert.equal(lastExport().job.portalOrigin, "https://sundial.harmonelectric.net");
+  assert.equal(ctx.secretReads, 0, "the primary tenant reads no secret for its origin");
+  ctx.rpcPages = { rows: [["PAY-1", 10], ["PAY-2", 20]], records: PAY_RECORDS };
+  await worker(q.body.exportId);
+  const lines = ctx.s3.find((s) => s.kind === "PutObject").input.Body.toString("utf8").split("\r\n");
+  assert.equal(lines[0], "﻿Payment: Payment Number,Payment: Amount,Payment link,Invoice link,Service job link,Customer link");
+  const J = "https://sundial.harmonelectric.net/service/jobs/a3J000000000001AAA";
+  assert.equal(lines[1], `PAY-1,10,${J},${J},${J},https://sundial.harmonelectric.net/customers/a1P000000000001AAA`);
+  assert.equal(lines[2], "PAY-2,20,,,,", "no parent record, no link");
+});
+
+test("csv: grouped exports, old exports and tenants with no portal address get no link columns; another tenant gets its own origin", async () => {
+  reset("Admin");
+  const g = await call("/reports/csv", { method: "POST", body: { type: "customers", groupBy: ["customer.city"], aggregates: [{ fn: "count" }] } });
+  assert.equal(lastExport().job.portalOrigin, null);
+  ctx.rpcPages = { rows: [["Mesa", 3]] };
+  await worker(g.body.exportId);
+  assert.equal(ctx.s3.find((s) => s.kind === "PutObject").input.Body.toString("utf8"), "﻿Customer: City,Count\r\nMesa,3\r\n");
+
+  // queued before the amendment: its job has no portalOrigin
+  reset("Admin");
+  const old = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  delete lastExport().job.portalOrigin;
+  ctx.rpcPages = { rows: [["Ada", "Mesa"]], records: [{ customer: { sfId: "a1P000000000001AAA", name: "Ada" } }] };
+  await worker(old.body.exportId);
+  assert.equal(ctx.s3.find((s) => s.kind === "PutObject").input.Body.toString("utf8").split("\r\n")[1], "Ada,Mesa");
+
+  // PORTAL_BASE_URL is the primary tenant's, trailing slash dropped
+  reset("Admin");
+  process.env.PORTAL_BASE_URL = "https://portal.harmon.example/";
+  try {
+    await call("/reports/csv", { method: "POST", body: SIMPLE });
+    assert.equal(lastExport().job.portalOrigin, "https://portal.harmon.example");
+  } finally {
+    delete process.env.PORTAL_BASE_URL;
+  }
+
+  // another tenant: its own sundial/brand portalUrl — never the primary tenant's
+  reset("Admin");
+  ctx.slug = "conops-demo";
+  await call("/reports/csv", { method: "POST", body: SIMPLE });
+  assert.equal(lastExport().job.portalOrigin, "https://demo.sundial.example");
+  reset("Admin");
+  ctx.slug = "acme"; // no brand block: not configured
+  const none = await call("/reports/csv", { method: "POST", body: SIMPLE });
+  assert.equal(none.status, 202, "the export still runs");
+  assert.equal(lastExport().job.portalOrigin, null);
 });

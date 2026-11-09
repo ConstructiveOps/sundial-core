@@ -14,7 +14,8 @@
       "description": "Record auto-name / project number.",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "project_name",

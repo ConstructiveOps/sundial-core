@@ -14,7 +14,8 @@
       "description": "SC-{00000}",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "visit_type",

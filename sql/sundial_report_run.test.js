@@ -474,3 +474,128 @@ test("R1b: the aliases the types declare are the ones the wire carries", () => {
     assert.deepEqual([n.wire.base.alias, ...n.wire.joins.map((j) => j.alias)], [...aliasesOf(t).keys()]);
   }
 });
+
+// =============================================================================================
+// D-089 amendment 1 (2026-11-09): record links on ungrouped runs; sundial_report_values.
+// =============================================================================================
+await db.exec(await readFile(new URL("./sundial_report_values.sql", import.meta.url), "utf8"));
+
+test("records: per row, every record alias's { sfId, name } in row order; null for a left-join miss; no rollup", async () => {
+  const r = await rbRun({ type: "service_jobs", columns: ["job.name"], sort: [{ field: "job.name" }] });
+  assert.deepEqual(r.rows, [["SVC-1"], ["SVC-2"]]);
+  assert.deepEqual(r.records, [
+    {
+      job: { sfId: "RJ1", name: "SVC-1" },
+      customer: { sfId: "RC1", name: "Cara One" },
+      bill_to: { sfId: "RC3", name: "Biller Co" },
+      estimate: { sfId: "RE1", name: "EST-1" },
+      invoice: { sfId: "RI2", name: "SVC-1-INV-2" }, // the latest join's chosen child
+      assignee: { sfId: "RU2", name: "Tom Tech" },
+    },
+    { job: { sfId: "RJ2", name: "SVC-2" }, customer: { sfId: "RC2", name: "Bo Two" }, bill_to: null, estimate: null, invoice: null, assignee: null },
+  ]);
+  assert.ok(!("payments" in r.records[0]), "a rollup has no record");
+  // Not columns: the output and the rows are exactly what was asked for.
+  assert.equal(r.n.output.length, 1);
+});
+
+test("records: a cross-tenant join key is a miss here too; solar's name is its project name; desc order kept", async () => {
+  const c = await rbRun({ type: "customers", columns: ["customer.name"], sort: [{ field: "customer.name", dir: "desc" }] });
+  assert.deepEqual(c.rows, [["Cara One"], ["Bo Two"], ["Biller Co"]]);
+  assert.deepEqual(c.records.map((x) => x.customer.sfId), ["RC1", "RC2", "RC3"]);
+  assert.equal(c.records[1].dealer, null, "RC2's dealer DX is another tenant's");
+  assert.deepEqual(c.records[0].dealer, { sfId: "D1", name: "Desert Dealer" });
+  const s = await rbRun({ type: "customers_solar", columns: ["customer.name"], filters: [{ field: "customer.name", op: "eq", value: "Cara One" }] });
+  assert.deepEqual(s.records[0].solar, { sfId: "RS2", name: "New Solar" });
+});
+
+test("records: absent on a grouped run; parallel to rows when truncated; [] when only aggregates", async () => {
+  const g = await rbRun({ type: "customers", groupBy: ["customer.name"], aggregates: [{ fn: "count" }] });
+  assert.ok(!("records" in g), "grouped: no records key");
+  assert.ok(!("records" in normalizeDefinition({ type: "customers", groupBy: ["customer.name"], aggregates: [{ fn: "count" }] }, { now: NOW }).wire));
+  const big = await run({ type: "solar", columns: ["solar.project_name"] }, { tenant: BIG });
+  assert.equal(big.truncated, true);
+  assert.equal(big.records.length, big.rows.length);
+  assert.ok(big.rows.every((row, i) => big.records[i].solar.name === row[0]));
+  const aggOnly = await rbRun({ type: "customers", aggregates: [{ fn: "count" }] });
+  assert.deepEqual(aggOnly.records, []);
+});
+
+test("records: a malformed records list RAISES", async () => {
+  const sj = normalizeDefinition({ type: "service_jobs", columns: ["job.name"] }, { now: NOW }).wire;
+  await raises({ ...sj, records: [{ alias: "payments" }] }, /payments is not a record alias/, RB);
+  await raises({ ...sj, records: [{ alias: "nope" }] }, /nope is not a record alias/, RB);
+  await raises({ ...sj, records: [{ alias: "job" }, { alias: "job" }] }, /job is listed twice/, RB);
+  await raises({ ...sj, records: [{ alias: "job", column: "nope" }] }, /unknown column job\.nope/, RB);
+  await raises({ ...sj, records: "job" }, /records is a list/, RB);
+  await raises({ ...sj, grouped: true, records: [{ alias: "job" }] }, /grouped report has no records/, RB);
+  const el = normalizeDefinition({ type: "estimate_lines", columns: ["line.name"] }, { now: NOW }).wire;
+  await raises({ ...el, records: [{ alias: "item", column: "labor_cost" }] }, /item\.labor_cost needs service\.costing\.read/, RB);
+  // No column: the id alone.
+  const ok = await runWire({ ...sj, records: [{ alias: "job" }] }, RB);
+  assert.deepEqual(ok.records.map((x) => x.job), [{ sfId: "RJ1", name: null }, { sfId: "RJ2", name: null }]);
+});
+
+// --- sundial_report_values ---------------------------------------------------------------
+async function values(table, column, search = null, tenant = T) {
+  const r = await db.query(`select public.sundial_report_values($1, $2, $3, $4) as r`, [tenant, table, column, search]);
+  return r.rows[0].r;
+}
+async function valuesRaise(table, column, re) {
+  await assert.rejects(() => values(table, column), (e) => {
+    assert.match(String(e.message), re);
+    return true;
+  });
+}
+
+test("values: the tenant's distinct non-blank values, most frequent first, then by value", async () => {
+  // T's solar stages: Permitting x2, Archive, Install, (null) — OTHER's Permitting never counts.
+  assert.deepEqual(await values("sundial_solar_cache", "stage"), {
+    values: [{ value: "Permitting", count: 2 }, { value: "Archive", count: 1 }, { value: "Install", count: 1 }],
+    total_distinct: 3,
+  });
+  // project_manager: "  " is blank and never offered.
+  const pm = await values("sundial_solar_cache", "project_manager");
+  assert.ok(pm.values.every((v) => v.value.trim() !== ""));
+  assert.deepEqual(await values("sundial_customer_cache", "city", null, OTHER), { values: [{ value: "Nowhere", count: 1 }], total_distinct: 1 });
+});
+
+test("values: search is a case-insensitive contains with % and _ taken literally", async () => {
+  assert.deepEqual((await values("sundial_solar_cache", "stage", "PERM")).values, [{ value: "Permitting", count: 2 }]);
+  assert.deepEqual(await values("sundial_solar_cache", "project_name", "_"), { values: [{ value: "Under_score", count: 1 }], total_distinct: 1 });
+  assert.deepEqual((await values("sundial_solar_cache", "project_name", "50%")).values, [{ value: "50% Off Roof", count: 1 }]);
+  assert.equal((await values("sundial_solar_cache", "project_name", "   ")).total_distinct, 5, "a blank search narrows nothing");
+  assert.deepEqual(await values("sundial_solar_cache", "stage", "zzz"), { values: [], total_distinct: 0 });
+});
+
+test("values: at most 200, total_distinct counts them all", async () => {
+  const r = await values("sundial_solar_cache", "project_name", null, BIG);
+  assert.equal(r.values.length, 200);
+  assert.equal(r.total_distinct, 5001);
+  // every count is 1, so the tiebreak (the value) decides the order
+  const got = r.values.map((v) => v.value);
+  assert.deepEqual(got, [...got].sort());
+});
+
+test("values: refuses what a value list must never show", async () => {
+  await valuesRaise("sundial_solar_cache", "nope", /unknown column sundial_solar_cache\.nope/);
+  await valuesRaise("profiles", "email", /unknown column profiles\.email/);
+  await valuesRaise("sundial_solar_cache", "sf_id", /is not reportable/);
+  await valuesRaise("sundial_solar_cache", "sales_rep_sf_id", /is an id/);
+  await valuesRaise("sundial_solar_cache", "contract_amount", /is numeric, not text/);
+  await valuesRaise("sundial_price_book_item_cache", "labor_cost", /is gated/);
+  const lt = (await db.query(`select table_name, column_name from public.sundial_report_catalog where long_text and reportable and gate is null and data_type = 'text' limit 1`)).rows[0];
+  assert.ok(lt, "the seed flags long text");
+  await valuesRaise(lt.table_name, lt.column_name, /is long text/);
+  await assert.rejects(() => values("sundial_solar_cache", "stage", null, ""), /p_client_sf_id is required/);
+  await assert.rejects(() => values("sundial_solar_cache", "stage", "x".repeat(201)), /longer than 200/);
+});
+
+test("values: anon and authenticated cannot execute it", async () => {
+  for (const role of ["anon", "authenticated"]) {
+    const r = await db.query(`select has_function_privilege($1, 'public.sundial_report_values(text, text, text, text)', 'execute') as ok`, [role]);
+    assert.equal(r.rows[0].ok, false, role);
+  }
+  const s = await db.query(`select has_function_privilege('service_role', 'public.sundial_report_values(text, text, text, text)', 'execute') as ok`);
+  assert.equal(s.rows[0].ok, true);
+});

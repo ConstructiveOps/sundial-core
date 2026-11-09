@@ -24,6 +24,13 @@
 // details). Encrypted at rest (SSE-S3); deleted by the bucket after 7 days (REPORTS/ lifecycle
 // rule). The URL is a presigned GET made when the status is read, good for 15 minutes.
 //
+// LINKS (D-089 am. 1). An UNGROUPED export ends each row with a "<alias> link" column per
+// record alias with a portal page (lib/report-csv.js linkColumns). The origin is the tenant's
+// portal address — lib/tenant-settings.js portalUrlFor, the one the invite and mention emails
+// use: the primary tenant's PORTAL_BASE_URL (default below), any other tenant's
+// `sundial/brand` portalUrl. It is resolved ONCE, when the export is queued, and stored in the
+// job; a tenant with no address gets an export without link columns, never another tenant's.
+//
 // WHO: reports.read, then the export row's owner in its tenant — anyone else's export is 404
 // RECORD_NOT_FOUND, the saved-report rule. NEVER LOGGED: a row, a value, a filter, the URL.
 
@@ -35,7 +42,8 @@ import { jsonResponse } from "../../lib/http.js";
 import { DENY } from "../../lib/access.js";
 import { normalizeDefinition } from "../../lib/report-def.js";
 import { reportType } from "../../lib/report-types.js";
-import { csvHeader, csvRows, exportKey, downloadName, REPORTS_BUCKET, REPORTS_REGION } from "../../lib/report-csv.js";
+import { csvHeader, csvRows, exportKey, downloadName, linkColumns, cleanOrigin, REPORTS_BUCKET, REPORTS_REGION } from "../../lib/report-csv.js";
+import { createTenantSettings } from "../../lib/tenant-settings.js";
 import { isUuid } from "../../lib/saved-reports.js";
 
 export const EXPORTS_TABLE = "sundial_report_exports";
@@ -45,8 +53,25 @@ export const STOP_BEFORE_END_MS = 20_000;
 // A queued / running export older than this was lost (the worker died without marking it).
 export const LOST_AFTER_MS = 10 * 60_000;
 
+// The primary tenant's portal (the same default as lib/auth-email.js / sundial-user-admin).
+export const DEFAULT_PORTAL_BASE_URL = "https://sundial.harmonelectric.net";
+
 let s3;
 let lambda;
+let settings;
+const tenantSettings = () => (settings ??= createTenantSettings());
+
+/** The portal origin an export's links open, or null (grouped, no link columns, not configured). */
+export async function exportOrigin(type, wire, tenantSlug) {
+  if (wire.grouped || !type || linkColumns(type).length === 0) return null;
+  const primary = cleanOrigin(process.env.PORTAL_BASE_URL || DEFAULT_PORTAL_BASE_URL);
+  try {
+    return cleanOrigin(await tenantSettings().portalUrlFor(tenantSlug, primary));
+  } catch (err) {
+    console.warn("reports csv: portal origin lookup failed:", err?.message || String(err));
+    return null;
+  }
+}
 const s3Client = () => (s3 ??= new S3Client({ region: REPORTS_REGION }));
 const lambdaClient = () => (lambda ??= new LambdaClient({}));
 
@@ -56,12 +81,13 @@ const notFound = (cors) => jsonResponse(404, cors, { error: "not_found", code: D
  * Validate a definition for CSV and queue its export. Shared by POST /reports/csv and
  * GET /reports/{id}/csv. `def` is the definition; `reportId` the saved report, if any.
  */
-export async function startExport({ def, reportId = null, tenantId, profileId, heldGates, cors, now = new Date() }) {
+export async function startExport({ def, reportId = null, tenantId, tenantSlug = null, profileId, heldGates, cors, now = new Date() }) {
   const n = normalizeDefinition(def, { heldGates, now, mode: "csv" });
   if (!n.ok) return jsonResponse(n.status, cors, n.body);
 
+  const portalOrigin = await exportOrigin(reportType(def.type), n.wire, tenantSlug);
   const supabase = await getSupabaseClient();
-  const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects };
+  const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects, portalOrigin };
   const { data, error } = await supabase
     .from(EXPORTS_TABLE)
     .insert({ client_sf_id: tenantId, owner_profile_id: profileId, report_id: reportId, report_type: def.type, status: "queued", job })
@@ -222,7 +248,10 @@ export async function runExport(exportId, { remainingMs = () => Infinity, asOfFo
   try {
     if (!type) throw new ExportError("UNKNOWN_TYPE");
     const asOf = await asOfFor(supabase, job.objects ?? []);
-    await writer.write(csvHeader(job.output, type));
+    // An export queued before D-089 am. 1 has no portalOrigin: no link columns.
+    const origin = !job.wire.grouped ? cleanOrigin(job.portalOrigin) : null;
+    const links = origin ? linkColumns(type) : [];
+    await writer.write(csvHeader(job.output, type, links));
     for (;;) {
       if (remainingMs() < STOP_BEFORE_END_MS) throw new ExportError("CSV_TOO_SLOW");
       const limit = Math.min(job.wire.limit, job.rowLimit - rows);
@@ -233,7 +262,7 @@ export async function runExport(exportId, { remainingMs = () => Infinity, asOfFo
       }
       const page = data?.rows ?? [];
       pages += 1;
-      if (page.length) await writer.write(csvRows(page, job.output));
+      if (page.length) await writer.write(csvRows(page, job.output, { records: data?.records ?? null, links, origin }));
       rows += page.length;
       if (!data?.truncated) break;
       if (rows >= job.rowLimit) {

@@ -1,5 +1,19 @@
 # Sundial — Progress Log
 
+## 2026-11-09 — Reports: record links on every row; distinct values for filters (D-089 amendment 1) — DEPLOYED (sundial-reports + the /reports/values route); SQL is Tim's
+
+**Why.** A report's rows named records the user could not open, and a text filter made the user type a value blind. Both belong to the engine, so the portal keeps no page map and never reads the cache.
+
+**Built.**
+- **Catalog:** each object's describe `nameField` is `nameField: true` (solar's `Name` is not cached → `Project_Name__c`, `NAME_FIELD_FALLBACK`). The SQL seed now carries `long_text`. Regenerated from live (the generator's `--check` was clean first; still 1,353 rows).
+- **Record links:** `lib/report-types.js` `RECORD_PATHS` / `LINK_VIA` / `recordLinkOf` — the one map; `GET /reports/types` returns `recordPath` / `linkVia` per alias. `normalizeDefinition` puts `records: [{ alias, column }]` on an UNGROUPED wire; `sundial_report_run` re-checks them and returns `records` parallel to `rows` (`{ alias: { sfId, name } | null }`, from the rows already joined — the tenant clause covers them). Not columns, not counted against the 50. `POST /reports/run` and `GET /reports/{id}/run` pass them through; grouped runs have none.
+- **CSV:** an ungrouped export ends with "<alias label> link" columns (a linkVia alias keeps its label and opens the parent). The origin is the existing `lib/tenant-settings.js` `portalUrlFor` — no new tenant config was needed: Harmon is the primary tenant (`PORTAL_BASE_URL`, default `https://sundial.harmonelectric.net`, no secret read) and conops-demo already has `portalUrl` (`sundial.constructiveoperations.com`) in `sundial/brand`. Resolved at queue time and stored in the job; no address → no link columns.
+- **Distinct values:** `sql/sundial_report_values.sql` (`public.sundial_report_values`, service role only, catalog-checked; refuses non-reportable / gated / id / long-text / non-text) and `GET /reports/values?type=&field=&q=` → `{ values: [{ value, count }], totalDistinct, partial }`. The catalog marks `valuesLookup: true` with the same `valuesLookupAllowed` rule the route uses.
+- **Tests:** PGlite +9 (records in row order incl. desc sort, left-join and cross-tenant misses as null, latest's chosen child, absent when grouped, parallel when truncated, malformed lists RAISE; values ordering / search escaping / 200 cap / every refusal / grants), Lambda +8, report-csv +3, report-types +3, catalog-build +2.
+- **Docs:** `docs/api-endpoints.md`, `docs/reporting-module.md` §6.1 / 6.2 / 6.4 / 6.5 / 6.7, D-089 amendment 1, CLAUDE.md item 11, feature inventory R5, `docs/multi-client-deployment.md` (`sundial/brand` row).
+
+**Tim:** run `sql/2026-11-03_report_catalog.sql`, then `sql/sundial_report_run.sql`, then `sql/sundial_report_values.sql` (TASKS.md, top section).
+
 ## 2026-11-09 — Global search: one request instead of five (`GET /sf/search`)
 
 **Why.** The header's "Search all records…" mounted `useServerSearch` five times (customers, solar, roofing, jobs, estimates) — five Lambda invocations per pause in typing. The alarm window on 2026-11-09 had 47 of 129 requests on those legs, and the 16:03 UTC burst was 40 cold starts at once, 36 of them timing out. Fewer invocations per keystroke is the structural fix; the budgets + timing lines in the drop before this one are what will say what the rest were.

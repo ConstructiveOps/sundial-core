@@ -14,7 +14,8 @@
       "description": "PAY-{00000}",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "service_job_sf_id",

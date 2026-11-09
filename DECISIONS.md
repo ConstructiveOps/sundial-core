@@ -3940,6 +3940,23 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **The engine has two more helper functions.** `sundial_report_join_where` and `sundial_report_ref` are service-role only, like `sundial_report_run` and `sundial_report_column`.
 - **A deleted saved report keeps its exports.** An export row stays until it is deleted, and its file is gone after 7 days.
 
+### D-089 amendment 1 (2026-11-09): record links on report rows; distinct values for filters
+
+**Context.** A report row named records the user could not open, and a filter on a text field made the user type a value blind. Both needed the engine, not the portal: the portal must not keep its own map of object → page, and must not read the cache.
+
+**Decision.**
+1. **Record links come from the rows already joined.** An UNGROUPED wire carries `records: [{ alias, column }]` — every record alias of the type (base, lookup, latest; never a rollup), each with its object's catalog name field. `sundial_report_run` re-checks them (a table alias; a reportable, ungated catalog column) and returns `records` parallel to `rows`: `{ "<alias>": { sfId, name } | null }`. They are not columns: not selectable, not filterable, not counted against the 50, never stripped. The tenant clause already inside every join covers them. A grouped run has none; a grouped wire with `records` RAISES.
+2. **The name field is the describe's `nameField`**, carried by the generated catalog as `nameField: true`. `Sundial_Solar__c.Name` is not cached, so `NAME_FIELD_FALLBACK` (`lib/report-catalog-build.js`) names `Project_Name__c`. One per object, pinned by test.
+3. **The record-page map lives once, in `lib/report-types.js`**: `RECORD_PATHS` (customer, solar, roofing, job, estimate) and `LINK_VIA` (invoice / payment / service call → the `job` alias, line → the `estimate` alias). `GET /reports/types` returns `recordPath` / `linkVia` per alias; the portal keeps no map.
+4. **CSV link columns use the tenant's existing portal address** — `lib/tenant-settings.js` `portalUrlFor` (D-078), the invite / mention emails' source: `PORTAL_BASE_URL` (default `https://sundial.harmonelectric.net`) for the primary tenant with no secret read, `sundial/brand` `portalUrl` for any other (conops-demo already has one). **No new tenant config.** Resolved once at queue time and stored in the export job; a tenant with no address exports without link columns, never with another tenant's. Ungrouped exports only; titled "<alias label> link"; a linkVia alias keeps its own label and opens the parent.
+5. **Distinct values are their own function**, `public.sundial_report_values(p_client_sf_id, p_table, p_column, p_search)` (`sql/sundial_report_values.sql`), with `sundial_report_run`'s rules: SECURITY DEFINER, service role only, table + column re-checked against the catalog. ≤ 200 values by frequency then value, plus `total_distinct`. It refuses non-reportable, gated (always), id (`*_sf_id`), long-text and non-text columns. To know long text the catalog seed gained a `long_text` column.
+6. **One rule decides which fields offer values**: `lib/report-def.js` `valuesLookupAllowed` — the catalog's `valuesLookup: true` and `GET /reports/values` both call it, and a test runs the route over every flagged field.
+
+**Consequences.**
+- **SQL order matters:** the catalog seed (adds `long_text`) before `sundial_report_values.sql` (reads it); `sundial_report_run.sql` before the Lambda deploy (the new Lambda sends `records`, which the old function ignores — harmless — but the portal would get none).
+- **A response is larger** by about 50–80 bytes per record alias per row (≤ 7 aliases): ~1–2 MB more at 5,000 rows, inside the 6 MB response limit with the 50-column cap.
+- **A multipicklist's values are its stored combinations** ("A;B"), which is what `eq` / `in` match; its single values are still in the catalog's `picklistValues`.
+
 ## D-090 (2026-11-04): Sundial_Solar__c is at the 500-field cap; 24 unused fields deleted, references first
 
 **Context.** Harmon needs two new fields on `Sundial_Solar__c`, and the object holds 500 custom fields, which is Salesforce's Enterprise Edition cap. `scripts/audit-solar-fields.mjs` (read-only) audited all 500. For each field it recorded the data (records with a value, last touched) and every reference in both repos and the three design sheets. Its output is `docs/audits/solar-fields-2026-11.{csv,md}`. The result was A 2, B 30, C 468. Most of the object is in use, and the room to free is small.

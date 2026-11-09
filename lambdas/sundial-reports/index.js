@@ -1,8 +1,10 @@
 // sundial-reports — the report engine's API (D-087 / D-088 R1a / D-089 R1b; docs/reporting-module.md §6).
 //
-//   POST /reports/run       a report definition in → { columns, rows, aggregates, truncated, stripped, asOf }
-//   GET  /reports/types     the report types (aliases + labels + default columns; no table names)
+//   POST /reports/run       a report definition in → { columns, rows, records?, aggregates, truncated, stripped, asOf }
+//   GET  /reports/types     the report types (aliases + labels + default columns + recordPath / linkVia; no table names)
 //   GET  /reports/catalog?type=solar   the fields a report of that type may use, FOR THIS CALLER
+//   GET  /reports/values?type=&field=<alias.column>&q=   a text field's distinct values, for a
+//                           filter's picker (D-089 am. 1) → { values, totalDistinct, partial }
 //   POST /reports/csv       a definition → 202 { exportId }   (csv.js — asynchronous, see there)
 //   GET  /reports/csv/{exportId}       → { status, url, rowCount, truncated, ... }
 //   GET  /reports, POST /reports, GET / PATCH / DELETE /reports/{id},
@@ -38,13 +40,15 @@ import { alwaysEnforcedAccess } from "../../lib/access-enforce.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError } from "../../lib/http.js";
 import { CATALOG } from "../../lib/report-catalog/index.js";
 import { reportType, aliasesOf, describeTypes, fieldsOf } from "../../lib/report-types.js";
-import { normalizeDefinition, OPERATORS } from "../../lib/report-def.js";
+import { normalizeDefinition, OPERATORS, valuesLookupAllowed } from "../../lib/report-def.js";
 import { startExport, exportStatus, runExport } from "./csv.js";
 import { listReports, createReport, getReport, updateReport, deleteReport, loadVisible } from "./saved.js";
 import { isUuid } from "../../lib/saved-reports.js";
 
 export const ACTION = "reports.read";
 export const RPC = "sundial_report_run";
+export const VALUES_RPC = "sundial_report_values";
+export const MAX_VALUES_SEARCH = 100;
 export const MAX_BODY_BYTES = 100_000;
 
 // Every gate any catalog column carries (today: service.costing.read). Derived, so a new gate
@@ -58,6 +62,7 @@ const ROUTES = [
   [/^\/reports\/run\/?$/, "run", ["POST"]],
   [/^\/reports\/types\/?$/, "types", ["GET"]],
   [/^\/reports\/catalog\/?$/, "catalog", ["GET"]],
+  [/^\/reports\/values\/?$/, "values", ["GET"]],
   [/^\/reports\/csv\/?$/, "csv", ["POST"]],
   [/^\/reports\/csv\/([^/]+)\/?$/, "csvStatus", ["GET"]],
   [/^\/reports\/?$/, "saved", ["GET", "POST"]],
@@ -106,6 +111,10 @@ export function catalogFor(typeKey, held) {
           ...(f.picklistValues ? { picklistValues: f.picklistValues } : {}),
           description: f.description,
           longText: f.longText,
+          // The record's name (D-089 am. 1): what a row's link to this alias's record shows.
+          ...(f.nameField ? { nameField: true } : {}),
+          // GET /reports/values offers this field's distinct values (D-089 am. 1).
+          ...(valuesLookupAllowed(f) ? { valuesLookup: true } : {}),
           operators: OPERATORS[f.type],
           // Long text: a filter on screen, a column only in a CSV — never a group or a sort.
           selectable: !f.longText,
@@ -182,6 +191,9 @@ async function runDefinition({ def, tenantId, access, cors, extra = {} }) {
     type: def.type,
     columns: n.output,
     rows: data?.rows ?? [],
+    // Ungrouped only (D-089 am. 1): per row, { <alias>: { sfId, name } | null } for every record
+    // alias — GET /reports/types says which page each opens (recordPath / linkVia).
+    ...(n.wire.grouped ? {} : { records: data?.records ?? [] }),
     aggregates: n.totals.map((t) => ({ ...t, value: totals[t.field] ?? null })),
     truncated: data?.truncated === true,
     limit: n.wire.limit,
@@ -201,6 +213,52 @@ async function runDefinition({ def, tenantId, access, cors, extra = {} }) {
     bytes: res.body.length,
   }));
   return res;
+}
+
+const badValues = (cors, code, field, message) => jsonResponse(400, cors, { error: "invalid_report", code, field, message });
+
+/**
+ * GET /reports/values?type=&field=<alias.column>&q= — the field resolved through the type's
+ * aliases as a run resolves it; a gated field the caller does not hold is unknown to them (the
+ * catalog's projection); only a field valuesLookupAllowed() passes reaches the database.
+ */
+export async function valuesFor({ qs, tenantId, held, cors }) {
+  const t = reportType(qs?.type);
+  if (!t) return badValues(cors, "UNKNOWN_TYPE", "type", "type: name a report type (GET /reports/types).");
+  const ref = typeof qs?.field === "string" ? qs.field : "";
+  const dot = ref.indexOf(".");
+  const alias = dot > 0 ? ref.slice(0, dot) : "";
+  const column = dot > 0 ? ref.slice(dot + 1) : "";
+  const objectKey = aliasesOf(t).get(alias);
+  const fld = objectKey ? fieldsOf(t, alias, CATALOG)?.find((f) => f.column === column) : null;
+  if (!fld || !fld.reportable || (fld.gate && !held.includes(fld.gate))) {
+    return badValues(cors, "UNKNOWN_FIELD", "field", `field: ${JSON.stringify(ref)} is not a field of the ${t.key} report type.`);
+  }
+  if (!valuesLookupAllowed(fld)) {
+    return badValues(cors, "VALUES_NOT_AVAILABLE", "field", `field: ${ref} does not offer a list of values (text and picklist fields only, never an id or long text).`);
+  }
+  const q = qs?.q === undefined || qs?.q === null ? "" : String(qs.q).trim();
+  if (q.length > MAX_VALUES_SEARCH) return badValues(cors, "BAD_VALUE", "q", `q: at most ${MAX_VALUES_SEARCH} characters.`);
+
+  const supabase = await getSupabaseClient();
+  const started = Date.now();
+  const { data, error } = await supabase.rpc(VALUES_RPC, {
+    p_client_sf_id: tenantId, p_table: CATALOG[objectKey].table, p_column: column, p_search: q || null,
+  });
+  if (error) {
+    const msg = String(error.message || "");
+    if (msg.startsWith(`${VALUES_RPC}:`)) {
+      console.error(`reports: ${msg} — re-run the catalog SQL and sql/sundial_report_values.sql, and redeploy sundial-reports together.`);
+      return jsonResponse(500, cors, { error: "server_error", code: "REPORT_CATALOG_MISMATCH" });
+    }
+    console.error("reports: values rpc error:", msg);
+    return jsonResponse(500, cors, { error: "server_error" });
+  }
+  const values = Array.isArray(data?.values) ? data.values : [];
+  const totalDistinct = Number(data?.total_distinct ?? values.length);
+  // Never logged: a value or the search text.
+  console.log(JSON.stringify({ values: t.key, field: ref, searched: q !== "", returned: values.length, totalDistinct, ms: Date.now() - started }));
+  return jsonResponse(200, cors, { type: t.key, field: ref, values, totalDistinct, partial: totalDistinct > values.length });
 }
 
 // --- handler ---------------------------------------------------------------------------
@@ -243,7 +301,7 @@ export const handler = async (event, context) => {
   const profileId = identity?.authUserId;
   const me = { tenantId, profileId };
   // Saved reports and exports are owned by the profile id (the JWT sub). No id, no ownership.
-  if (route.name !== "types" && route.name !== "catalog" && route.name !== "run" && !isUuid(profileId)) {
+  if (!["types", "catalog", "values", "run"].includes(route.name) && !isUuid(profileId)) {
     console.error("reports: identity carries no profile id");
     return jsonResponse(500, cors, { error: "server_error" });
   }
@@ -267,10 +325,12 @@ export const handler = async (event, context) => {
         if (!cat) return jsonResponse(400, cors, { error: "invalid_report", code: "UNKNOWN_TYPE", field: "type", message: "type: name a report type (GET /reports/types)." });
         return jsonResponse(200, cors, cat);
       }
+      case "values":
+        return await valuesFor({ qs: event?.queryStringParameters, tenantId, held, cors });
       case "run":
         return await runDefinition({ def: body, tenantId, access, cors });
       case "csv":
-        return await startExport({ def: body, tenantId, profileId, heldGates: held, cors });
+        return await startExport({ def: body, tenantId, tenantSlug: identity?.tenantSlug, profileId, heldGates: held, cors });
       case "csvStatus":
         return await exportStatus({ exportId: route.id, tenantId, profileId, cors });
       case "saved":
@@ -290,7 +350,7 @@ export const handler = async (event, context) => {
         if (route.name === "savedRun") {
           return await runDefinition({ def: row.definition, tenantId, access, cors, extra: { report: { id: row.id, name: row.name } } });
         }
-        return await startExport({ def: row.definition, reportId: row.id, tenantId, profileId, heldGates: held, cors });
+        return await startExport({ def: row.definition, reportId: row.id, tenantId, tenantSlug: identity?.tenantSlug, profileId, heldGates: held, cors });
       }
       default:
         return jsonResponse(404, cors, { error: "not_found", code: "ROUTE_NOT_FOUND" });

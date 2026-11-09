@@ -40,7 +40,8 @@
       "description": "",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "createddate",

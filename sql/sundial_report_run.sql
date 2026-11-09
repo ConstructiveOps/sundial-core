@@ -26,6 +26,8 @@
 --     "offset": 0..49999                      (R1b: the CSV export pages with it; default 0)
 --     "totals": true|false                    (R1b: false skips the grand totals; default true)
 --     "allowedGates": ["service.costing.read"]   the gates the caller holds
+--     "records": [{ "alias", "column"? }]     (D-089 am. 1) UNGROUPED only, ≤ 11: per row, each
+--                                             record alias's sf_id + its name column
 --   }
 --
 -- THE JOIN KINDS (R1b, D-089). Each yields AT MOST ONE row per base row, so a report has
@@ -53,6 +55,12 @@
 --               returned ({} when none were asked for, or "totals": false).
 --   truncated   true when more than `limit` rows matched past `offset`; `rows` then holds
 --               the first `limit` (the CSV export reads the next page while it is true).
+--   records     (D-089 am. 1; only when the wire asked, never on a grouped run) parallel to
+--               rows: [{ "<alias>": { "sfId", "name" } | null }] — null where the left join
+--               found nothing. Taken from the rows already joined, so the tenant clause that
+--               covers them covers these. An alias here must be a TABLE alias (base, lookup,
+--               latest — a rollup has no record); its column must be a reportable catalog
+--               column (ungated, like any column); sf_id is the function's own.
 --
 -- HOW THE SQL IS BUILT. Mechanically: identifiers only through format('%I'), values only
 -- through %L / quote_literal. The TENANT CLAUSE (`client_sf_id = p_client_sf_id`) is the
@@ -222,6 +230,12 @@ declare
   is_num   boolean;
   pred     text;
   rows_json jsonb;
+  recs_json jsonb := '[]'::jsonb;
+  rec_parts text[] := '{}';
+  rec_seen  text[] := '{}';
+  want_recs boolean := false;
+  r        jsonb;
+  ra       text;
   totals   jsonb := '{}'::jsonb;
   truncated boolean := false;
   sql      text;
@@ -479,6 +493,36 @@ begin
     end if;
   end loop;
 
+  -- Record links (D-089 am. 1): each record alias's sf_id + name, per row. Ungrouped only.
+  if d ? 'records' and jsonb_typeof(d -> 'records') <> 'null' then
+    if grouped then
+      raise exception 'sundial_report_run: a grouped report has no records';
+    end if;
+    if jsonb_typeof(d -> 'records') <> 'array' or jsonb_array_length(d -> 'records') > 11 then
+      raise exception 'sundial_report_run: records is a list of at most 11 aliases';
+    end if;
+    want_recs := true;
+    for r in select * from jsonb_array_elements(d -> 'records') loop
+      ra := r ->> 'alias';
+      if ra is null or not (aliases ? ra) or jsonb_typeof(aliases -> ra) <> 'string' then
+        raise exception 'sundial_report_run: records: % is not a record alias', coalesce(ra, '(null)');
+      end if;
+      if ra = any(rec_seen) then
+        raise exception 'sundial_report_run: records: % is listed twice', ra;
+      end if;
+      rec_seen := rec_seen || ra;
+      perform public.sundial_report_column(aliases, ra, 'sf_id', gates, false);
+      if r ? 'column' and jsonb_typeof(r -> 'column') <> 'null' then
+        perform public.sundial_report_column(aliases, ra, r ->> 'column', gates, true);
+        col := format('%I.%I', ra, r ->> 'column');
+      else
+        col := 'null';
+      end if;
+      rec_parts := rec_parts || format('%L, case when %I.sf_id is null then null else jsonb_build_object(%L, %I.sf_id, %L, %s) end',
+        ra, ra, 'sfId', ra, 'name', col);
+    end loop;
+  end if;
+
   n_out := coalesce(array_length(outs, 1), 0);
   if not grouped and n_out = 0 and coalesce(array_length(aggs_sql, 1), 0) = 0 then
     raise exception 'sundial_report_run: nothing to return';
@@ -514,24 +558,28 @@ begin
     end if;
 
     sql := format(
-      'select coalesce(jsonb_agg(jsonb_build_array(%s) order by %s), %L::jsonb) from ('
-      || 'select %s%s from %s where %s%s order by %s limit %s offset %s'
+      'select coalesce(jsonb_agg(jsonb_build_array(%s) order by %s), %L::jsonb), %s from ('
+      || 'select %s%s%s from %s where %s%s order by %s limit %s offset %s'
       || ') q',
       (select string_agg(format('q.%I', '__o' || i), ', ' order by i) from generate_series(1, n_out) i),
       array_to_string(ord_q, ', '),
       '[]',
+      -- The records, in the SAME order as the rows (the order ends on the unique sf_id).
+      case when want_recs then format('coalesce(jsonb_agg(q.__rec order by %s), %L::jsonb)', array_to_string(ord_q, ', '), '[]') else '''[]''::jsonb' end,
       (select string_agg(format('%s as %I', outs[i], '__o' || i), ', ' order by i) from generate_series(1, n_out) i),
       case when grouped then '' else format(', %I.sf_id as __k', base_a) end,
+      case when want_recs then format(', jsonb_build_object(%s) as __rec', array_to_string(rec_parts, ', ')) else '' end,
       from_sql,
       where_sql,
       case when grouped then ' group by 1' else '' end,
       array_to_string(ord, ', '),
       lim + 1,
       off);
-    execute sql into rows_json;
+    execute sql into rows_json, recs_json;
     if jsonb_array_length(rows_json) > lim then
       truncated := true;
       rows_json := rows_json - lim; -- drop the (limit+1)th row
+      recs_json := recs_json - lim;
     end if;
   else
     rows_json := '[]'::jsonb;
@@ -543,6 +591,9 @@ begin
       into totals;
   end if;
 
+  if want_recs then
+    return jsonb_build_object('rows', rows_json, 'aggregates', totals, 'truncated', truncated, 'records', recs_json);
+  end if;
   return jsonb_build_object('rows', rows_json, 'aggregates', totals, 'truncated', truncated);
 end;
 $$;

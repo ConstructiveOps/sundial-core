@@ -4,6 +4,24 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-09 — Reports: record links + distinct values for filters (D-089 amendment 1)
+
+- [x] Catalog: `nameField: true` from the describe (solar → `project_name`, `NAME_FIELD_FALLBACK`); the SQL seed gains `long_text` (regenerated; `--check` clean before the change, 1,353 rows)
+- [x] `lib/report-types.js`: `RECORD_PATHS` / `LINK_VIA`, `recordLinkOf`; `GET /reports/types` returns `recordPath` / `linkVia` per alias
+- [x] Engine: `wire.records` (ungrouped), `sundial_report_run` returns `records` parallel to `rows`; `POST /reports/run` + `GET /reports/{id}/run` pass them through
+- [x] CSV: "<alias> link" columns on ungrouped exports, origin from `lib/tenant-settings.js` `portalUrlFor` (no new tenant config: Harmon = `PORTAL_BASE_URL` default, conops-demo = its `sundial/brand` `portalUrl`)
+- [x] `sql/sundial_report_values.sql` + `GET /reports/values`; catalog `valuesLookup: true` (`valuesLookupAllowed`, one rule)
+- [x] Tests: PGlite (records + values), Lambda, report-csv (titles + a URL), report-types, catalog-build
+- [x] Docs: api-endpoints, reporting-module §6, D-089 am. 1, CLAUDE.md item 11, feature inventory R5, multi-client `sundial/brand` row
+- [x] Commit + push `master`; `.\deploy.ps1 sundial-reports`; `.\scripts\wire-reports-routes.ps1 -Yes` (Claude)
+
+**Tim — SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
+- [ ] **1. `sql/2026-11-03_report_catalog.sql`** (regenerated: `long_text` column + `nameField` is JSON-only). The check at the bottom must say `catalog_rows` = **1,353**.
+- [ ] **2. `sql/sundial_report_run.sql`** (returns `records`). The check at the bottom must show **false** in all **eight** columns.
+- [ ] **3. `sql/sundial_report_values.sql`** (new; needs step 1's `long_text`). The check at the bottom must show **false** in both columns (`anon_can_values`, `authenticated_can_values`).
+- [ ] Until step 2 runs, runs return `records: []`; until step 3 runs, `GET /reports/values` answers 500 (`server_error`, the function is missing). Nothing else changes.
+- [ ] harmon-crm: link cells from `records` + `/reports/types` `recordPath` / `linkVia`; a value picker on `valuesLookup` fields (`GET /reports/values`); then a feature-inventory row for each
+
 ## 2026-11-09 — sf-query alarm (`sundial-sf-query-errors`)
 
 - [x] Upstream time budgets (token 15 s, query `SF_FETCH_TIMEOUT_MS` / 60 s, secret 10 s) + per-request `req: start` / `req: slow` lines + `sfBody` in the error logs — 2026-11-09 (PROGRESS). **Tim:** set `SF_FETCH_TIMEOUT_MS=25000` on `sundial-sf-query`, `.\deploy.ps1 sundial-sf-query`.

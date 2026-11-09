@@ -53,7 +53,8 @@
       "description": "Auto/primary name of the record (household or primary contact).",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "first_name",

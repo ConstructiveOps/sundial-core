@@ -14,7 +14,8 @@
       "description": "SVC-{00000}",
       "gate": null,
       "reportable": true,
-      "longText": false
+      "longText": false,
+      "nameField": true
     },
     {
       "column": "sundial_customer_sf_id",

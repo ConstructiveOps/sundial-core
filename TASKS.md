@@ -4,6 +4,12 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-09 — sf-query alarm (`sundial-sf-query-errors`)
+
+- [x] Upstream time budgets (token 15 s, query `SF_FETCH_TIMEOUT_MS` / 60 s, secret 10 s) + per-request `req: start` / `req: slow` lines + `sfBody` in the error logs — 2026-11-09 (PROGRESS). **Tim:** set `SF_FETCH_TIMEOUT_MS=25000` on `sundial-sf-query`, `.\deploy.ps1 sundial-sf-query`.
+- [ ] One cross-object search endpoint (`GET /sf/search?q=`) in `sundial-sf-query` + `GlobalSearch.tsx` on it — one request per keystroke instead of five (the 16:03 UTC burst was 40 cold starts at once).
+- [ ] After the next alarm: read the `req: start` lines with no `req: slow` / REPORT (the hung phase) and the `cold-cache count error … sfBody` lines (which query 400s ~30×/day — likely the demo tenant with no cache rows); fix the query or short-circuit a tenant with zero rows.
+
 ## 2026-11-05 — The photo report (D-072 amendment 17, `feature/photo-report`)
 
 - [x] `sql/2026-11-05_job_photo_reports.sql` (+ PGlite test): `sundial_job_photo_reports` (one per job, `sent_report`) + `sundial_job_photo_report_renders`; service role only

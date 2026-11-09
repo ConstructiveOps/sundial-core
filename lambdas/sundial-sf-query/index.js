@@ -1658,7 +1658,7 @@ async function listColdCacheFallback(ctx) {
     const cnt = await sfQuery(`SELECT COUNT(Id) c FROM ${sfObject} WHERE ${where}`);
     total = Number(cnt?.[0]?.c ?? cnt?.[0]?.expr0 ?? 0) || 0;
   } catch (e) {
-    console.error("cold-cache count error:", e?.message || String(e));
+    console.error("cold-cache count error:", e?.message || String(e), e?.sfBody ? String(e.sfBody).slice(0, 400) : "", `object=${sfObject}`);
   }
 
   // Order newest-first. SOQL has no COALESCE, so this rare cold path orders by the
@@ -1989,6 +1989,38 @@ async function handleUsersRead(ctx) {
 }
 
 // --- handler ---------------------------------------------------------------
+/**
+ * Request timing (2026-11-09, the sundial-sf-query-errors alarm): one line as a request
+ * starts — its route, so a request Lambda kills at 30 s is at least identified — and one
+ * line when it ends with the time spent in each phase (identity = token verify + the
+ * user read; the rest), logged only when a phase ran long (`SLOW_REQUEST_MS`) so a normal
+ * day adds one short line per request. The 43 requests that tripped the alarm logged
+ * nothing at all, which is what made them impossible to place.
+ */
+const SLOW_REQUEST_MS = 5000;
+function requestTimer(event) {
+  const t0 = Date.now();
+  const marks = {};
+  let last = t0;
+  // The path with record ids blanked: a Salesforce id is a 15- or 18-character segment, and
+  // the log carries routes, never records (the log-hygiene rule in shadow.test.js).
+  const path = String(event?.rawPath || event?.path || "").split("/").map((s) => (/^[A-Za-z0-9]{15}([A-Za-z0-9]{3})?$/.test(s) ? "{id}" : s)).join("/");
+  const route = `${event?.requestContext?.http?.method || event?.httpMethod || "GET"} ${path}`;
+  console.log(JSON.stringify({ req: "start", route, cold: !globalThis.__sfQueryWarm }));
+  globalThis.__sfQueryWarm = true;
+  return {
+    mark(name) {
+      const now = Date.now();
+      marks[name] = now - last;
+      last = now;
+    },
+    done(status) {
+      const total = Date.now() - t0;
+      if (total >= SLOW_REQUEST_MS) console.log(JSON.stringify({ req: "slow", route, status, totalMs: total, phases: marks }));
+    },
+  };
+}
+
 export const handler = async (event) => {
   const method =
     event?.requestContext?.http?.method || event?.httpMethod || "GET";
@@ -1998,6 +2030,12 @@ export const handler = async (event) => {
   if (method === "OPTIONS") {
     return { statusCode: 204, headers: cors, body: "" };
   }
+  const timer = requestTimer(event);
+  const finish = (res) => {
+    timer.mark("respond");
+    timer.done(res?.statusCode ?? null);
+    return res;
+  };
   if (method !== "GET") {
     return jsonResponse(405, cors, {
       error: "method_not_allowed",
@@ -2030,9 +2068,10 @@ export const handler = async (event) => {
       identity = await resolveIdentity(headers["authorization"]);
     } catch (err) {
       const mapped = mapIdentityError(err?.code);
-      if (mapped) return jsonResponse(mapped.status, cors, mapped.body);
+      if (mapped) return finish(jsonResponse(mapped.status, cors, mapped.body));
       throw err; // unexpected -> 500 below
     }
+    timer.mark("identity");
 
     const tenantId = identity.tenantId;
     const tenantSlug = identity.tenantSlug;
@@ -2176,13 +2215,15 @@ export const handler = async (event) => {
       // ?full=true (exact, case-insensitive) opts into the all-fields, cache-
       // bypassing detail read. Any other value keeps existing cache-first behavior.
       const full = String(qs.full).toLowerCase() === "true";
-      return hideCost(objectKey, await handleSingleRead({ ...shared, id: route.id, full }), seesCost);
+      return finish(hideCost(objectKey, await handleSingleRead({ ...shared, id: route.id, full }), seesCost));
     }
     // Repeated keys (f[stage]=A&f[stage]=B) survive ONLY in the multi-value map —
     // see caller-filters.js readMulti.
-    return hideCost(objectKey, await handleListRead({ ...shared, qs, multi: readMulti(event, qs) }), seesCost);
+    return finish(hideCost(objectKey, await handleListRead({ ...shared, qs, multi: readMulti(event, qs) }), seesCost));
   } catch (err) {
-    console.error("sf-query unexpected error:", err?.message || String(err));
-    return jsonResponse(500, cors, { error: "server_error" });
+    // Salesforce's own words (sfBody) are what say WHICH query was bad (2026-11-09: two
+    // weeks of "Salesforce query failed (400)" with no way to tell what was asked).
+    console.error("sf-query unexpected error:", err?.message || String(err), err?.sfBody ? String(err.sfBody).slice(0, 400) : "", err?.code === "UPSTREAM_TIMEOUT" ? "(upstream timeout)" : "");
+    return finish(jsonResponse(500, cors, { error: "server_error" }));
   }
 };

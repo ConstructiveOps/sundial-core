@@ -31,6 +31,13 @@
 //               takes it back to private and it is 404 again. Then zz-admin saves a private
 //               report, zz-manager cannot see it, zz-admin shares it, zz-manager sees it
 //               read-only (PATCH 403 REPORT_READ_ONLY) and can export it.
+//               Since D-089 am. 1 the header ends with the link columns GET /reports/types
+//               implies, and the first row's "Customer link" is a URL on Harmon's portal.
+//   I. LINKS +  (D-089 am. 1, runs between F and G) the page map in /reports/types; an
+//      VALUES   ungrouped run's records parallel to rows and agreeing with them, none when
+//               grouped; catalog nameField / valuesLookup; GET /reports/values ordered, its
+//               solar.stage counts equal a grouped count, q narrows, a joined alias works, a
+//               number / an id are 400, sales / tech 403. Counts only — no value printed.
 //   H. DENIED   zz-rep-a1, zz-mgr-a and zz-tech get 403 MODULE_FORBIDDEN from every R1b route.
 //   CLEANUP     every "ZZ VERIFY" report deleted (through the API, then any leftover by the
 //               service role), and every export this run made: its CSV file in S3 and its row.
@@ -230,7 +237,11 @@ async function waitForExport(token, exportId, label) {
   const typeInfo = TYPES.find((t) => t.key === "customers");
   const labels = new Map([[typeInfo?.base.alias, typeInfo?.base.label], ...(typeInfo?.joins ?? []).map((j) => [j.alias, j.label])]);
   const shape = await api(tokens.admin, "POST", "/reports/run", { ...CSV_DEF, limit: 1 });
-  const expectedHeader = (shape.body?.columns ?? []).map((c) => quote(`${labels.get(c.object)}: ${c.label}`)).join(",");
+  // Data columns, then (D-089 am. 1) one "<alias label> link" per record alias with a page,
+  // read from GET /reports/types — the same map the CSV is built from.
+  const linkTitles = [typeInfo?.base, ...(typeInfo?.joins ?? []).filter((j) => j.kind !== "rollup")]
+    .filter((a) => a && (a.recordPath || a.linkVia)).map((a) => quote(`${a.label} link`));
+  const expectedHeader = [...(shape.body?.columns ?? []).map((c) => quote(`${labels.get(c.object)}: ${c.label}`)), ...linkTitles].join(",");
   const q = await api(tokens.admin, "POST", "/reports/csv", CSV_DEF);
   if (q.body?.exportId) exportIds.push(q.body.exportId);
   check("POST /reports/csv → 202 { exportId }", q.status === 202 && /^[0-9a-f-]{36}$/.test(q.body?.exportId ?? ""), `${q.status} ${q.text.slice(0, 200)}`);
@@ -249,11 +260,78 @@ async function waitForExport(token, exportId, label) {
       check("it starts with the UTF-8 BOM", buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf);
       check("its first line is the header", firstLine === `\uFEFF${expectedHeader}`, firstLine.replace("\uFEFF", "").slice(0, 200));
       check("it holds rowCount rows (+ the header)", csvRecords(text) === s.body.rowCount + 1, `${csvRecords(text) - 1} vs ${s.body.rowCount}`);
+      // The base record always exists, so the first row's "Customer link" is a full URL on
+      // Harmon's portal (the primary tenant's origin). The URL itself is not printed.
+      const second = text.slice(firstLine.length + 2, text.indexOf("\r\n", firstLine.length + 2));
+      const lastCell = second.slice(second.lastIndexOf(",") + 1);
+      const linkOk = /^https:\/\/sundial\.harmonelectric\.net\/customers\/[A-Za-z0-9]{15,18}$/.test(lastCell);
+      check("the first row ends with the customer's portal link (D-089 am. 1)", linkOk,
+        linkOk ? "" : lastCell.startsWith("https://") ? "a URL of another shape" : "not a URL");
       check("12,000 rows asked → 12,000 rows, truncated", s.body.rowCount === 12000 && s.body.truncated === true, `${s.body.rowCount} ${s.body.truncated}`);
       console.log(`  ${(buf.length / 1024).toFixed(0)} KB downloaded (kept in memory only)`);
     }
     const other = await api(tokens.manager, "GET", `/reports/csv/${q.body.exportId}`);
     check("another user's export is 404 RECORD_NOT_FOUND", other.status === 404 && other.body?.code === "RECORD_NOT_FOUND", `${other.status}`);
+  }
+}
+
+// --- I. record links + distinct values (D-089 amendment 1) ------------------------------------
+console.log("\n== I. Record links + distinct values (D-089 am. 1) ==");
+{
+  // Types: the page map, served once.
+  const ty = (key) => TYPES.find((t) => t.key === key);
+  const all = (t) => [t.base, ...t.joins];
+  check("types: customers' base opens /customers/{id}", ty("customers")?.base.recordPath === "/customers/{id}");
+  check("types: a service job's invoice links via the job", all(ty("service_jobs") ?? { base: {}, joins: [] }).find((a) => a.alias === "invoice")?.linkVia === "job");
+  const badVia = TYPES.flatMap((t) => all(t).filter((a) => a.linkVia && !all(t).find((x) => x.alias === a.linkVia)?.recordPath).map((a) => `${t.key}.${a.alias}`));
+  check("types: every linkVia names an alias of the same type that has a page", badVia.length === 0, badVia.join(", "));
+
+  // Records: the detail run (ungrouped) carries one per row; the grouped run none.
+  const d = await api(tokens.admin, "POST", "/reports/run", DEFINITIONS.detail);
+  const rows = d.body?.rows ?? [];
+  const recs = d.body?.records ?? null;
+  check("ungrouped run: records parallel to rows", Array.isArray(recs) && recs.length === rows.length && rows.length > 0, `${recs?.length} records / ${rows.length} rows`);
+  if (Array.isArray(recs) && recs.length === rows.length) {
+    const solarOk = rows.every((row, i) => recs[i].solar?.sfId && recs[i].solar.name === row[0]);
+    check("each row's solar record: an id and its name = the row's project name", solarOk);
+    const custOk = rows.every((row, i) => (recs[i].customer === null ? row[1] === null : recs[i].customer.name === row[1] && /^[A-Za-z0-9]{15,18}$/.test(recs[i].customer.sfId)));
+    check("each row's customer record matches the row (null where the row has no customer)", custOk);
+    console.log(`  ${rows.length} rows; ${recs.filter((r) => r.customer).length} with a customer, ${recs.filter((r) => r.rep).length} with a rep, ${recs.filter((r) => r.dealer).length} with a dealer`);
+  }
+  const g = await api(tokens.admin, "POST", "/reports/run", DEFINITIONS.byRepYtd);
+  check("grouped run: no records key", g.status === 200 && !("records" in (g.body ?? {})));
+
+  // Catalog flags.
+  const cat = await api(tokens.manager, "GET", "/reports/catalog?type=solar");
+  const flds = (cat.body?.aliases ?? []).flatMap((a) => a.fields);
+  const f = (ref) => flds.find((x) => x.field === ref);
+  check("catalog: solar's name field is project_name", f("solar.project_name")?.nameField === true && flds.filter((x) => x.nameField && x.field.startsWith("solar.")).length === 1);
+  check("catalog: solar.stage offers values, contract_amount does not", f("solar.stage")?.valuesLookup === true && !f("solar.contract_amount")?.valuesLookup);
+
+  // Values: solar.stage's counts agree with a grouped count of the same column.
+  const v = await api(tokens.manager, "GET", "/reports/values?type=solar&field=solar.stage");
+  const vals = v.body?.values ?? [];
+  // On failure the status and error code only — never the body (it holds values).
+  check("GET /reports/values solar.stage → 200 with values", v.status === 200 && vals.length > 0, `${v.status} ${v.body?.code ?? ""} ${vals.length} values`);
+  const sorted = vals.every((x, i) => i === 0 || vals[i - 1].count > x.count || (vals[i - 1].count === x.count && vals[i - 1].value <= x.value));
+  check("values: most frequent first, then by value; ≤ 200; partial says whether more exist",
+    sorted && vals.length <= 200 && v.body?.partial === (v.body?.totalDistinct > vals.length), `${vals.length} of ${v.body?.totalDistinct}`);
+  const byStage = await api(tokens.manager, "POST", "/reports/run", { type: "solar", groupBy: ["solar.stage"], aggregates: [{ fn: "count" }], limit: 5000 });
+  const groupCount = new Map((byStage.body?.rows ?? []).filter((r) => r[0] !== null && String(r[0]).trim() !== "").map((r) => [r[0], Number(r[1])]));
+  const agree = !v.body?.partial && vals.length === groupCount.size && vals.every((x) => groupCount.get(x.value) === Number(x.count));
+  check("values: the same stages and counts as a grouped run of solar.stage", agree, `${vals.length} values vs ${groupCount.size} groups`);
+
+  const s = await api(tokens.manager, "GET", "/reports/values?type=customers&field=customer.city&q=mes");
+  check("values: q narrows (every city contains 'mes', any case)", s.status === 200 && (s.body?.values ?? []).every((x) => String(x.value).toLowerCase().includes("mes")), `${s.status} ${(s.body?.values ?? []).length} values`);
+  const j = await api(tokens.manager, "GET", "/reports/values?type=customers&field=rep.name");
+  check("values: a joined alias (customers → rep.name) reads its own object", j.status === 200 && (j.body?.values ?? []).length > 0, `${j.status}`);
+  const n = await api(tokens.manager, "GET", "/reports/values?type=solar&field=solar.contract_amount");
+  check("values: a number is 400 VALUES_NOT_AVAILABLE", n.status === 400 && n.body?.code === "VALUES_NOT_AVAILABLE", `${n.status} ${n.body?.code ?? ""}`);
+  const id = await api(tokens.manager, "GET", "/reports/values?type=solar&field=solar.sales_rep_sf_id");
+  check("values: an id is 400 VALUES_NOT_AVAILABLE", id.status === 400 && id.body?.code === "VALUES_NOT_AVAILABLE", `${id.status} ${id.body?.code ?? ""}`);
+  for (const slug of DENIED_USERS) {
+    const r = await api(tokens[slug], "GET", "/reports/values?type=solar&field=solar.stage");
+    check(`zz-${slug} GET /reports/values → 403 MODULE_FORBIDDEN`, r.status === 403 && r.body?.code === "MODULE_FORBIDDEN", `${r.status}`);
   }
 }
 

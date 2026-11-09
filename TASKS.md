@@ -16,10 +16,10 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] Commit + push `master`; `.\deploy.ps1 sundial-reports`; `.\scripts\wire-reports-routes.ps1 -Yes` (Claude)
 
 **Tim — SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
-- [ ] **1. `sql/2026-11-03_report_catalog.sql`** (regenerated: `long_text` column + `nameField` is JSON-only). The check at the bottom must say `catalog_rows` = **1,353**.
-- [ ] **2. `sql/sundial_report_run.sql`** (returns `records`). The check at the bottom must show **false** in all **eight** columns.
-- [ ] **3. `sql/sundial_report_values.sql`** (new; needs step 1's `long_text`). The check at the bottom must show **false** in both columns (`anon_can_values`, `authenticated_can_values`).
-- [ ] Until step 2 runs, runs return `records: []`; until step 3 runs, `GET /reports/values` answers 500 (`server_error`, the function is missing). Nothing else changes.
+- [x] **1. `sql/2026-11-03_report_catalog.sql`** (regenerated: `long_text` column + `nameField` is JSON-only). The check at the bottom must say `catalog_rows` = **1,353**.
+- [x] **2. `sql/sundial_report_run.sql`** (returns `records`). The check at the bottom must show **false** in all **eight** columns.
+- [x] **3. `sql/sundial_report_values.sql`** (new; needs step 1's `long_text`). The check at the bottom must show **false** in both columns (`anon_can_values`, `authenticated_can_values`).
+- [x] All three run by Tim 2026-11-09, checks passed. **Verified live:** `node scripts/verify-report-run.mjs` — 132 checks, all passed (extended with section I: page map, records vs rows, catalog flags, values vs a grouped count, q, refusals, 403s; the CSV header now expects the link column and the first row's customer link is checked).
 - [ ] harmon-crm: link cells from `records` + `/reports/types` `recordPath` / `linkVia`; a value picker on `valuesLookup` fields (`GET /reports/values`); then a feature-inventory row for each
 
 ## 2026-11-09 — sf-query alarm (`sundial-sf-query-errors`)

@@ -12,7 +12,9 @@
 - **Tests:** PGlite +9 (records in row order incl. desc sort, left-join and cross-tenant misses as null, latest's chosen child, absent when grouped, parallel when truncated, malformed lists RAISE; values ordering / search escaping / 200 cap / every refusal / grants), Lambda +8, report-csv +3, report-types +3, catalog-build +2.
 - **Docs:** `docs/api-endpoints.md`, `docs/reporting-module.md` §6.1 / 6.2 / 6.4 / 6.5 / 6.7, D-089 amendment 1, CLAUDE.md item 11, feature inventory R5, `docs/multi-client-deployment.md` (`sundial/brand` row).
 
-**Tim:** run `sql/2026-11-03_report_catalog.sql`, then `sql/sundial_report_run.sql`, then `sql/sundial_report_values.sql` (TASKS.md, top section).
+**Tim:** run `sql/2026-11-03_report_catalog.sql`, then `sql/sundial_report_run.sql`, then `sql/sundial_report_values.sql` (TASKS.md, top section). — **Done 2026-11-09, all three checks passed.**
+
+**Verified live (2026-11-09):** `node scripts/verify-report-run.mjs` → 132 checks, **all passed**. Its first run failed one check — the script expected the CSV header to end at the data columns, and the live file correctly ends with `Customer link`. The script now derives the link titles from `GET /reports/types`, checks the first row's customer link is a `https://sundial.harmonelectric.net/customers/<id>` URL, and has a new section I: the page map, 200 rows with 200 records agreeing row by row (solar name = project name; customer null exactly where the row has none), no `records` on a grouped run, the catalog's `nameField` / `valuesLookup`, `GET /reports/values` on solar.stage (25 stages, counts identical to a grouped count), `q`, a joined alias, a number / an id refused, sales / tech 403. Counts only are printed.
 
 ## 2026-11-09 — Global search: one request instead of five (`GET /sf/search`)
 

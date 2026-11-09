@@ -279,6 +279,35 @@ The Solar Projects page's stage columns and PM / Sales Rep option counts **and**
 - `name` — First + Last, else Email, else Id. `supabaseUserId` — `null` until the user has a login.
 - `staff` (2026-10-23, additive) — `true` when `Access_Level__c` is a tenant-scope level (`TENANT_ACCESS_LEVELS` in `lib/access.js`: Executive, Admin, Manager) or `Technician`; `false` otherwise, including blank. The portal's `isStaffAuthor` reads it when present and falls back when absent, so Lambda and portal deploy in either order. **The level name is never returned** — sales roles call this route and must not learn who is an Admin.
 
+#### `GET /sf/search`
+
+**Lambda:** `sundial-sf-query` (`handleGlobalSearch`, 2026-11-09)
+**Purpose:** the header's global search as ONE request. Runs the per-object cache search for every object asked for — customer, solar, roofing, job, estimate — inside one invocation, in parallel, and answers once, grouped. It replaced five requests per pause in typing (`useServerSearch` once per object), which is what made a few people typing at once forty cold starts in a minute (the `sundial-sf-query-errors` alarm, 2026-11-09). Its own API Gateway resource, a literal sibling of `/sf/{object}` like `/sf/users` (`scripts/wire-global-search-route.ps1`).
+
+**Query parameters:**
+- `q` — the term (required; `sanitizeSearchTerm`, ≥ 2 characters after cleaning, else `400 SEARCH_TERM_REQUIRED`). Same matching as `GET /sf/{object}?q=`: every word must match some column, a phone matches on its digits.
+- `objects` — comma-separated subset of `customer,solar,roofing,job,estimate` (the portal sends the modules the caller may read); unknown names ignored; omitted = all five.
+- `limit` — rows PER GROUP, default 5, max 20. `total` is exact regardless.
+
+**Response shape (200):**
+```json
+{
+  "source": "cache", "q": "ann lee", "limit": 5, "total": 14,
+  "groups": {
+    "customer": { "count": 5, "total": 12, "records": [ { "sf_id": "…", "name": "…", "street": "…" } ] },
+    "solar":    { "count": 2, "total": 2, "records": [ … ] },
+    "roofing":  { "count": 0, "total": 0, "records": [] },
+    "job":      { "count": 0, "total": 0, "records": [], "forbidden": true },
+    "estimate": { "count": 0, "total": 0, "records": [], "error": true }
+  }
+}
+```
+
+- Each group: tenant from the token; under `ACCESS_MODEL_MODE=enforce` the module gate (`canReadObject`) and the row filter (`resolveEnforceFilter`) FIRST, the ILIKE group AND-ed after it, the field manifest's projection on every row — the same composition as the per-object search. A module the caller may not read is `forbidden: true` and runs no query; a `none` scope gets every group forbidden (200, not 403 — the search as a whole is not refused).
+- `records` carry only the columns a hit renders (`GLOBAL_SEARCH_COLUMNS` in `sundial-sf-query`: name / address / phone / type for a customer, project name + customer + address for solar / roofing, number + customer + address + status for a job / estimate) — never a long-text column.
+- **Cache only.** There is no cold-cache fallback to Salesforce on this route: a tenant with no cache rows gets empty groups and still has every module's own list (which does fall back).
+- A group whose query fails is `error: true` with the others intact; the response is 200. The route emits no shadow (`"shadow":true`) lines — it is served by `enforce` directly, and five extra count queries per keystroke would be the load this route exists to remove.
+
 #### `GET /sf/{object}/{id}`
 
 **Lambda:** `sundial-sf-query`

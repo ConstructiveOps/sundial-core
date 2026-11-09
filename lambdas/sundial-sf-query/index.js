@@ -570,6 +570,13 @@ function extractRoute(event) {
     return { kind: "users" };
   }
 
+  // 1c') Global search: GET /sf/search?q= (2026-11-09). A literal path like /sf/users,
+  //      matched before the generic branch so "search" is never read as an object key
+  //      (it is not one). One request searches every object the header search shows.
+  if (/\/sf\/search\/?$/.test(path)) {
+    return { kind: "search" };
+  }
+
   // 1d) Pipeline counts: GET /sf/{object}/pipeline (D-080). Its own API Gateway
   //     resource (scripts/wire-sales-pipeline-route.ps1); also recognised when it
   //     arrives through /sf/{object}/{id} with id "pipeline" — a Salesforce id is 15 or
@@ -1040,6 +1047,112 @@ async function handleCacheSearch({ supabase, cacheTable, columnSet, tenantId, se
     offset: 0,
     hasMore: total > records.length,
     records,
+  });
+}
+
+// --- Global search: GET /sf/search?q= (2026-11-09) ----------------------------------
+// The header's "Search all records…" used to be FIVE requests per keystroke (customers,
+// solar, roofing, jobs, estimates — `useServerSearch` once per object), and a burst of
+// typing on a quiet morning was 40 cold starts at once (the sundial-sf-query-errors alarm,
+// 2026-11-09 16:03 UTC: 36 timeouts in a minute, nothing logged). This route runs the
+// same five cache searches inside ONE invocation, in parallel, and answers once.
+//
+// Same rules as the per-object search, per leg:
+//   - tenant from the token; the access row filter (`enforce`) FIRST, the ILIKE group
+//     AND-ed after it (a term can only narrow); the field manifest's projection on
+//     every row; a module the caller may not read is `forbidden: true` with no query.
+//   - CACHE ONLY — no cold-cache fallback to Salesforce. The fallback is the path that
+//     has been failing ~30× a day; a tenant with no cache rows gets empty groups here
+//     and still has every module's own list. `source` says so.
+//   - a leg that fails answers `error: true` and the others still come back, which is
+//     what the panel did when each leg was its own request.
+// `objects=` picks the legs (the portal sends the modules the caller can read, so a rep
+// never asks for solar); unknown names are ignored, none at all = every object below.
+// `limit` is rows PER LEG (the panel shows 5 per group), capped; `total` is exact.
+const GLOBAL_SEARCH_OBJECTS = ["customer", "solar", "roofing", "job", "estimate"];
+const GLOBAL_SEARCH_DEFAULT_LIMIT = 5;
+const GLOBAL_SEARCH_MAX_LIMIT = 20;
+// The columns a hit renders (GlobalSearch.tsx: a name, a line under it, where to go).
+// Its own list, not LIST_PROJECTION — that is the list screens' contract, and the
+// roofing list has no address while a roofing hit shows one.
+const GLOBAL_SEARCH_COLUMNS = {
+  customer: ["sf_id", "name", "first_name", "last_name", "is_company", "company_name", "street", "city", "state", "postal_code", "primary_phone", "customer_type"],
+  solar: ["sf_id", "project_name", "first_name", "last_name", "customer_name_at_creation", "address", "address_at_creation"],
+  roofing: ["sf_id", "project_name", "first_name", "last_name", "customer_name_at_creation", "address", "address_at_creation"],
+  job: ["sf_id", "name", "customer_name_at_creation", "address_at_creation", "status"],
+  estimate: ["sf_id", "name", "customer_name_at_creation", "address_at_creation", "status"],
+};
+
+/** The objects a `objects=` value names, in canonical order; none named = all. */
+export function globalSearchObjects(raw) {
+  const asked = String(raw ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  if (!asked.length) return [...GLOBAL_SEARCH_OBJECTS];
+  return GLOBAL_SEARCH_OBJECTS.filter((o) => asked.includes(o));
+}
+
+/** Rows per leg: the default, or `limit` clamped to [1, GLOBAL_SEARCH_MAX_LIMIT]. */
+export function globalSearchLimit(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return GLOBAL_SEARCH_DEFAULT_LIMIT;
+  return Math.min(n, GLOBAL_SEARCH_MAX_LIMIT);
+}
+
+async function globalSearchLeg({ supabase, objectKey, tenantId, access, enforcing, term, limit }) {
+  const empty = { count: 0, total: 0, records: [] };
+  // The module gate first, with no query behind it: a scope that may not read the
+  // object (a rep and the Service module, a `none` scope and everything) is told so.
+  if (enforcing && !canReadObject(objectKey, access)) return { ...empty, forbidden: true };
+  const enforce = enforcing ? resolveEnforceFilter(objectKey, access) : null;
+  if (enforce?.deny) return { ...empty, forbidden: true };
+  const entry = OBJECT_ALLOWLIST[objectKey];
+  const columnSet = await getCacheColumns(entry.cacheTable);
+  const search = SEARCH_FIELDS[objectKey];
+  const cols = (search?.cache || []).filter((c) => columnSet.has(c));
+  if (!columnSet.size || !cols.length) return empty; // no cache table yet, or nothing searchable
+  const select = GLOBAL_SEARCH_COLUMNS[objectKey].filter((c) => columnSet.has(c));
+  let q = supabase
+    .from(entry.cacheTable)
+    .select(select.join(","), { count: "exact" })
+    .eq("client_sf_id", tenantId);
+  // ENFORCE FIRST, the search group AND-ed after it — the same composition as
+  // handleCacheSearch, for the same reason: the term can never reach outside the scope.
+  q = applyEnforceToQuery(q, enforce);
+  q = q.or(searchOrExpr(cols, term, search.phone || []));
+  if (columnSet.has("created_date")) {
+    q = q.order("created_date", { ascending: false, nullsFirst: false }).order("sf_id", { ascending: true });
+  } else {
+    q = q.order("sf_id", { ascending: true });
+  }
+  q = q.range(0, limit - 1);
+  const { data, count, error } = await q;
+  if (error) throw new Error(`${objectKey}: ${error.message}`);
+  const records = (data || []).map((r) => projectRow(objectKey, enforcing ? access : null, projectListRow(r)));
+  return { count: records.length, total: count ?? records.length, records };
+}
+
+async function handleGlobalSearch({ supabase, tenantId, access, enforcing, qs, cors }) {
+  const term = sanitizeSearchTerm(qs.q);
+  if (!term) {
+    return jsonResponse(400, cors, { error: "search_term_required", code: "SEARCH_TERM_REQUIRED" });
+  }
+  const objects = globalSearchObjects(qs.objects);
+  const limit = globalSearchLimit(qs.limit);
+  // Every leg at once; one leg's failure is its own `error: true`, never the response's.
+  const legs = await Promise.all(objects.map(async (objectKey) => {
+    try {
+      return [objectKey, await globalSearchLeg({ supabase, objectKey, tenantId, access, enforcing, term, limit })];
+    } catch (e) {
+      console.error("global search leg failed:", e?.message || String(e));
+      return [objectKey, { count: 0, total: 0, records: [], error: true }];
+    }
+  }));
+  const groups = Object.fromEntries(legs);
+  return jsonResponse(200, cors, {
+    source: "cache",
+    q: term,
+    limit,
+    total: legs.reduce((n, [, g]) => n + (g.total || 0), 0),
+    groups,
   });
 }
 
@@ -2054,7 +2167,7 @@ export const handler = async (event) => {
     // fixed literal route with no {object}, so it is exempt from this gate (it
     // targets Sundial_User__c directly and is still tenant-scoped below).
     const entry = objectKey ? OBJECT_ALLOWLIST[objectKey] : null;
-    if (!entry && route.kind !== "users") {
+    if (!entry && route.kind !== "users" && route.kind !== "search") {
       return jsonResponse(400, cors, {
         error: "unsupported_object",
         code: "OBJECT_NOT_ALLOWED",
@@ -2152,6 +2265,19 @@ export const handler = async (event) => {
     // already NO_TENANT-checked above). Needs no cache client / column set.
     if (route.kind === "users") {
       return await handleUsersRead({ tenantId, cors, shadow, enforce });
+    }
+
+    // Global search (2026-11-09): every object the header search shows, in ONE request.
+    if (route.kind === "search") {
+      timer.mark("prepare");
+      return finish(await handleGlobalSearch({
+        supabase: await getSupabaseClient(),
+        tenantId,
+        access,
+        enforcing,
+        qs: event.queryStringParameters || {},
+        cors,
+      }));
     }
 
     // Pipeline counts (D-080): the same identity and the same `enforce` as the list, so

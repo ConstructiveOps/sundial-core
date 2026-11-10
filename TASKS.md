@@ -17,16 +17,17 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] Docs: D-092, `docs/reporting-module.md` §6.3 / §6.5 / §7.2 / §8, `docs/api-endpoints.md`, CLAUDE.md (tech stack, Dashboard rule, item 11), `docs/multi-client-deployment.md` (shared secret)
 
 **Tim — before the deploy:**
-- [ ] **Secrets Manager `sundial/anthropic`** = `{ "api_key": "sk-ant-…" }` (us-west-1). Never pasted into chat or a file.
-- [ ] **SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
-  - [ ] **1. `sql/2026-11-10_report_assist.sql`** (new). The check at the bottom must show **false**, **false** (`anon_can_claim`, `authenticated_can_read_log`).
-  - [ ] **2. `sql/sundial_solar_pipeline.sql`** (re-run: `p_terminal_stages`; drops the 5-argument version). The check at the bottom must show **false**, **false**. Run it BEFORE `sundial-sf-query` is redeployed.
+- [x] **Secrets Manager `sundial/anthropic`** = `{ "api_key": "sk-ant-…" }` (us-west-1). Never pasted into chat or a file.
+- [x] **SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
+  - [x] **1. `sql/2026-11-10_report_assist.sql`** (new). The check at the bottom must show **false**, **false** (`anon_can_claim`, `authenticated_can_read_log`).
+  - [x] **2. `sql/sundial_solar_pipeline.sql`** (re-run: `p_terminal_stages`; drops the 5-argument version). The check at the bottom must show **false**, **false**. Run it BEFORE `sundial-sf-query` is redeployed.
 - [ ] Optional: different limits — `private.app_config` `report_assist_tenant_month_limit` (default 500) / `report_assist_user_day_limit` (default 40). See the SQL file's header.
 
 **Claude, after "SQL is in":**
-- [ ] `npm i`; `.\deploy.ps1 sundial-reports`; `.\scripts\wire-reports-routes.ps1 -Yes` (`/reports/assist` + CORS)
-- [ ] `.\deploy.ps1 sundial-sf-query` (the Dashboard on the explicit list) and `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` advertises `reports.ai`)
-- [ ] `node scripts/verify-report-assist.mjs` → merge `feature/reports-r4` into `master` (`--no-ff`), push
+- [x] `npm i`; `.\deploy.ps1 sundial-reports`; `.\scripts\wire-reports-routes.ps1 -Yes` (`/reports/assist` + CORS) (2026-11-10)
+- [x] `.\deploy.ps1 sundial-sf-query` (the Dashboard on the explicit list) and `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` advertises `reports.ai`) (2026-11-10)
+- [x] `node scripts/verify-report-assist.mjs` — **all checks passed** (2026-11-10; tokens and latency in PROGRESS) → merged `feature/reports-r4` into `master` (`--no-ff`), pushed
+- [ ] Log WHY the API refuses the strict schema (it did for every type; the non-strict fallback carried every turn, all 15 proposals valid on the first attempt) and decide whether a smaller strict schema is worth it
 - [ ] harmon-crm: the "Describe the report you want" box on the Reports page (build / refine / explain, the question shown as a chat turn, the 429 message with the editor still usable, `reports.ai` from `/auth/me`); then a feature-inventory row (sundial-core dependency: `POST /reports/assist`, SQL `2026-11-10_report_assist.sql`, secret `sundial/anthropic`; new-client step: none, shared). Update the two comments in `src/lib/api.ts` / `DashboardPage.tsx` that still name `TERMINAL_STAGE_TERMS`
 - [ ] Tim: review `docs/reporting-glossary.md` (sold, active, open job, unpaid, revenue, the stage families); edits need the generator + a redeploy
 - [ ] Later engine item: **a second group level** ("calls per tech per week") — not in R4

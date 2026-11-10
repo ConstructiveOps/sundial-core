@@ -76,6 +76,20 @@ export async function ownerNames(supabase, profileIds) {
   return { byId };
 }
 
+/**
+ * One report's owner name, by the list's rule (ownerNames): the profile's full_name, FORMER_USER
+ * when the profile is gone (or has no name), null when the lookup itself failed — a label is
+ * never a reason to fail the read. Used by GET /reports/{id} and GET /reports/{id}/schedule.
+ */
+export async function ownerNameOf(supabase, profileId) {
+  const names = await ownerNames(supabase, [profileId]);
+  if (names.error) {
+    console.warn("reports saved: owner name lookup failed:", names.error?.message || String(names.error));
+    return null;
+  }
+  return names.byId.get(profileId) || FORMER_USER;
+}
+
 export async function createReport({ body, me, perms, heldGates, cors }) {
   if (!perms.canWrite) return forbidden(cors);
   const v = validateInput(body, { creating: true, heldGates });
@@ -106,7 +120,7 @@ export async function getReport({ id, me, perms, cors }) {
   const { row, error } = await loadVisible(supabase, id, me);
   if (error) return serverError(cors, "read", error);
   if (!row) return notFound(cors);
-  return jsonResponse(200, cors, present(row, me, perms));
+  return jsonResponse(200, cors, { ...present(row, me, perms), ownerName: await ownerNameOf(supabase, row.owner_profile_id) });
 }
 
 export async function updateReport({ id, body, me, perms, heldGates, cors }) {

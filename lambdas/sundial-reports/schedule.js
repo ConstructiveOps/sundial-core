@@ -47,7 +47,7 @@ import {
 import { buildDisabledEmail } from "../../lib/report-email.js";
 import { sendEmail } from "../../lib/email.js";
 import { queueExport, tenantPortalOrigin } from "./csv.js";
-import { loadVisible, REPORTS_TABLE } from "./saved.js";
+import { loadVisible, ownerNameOf, REPORTS_TABLE } from "./saved.js";
 import { heldGates } from "./gates.js";
 
 export const USERS_TABLE = "sundial_user_cache";
@@ -109,14 +109,16 @@ export async function getSchedule({ id, me, cors }) {
   if (error) return serverError(cors, "read", error);
   if (!row) return notFound(cors);
   const mine = row.owner_profile_id === me.profileId;
-  if (!row.schedule) return jsonResponse(200, cors, { reportId: row.id, schedule: null });
+  // The owner's name, by GET /reports' rule (one profile lookup; "former user"; null on failure).
+  const ownerName = await ownerNameOf(supabase, row.owner_profile_id);
+  if (!row.schedule) return jsonResponse(200, cors, { reportId: row.id, ownerName, schedule: null });
   let recipients = null;
   if (mine) {
     const u = await eligibleUsers(supabase, me.tenantId);
     if (u.error) console.warn("reports schedule: recipient names unavailable:", u.error?.message || String(u.error));
     recipients = recipientsView(row.schedule.recipients, u.users ?? []);
   }
-  return jsonResponse(200, cors, { reportId: row.id, schedule: scheduleView(row, { withRecipients: mine, recipients }) });
+  return jsonResponse(200, cors, { reportId: row.id, ownerName, schedule: scheduleView(row, { withRecipients: mine, recipients }) });
 }
 
 /** PUT /reports/{id}/schedule */

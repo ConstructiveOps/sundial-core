@@ -1368,7 +1368,7 @@ Body: a report definition, as for `/reports/run`, except that `limit` may be up 
 File format: UTF-8 with a BOM, CRLF, RFC 4180. Headers are "`<object>: <field>`". A text value starting with `= + - @` TAB or CR gets a leading `'`. Datetimes are in Arizona time; booleans are Yes / No. **Link columns (D-089 am. 1):** an ungrouped export ends each row with one `<alias label> link` column per record alias that has a page (e.g. `Customer link`, and `Payment link` → the payment's job), holding the full URL on the tenant's own portal (`lib/tenant-settings.js` `portalUrlFor`, resolved when the export is queued). Grouped exports, and a tenant with no portal address, have none.
 
 ### Saved reports (R1b) — `GET /reports`, `POST /reports`, `GET` / `PATCH` / `DELETE /reports/{id}`, `GET /reports/{id}/run`, `GET /reports/{id}/csv`
-A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`. **`GET /reports` adds `ownerName`** to each: `profiles.full_name` of the owner, read in ONE lookup for the whole list; `"former user"` when the profile is gone (or has no name); `null` if that lookup failed (the list still answers).
+A saved report: `{ id, name, description, type, definition, sharing: "private" | "tenant", mine, canEdit, ownerProfileId, createdAt, updatedAt }`. **`GET /reports` adds `ownerName`** to each: `profiles.full_name` of the owner, read in ONE lookup for the whole list; `"former user"` when the profile is gone (or has no name); `null` if that lookup failed (the list still answers). **`GET /reports/{id}` and `GET /reports/{id}/schedule` carry `ownerName` by the same rule** (one profile lookup; `"former user"`; `null` on a failed lookup, never a failed read) — 2026-11-10.
 
 **Visible** = same tenant AND (yours OR `sharing: "tenant"`). Anything else is **404 `RECORD_NOT_FOUND`**, including someone else's private report and another tenant's report.
 
@@ -1376,7 +1376,7 @@ A saved report: `{ id, name, description, type, definition, sharing: "private" |
 |---|---|---|
 | `GET /reports` | reports.read | `{ reports: [...] }`, mine + shared with my tenant, newest first (≤ 500) |
 | `POST /reports` `{ name, description?, definition, sharing? }` | reports.write (+ reports.share for `sharing: "tenant"`) | `201` the report + `stripped` |
-| `GET /reports/{id}` | visible | the report |
+| `GET /reports/{id}` | visible | the report + `ownerName` |
 | `PATCH /reports/{id}` (any of name / description / definition / sharing) | yours (reports.write; + reports.share to set `tenant`) | `200` the report + `stripped` |
 | `DELETE /reports/{id}` | as PATCH | `204` |
 | `GET /reports/{id}/run` | visible | the `/reports/run` response + `report: { id, name }`, run with **the caller's** gates |
@@ -1396,7 +1396,7 @@ A saved report emailed on a schedule. **The owner is the sender:** every deliver
 | Route | Who | Answer |
 |---|---|---|
 | `GET /reports/recipients` | reports.read | `{ users: [{ userId, name, email, accessLevel }], canAddExternal, maxRecipients: 25 }` — the tenant's **active Executive / Admin / Manager** users with an email (the picker), by name |
-| `GET /reports/{id}/schedule` | visible | `{ reportId, schedule }` — `null` when none. `recipients` only for the owner: `[{ userId, name, email, eligible } \| { email, external: true }]` |
+| `GET /reports/{id}/schedule` | visible | `{ reportId, ownerName, schedule }` — `schedule` is `null` when none; `ownerName` as on `GET /reports`. `recipients` only for the owner: `[{ userId, name, email, eligible } \| { email, external: true }]` |
 | `PUT /reports/{id}/schedule` | owner (reports.write) | `200 { reportId, schedule }`; sets `next_run_at` and a clean failure count |
 | `DELETE /reports/{id}/schedule` | owner | `204`; the last run stays on record |
 | `POST /reports/{id}/send-now` (body empty, or `{ "toMe": true }`) | owner | **`202 { exportId, status: "queued", recipients, skipped }`**. Without `toMe`: to the saved recipients, recorded in the schedule's last run (`next_run_at` untouched; `400 NO_SCHEDULE` when there is none, `400 NO_RECIPIENTS` when nobody can receive it now). With `toMe`: to the caller only, recorded nowhere (`400 NO_EMAIL` when the caller's user has no email). Progress: `GET /reports/csv/{exportId}` |

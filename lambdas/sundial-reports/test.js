@@ -954,3 +954,43 @@ test("csv: grouped exports, old exports and tenants with no portal address get n
   assert.equal(none.status, 202, "the export still runs");
   assert.equal(lastExport().job.portalOrigin, null);
 });
+
+test("saved: GET /reports/{id} and GET /reports/{id}/schedule name the owner as the list does — one lookup, \"former user\", null on failure", async () => {
+  reset("Manager");
+  const GONE = "d0000000-0000-4000-8000-000000000009";
+  ctx.tables.profiles.push({ id: USERS.Admin.profile, full_name: "  Ada Admin " });
+  const mk = (profile, schedule = null) => {
+    const id = randomUUID();
+    ctx.tables.sundial_reports.push({
+      id, client_sf_id: TENANT, owner_profile_id: profile, name: "r", description: null, definition: SIMPLE, sharing: "tenant",
+      created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z", created_by: profile, updated_by: profile, schedule,
+    });
+    return id;
+  };
+  const admins = mk(USERS.Admin.profile, { cadence: "daily", time: "07:00", recipients: [{ userId: USERS.Admin.id }], format: "csv", enabled: true });
+  const orphan = mk(GONE);
+
+  ctx.dbCalls = [];
+  const one = await call(`/reports/${admins}`);
+  assert.equal(one.status, 200);
+  assert.equal(one.body.ownerName, "Ada Admin");
+  assert.equal(ctx.dbCalls.filter((c) => c.table === "profiles").length, 1, "one profiles read");
+  assert.equal((await call(`/reports/${orphan}`)).body.ownerName, "former user");
+
+  const sched = await call(`/reports/${admins}/schedule`);
+  assert.equal(sched.status, 200);
+  assert.equal(sched.body.ownerName, "Ada Admin");
+  assert.equal(sched.body.schedule.recipients, undefined, "still not shown to a non-owner");
+  const none = await call(`/reports/${orphan}/schedule`);
+  assert.equal(none.body.ownerName, "former user");
+  assert.equal(none.body.schedule, null);
+
+  // A failed lookup never fails the read: null (unknown), not "former user".
+  ctx.failTables.add("profiles");
+  const degraded = await call(`/reports/${admins}`);
+  assert.equal(degraded.status, 200);
+  assert.equal(degraded.body.ownerName, null);
+  const degradedSched = await call(`/reports/${admins}/schedule`);
+  assert.equal(degradedSched.status, 200);
+  assert.equal(degradedSched.body.ownerName, null);
+});

@@ -599,3 +599,51 @@ test("values: anon and authenticated cannot execute it", async () => {
   const s = await db.query(`select has_function_privilege('service_role', 'public.sundial_report_values(text, text, text, text)', 'execute') as ok`);
   assert.equal(s.rows[0].ok, true);
 });
+
+// --- D-091: group by period (dateTrunc) ---------------------------------------------------
+const TR = "a0Xtrunc";
+await insert("sundial_solar_cache", { sf_id: "TR1", client_sf_id: TR, project_name: "T1", contract_amount: 100, contract_date: "2026-10-31", created_date: "2026-11-01T06:30:00Z" }); // Oct 31, 11:30 PM in Arizona
+await insert("sundial_solar_cache", { sf_id: "TR2", client_sf_id: TR, project_name: "T2", contract_amount: 200, contract_date: "2026-11-01", created_date: "2026-11-01T07:30:00Z" }); // Nov 1, 12:30 AM in Arizona
+await insert("sundial_solar_cache", { sf_id: "TR3", client_sf_id: TR, project_name: "T3", contract_amount: 400, contract_date: "2026-11-15", created_date: "2026-11-15T19:00:00Z" });
+await insert("sundial_solar_cache", { sf_id: "TR4", client_sf_id: TR, project_name: "T4", contract_amount: 800, contract_date: null, created_date: null });
+
+const byPeriod = async (field, dateTrunc) => {
+  const r = await run({ type: "solar", groupBy: [{ field, dateTrunc }], aggregates: [{ fn: "count" }, { fn: "sum", field: "solar.contract_amount" }] }, { tenant: TR });
+  return r.rows;
+};
+
+test("D-091 dateTrunc: a datetime is bucketed by its ARIZONA date (11:30 PM Oct 31 in Phoenix is October)", async () => {
+  assert.deepEqual(await byPeriod("solar.created_date", "month"), [
+    ["2026-10-01", 1, 100], ["2026-11-01", 2, 600], [null, 1, 800],
+  ]);
+  assert.deepEqual(await byPeriod("solar.created_date", "day"), [
+    ["2026-10-31", 1, 100], ["2026-11-01", 1, 200], ["2026-11-15", 1, 400], [null, 1, 800],
+  ]);
+});
+
+test("D-091 dateTrunc: a date field by month / quarter / year; weeks start Monday", async () => {
+  assert.deepEqual(await byPeriod("solar.contract_date", "month"), [["2026-10-01", 1, 100], ["2026-11-01", 2, 600], [null, 1, 800]]);
+  assert.deepEqual(await byPeriod("solar.contract_date", "quarter"), [["2026-10-01", 3, 700], [null, 1, 800]]);
+  assert.deepEqual(await byPeriod("solar.contract_date", "year"), [["2026-01-01", 3, 700], [null, 1, 800]]);
+  // Sat Oct 31 → week of Mon Oct 26; Sun Nov 1 → still Mon Oct 26; Sun Nov 15 → Mon Nov 9.
+  assert.deepEqual(await byPeriod("solar.contract_date", "week"), [["2026-10-26", 2, 300], ["2026-11-09", 1, 400], [null, 1, 800]]);
+});
+
+test("D-091 dateTrunc: sorted by the period desc; the output column is a date labelled with the period", async () => {
+  const r = await run({ type: "solar", groupBy: [{ field: "solar.contract_date", dateTrunc: "month" }], aggregates: [{ fn: "count" }], sort: [{ field: "solar.contract_date", dir: "desc" }] }, { tenant: TR });
+  assert.deepEqual(r.rows.map((x) => x[0]), ["2026-11-01", "2026-10-01", null]);
+  assert.equal(r.n.output[0].type, "date");
+  assert.equal(r.n.output[0].dateTrunc, "month");
+  assert.match(r.n.output[0].label, /\(month\)$/);
+  assert.deepEqual(r.n.wire.columns, [{ alias: "solar", column: "contract_date", trunc: "month" }]);
+});
+
+test("D-091 dateTrunc: a plain string groupBy is unchanged; the function RAISES on a bad trunc", async () => {
+  const plain = normalizeDefinition({ type: "solar", groupBy: ["solar.stage"], aggregates: [{ fn: "count" }] }, { now: NOW });
+  assert.deepEqual(plain.wire.columns, [{ alias: "solar", column: "stage" }]);
+  const g = normalizeDefinition({ type: "solar", groupBy: [{ field: "solar.contract_date", dateTrunc: "month" }], aggregates: [{ fn: "count" }] }, { now: NOW }).wire;
+  await raises({ ...g, columns: [{ alias: "solar", column: "contract_date", trunc: "decade" }] }, /bad trunc decade/, TR);
+  await raises({ ...g, columns: [{ alias: "solar", column: "stage", trunc: "month" }] }, /trunc needs a date column/, TR);
+  const ungrouped = normalizeDefinition({ type: "solar", columns: ["solar.contract_date"] }, { now: NOW }).wire;
+  await raises({ ...ungrouped, columns: [{ alias: "solar", column: "contract_date", trunc: "month" }] }, /grouped report only/, TR);
+});

@@ -61,9 +61,8 @@ let lambda;
 let settings;
 const tenantSettings = () => (settings ??= createTenantSettings());
 
-/** The portal origin an export's links open, or null (grouped, no link columns, not configured). */
-export async function exportOrigin(type, wire, tenantSlug) {
-  if (wire.grouped || !type || linkColumns(type).length === 0) return null;
+/** The tenant's portal origin ("https://host"), or null when it has none (D-078: never another tenant's). */
+export async function tenantPortalOrigin(tenantSlug) {
   const primary = cleanOrigin(process.env.PORTAL_BASE_URL || DEFAULT_PORTAL_BASE_URL);
   try {
     return cleanOrigin(await tenantSettings().portalUrlFor(tenantSlug, primary));
@@ -71,6 +70,12 @@ export async function exportOrigin(type, wire, tenantSlug) {
     console.warn("reports csv: portal origin lookup failed:", err?.message || String(err));
     return null;
   }
+}
+
+/** The portal origin an export's links open, or null (grouped, no link columns, not configured). */
+export async function exportOrigin(type, wire, tenantSlug) {
+  if (wire.grouped || !type || linkColumns(type).length === 0) return null;
+  return tenantPortalOrigin(tenantSlug);
 }
 const s3Client = () => (s3 ??= new S3Client({ region: REPORTS_REGION }));
 const lambdaClient = () => (lambda ??= new LambdaClient({}));
@@ -86,17 +91,35 @@ export async function startExport({ def, reportId = null, tenantId, tenantSlug =
   if (!n.ok) return jsonResponse(n.status, cors, n.body);
 
   const portalOrigin = await exportOrigin(reportType(def.type), n.wire, tenantSlug);
-  const supabase = await getSupabaseClient();
   const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects, portalOrigin };
+  const q = await queueExport({ tenantId, ownerProfileId: profileId, reportId, reportType: def.type, job });
+  if (q.error === "QUEUE_FAILED") return jsonResponse(500, cors, { error: "server_error" });
+  if (q.error) return jsonResponse(502, cors, { error: "worker_invoke_failed", code: "WORKER_INVOKE_FAILED" });
+  const data = { id: q.exportId };
+  console.log(JSON.stringify({ csv: "queued", exportId: data.id, report: def.type, saved: !!reportId, columns: n.output.length, rowLimit: n.rowLimit }));
+  return jsonResponse(202, cors, { exportId: data.id, status: "queued", stripped: n.stripped });
+}
+
+/**
+ * Write a queued export row and start the worker (this Lambda, invoked by itself). Shared by
+ * startExport and the scheduled delivery (schedule.js, D-091), so an emailed report goes down
+ * exactly the path a downloaded one does. Returns { exportId } or { error, exportId? }:
+ * QUEUE_FAILED (no row), WORKER_INVOKE_FAILED (the row is marked failed).
+ */
+export async function queueExport({ tenantId, ownerProfileId, reportId = null, reportType: typeKey, job, beforeInvoke = null }) {
+  const supabase = await getSupabaseClient();
   const { data, error } = await supabase
     .from(EXPORTS_TABLE)
-    .insert({ client_sf_id: tenantId, owner_profile_id: profileId, report_id: reportId, report_type: def.type, status: "queued", job })
+    .insert({ client_sf_id: tenantId, owner_profile_id: ownerProfileId, report_id: reportId, report_type: typeKey, status: "queued", job })
     .select("id")
     .single();
   if (error || !data?.id) {
     console.error("reports csv: could not queue the export:", error?.message || "no id");
-    return jsonResponse(500, cors, { error: "server_error" });
+    return { error: "QUEUE_FAILED" };
   }
+  // The scheduled delivery stamps the export id on its report here, BEFORE the worker can
+  // finish and look for it there (D-091).
+  if (typeof beforeInvoke === "function") await beforeInvoke(data.id);
   try {
     await lambdaClient().send(new InvokeCommand({
       FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
@@ -106,10 +129,9 @@ export async function startExport({ def, reportId = null, tenantId, tenantSlug =
   } catch (err) {
     console.error("reports csv: self-invoke failed:", err?.message || String(err));
     await supabase.from(EXPORTS_TABLE).update({ status: "failed", error_code: "WORKER_INVOKE_FAILED", finished_at: new Date().toISOString() }).eq("id", data.id);
-    return jsonResponse(502, cors, { error: "worker_invoke_failed", code: "WORKER_INVOKE_FAILED" });
+    return { error: "WORKER_INVOKE_FAILED", exportId: data.id };
   }
-  console.log(JSON.stringify({ csv: "queued", exportId: data.id, report: def.type, saved: !!reportId, columns: n.output.length, rowLimit: n.rowLimit }));
-  return jsonResponse(202, cors, { exportId: data.id, status: "queued", stripped: n.stripped });
+  return { exportId: data.id };
 }
 
 /** GET /reports/csv/{exportId}. */
@@ -130,6 +152,13 @@ export async function exportStatus({ exportId, tenantId, profileId, cors, now = 
   if (!row || row.owner_profile_id !== profileId) return notFound(cors);
 
   const base = { exportId: row.id, type: row.report_type, stripped: row.job?.stripped ?? [], createdAt: row.created_at };
+  // A delivery (D-091, send-now): how the emailing went — counts only, never an address.
+  if (row.job?.delivery) {
+    const d = row.delivery;
+    base.delivery = d
+      ? { status: d.status, sent: d.sent ?? 0, failed: d.failed ?? 0, skipped: d.skipped ?? 0, attached: d.attached ?? null, code: d.code ?? null }
+      : { status: "pending" };
+  }
   if (row.status === "done") {
     const url = await getSignedUrl(
       s3Client(),
@@ -221,7 +250,7 @@ class ExportError extends Error {
  * sundial_report_run with the stored wire definition, streams the CSV to S3, and marks the row.
  * `remainingMs` is the Lambda context's clock.
  */
-export async function runExport(exportId, { remainingMs = () => Infinity, asOfFor = async () => null, now = () => new Date() } = {}) {
+export async function runExport(exportId, { remainingMs = () => Infinity, asOfFor = async () => null, now = () => new Date(), onFinished = null } = {}) {
   if (!isUuid(exportId)) return { ok: false, skipped: "bad id" };
   const supabase = await getSupabaseClient();
   const { data: claimed, error: claimErr } = await supabase
@@ -275,12 +304,27 @@ export async function runExport(exportId, { remainingMs = () => Infinity, asOfFo
       status: "done", s3_key: key, row_count: rows, truncated, as_of: asOf, finished_at: now().toISOString(),
     }).eq("id", row.id);
     console.log(JSON.stringify({ csv: "done", exportId: row.id, report: job.type, rows, pages, truncated, bytes: writer.bytes, ms: Date.now() - started }));
+    await finished(onFinished, { ...row, status: "done", s3_key: key, row_count: rows, truncated, as_of: asOf, bytes: writer.bytes });
     return { ok: true, rows, pages, truncated, key };
   } catch (err) {
     await writer.abort();
     const code = err instanceof ExportError ? err.code : "CSV_FAILED";
     console.error(`reports csv: export ${row.id} failed (${code}) after ${rows} rows / ${pages} pages / ${Date.now() - started} ms:`, err?.message || String(err));
     await supabase.from(EXPORTS_TABLE).update({ status: "failed", error_code: code, row_count: rows, finished_at: now().toISOString() }).eq("id", row.id);
+    await finished(onFinished, { ...row, status: "failed", error_code: code, row_count: rows });
     return { ok: false, code, rows };
+  }
+}
+
+/**
+ * After an export is marked done / failed: the caller's hook (D-091 — the scheduled delivery
+ * emails it). A hook that throws never changes the export's own result.
+ */
+async function finished(onFinished, row) {
+  if (typeof onFinished !== "function") return;
+  try {
+    await onFinished(row);
+  } catch (err) {
+    console.error(`reports csv: after-export hook failed for ${row.id}:`, err?.message || String(err));
   }
 }

@@ -997,7 +997,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
-| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); GET /reports/values — a text field's distinct values (D-089 am. 1); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes) |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); GET /reports/values — a text field's distinct values (D-089 am. 1); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes); GET /reports/recipients, GET/PUT/DELETE /reports/{id}/schedule, POST /reports/{id}/send-now, GET /public/reports/download/{token} (no login) — scheduled delivery (D-091, R3; `reports.schedule.external` for outside addresses); `{ task: "tick" }` from EventBridge `sundial-reports-tick` |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1039,6 +1039,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 |---|---|---|---|
 | `SERVICE_PUBLIC_BASE_URL` | `sundial-service-estimate` | **Yes** (for the customer link) | The portal's public origin, e.g. `https://harmon.sundialcrm.com` (no trailing slash). `/send` builds the customer link as `{base}/estimate/{token}`. If unset, `/send` still records the version and returns `delivery: "recorded"` with `deliveryDetail` naming this variable — nothing is emailed because there is no link to email. **Per-tenant:** each fork's Vercel origin. |
 | `EMAIL_FROM` / `EMAIL_REPLY_TO` / `SES_REGION` / `EMAIL_CONFIG_SET` | `sundial-service-estimate` (in addition to the senders below) | `EMAIL_FROM` yes to send | Same values as the other senders — the estimate email goes through `lib/email.js`. The execution role already carries SES access (see the SES notes). |
+| `REPORTS_PUBLIC_API_BASE` | `sundial-reports` | No | Where a scheduled report's download link points (D-091). Default `https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`; set it only if the API moves to a custom domain. |
 | *(secret, not a variable)* `sundial/twilio` | `sundial-sms` | Yes to text | Secrets Manager JSON `{ "accountSid", "authToken", "fromNumber", "tenantNumbers"?: { "<slug>": "+1…" }, "defaultTenant"?: "<slug>" }`. The account is Constructive Ops'; the number a tenant texts from is `tenantNumbers[slug]`, else the shared `fromNumber`; an inbound text routes to the tenant whose number it hit, else `defaultTenant`. Re-read every 5 minutes — swapping Harmon onto its own approved number is a secret edit, not a deploy. |
 | `SMS_WEBHOOK_BASE` | `sundial-sms` | Yes for webhooks | The public base Twilio calls, e.g. `https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`. Twilio's signature covers the EXACT URL, so this must match the Twilio console character for character; it is also the base of the per-message status callback. |
 | `SMS_DEFAULT_TENANT` | `sundial-sms` | No | Overrides the secret's `defaultTenant` (a slug, e.g. `harmon`): the tenant inbound texts on the shared line are routed to, and a tenant allowed to send from it. The primary tenant may always send from the shared line, whatever this says (D-078). |
@@ -1059,7 +1060,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 | `DESIGN_REQUEST_NOTIFY_CC` | `sundial-aurora-push`, `sundial-aurora-inbound` | No | The director (or anyone else) CC'd on those notifications. Same list format. When unset, **no Cc header is sent at all**. |
 | `AURORA_INBOUND_QUEUE_URL` | `sundial-aurora-webhook` | **Yes** | The SQS queue the Aurora doorbell enqueues to. If unset the doorbell returns **500 on purpose** so Aurora retries rather than the event being acked into a void. |
 | `SUNDIAL_TENANT_SLUG` | `sundial-aurora-inbound` | No (defaults `harmon`) | Tenant slug resolved to the `Sundial_Tenant__c` record id for `Client__c` on auto-created dealer customers (D-049). Same identity as `VITE_TENANT_ID` and the S3 prefix. |
-| `EMAIL_FROM` | any sender (`sundial-aurora-push`, `sundial-aurora-inbound`, `sundial-comment-notify`) | Yes to send | **Set to `Sundial <no-reply@sundialcrm.com>`** (2026-08-19). The verified identity is the **domain** `sundialcrm.com`. Until it is set, `lib/email.js` reports "not configured" and senders skip the email instead of failing — which is exactly how Design Request notifications degraded silently for weeks. |
+| `EMAIL_FROM` | any sender (`sundial-aurora-push`, `sundial-aurora-inbound`, `sundial-comment-notify`, `sundial-reports` — D-091, copied by `wire-reports-schedule.ps1` with `EMAIL_REPLY_TO` / `EMAIL_CONFIG_SET` / `SES_REGION`) | Yes to send | **Set to `Sundial <no-reply@sundialcrm.com>`** (2026-08-19). The verified identity is the **domain** `sundialcrm.com`. Until it is set, `lib/email.js` reports "not configured" and senders skip the email instead of failing — which is exactly how Design Request notifications degraded silently for weeks. |
 | `EMAIL_REPLY_TO` | any sender | No, but **effectively required** | **Set to `tim@constructiveoperations.com`.** No mailbox exists behind `no-reply@sundialcrm.com`, so without this a recipient who hits Reply gets a bounce. **Per-tenant:** the From is correctly tenant-neutral, the reply target is not — a second tenant must point this at their own monitored address. |
 | `SES_REGION` | any sender | No (defaults `us-west-1`) | **Set explicitly to `us-west-1`**, which is where `sundialcrm.com` is verified. Matches the in-code default; set anyway so the config is self-describing. |
 | `EMAIL_CONFIG_SET` | any sender | No | **Set to `sundial-transactional`.** SES configuration set publishing BOUNCE / COMPLAINT / DELIVERY / REJECT to CloudWatch under the `configuration-set` dimension. These emails reach real Harmon employees on a domain that **also carries auth email**, so a bounce/complaint problem here is a reputation risk to the login flow, not just to notifications. |
@@ -1292,7 +1293,7 @@ Wire script: `scripts/wire-dealer-routes.ps1` (resources `/dealer/customers` +
 
 ---
 
-## Reports — the engine, CSV, saved reports (D-087 / D-088 R1a 2026-11-03 / D-089 R1b 2026-11-04) — `sundial-reports`
+## Reports — the engine, CSV, saved reports, scheduled delivery (D-087 / D-088 R1a 2026-11-03 / D-089 R1b 2026-11-04 / D-091 R3 2026-11-10) — `sundial-reports`
 
 Every report reads the **Supabase cache** (D-087) through `public.sundial_report_run`
 (`sql/sundial_report_run.sql`); Salesforce is never queried. Design: `docs/reporting-module.md` §6.
@@ -1388,6 +1389,37 @@ Errors:
 - `403 ACTION_FORBIDDEN`: a create without `reports.write`.
 
 The stored definition is the saver's **visible** one: columns their gates strip are removed before saving.
+
+### Scheduled delivery (R3, D-091, 2026-11-10) — `GET /reports/recipients`, `GET` / `PUT` / `DELETE /reports/{id}/schedule`, `POST /reports/{id}/send-now`, `GET /public/reports/download/{token}`
+A saved report emailed on a schedule. **The owner is the sender:** every delivery runs the report with the OWNER's identity and gates as they are at send time (a Manager on an Admin's cost report receives the costs). Design: `docs/reporting-module.md` §7.1.
+
+| Route | Who | Answer |
+|---|---|---|
+| `GET /reports/recipients` | reports.read | `{ users: [{ userId, name, email, accessLevel }], canAddExternal, maxRecipients: 25 }` — the tenant's **active Executive / Admin / Manager** users with an email (the picker), by name |
+| `GET /reports/{id}/schedule` | visible | `{ reportId, schedule }` — `null` when none. `recipients` only for the owner: `[{ userId, name, email, eligible } \| { email, external: true }]` |
+| `PUT /reports/{id}/schedule` | owner (reports.write) | `200 { reportId, schedule }`; sets `next_run_at` and a clean failure count |
+| `DELETE /reports/{id}/schedule` | owner | `204`; the last run stays on record |
+| `POST /reports/{id}/send-now` (body empty, or `{ "toMe": true }`) | owner | **`202 { exportId, status: "queued", recipients, skipped }`**. Without `toMe`: to the saved recipients, recorded in the schedule's last run (`next_run_at` untouched; `400 NO_SCHEDULE` when there is none, `400 NO_RECIPIENTS` when nobody can receive it now). With `toMe`: to the caller only, recorded nowhere (`400 NO_EMAIL` when the caller's user has no email). Progress: `GET /reports/csv/{exportId}` |
+| `GET /public/reports/download/{token}` | **no login** — the token | `302` to a 15-minute S3 link; `404` unknown, `410` expired (7 days), `429` after 20 follows of that link. HTML pages, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` |
+
+**`PUT` body** (`lib/report-schedule.js` `validateSchedule`; unknown keys refused):
+```json
+{ "cadence": "daily" | "weekly" | "monthly", "time": "07:00",
+  "days": ["mon", "thu"],          // weekly only, ≥ 1 of mon…sun
+  "dayOfMonth": 31,                // monthly only, 1–31 (past a shorter month's end: its last day)
+  "recipients": [{ "userId": "a0U…" }, { "email": "partner@example.com" }],   // 1–25
+  "format": "csv", "enabled": true }  // both optional (defaults shown)
+```
+`time` is **Arizona** wall time on the quarter hour. **The `schedule` view:** `{ cadence, time, days?, dayOfMonth?, format, enabled, summary: "Weekly on Mon, Thu at 7:00 AM (Arizona time)", recipientCount, recipients? (owner), nextRunAt (null when disabled), lastRunAt, lastRunStatus: running | ok | partial | failed | disabled | null, lastRunError, consecutiveFailures }`. **`GET /reports`** carries the same view on every report (`schedule`, never `recipients`).
+
+Errors:
+- `400 invalid_schedule` with `code` `BAD_SCHEDULE` (unknown key), `BAD_CADENCE`, `BAD_TIME`, `BAD_DAYS`, `BAD_DAY_OF_MONTH`, `BAD_FORMAT`, `TOO_MANY_RECIPIENTS`, `BAD_RECIPIENT` (malformed, or a `userId` that is not an active Executive / Admin / Manager of this tenant), and `field` naming it (`recipients[2]`).
+- **`403 EXTERNAL_RECIPIENT_FORBIDDEN`** — an outside address (anyone who is not an active Executive / Admin / Manager here: a sales rep, a tech, anyone outside) on a schedule by someone without **`reports.schedule.external`** (Admin / Executive). An email that IS an eligible user's is stored as that user, not refused.
+- `403 REPORT_READ_ONLY` — someone else's report (shared with you); `404 RECORD_NOT_FOUND` — one you cannot see.
+
+**`GET /reports/csv/{exportId}`** on a delivery's export adds `delivery: { status: pending | sent | partial | failed, sent, failed, skipped, attached, code }` — counts only, never an address.
+
+**The tick** (not a route): EventBridge `sundial-reports-tick`, `cron(0/15 * * * ? *)`, input `{ "task": "tick" }` → `{ lost, due, claimed, queued, failed }`. At most 5 claims a tick; a schedule is claimed by a conditional update of `next_run_at`, so two ticks never run the same slot. Each delivery: under 8 MB the CSV is attached, 8 MB or more a 7-day link per recipient; a grouped report's first 100 rows are drawn in the body; subject `<report name> — <Mon D, YYYY>`. Three failures in a row disable the schedule and email the owner once.
 
 ---
 

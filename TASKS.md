@@ -4,6 +4,29 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`)
+
+- [x] Engine: `groupBy` `{ field, dateTrunc }` (day / week from Monday / month / quarter / year, Arizona periods) — `lib/report-def.js` + `sql/sundial_report_run.sql`, PGlite tests
+- [x] Storage: `sql/2026-11-10_report_schedules.sql` — schedule + run columns on `sundial_reports`, `delivery` on exports, `sundial_report_downloads` (hashed links); PGlite test
+- [x] Routes: `GET /reports/recipients`, `GET/PUT/DELETE /reports/{id}/schedule`, `POST /reports/{id}/send-now`, `GET /public/reports/download/{token}`; `GET /reports` carries the schedule summary; new action `reports.schedule.external` (Admin / Executive)
+- [x] The tick (`{ task: "tick" }`, claim-before-run, ≤ 5 a tick, one background worker per delivery), the email (`lib/report-email.js`; attach < 8 MB, else a 7-day hashed link per recipient; grouped table in the body), 3 failures → off + one owner email
+- [x] `lib/identity.js` `resolveIdentityForProfile` (shared `identityForAuthUser`; `resolveIdentity` unchanged — `lib/identity.test.js` pins byte-identical output)
+- [x] `scripts/wire-reports-routes.ps1` (R3 routes + the public route), new `scripts/wire-reports-schedule.ps1` (email env merged, `ses:SendEmail`, rule `sundial-reports-tick`), new `scripts/verify-report-schedule.mjs`
+- [x] Tests: full suite 2,059 + 214 budget checks, all pass (46 new)
+- [x] Docs: D-091, `docs/reporting-module.md` §6.3 + §7.1, `docs/api-endpoints.md`, CLAUDE.md item 11
+
+**Tim — SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
+- [ ] **1. `sql/2026-11-10_report_schedules.sql`** (new). The check at the bottom must show `report_columns_7` = **7**, `export_delivery_1` = **1**, and **false** in both `…_false` columns.
+- [ ] **2. `sql/sundial_report_run.sql`** (re-run: the `trunc` group). The check at the bottom must show **false** in all **eight** columns.
+
+**Claude, after "SQL is in":**
+- [ ] `.\deploy.ps1 sundial-reports`
+- [ ] `.\scripts\wire-reports-routes.ps1 -Yes`
+- [ ] `.\scripts\wire-reports-schedule.ps1`
+- [ ] `node scripts/verify-report-schedule.mjs` → merge `feature/reports-r3` into `master` (`--no-ff`), push
+- [ ] harmon-crm: a Schedule panel on the report editor (picker from `GET /reports/recipients`, outside addresses only when `canAddExternal`), "Send to me" / "Send now", the schedule column on the Reports list, the period choice on a date group; then a feature-inventory row (R8: scheduled delivery — sundial-core dependency: the routes above, rule `sundial-reports-tick`, SQL `2026-11-10_report_schedules.sql`; new-client step: none, shared)
+- [ ] R2 dashboards (deferred)
+
 ## 2026-11-09 — Reports: record links + distinct values for filters (D-089 amendment 1)
 
 - [x] Catalog: `nameField: true` from the describe (solar → `project_name`, `NAME_FIELD_FALLBACK`); the SQL seed gains `long_text` (regenerated; `--check` clean before the change, 1,353 rows)

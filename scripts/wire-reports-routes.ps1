@@ -11,8 +11,14 @@
       GET    /reports  POST /reports   saved reports: list / create (R1b)
       GET / PATCH / DELETE /reports/{id}                            (R1b)
       GET    /reports/{id}/run  GET /reports/{id}/csv               (R1b)
+      GET    /reports/recipients                                    (R3, D-091)
+      GET / PUT / DELETE /reports/{id}/schedule                     (R3, D-091)
+      POST   /reports/{id}/send-now                                 (R3, D-091)
+      GET    /public/reports/download/{token}   NO LOGIN — a delivered report's 7-day link (R3)
     plus OPTIONS (204, CORS) on every resource. AWS_PROXY, authorization NONE at the gateway —
-    the Supabase JWT is checked IN the Lambda (reports.read: Executive / Admin / Manager).
+    the Supabase JWT is checked IN the Lambda (reports.read: Executive / Admin / Manager); the
+    one public route is checked by its token (hashed, per-link limit) in deliver.js.
+    The tick's EventBridge rule, SES and the email env are scripts\wire-reports-schedule.ps1.
 
     R1b ALSO sets, on the Lambda (the asynchronous CSV export, lambdas/sundial-reports/csv.js):
       - timeout 300 s, memory 1,024 MB (the export worker pages 50,000 rows; API requests
@@ -104,6 +110,18 @@ Wire-All $one @("GET", "PATCH", "DELETE")
 Wire-All (Ensure-Resource $one "run") @("GET")
 Wire-All (Ensure-Resource $one "csv") @("GET")
 
+Write-Host "==> R3 (D-091): /reports/recipients : GET ; /{id}/schedule : GET, PUT, DELETE ; /{id}/send-now : POST" -ForegroundColor Cyan
+Wire-All (Ensure-Resource $reports "recipients") @("GET")
+Wire-All (Ensure-Resource $one "schedule") @("GET", "PUT", "DELETE")
+Wire-All (Ensure-Resource $one "send-now") @("POST")
+
+Write-Host "==> R3 (D-091): /public/reports/download/{token} : GET (no login; the token is the credential)" -ForegroundColor Cyan
+$public = Ensure-Resource $root "public"
+$pubReports = Ensure-Resource $public "reports"
+$pubDownload = Ensure-Resource $pubReports "download"
+# GET only: a link followed from an email, never called by a browser script (no OPTIONS needed).
+Wire-Method (Ensure-Resource $pubDownload "{token}") "GET"
+
 Write-Host "==> Lambda invoke permission (apigateway)" -ForegroundColor Cyan
 # /reports/* covers every sub-path; /reports itself (GET / POST the list) needs its own ARN.
 aws lambda add-permission --function-name $Fn --region $Region `
@@ -112,6 +130,9 @@ aws lambda add-permission --function-name $Fn --region $Region `
 aws lambda add-permission --function-name $Fn --region $Region `
     --statement-id "apigw-reports-root" --action "lambda:InvokeFunction" `
     --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/*/reports" --output json 2>$null | Out-Null
+aws lambda add-permission --function-name $Fn --region $Region `
+    --statement-id "apigw-public-reports" --action "lambda:InvokeFunction" `
+    --principal apigateway.amazonaws.com --source-arn "arn:aws:execute-api:${Region}:${AcctId}:${ApiId}/*/GET/public/reports/download/*" --output json 2>$null | Out-Null
 Write-Host "  (an 'already exists' error here is harmless - permission is in place)" -ForegroundColor DarkGray
 
 Write-Host "==> Lambda: timeout 300 s, memory 1024 MB (the CSV worker)" -ForegroundColor Cyan
@@ -148,6 +169,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Report engine routes (R1b + D-089 am. 1 values) -> $Fn" --output json | Out-Null
+    --description "Report engine routes (R1b + D-089 am. 1 + R3 schedules, D-091) -> $Fn" --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
-Write-Host "SUCCESS. Next: .\scripts\add-reports-lifecycle.ps1, then node scripts/verify-report-run.mjs" -ForegroundColor Green
+Write-Host "SUCCESS. Next (R3): .\scripts\wire-reports-schedule.ps1, then node scripts/verify-report-schedule.mjs" -ForegroundColor Green

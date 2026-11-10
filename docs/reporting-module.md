@@ -159,6 +159,7 @@ Shape (`lib/report-types.js`): `{ key, label, base: { object, alias, label }, jo
 - **Relative dates** (`this_month`, `last_month`, `this_quarter`, `ytd`, `last_n_days:N` = N days ending today) are resolved on the server in **America/Phoenix** (UTC-07:00 all year), as a value of `eq` or `between`. A datetime filter means whole Arizona days. This is what makes a saved report re-runnable.
 - **Shape:**
   - One group level. When grouped, the columns are the group, then the aggregates.
+  - **Group by period (D-091):** a `groupBy` entry may be `{ "field": "solar.contract_date", "dateTrunc": "month" }` — `day` | `week` | `month` | `quarter` | `year`, on a date or datetime field only (`400 BAD_GROUP` otherwise). The group's value is the period's first day (`"2026-11-01"`), the output column is a `date` labelled "Contract Signed Date (month)". A datetime is bucketed by its **Arizona** date (11:30 PM on Oct 31 in Phoenix is October); weeks start **Monday**. The wire column carries `trunc`; `sundial_report_run` re-checks it and RAISES on anything else. A plain string group is unchanged.
   - Aggregates are `count` (no field), `sum` / `avg` (numbers) and `min` / `max` (numbers, dates). Each is named `<fn>_<alias>_<column>`, or `count`.
   - Sort only on what the report shows, with aggregates only when grouped.
   - Limits: `limit` ≤ 5,000 on screen and ≤ 50,000 for a CSV (where it is also the default); ≤ 50 columns, 50 filters, 10 aggregates, 5 sorts.
@@ -239,10 +240,41 @@ The file format:
 **IAM:** inline policy `sundial-reports-export`: self-invoke + `sfsolproj/REPORTS/*` objects.
 **Logs:** counts, pages, bytes and ms. Never a row, a value or the URL.
 
-## 7. R2–R4 (sketch)
-- **R2** — Tim authors the starter set as saved definitions (pipeline by stage / rep, solar by PM and stage with contract totals, service jobs by status and payer, invoices + balances, estimates sent / approved, calls per tech per week) and pins them per department in `sundial_dashboards`. The Dashboard page gains a "My Dashboard" built from `GET /dashboards/me`; the existing stat cards stay.
-- **R3** — `schedule` on a report (`cron`, recipients, format csv | pdf) → one EventBridge rule → `sundial-reports` `{ task: "deliver" }` → run → SES through `lib/email.js` (BASE64 attachment rule).
-- **R4** — Reports page: "Describe the report you want" → the model (tool-use, the catalog + report types + business definitions in a cached prompt) returns a definition → shown as plain English + editable filter chips / column list → Run → Save. The model never sees rows. A `reports.ai` refusal (budget exhausted) leaves the chips editable by hand.
+## 7. R2–R4
+- **R2** (deferred, sketch) — Tim authors the starter set as saved definitions (pipeline by stage / rep, solar by PM and stage with contract totals, service jobs by status and payer, invoices + balances, estimates sent / approved, calls per tech per week) and pins them per department in `sundial_dashboards`. The Dashboard page gains a "My Dashboard" built from `GET /dashboards/me`; the existing stat cards stay.
+- **R4** (sketch) — Reports page: "Describe the report you want" → the model (tool-use, the catalog + report types + business definitions in a cached prompt) returns a definition → shown as plain English + editable filter chips / column list → Run → Save. The model never sees rows. A `reports.ai` refusal (budget exhausted) leaves the chips editable by hand.
+
+### 7.1 R3 — scheduled delivery (built 2026-11-10, D-091, `feature/reports-r3`)
+A saved report goes out by email on a schedule. The sketch said `cron`, format `csv | pdf` and `{ task: "deliver" }`; as built it is cadences, CSV only, and `{ task: "tick" }`.
+
+**The schedule** is on the report row (`sql/2026-11-10_report_schedules.sql`): `schedule` jsonb, validated by `lib/report-schedule.js` `validateSchedule` —
+```json
+{ "cadence": "weekly", "time": "07:00", "days": ["mon", "thu"], "recipients": [{ "userId": "a0U…" }, { "email": "partner@example.com" }], "format": "csv", "enabled": true }
+```
+- `cadence` daily | weekly (`days`, at least one of mon…sun) | monthly (`dayOfMonth` 1–31; past a shorter month's end, its last day). `time` on the quarter hour (:00 :15 :30 :45), **Arizona time**. `format` is `csv` (no report PDF exists).
+- `next_run_at` = the first slot strictly after the later of now and the slot just run (`nextRunAt`). America/Phoenix is UTC−07:00 all year (no daylight saving), so 07:00 is always 14:00 UTC; a missed tick sends once, never a burst.
+- Also on the row: `last_run_at`, `last_run_status` (running / ok / partial / failed / disabled), `last_run_error` (a code), `consecutive_failures`, `last_export_id`.
+
+**Recipients** (≤ 25). The picker, `GET /reports/recipients`, is the tenant's **active Executive / Admin / Manager users with an email** (`sundial_user_cache`), stored by user id. **Anyone else is an outside address** (a sales rep, a tech, anyone outside) and needs **`reports.schedule.external`** (Admin / Executive) — `403 EXTERNAL_RECIPIENT_FORBIDDEN`. An email typed that is an eligible user's is stored as the user. Each send re-checks: a user no longer eligible, or an outside address the owner may no longer send to, is skipped (`skipped`).
+
+**The owner is the sender.** Every delivery re-reads the owner (`lib/identity.js` `resolveIdentityForProfile`, the login's own code) and runs the report with **the owner's** gates, so a Manager on an Admin's cost report receives the costs. An owner who is gone, inactive, in another tenant or no longer tenant-level turns the schedule off at once (`OWNER_NOT_ALLOWED`).
+
+**The tick.** EventBridge `sundial-reports-tick`, `cron(0/15 * * * ? *)` → `{ task: "tick" }` (`scripts/wire-reports-schedule.ps1`):
+1. A run still `running` 15 minutes on is recorded (its export's delivery if it got that far, else `DELIVERY_LOST`).
+2. At most **5** due schedules are read (`schedule->>enabled = 'true' and next_run_at <= now`, partial index `idx_sundial_reports_due`).
+3. **Claim before run:** one conditional update per row moves `next_run_at` to the next slot WHERE it is still what was read; a racing tick updates nothing and skips it.
+4. Each claimed schedule is queued down the CSV export path (`csv.js` `queueExport`) with a `delivery` block — **one background worker per delivery**, each with the Lambda's 300 s. The export id is stamped on the report before the worker starts.
+
+**The delivery** (`deliver.js`, the worker's `onFinished` hook, after the CSV is written):
+- One email per recipient, from `EMAIL_FROM`, Reply-To the owner, subject `<report name> — Nov 10, 2026` (Arizona date) — `lib/report-email.js`.
+- **Under 8 MB: the CSV attached.** **8 MB or more: a link per recipient**, `GET /public/reports/download/{token}`, valid **7 days** — a random token whose SHA-256 alone is stored (`sundial_report_downloads`); following it 302s to a fresh 15-minute S3 link. 20 follows per link (then 429), 410 when expired; logged by the hash's first 12 characters only. (A presigned URL straight from the Lambda dies with its short-lived credentials, hours not days.)
+- **A grouped report also draws its first 100 rows in the body** (the on-screen wire, `limit` 100).
+- What happened — per recipient, the SES message id — is the export row's `delivery`; `GET /reports/csv/{exportId}` shows the counts.
+- The outcome lands on the report: ok / partial / failed. **Three failures in a row** set `enabled: false`, status `disabled`, and email the owner once.
+
+**Routes:** `GET` / `PUT` / `DELETE /reports/{id}/schedule` (owner), `POST /reports/{id}/send-now` (owner; `{ toMe: true }` = to the caller only, recorded nowhere), `GET /reports/recipients`, and `GET /reports` carries each report's schedule summary (never its recipients). Details: `docs/api-endpoints.md`.
+
+**Proof:** `node scripts/verify-report-schedule.mjs` (ZZ users; send-now to zz-admin checked by the SES result, a Manager's outside address refused, a forced-due schedule ticked twice at once runs once and advances).
 
 ## 8. Open items
 - Business definitions for the AI and the picker: "Active" = `NOT_TERMINAL_STAGES` (`sundial-sf-query`), "sold" = which stage values, "contract date" = `Contract_Date__c`, "revenue" = `contract_amount` vs invoice `total`. Collect as `docs/reporting-glossary.md` during R2 while authoring the starter set.

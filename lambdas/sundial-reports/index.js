@@ -9,7 +9,12 @@
 //   GET  /reports/csv/{exportId}       → { status, url, rowCount, truncated, ... }
 //   GET  /reports, POST /reports, GET / PATCH / DELETE /reports/{id},
 //   GET  /reports/{id}/run, GET /reports/{id}/csv            saved reports (saved.js)
-//   { task: "csv", exportId }   NOT a route: this Lambda invoking itself to build an export.
+//   GET  /reports/recipients, GET / PUT / DELETE /reports/{id}/schedule,
+//   POST /reports/{id}/send-now        scheduled delivery (schedule.js, D-091)
+//   GET  /public/reports/download/{token}   NO LOGIN: a delivered report's 7-day link (deliver.js)
+//   { task: "csv", exportId }   NOT a route: this Lambda invoking itself to build an export
+//                               (and, for a delivery, to email it when it is done — deliver.js).
+//   { task: "tick" }            NOT a route: EventBridge every 15 minutes — queue what is due.
 //
 // Every report reads the Supabase cache (D-087); Salesforce is never queried here.
 //
@@ -44,6 +49,9 @@ import { normalizeDefinition, OPERATORS, valuesLookupAllowed } from "../../lib/r
 import { startExport, exportStatus, runExport } from "./csv.js";
 import { listReports, createReport, getReport, updateReport, deleteReport, loadVisible } from "./saved.js";
 import { isUuid } from "../../lib/saved-reports.js";
+import { CATALOG_GATES, heldGates } from "./gates.js";
+import { listRecipients, getSchedule, putSchedule, deleteSchedule, sendNow, runTick } from "./schedule.js";
+import { deliverExport, publicDownload } from "./deliver.js";
 
 export const ACTION = "reports.read";
 export const RPC = "sundial_report_run";
@@ -51,11 +59,8 @@ export const VALUES_RPC = "sundial_report_values";
 export const MAX_VALUES_SEARCH = 100;
 export const MAX_BODY_BYTES = 100_000;
 
-// Every gate any catalog column carries (today: service.costing.read). Derived, so a new gate
-// in a regenerated catalog is honoured without a code change here.
-export const CATALOG_GATES = Object.freeze([
-  ...new Set(Object.values(CATALOG).flatMap((c) => c.fields.map((f) => f.gate).filter(Boolean))),
-].sort());
+// The gates (CATALOG_GATES / heldGates) live in gates.js, shared with the scheduled delivery.
+export { CATALOG_GATES, heldGates };
 
 // Order matters: the fixed words (run, types, catalog, csv) before /reports/{id}.
 const ROUTES = [
@@ -65,9 +70,12 @@ const ROUTES = [
   [/^\/reports\/values\/?$/, "values", ["GET"]],
   [/^\/reports\/csv\/?$/, "csv", ["POST"]],
   [/^\/reports\/csv\/([^/]+)\/?$/, "csvStatus", ["GET"]],
+  [/^\/reports\/recipients\/?$/, "recipients", ["GET"]],
   [/^\/reports\/?$/, "saved", ["GET", "POST"]],
   [/^\/reports\/([^/]+)\/run\/?$/, "savedRun", ["GET"]],
   [/^\/reports\/([^/]+)\/csv\/?$/, "savedCsv", ["GET"]],
+  [/^\/reports\/([^/]+)\/schedule\/?$/, "schedule", ["GET", "PUT", "DELETE"]],
+  [/^\/reports\/([^/]+)\/send-now\/?$/, "sendNow", ["POST"]],
   [/^\/reports\/([^/]+)\/?$/, "savedOne", ["GET", "PATCH", "DELETE"]],
 ];
 
@@ -81,9 +89,13 @@ export function matchRoute(path) {
   return null;
 }
 
-/** The gates this caller holds, from the one table that decides it. */
-export function heldGates(access) {
-  return CATALOG_GATES.filter((g) => canAction(g, access));
+/**
+ * The one public route (D-091): GET /public/reports/download/{token}, a stage prefix tolerated.
+ * Returns the token (as given; deliver.js checks its shape) or null.
+ */
+export function matchPublicDownload(path) {
+  const m = /^(?:\/[^/]+)?\/public\/reports\/download\/([^/]+)\/?$/.exec(path || "");
+  return m ? m[1] : null;
 }
 
 /** The catalog of one report type, projected for the caller (gated + non-reportable removed). */
@@ -270,13 +282,34 @@ export const handler = async (event, context) => {
     return runExport(event.exportId, {
       remainingMs: () => (typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : Infinity),
       asOfFor,
+      // A scheduled delivery (D-091): email the file once it exists. A plain export has no
+      // `delivery` block and deliverExport returns at once.
+      onFinished: (row) => deliverExport(row),
     });
+  }
+  // The scheduler (D-091): EventBridge rule sundial-reports-tick, every 15 minutes. Same guard
+  // as the worker — a request through API Gateway can never be read as a task.
+  if (event && event.task === "tick" && !event.httpMethod && !event.requestContext) {
+    return runTick({});
   }
 
   const method = event?.requestContext?.http?.method || event?.httpMethod || "GET";
   const headers = normalizeHeaders(event?.headers);
   const cors = corsHeaders(headers["origin"]);
   if (method === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+
+  // The ONE public route (D-091): a delivered report's download link. No login — the token is
+  // the credential, checked (and rate-limited, logged by hash) in deliver.js.
+  const publicToken = matchPublicDownload(event?.rawPath || event?.path || "");
+  if (publicToken !== null) {
+    if (method !== "GET") return jsonResponse(405, cors, { error: "method_not_allowed", code: "METHOD_NOT_ALLOWED" });
+    try {
+      return await publicDownload(publicToken);
+    } catch (err) {
+      console.error("reports download error:", err?.message || String(err));
+      return jsonResponse(500, cors, { error: "server_error" });
+    }
+  }
 
   const route = matchRoute(event?.rawPath || event?.path || "");
   if (!route) return jsonResponse(404, cors, { error: "not_found", code: "ROUTE_NOT_FOUND" });
@@ -307,9 +340,11 @@ export const handler = async (event, context) => {
   }
   const perms = { canWrite: canAction("reports.write", access), canShare: canAction("reports.share", access) };
   const held = heldGates(access);
-  const needsBody = method === "POST" || method === "PATCH";
+  const needsBody = method === "POST" || method === "PATCH" || method === "PUT";
+  // send-now's body is optional ({ "toMe": true } or nothing).
+  const emptyBody = route.name === "sendNow" && (event?.body === null || event?.body === undefined || event?.body === "");
   let body;
-  if (needsBody) {
+  if (needsBody && !emptyBody) {
     const b = parseBody(event);
     if (b.error) return badBody(cors, b.error);
     body = b.value;
@@ -352,6 +387,15 @@ export const handler = async (event, context) => {
         }
         return await startExport({ def: row.definition, reportId: row.id, tenantId, tenantSlug: identity?.tenantSlug, profileId, heldGates: held, cors });
       }
+      // Scheduled delivery (D-091, schedule.js).
+      case "recipients":
+        return await listRecipients({ me, access, cors });
+      case "schedule":
+        if (method === "GET") return await getSchedule({ id: route.id, me, cors });
+        if (method === "PUT") return await putSchedule({ id: route.id, body, me, perms, access, cors });
+        return await deleteSchedule({ id: route.id, me, perms, cors });
+      case "sendNow":
+        return await sendNow({ id: route.id, body, me, perms, identity, access, cors });
       default:
         return jsonResponse(404, cors, { error: "not_found", code: "ROUTE_NOT_FOUND" });
     }

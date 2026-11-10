@@ -82,6 +82,10 @@ const as = (level) => { ctx.level = level; };
 
 mock.module("../../lib/identity.js", {
   namedExports: {
+    // D-091: the scheduled delivery resolves the OWNER by profile id (schedule.test.js drives it).
+    resolveIdentityForProfile: async () => {
+      throw Object.assign(new Error("not used here"), { code: "NO_SUNDIAL_USER" });
+    },
     resolveIdentity: async () => {
       if (ctx.identityError) {
         const e = new Error("nope");

@@ -18,7 +18,11 @@
 --                  "measures"?: [{ "name", "fn": "count"|"sum"|"max", "column"?,
 --                                  "where"?: [...], "negate_when"?: { "column", "value": [...] } }] }],
 --     "grouped": false,                       true = GROUP BY the one column in "columns"
---     "columns": [{ "alias", "column" }],     ≤ 50 (exactly 1 when grouped)
+--     "columns": [{ "alias", "column", "trunc"? }],  ≤ 50 (exactly 1 when grouped)
+--                                             trunc (D-091, grouped only, a date / timestamptz
+--                                             column): day | week | month | quarter | year —
+--                                             the group is the period's first day, a datetime
+--                                             taken as its America/Phoenix date, weeks from Monday
 --     "filters": [{ "alias", "column", "op", "value" }],   ANDed, ≤ 50
 --     "aggregates": [{ "fn", "alias"?, "column"?, "name" }],  ≤ 10
 --     "sort":   [{ "position": 1-based output position, "dir": "asc"|"desc" }],  ≤ 5
@@ -458,8 +462,28 @@ begin
     raise exception 'sundial_report_run: a grouped report has exactly one group column';
   end if;
   for f in select * from jsonb_array_elements(coalesce(d -> 'columns', '[]'::jsonb)) loop
-    perform public.sundial_report_column(aliases, f ->> 'alias', f ->> 'column', gates, true);
-    outs := outs || public.sundial_report_ref(aliases, f ->> 'alias', f ->> 'column');
+    dt := public.sundial_report_column(aliases, f ->> 'alias', f ->> 'column', gates, true);
+    col := public.sundial_report_ref(aliases, f ->> 'alias', f ->> 'column');
+    -- A period (D-091): the group is the first day of the day / week / month / quarter / year
+    -- it falls in. A timestamptz is read as its ARIZONA wall time first (UTC−7 all year), so
+    -- 11:30 PM on Oct 31 in Phoenix is October, not November. A date is cast to a plain
+    -- timestamp so the session time zone never touches it. Weeks start Monday (ISO).
+    if f ? 'trunc' and jsonb_typeof(f -> 'trunc') <> 'null' then
+      if not grouped then
+        raise exception 'sundial_report_run: trunc is for a grouped report only';
+      end if;
+      if coalesce(f ->> 'trunc', '') not in ('day', 'week', 'month', 'quarter', 'year') then
+        raise exception 'sundial_report_run: bad trunc %', coalesce(f ->> 'trunc', '(null)');
+      end if;
+      if dt = 'date' then
+        col := format('date_trunc(%L, (%s)::timestamp)::date', f ->> 'trunc', col);
+      elsif dt = 'timestamp with time zone' then
+        col := format('date_trunc(%L, %s at time zone %L)::date', f ->> 'trunc', col, 'America/Phoenix');
+      else
+        raise exception 'sundial_report_run: trunc needs a date column, not %', dt;
+      end if;
+    end if;
+    outs := outs || col;
   end loop;
 
   -- Aggregates: per group (grouped) and always as grand totals.

@@ -6,8 +6,9 @@
 --               gated columns already stripped). It is re-validated for whoever RUNS it, so a
 --               Manager running an Admin's shared report never sees a cost column.
 --   sharing     'private' (the owner only) | 'tenant' (everyone in the owner's tenant who has
---               reports.read). Only reports.share (Admin / Executive) may set 'tenant'; the
---               owner may always set their own back to 'private'.
+--               reports.read). The OWNER sets 'tenant' with reports.share — every tenant
+--               level, Managers included (D-089, amended 2026-11-04) — and may always set
+--               their own back to 'private'. (Comment only; re-running this file changes nothing.)
 --   VISIBLE to a caller = same client_sf_id AND (owner OR sharing = 'tenant'). Anything else
 --   is 404 RECORD_NOT_FOUND — the same answer as a report that does not exist.
 --   owner_profile_id / created_by / updated_by are profiles.id (= auth.users.id, the JWT sub).

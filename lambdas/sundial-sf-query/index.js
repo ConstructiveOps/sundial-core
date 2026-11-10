@@ -1200,17 +1200,13 @@ const SOQL_UNSORTABLE_TYPES = new Set(["multipicklist", "textarea", "encryptedst
 
 const PIPELINE_ACCESS_COLUMNS = new Set(["sales_rep_sf_id", "dealer_sf_id"]);
 
-// The Dashboard's "Active Projects" rule (D-080 amendment 1, 2026-10-06) — its ONE home.
-// sundial_solar_pipeline applies it; nothing else decides it. A stage is TERMINAL when it
-// CONTAINS one of the terms (case-insensitive — the substring rule DashboardPage's
-// isTerminalStage() used), unless it is exactly one of NOT_TERMINAL_STAGES.
-//   "archive" added 2026-10-06 at Harmon's request: Archive is 2,913 of 4,523 projects
-//     and the old rule counted every one of them as in progress.
-//   "Billing Complete - Pending Closeout" is still open work (it waits on closeout) but
-//     contains "complete", so it is named as the exception.
-// Measured live 2026-10-06: old list 3,300 in progress, this list 421.
-export const TERMINAL_STAGE_TERMS = Object.freeze(["complete", "cancel", "pto", "closed", "archive"]);
-export const NOT_TERMINAL_STAGES = Object.freeze(["Billing Complete - Pending Closeout"]);
+// The Dashboard's "Active Projects" rule (D-080 amendment 1, 2026-10-06; corrected D-092,
+// 2026-11-10). Its ONE home is lib/stage-rules.js, re-exported here; sundial_solar_pipeline
+// applies it; nothing else decides it. A stage is TERMINAL when it is EXACTLY one of
+// SOLAR_TERMINAL_STAGES. (Until D-092 it was a substring match on five terms, which wrongly
+// called "Inspection Completed" and "Go Back Items Complete" finished.)
+import { SOLAR_TERMINAL_STAGES } from "../../lib/stage-rules.js";
+export { SOLAR_TERMINAL_STAGES };
 
 // One entry per object that has a pipeline. An object NOT here is 400
 // PIPELINE_UNSUPPORTED. Each names its SQL function, the f[] columns it narrows on, any
@@ -1231,7 +1227,7 @@ export const PIPELINE = Object.freeze({
   solar: {
     rpc: "sundial_solar_pipeline",
     narrowColumns: SOLAR_PIPELINE_NARROW_COLUMNS,
-    extraArgs: () => ({ p_terminal_terms: [...TERMINAL_STAGE_TERMS], p_not_terminal: [...NOT_TERMINAL_STAGES] }),
+    extraArgs: () => ({ p_terminal_stages: [...SOLAR_TERMINAL_STAGES] }),
     shape: (d) => ({
       by_stage: d?.by_stage ?? {},
       pms: d?.pms ?? [],

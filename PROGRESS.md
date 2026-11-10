@@ -1,5 +1,68 @@
 # Sundial — Progress Log
 
+## 2026-11-10 — Reporting R4: the report assistant (D-092, `feature/reports-r4`) — BUILT; SQL + secret are Tim's, then deploy + verify
+
+**Why.** D-087 promised an AI front door: an office user describes a report in plain English and gets a report DEFINITION the engine runs — never rows, never SQL. Tim's brief and his answers to the plan (2026-11-10) set every rule.
+
+**Built.**
+- **`POST /reports/assist`** (`lambdas/sundial-reports/assist.js` → `lib/report-assist.js`):
+  - **build** — with no type, a small router call picks one of the ten (or asks);
+  - **refine** — the definition open in the editor, validated first;
+  - **explain** — a definition → one paragraph.
+  - **Everything the model proposes goes through `normalizeDefinition` with the caller's gates** and comes back as `stripDefinition(def, stripped)`, the editor's own shape with relative tokens kept.
+  - Two attempts: a refused proposal goes back once as an error tool result; the second failure becomes a question naming the problem.
+  - Action **`reports.ai`** (every tenant level).
+- **The tool is the rules** (`lib/report-assist-schema.js`). `propose_report` is generated per type and per caller:
+  - field enums defined once in `$defs` (without them solar's schema was ~42k tokens; with them ~15k), with no non-reportable or gated field;
+  - one filter branch per field family × operator group;
+  - period groups and aggregates by type.
+
+  A test runs **every field × operator × value shape the schema offers** through `normalizeDefinition`, for all ten types with and without the cost gate. `tool_choice: auto` + `strict` (Sonnet 5.5 refuses forced tool use); if the API refuses the strict schema, the call goes again non-strict, remembered per type and gates.
+- **The prompt** (`lib/report-assist-prompt.js`): the rules + the glossary + the type's catalog, one line per field. It is a pure function of (type, gates), cached for 1 hour; today's date rides on the last user message.
+  - Estimated cached prefix: customers ~25k tokens, service types ~28–48k, solar ~53k.
+  - Model `claude-sonnet-5-5` (`REPORT_ASSIST_MODEL`), adaptive thinking at effort low, refusal fallback on, `maxRetries: 0`, a 26 s budget.
+- **Key:** `lib/anthropic.js` reads `sundial/anthropic` `api_key` (`apiKey` accepted), never logs it, and answers `503 ASSIST_NOT_CONFIGURED` without it.
+- **Budget + log** (`sql/2026-11-10_report_assist.sql`, PGlite-tested):
+  - `sundial_report_assist_claim` counts the tenant's Arizona month and the user's Arizona day atomically, before the model is called. The limits come from `private.app_config` (500 / 40 by default; 0 = off).
+  - `_release` gives the turn back after an upstream failure.
+  - `sundial_report_assist_log` keeps 90 days of text, definition, outcome, codes and tokens — never rows. The 15-minute tick deletes older rows.
+- **Relative periods** `today`, `this_week`, `last_week` (Monday), `last_quarter`, `this_year`, `last_year` (`RELATIVE_TOKENS`).
+- **Glossary** `docs/reporting-glossary.md` (draft for Tim): sold, active, open job, unpaid, paid, revenue (ask), the stage families and status lists. The Lambda reads it through the generated `lib/report-glossary.js`; tests pin the copy, every field it names, the terminal stage line and every status value.
+- **"Active" corrected (Tim).** The Dashboard's substring rule called "Inspection Completed" and "Go Back Items Complete" finished.
+  - The rule is now the explicit `SOLAR_TERMINAL_STAGES` in `lib/stage-rules.js`, re-exported by `sundial-sf-query` and sent as `sundial_solar_pipeline`'s new `p_terminal_stages`.
+  - The old 5-argument signature is dropped; the legacy arguments still work, so the deployed Lambda keeps working between the SQL and its redeploy.
+  - **Measured on the live cache, 2026-11-10: Harmon 0 projects change category** (none sits at either stage); **conops-demo 3** (2 Inspection Completed, 1 Go Back Items Complete) move from finished to active. Every live stage value is a picklist value, so the explicit list equals the old result on everything else.
+- **Scripts:** `scripts/wire-reports-routes.ps1` (+ `/reports/assist`), `scripts/verify-report-assist.mjs`, `scripts/generate-report-glossary.mjs`.
+- **Tests:** 80 new — schema 25, assist 18, handler 11, SQL 10, glossary 5, stage rules 3, pipeline +4, periods +2, access +1. Full suite **2,139, all pass**.
+- **Docs:** D-092; `docs/reporting-module.md` §6.3 / §6.5 (the budget is `private.app_config`, not `sundial/anthropic`) / §7.2 / §8; `docs/api-endpoints.md`; CLAUDE.md; `docs/multi-client-deployment.md`.
+
+**Tim:** create `sundial/anthropic`, run `sql/2026-11-10_report_assist.sql` then `sql/sundial_solar_pipeline.sql` (TASKS.md, top section). — **Done 2026-11-10.**
+
+**Live (2026-11-10).** `sundial-reports`, `sundial-sf-query` (the Dashboard on the explicit list) and `sundial-auth-proxy` (`reports.ai` on `/auth/me`) are deployed. `/reports/assist` is wired and deployed to `prod`. `node scripts/verify-report-assist.mjs` → **all checks passed** (third run; numbers below).
+- **The five canned requests all came back as definitions that run:**
+  - solar sold this quarter by rep → 10 rows;
+  - open service jobs, oldest first → 441;
+  - unpaid invoices by customer → 539;
+  - calls per tech this month → 8;
+  - customers with no dealer → 5,000, truncated.
+- "Show me revenue for last month" came back as the glossary's three-way question.
+- Refine moved the solar report to `last_quarter` and kept the rest. Explain wrote one accurate paragraph.
+- zz-rep-a1 got 403. zz-admin's filled daily counter gave 429 `ASSIST_BUDGET_EXHAUSTED` (scope user) while the editor still ran reports, and the counter was restored.
+- **Real tokens and latency** (warm cache):
+  - router call: 110–121 in / 47–93 out, 5,949 cached, 1.1–1.9 s;
+  - build call: 110–121 in / 335–383 out, 38,558 (customers) / 42,842 (service_calls) / 69,518 (invoices_payments) / 75,216 (service_jobs) / 79,579 (solar) cached, 2.0–2.8 s;
+  - refine: 330 in / 352 out, 2.7 s; explain: 386 in / 176 out, 2.4 s;
+  - **per turn as the caller saw it: median 3.96 s, max 4.98 s.**
+  - Totals for 8 turns / 13 calls: input 1,963, output 2,653, cache read 496,202, cache write 0.
+  - The earlier run's cold writes were 5,949 for the router and 38,558–79,579 per type (solar's prefix is ~80k real tokens; the character estimate said ~53k).
+- **Cost** at Sonnet 5.5 prices: a warm turn ≈ $0.01; the first turn of an hour for solar adds ≈ $0.32 of cache write (≈ $0.15 for customers).
+- **Strict mode:** the API refused the strict schema for every type, so every proposal went out non-strict. That is the designed fallback, and every one of the 15 proposals still validated on its FIRST attempt (no retries, no codes). The refusal reason is not logged yet — a follow-up.
+- **Model choices worth knowing:**
+  - "by rep" on solar grouped on `solar.sales_rep_name` (the project's own rep field, the one the Solar page counts), not the joined `rep.name`; the verify script accepts both;
+  - "calls per tech" left out Cancelled calls, as the glossary says.
+- The **first** run's first three requests got API Gateway's "Invalid key=value pair in Authorization header" 403: the just-created `prod` deployment had not reached the new resource yet. The same requests passed seconds later; no code changed.
+- **Stage-category change (item 2), live:** Harmon 0 projects; conops-demo 3.
+
 ## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`) — DEPLOYED, VERIFIED LIVE, merged to master
 
 **Why.** Harmon wants saved reports to arrive by email on a schedule, without anyone opening the portal. Tim's brief and his answers to the plan (2026-11-10) set every rule. Dashboards (R2) stay deferred.

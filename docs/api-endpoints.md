@@ -256,7 +256,7 @@ The Solar Projects page's stage columns and PM / Sales Rep option counts **and**
 - **`by_stage`** has no status level — the Solar page has no Status tabs; stage is the grouping. Blank stage under `""`.
 - **`pms` / `reps`** are `[value, n]` tuples, most first, a blank value as `null`. They are the COUNTS behind the dropdowns; the page keeps its own option rules (PMs = the picklist's active values, reps = names on records ∩ active users).
 - **`stats`** cover the SAME rows as the counts: the access filter AND any narrowing. `in_progress` = stage not blank and not terminal (below). `contract_total` = Σ `contract_amount`; `system_size_kw_total` = Σ **`system_size`** — the column the Dashboard summed, in kW (`system_size_kw` is empty on every Harmon row as of 2026-10-06). Both are `null`, not `0`, when no row has a value (the card shows "—"). `recent` = the 6 most recently synced rows, `[sf_id, project_name, customer_name, stage, last_synced_at]`, `customer_name` = first + last name, else the snapshot name (the page's `customerName()`).
-- **The terminal rule has one home**: `TERMINAL_STAGE_TERMS` + `NOT_TERMINAL_STAGES` in `lambdas/sundial-sf-query/index.js`, passed to the function as `p_terminal_terms` / `p_not_terminal`. A stage is terminal when it **contains** one of `complete`, `cancel`, `pto`, `closed`, `archive` (case-insensitive — the Dashboard's old substring rule plus `archive`), unless it is **exactly** `Billing Complete - Pending Closeout` (still open work). Live 2026-10-06: **421** of Harmon's 4,523 projects in progress; the old four-word rule gave **3,300** (Archive, 2,913 projects, counted as active). See D-080 amendment 1.
+- **The terminal rule has one home** (D-092, 2026-11-10): `SOLAR_TERMINAL_STAGES` in `lib/stage-rules.js`, re-exported by `sundial-sf-query` and passed to the function as **`p_terminal_stages`** — an EXACT list: PTO Approval Granted, Request to Archive, Archive, Cancelled - Awaiting Sales to Resell, Cancelled. Everything else non-blank is in progress, including **Inspection Completed**, **Go Back Items Complete** and Billing Complete - Pending Closeout. (Until D-092 the rule was a substring match on `complete` / `cancel` / `pto` / `closed` / `archive` with Billing Complete as the one exception, which wrongly called the first two finished; the function still accepts the old `p_terminal_terms` / `p_not_terminal` when `p_terminal_stages` is null, for the Lambda deployed before D-092.) Live 2026-11-10: the correction moves **0** Harmon projects and **3** conops-demo ones (2 Inspection Completed, 1 Go Back Items Complete) into in-progress. History: D-080 amendment 1 (421 of 4,523 in progress on 2026-10-06 after `archive` was added).
 
 **Access** — identical to the customer pipeline (rep → `sales_rep_sf_id`, dealer → `dealer_sf_id`, tenant → `{}`; an OR group or another column → `403`), so a rep's Dashboard is the rep's book.
 
@@ -997,7 +997,7 @@ Quick reference of which Lambda handles which routes:
 | `sundial-sf-query` | GET /sf/{object}, GET /sf/{object}/{id} |
 | `sundial-sf-update` | PATCH /sf/{object}/{id}, DELETE /sf/{object}/{id} |
 | `sundial-dealer` | GET /dealer/customers, GET /dealer/customers/{id} — the dealer shell (dealer module step 3; action `dealer.read`) |
-| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); GET /reports/values — a text field's distinct values (D-089 am. 1); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes); GET /reports/recipients, GET/PUT/DELETE /reports/{id}/schedule, POST /reports/{id}/send-now, GET /public/reports/download/{token} (no login) — scheduled delivery (D-091, R3; `reports.schedule.external` for outside addresses); `{ task: "tick" }` from EventBridge `sundial-reports-tick` |
+| `sundial-reports` | POST /reports/run, GET /reports/types, GET /reports/catalog — the report engine (D-088, R1a; action `reports.read`); GET /reports/values — a text field's distinct values (D-089 am. 1); POST /reports/csv, GET /reports/csv/{exportId}; GET/POST /reports, GET/PATCH/DELETE /reports/{id}, GET /reports/{id}/run, GET /reports/{id}/csv — CSV export + saved reports (D-089, R1b; `reports.write` / `reports.share`, both every tenant level). 1,024 MB / 300 s (the CSV worker self-invokes); GET /reports/recipients, GET/PUT/DELETE /reports/{id}/schedule, POST /reports/{id}/send-now, GET /public/reports/download/{token} (no login) — scheduled delivery (D-091, R3; `reports.schedule.external` for outside addresses); `{ task: "tick" }` from EventBridge `sundial-reports-tick` (also deletes report-assistant logs past 90 days); POST /reports/assist — the report assistant (D-092, R4; `reports.ai`, a per-tenant / per-user budget) |
 | `sundial-list-files` | GET /files/by-record/{recordId}, POST /projects/{customerId}/files/copy-to-solar |
 | `sundial-upload-file` | POST /files/by-record/{recordId}/upload |
 | `sundial-list-related-files` | GET /files/by-record/{recordId}/related |
@@ -1039,6 +1039,7 @@ Config that must not live in code (addresses, domains, regions) is set per-Lambd
 |---|---|---|---|
 | `SERVICE_PUBLIC_BASE_URL` | `sundial-service-estimate` | **Yes** (for the customer link) | The portal's public origin, e.g. `https://harmon.sundialcrm.com` (no trailing slash). `/send` builds the customer link as `{base}/estimate/{token}`. If unset, `/send` still records the version and returns `delivery: "recorded"` with `deliveryDetail` naming this variable — nothing is emailed because there is no link to email. **Per-tenant:** each fork's Vercel origin. |
 | `EMAIL_FROM` / `EMAIL_REPLY_TO` / `SES_REGION` / `EMAIL_CONFIG_SET` | `sundial-service-estimate` (in addition to the senders below) | `EMAIL_FROM` yes to send | Same values as the other senders — the estimate email goes through `lib/email.js`. The execution role already carries SES access (see the SES notes). |
+| `REPORT_ASSIST_MODEL` | `sundial-reports` | No | The report assistant's model (D-092). Default `claude-sonnet-5-5`. The key is NOT a variable: Secrets Manager **`sundial/anthropic`** `{ "api_key": "…" }` (`apiKey` also read), one shared Constructive Ops key for every tenant; the role's `SecretsManagerReadWrite` covers it. |
 | `REPORTS_PUBLIC_API_BASE` | `sundial-reports` | No | Where a scheduled report's download link points (D-091). Default `https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`; set it only if the API moves to a custom domain. |
 | *(secret, not a variable)* `sundial/twilio` | `sundial-sms` | Yes to text | Secrets Manager JSON `{ "accountSid", "authToken", "fromNumber", "tenantNumbers"?: { "<slug>": "+1…" }, "defaultTenant"?: "<slug>" }`. The account is Constructive Ops'; the number a tenant texts from is `tenantNumbers[slug]`, else the shared `fromNumber`; an inbound text routes to the tenant whose number it hit, else `defaultTenant`. Re-read every 5 minutes — swapping Harmon onto its own approved number is a secret edit, not a deploy. |
 | `SMS_WEBHOOK_BASE` | `sundial-sms` | Yes for webhooks | The public base Twilio calls, e.g. `https://5sktfwldh1.execute-api.us-west-1.amazonaws.com/prod`. Twilio's signature covers the EXACT URL, so this must match the Twilio console character for character; it is also the base of the per-message status callback. |
@@ -1420,6 +1421,54 @@ Errors:
 **`GET /reports/csv/{exportId}`** on a delivery's export adds `delivery: { status: pending | sent | partial | failed, sent, failed, skipped, attached, code }` — counts only, never an address.
 
 **The tick** (not a route): EventBridge `sundial-reports-tick`, `cron(0/15 * * * ? *)`, input `{ "task": "tick" }` → `{ lost, due, claimed, queued, failed }`. At most 5 claims a tick; a schedule is claimed by a conditional update of `next_run_at`, so two ticks never run the same slot. Each delivery: under 8 MB the CSV is attached, 8 MB or more a 7-day link per recipient; a grouped report's first 100 rows are drawn in the body; subject `<report name> — <Mon D, YYYY>`. Three failures in a row disable the schedule and email the owner once.
+
+### The report assistant (R4, D-092, 2026-11-10) — `POST /reports/assist`
+
+Plain English → a report **definition** (never rows, never SQL), one question, or a paragraph explaining a definition. Everything the model proposes goes through `lib/report-def.js` `normalizeDefinition` **with the caller's gates**, exactly like a hand-built definition; what comes back is `stripDefinition(def, stripped)` — the object the editor holds (relative tokens such as `this_quarter` kept). Design: `docs/reporting-module.md` §7.2; business words: `docs/reporting-glossary.md`.
+
+**Access:** `reports.read` (above), then **`reports.ai`** = every tenant level (Executive / Admin / Manager); anyone else `403 MODULE_FORBIDDEN` before anything is counted.
+
+**Body** (≤ 100 KB):
+```json
+{ "mode": "build" | "refine" | "explain",
+  "type": "solar",
+  "messages": [{ "role": "user", "content": "solar projects sold this quarter by rep" }],
+  "currentDefinition": { "type": "solar", … } }
+```
+- `type` is optional. In build mode without it, the server picks the report type first (one small extra model call, or a question).
+- `messages`: 1–20, alternating, starting and ending with the user, ≤ 2,000 characters each. Optional for explain.
+- `currentDefinition`: refine / explain only. It is validated first; a 400 names `currentDefinition.<field>`.
+
+→ `200`
+```json
+{ "outcome": "definition",
+  "reply": "Solar projects with a contract signed this quarter, totalled by sales rep, largest first.",
+  "definition": { "type": "solar", "filters": [{ "field": "solar.contract_date", "op": "between", "value": "this_quarter" }],
+                  "groupBy": ["rep.name"], "aggregates": [{ "fn": "count" }, { "fn": "sum", "field": "solar.contract_amount" }],
+                  "sort": [{ "field": "sum_solar_contract_amount", "dir": "desc" }] },
+  "type": "solar",
+  "usage": { "inputTokens": 1200, "outputTokens": 640, "cacheReadTokens": 48000, "cacheWriteTokens": 0, "ms": 5400,
+             "calls": [{ "kind": "build", "ms": 5400, "inputTokens": 1200, "outputTokens": 640, "cacheReadTokens": 48000, "cacheWriteTokens": 0 }] },
+  "budget": { "tenantUsed": 12, "tenantLimit": 500, "userUsed": 3, "userLimit": 40 } }
+```
+- `outcome`: `definition` | `question` | `explained` | `invalid` | `refused`.
+- `definition` only when `outcome` is `definition`. Explain puts its paragraph in `reply`.
+- `question` (outcomes question / invalid / refused): ONE question for the user. **`invalid`** = the validator refused the model's proposal twice (it is told why once); the question names the problem. **`refused`** = the model declined.
+- `stripped` appears only if a gated field had to be removed (not expected: the caller's schema has none).
+- `calls[].kind`: `route` (picking the type), `build`, `refine`, `retry`, `explain`.
+
+Errors:
+- `400 { error: "invalid_assist", code, field, message }` — `BAD_ASSIST_REQUEST`, `UNKNOWN_TYPE`, `TYPE_MISMATCH`, or any `/reports/run` code for `currentDefinition.*`. **Never counts a turn.**
+- **`429 { error: "budget_exhausted", code: "ASSIST_BUDGET_EXHAUSTED", scope: "tenant" | "user", limit, resetsAt, message }`** — the tenant's month (default 500 turns) or the user's Arizona day (default 40) is used up. The report editor does not use this route and keeps working.
+- `502 ASSIST_UPSTREAM` — the Anthropic API failed or timed out; **the turn is given back**.
+- `503 ASSIST_NOT_CONFIGURED` — Secrets Manager `sundial/anthropic` has no key; no turn counted.
+
+**A turn** is one request that reaches the model, however many calls it makes inside (the type pick, a retry). It is claimed BEFORE the model by `sundial_report_assist_claim` (`sql/2026-11-10_report_assist.sql`) and released on an upstream failure; a refusal or a question counts. The limits are `private.app_config` `report_assist_tenant_month_limit` / `report_assist_user_day_limit`, read inside the claim function (changing one needs no deploy).
+
+**Every turn is logged** in `public.sundial_report_assist_log` (service role only; the 15-minute tick deletes rows older than 90 days): the user's last message, the reply / question, the validated definition, the outcome, attempts, validation codes, model, tokens, ms. Never a data row. CloudWatch gets counts and timings only.
+
+**The model:** `REPORT_ASSIST_MODEL` (default `claude-sonnet-5-5`), adaptive thinking at effort `low`, the server-side refusal fallback on. Two tools: `propose_report` (schema generated per type and per caller from the definition rules) and `ask_question`, with `tool_choice: auto` and `strict: true` (non-strict if the API refuses the schema). The rules, the glossary and the type's catalog are a prompt-cached prefix (1 hour).
+
 
 ---
 

@@ -49,6 +49,7 @@ import { sendEmail } from "../../lib/email.js";
 import { queueExport, tenantPortalOrigin } from "./csv.js";
 import { loadVisible, ownerNameOf, REPORTS_TABLE } from "./saved.js";
 import { heldGates } from "./gates.js";
+import { cleanupAssist } from "./assist.js";
 
 export const USERS_TABLE = "sundial_user_cache";
 export const EXTERNAL_ACTION = "reports.schedule.external";
@@ -438,6 +439,9 @@ export async function runTick({ now = new Date() } = {}) {
     if (res.ok) summary.queued += 1;
     else summary.failed += 1;
   }
+  // The report assistant's 90-day log retention (D-092) rides on the same tick. Best effort:
+  // cleanupAssist never throws, so a failure here never touches a delivery.
+  summary.assistCleanup = await cleanupAssist(supabase, now);
   console.log(JSON.stringify({ tick: "done", ...summary, ms: Date.now() - started }));
   return summary;
 }

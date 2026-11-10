@@ -11,6 +11,8 @@
 //   GET  /reports/{id}/run, GET /reports/{id}/csv            saved reports (saved.js)
 //   GET  /reports/recipients, GET / PUT / DELETE /reports/{id}/schedule,
 //   POST /reports/{id}/send-now        scheduled delivery (schedule.js, D-091)
+//   POST /reports/assist   the report assistant (assist.js, D-092): plain English → a validated
+//                          definition, or one question; explain a definition. reports.ai + a budget.
 //   GET  /public/reports/download/{token}   NO LOGIN: a delivered report's 7-day link (deliver.js)
 //   { task: "csv", exportId }   NOT a route: this Lambda invoking itself to build an export
 //                               (and, for a delivery, to email it when it is done — deliver.js).
@@ -52,8 +54,10 @@ import { isUuid } from "../../lib/saved-reports.js";
 import { CATALOG_GATES, heldGates } from "./gates.js";
 import { listRecipients, getSchedule, putSchedule, deleteSchedule, sendNow, runTick } from "./schedule.js";
 import { deliverExport, publicDownload } from "./deliver.js";
+import { assist } from "./assist.js";
 
 export const ACTION = "reports.read";
+export const AI_ACTION = "reports.ai";
 export const RPC = "sundial_report_run";
 export const VALUES_RPC = "sundial_report_values";
 export const MAX_VALUES_SEARCH = 100;
@@ -71,6 +75,7 @@ const ROUTES = [
   [/^\/reports\/csv\/?$/, "csv", ["POST"]],
   [/^\/reports\/csv\/([^/]+)\/?$/, "csvStatus", ["GET"]],
   [/^\/reports\/recipients\/?$/, "recipients", ["GET"]],
+  [/^\/reports\/assist\/?$/, "assist", ["POST"]],
   [/^\/reports\/?$/, "saved", ["GET", "POST"]],
   [/^\/reports\/([^/]+)\/run\/?$/, "savedRun", ["GET"]],
   [/^\/reports\/([^/]+)\/csv\/?$/, "savedCsv", ["GET"]],
@@ -396,6 +401,10 @@ export const handler = async (event, context) => {
         return await deleteSchedule({ id: route.id, me, perms, cors });
       case "sendNow":
         return await sendNow({ id: route.id, body, me, perms, identity, access, cors });
+      // The report assistant (D-092). reports.read was checked above; reports.ai here.
+      case "assist":
+        if (!canAction(AI_ACTION, access)) return jsonResponse(403, cors, { error: "forbidden", code: DENY.MODULE_FORBIDDEN });
+        return await assist({ body, me, heldGates: held, cors });
       default:
         return jsonResponse(404, cors, { error: "not_found", code: "ROUTE_NOT_FOUND" });
     }

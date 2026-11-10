@@ -7,8 +7,9 @@
 --     'a1W7y000007AszBEAS',                                   -- the tenant (client_sf_id)
 --     '{"eq": {"sales_rep_sf_id": "a1O..."}}'::jsonb,         -- the ACCESS filter
 --     '{"stage": {"values": ["Permitting"], "blank": false}}'::jsonb,  -- the CALLER's narrowing
---     array['complete','cancel','pto','closed','archive'],     -- terminal stage TERMS
---     array['Billing Complete - Pending Closeout']             -- stages that are NEVER terminal
+--     null, null,                                              -- (legacy substring args, unused)
+--     array['PTO Approval Granted','Request to Archive','Archive',
+--           'Cancelled - Awaiting Sales to Resell','Cancelled']  -- the terminal STAGES (exact)
 --   );
 --
 -- Returns jsonb, every count a GROUP BY over public.sundial_solar_cache:
@@ -21,13 +22,16 @@
 --               recent: [[sf_id, project_name, customer_name, stage, last_synced_at], ...6] }
 --
 -- STATS (the Dashboard's four cards and Recent Projects):
---   in_progress           stage not blank AND not terminal. TERMINAL = the stage contains
---                         one of p_terminal_terms (case-insensitive substring — the rule
---                         the Dashboard's isTerminalStage() used), UNLESS the stage is
---                         exactly one of p_not_terminal. The two lists are passed by the
---                         Lambda (TERMINAL_STAGE_TERMS / NOT_TERMINAL_STAGES in
---                         sundial-sf-query) so the rule has ONE home; this function only
---                         applies it. NULL lists = nothing is terminal.
+--   in_progress           stage not blank AND not terminal. TERMINAL (D-092, 2026-11-10) =
+--                         the stage is EXACTLY one of p_terminal_stages, the list the
+--                         Lambda passes from lib/stage-rules.js SOLAR_TERMINAL_STAGES, so
+--                         the rule has ONE home; this function only applies it.
+--                         LEGACY (until the new sundial-sf-query is deployed): when
+--                         p_terminal_stages is NULL the old D-080 am. 1 rule applies — the
+--                         stage contains one of p_terminal_terms (case-insensitive
+--                         substring) UNLESS it is exactly one of p_not_terminal. That rule
+--                         wrongly called "Inspection Completed" / "Go Back Items Complete"
+--                         finished. All lists NULL = nothing is terminal.
 --   contract_total        sum(contract_amount); NULL when no row has one (the card's "—")
 --   system_size_kw_total  sum(system_size) — the column the Dashboard summed. It IS kW
 --                         (System_Size__c). system_size_kw is empty on every Harmon row
@@ -52,12 +56,19 @@
 -- browser-role revokes, and Postgres grants EXECUTE on a new function to PUBLIC (which
 -- anon / authenticated inherit) — hence the revoke below. Re-runnable.
 
+-- D-092: the 5-argument version is replaced by this 6-argument one. Dropped first so the
+-- two never coexist (an RPC by name would be ambiguous). The Lambda deployed before D-092
+-- calls with p_terminal_terms / p_not_terminal by NAME, which the new signature still takes,
+-- so the Dashboard keeps working between this file and the sundial-sf-query deploy.
+drop function if exists public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[]);
+
 create or replace function public.sundial_solar_pipeline(
-  p_client_sf_id   text,
-  p_filters        jsonb  default '{}'::jsonb,
-  p_narrow         jsonb  default null,
-  p_terminal_terms text[] default null,
-  p_not_terminal   text[] default null
+  p_client_sf_id    text,
+  p_filters         jsonb  default '{}'::jsonb,
+  p_narrow          jsonb  default null,
+  p_terminal_terms  text[] default null,
+  p_not_terminal    text[] default null,
+  p_terminal_stages text[] default null
 )
 returns jsonb
 language plpgsql
@@ -71,6 +82,8 @@ declare
   n   jsonb := coalesce(p_narrow, '{}'::jsonb);
   terms text[] := coalesce(p_terminal_terms, '{}'::text[]);
   keep  text[] := coalesce(p_not_terminal, '{}'::text[]);
+  exact  boolean := p_terminal_stages is not null;
+  stages text[]  := coalesce(p_terminal_stages, '{}'::text[]);
   bad text;
   result jsonb;
 begin
@@ -120,8 +133,11 @@ begin
   -- Terminal per DISTINCT stage (a couple of dozen), not per row.
   term as (
     select g, cnt,
-           g <> '' and not (g = any(keep))
-             and exists (select 1 from unnest(terms) t where btrim(t) <> '' and position(lower(t) in lower(g)) > 0) as terminal
+           g <> '' and case
+             when exact then g = any(stages)
+             else not (g = any(keep))
+               and exists (select 1 from unnest(terms) t where btrim(t) <> '' and position(lower(t) in lower(g)) > 0)
+           end as terminal
     from sg
   ),
   rc as (
@@ -152,9 +168,9 @@ end;
 $$;
 
 -- See the header: PUBLIC first, or anon / authenticated keep EXECUTE through it.
-revoke all on function public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[]) from public, anon, authenticated;
-grant execute on function public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[]) to service_role;
+revoke all on function public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[], text[]) from public, anon, authenticated;
+grant execute on function public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[], text[]) to service_role;
 
 -- Check (in the SQL editor) — this must return false for both:
-select has_function_privilege('anon', 'public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[])', 'execute') as anon_can_execute,
-       has_function_privilege('authenticated', 'public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[])', 'execute') as authenticated_can_execute;
+select has_function_privilege('anon', 'public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[], text[])', 'execute') as anon_can_execute,
+       has_function_privilege('authenticated', 'public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[], text[])', 'execute') as authenticated_can_execute;

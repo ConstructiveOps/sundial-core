@@ -4,6 +4,34 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-10 — Reporting R4: the report assistant (D-092, `feature/reports-r4`)
+
+- [x] `POST /reports/assist` (build / refine / explain) — `lambdas/sundial-reports/assist.js`, `lib/report-assist.js`; action `reports.ai` (every tenant level)
+- [x] The tool schema generated from the definition rules per type and caller (`lib/report-assist-schema.js`, `$defs` field lists); the prompt (`lib/report-assist-prompt.js`: rules + glossary + the type's catalog, cached 1 h; router for no type); `lib/anthropic.js` (`sundial/anthropic` `api_key` / `apiKey`, `REPORT_ASSIST_MODEL` default `claude-sonnet-5-5`)
+- [x] Budget + log: `sql/2026-11-10_report_assist.sql` (claim / release, limits in `private.app_config`, 90-day log; the tick cleans up)
+- [x] Relative periods `today`, `this_week`, `last_week`, `last_quarter`, `this_year`, `last_year` (`RELATIVE_TOKENS`)
+- [x] `docs/reporting-glossary.md` (draft) + `scripts/generate-report-glossary.mjs` → `lib/report-glossary.js` (pinned by test)
+- [x] "Active" solar stages: `lib/stage-rules.js` `SOLAR_TERMINAL_STAGES` (explicit; Inspection Completed and Go Back Items Complete are active), re-exported by `sundial-sf-query`, `sundial_solar_pipeline` `p_terminal_stages`. Live: **0** Harmon projects change category, **3** conops-demo
+- [x] `scripts/wire-reports-routes.ps1` (+ `/reports/assist`), `scripts/verify-report-assist.mjs`
+- [x] Tests: full suite 2,139 (+ the budget checks), all pass — 80 new
+- [x] Docs: D-092, `docs/reporting-module.md` §6.3 / §6.5 / §7.2 / §8, `docs/api-endpoints.md`, CLAUDE.md (tech stack, Dashboard rule, item 11), `docs/multi-client-deployment.md` (shared secret)
+
+**Tim — before the deploy:**
+- [x] **Secrets Manager `sundial/anthropic`** = `{ "api_key": "sk-ant-…" }` (us-west-1). Never pasted into chat or a file.
+- [x] **SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
+  - [x] **1. `sql/2026-11-10_report_assist.sql`** (new). The check at the bottom must show **false**, **false** (`anon_can_claim`, `authenticated_can_read_log`).
+  - [x] **2. `sql/sundial_solar_pipeline.sql`** (re-run: `p_terminal_stages`; drops the 5-argument version). The check at the bottom must show **false**, **false**. Run it BEFORE `sundial-sf-query` is redeployed.
+- [ ] Optional: different limits — `private.app_config` `report_assist_tenant_month_limit` (default 500) / `report_assist_user_day_limit` (default 40). See the SQL file's header.
+
+**Claude, after "SQL is in":**
+- [x] `npm i`; `.\deploy.ps1 sundial-reports`; `.\scripts\wire-reports-routes.ps1 -Yes` (`/reports/assist` + CORS) (2026-11-10)
+- [x] `.\deploy.ps1 sundial-sf-query` (the Dashboard on the explicit list) and `.\deploy.ps1 sundial-auth-proxy` (`/auth/me` advertises `reports.ai`) (2026-11-10)
+- [x] `node scripts/verify-report-assist.mjs` — **all checks passed** (2026-11-10; tokens and latency in PROGRESS) → merged `feature/reports-r4` into `master` (`--no-ff`), pushed
+- [ ] Log WHY the API refuses the strict schema (it did for every type; the non-strict fallback carried every turn, all 15 proposals valid on the first attempt) and decide whether a smaller strict schema is worth it
+- [ ] harmon-crm: the "Describe the report you want" box on the Reports page (build / refine / explain, the question shown as a chat turn, the 429 message with the editor still usable, `reports.ai` from `/auth/me`); then a feature-inventory row (sundial-core dependency: `POST /reports/assist`, SQL `2026-11-10_report_assist.sql`, secret `sundial/anthropic`; new-client step: none, shared). Update the two comments in `src/lib/api.ts` / `DashboardPage.tsx` that still name `TERMINAL_STAGE_TERMS`
+- [ ] Tim: review `docs/reporting-glossary.md` (sold, active, open job, unpaid, revenue, the stage families); edits need the generator + a redeploy
+- [ ] Later engine item: **a second group level** ("calls per tech per week") — not in R4
+
 ## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`)
 
 - [x] Engine: `groupBy` `{ field, dateTrunc }` (day / week from Monday / month / quarter / year, Arizona periods) — `lib/report-def.js` + `sql/sundial_report_run.sql`, PGlite tests

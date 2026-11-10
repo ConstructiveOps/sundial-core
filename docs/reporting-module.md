@@ -1,6 +1,6 @@
 # Reporting Module — design (2026-10-30)
 
-> Status: DESIGN, agreed with Tim 2026-10-30. R0 built and run 2026-11-02; R1a (the engine, solar type) built 2026-11-03 — D-088.
+> Status: DESIGN, agreed with Tim 2026-10-30. R0 built and run 2026-11-02; R1a (the engine, solar type) built 2026-11-03 — D-088; R1b 2026-11-04 — D-089; R3 2026-11-10 — D-091; R4 (the report assistant) 2026-11-10 — D-092.
 > Decision to record in DECISIONS.md: **D-087 — reports run on the Supabase cache; Salesforce is never the report engine.** Supersedes CLAUDE.md "Key UI Components" item 11 ("Reporting — Salesforce reports surfaced in portal UI").
 
 ## 1. What Harmon needs
@@ -156,7 +156,7 @@ Shape (`lib/report-types.js`): `{ key, label, base: { object, alias, label }, jo
   - boolean: `eq, is_blank`
 
   `neq` / `not_in` include blank rows. `contains` / `starts_with` are case-insensitive, with wildcards in the value taken literally.
-- **Relative dates** (`this_month`, `last_month`, `this_quarter`, `ytd`, `last_n_days:N` = N days ending today) are resolved on the server in **America/Phoenix** (UTC-07:00 all year), as a value of `eq` or `between`. A datetime filter means whole Arizona days. This is what makes a saved report re-runnable.
+- **Relative dates** (`today`, `this_week`, `last_week`, `this_month`, `last_month`, `this_quarter`, `last_quarter`, `this_year`, `last_year`, `ytd`, `last_n_days:N` = N days ending today) are resolved on the server in **America/Phoenix** (UTC-07:00 all year), as a value of `eq` or `between`. Weeks start **Monday**; quarters and years are calendar ones; `this_*` periods run to the period's end, `ytd` to today. The list is `RELATIVE_TOKENS` in `lib/report-def.js` (D-092 added `today`, the weeks, `last_quarter` and the years). A datetime filter means whole Arizona days. This is what makes a saved report re-runnable.
 - **Shape:**
   - One group level. When grouped, the columns are the group, then the aggregates.
   - **Group by period (D-091):** a `groupBy` entry may be `{ "field": "solar.contract_date", "dateTrunc": "month" }` — `day` | `week` | `month` | `quarter` | `year`, on a date or datetime field only (`400 BAD_GROUP` otherwise). The group's value is the period's first day (`"2026-11-01"`), the output column is a `date` labelled "Contract Signed Date (month)". A datetime is bucketed by its **Arizona** date (11:30 PM on Oct 31 in Phoenix is October); weeks start **Monday**. The wire column carries `trunc`; `sundial_report_run` re-checks it and RAISES on anything else. A plain string group is unchanged.
@@ -205,7 +205,9 @@ Actions:
 **The 404 rule:** a saved report or an export the caller may not see (another tenant's, someone else's private one, someone else's export) answers **404 `RECORD_NOT_FOUND`**, the same as one that does not exist. `reports.read` is checked first, so a sales user gets 403 `MODULE_FORBIDDEN` on every route.
 Error codes: editing or deleting a report someone else owns (and shared) is **403 `REPORT_READ_ONLY`**. A share without `reports.share` is **403 `SHARE_FORBIDDEN`**; no office level hits it today.
 
-**R2+:** `GET /dashboards/me`. Actions **`reports.admin`** (Admin / Executive): **see and manage every report in the tenant**, anyone's, shared or private, plus the dashboards. Also `reports.ai` (R4, with a per-tenant monthly budget in `sundial/anthropic`).
+**R2+:** `GET /dashboards/me`. Actions **`reports.admin`** (Admin / Executive): **see and manage every report in the tenant**, anyone's, shared or private, plus the dashboards.
+
+**Built (R4, D-092):** `POST /reports/assist`, action **`reports.ai`** (every tenant level). Its budget — turns per tenant per month and per user per day — lives in **`private.app_config`**, read inside `sundial_report_assist_claim` (§7.2); `sundial/anthropic` holds only the API key. (This sketch had said the budget would be in `sundial/anthropic`.)
 
 ### 6.6 Storage — saved reports (built, R1b) / dashboards (R2)
 `sql/sundial_reports.sql`: **`public.sundial_reports`** (id uuid, client_sf_id, owner_profile_id, name ≤ 120, description ≤ 2,000, definition jsonb, **sharing `private` | `tenant`**, created_at / updated_at / created_by / updated_by). There is no foreign key on the owner: a deleted login must not delete reports others rely on, and the id always comes from the verified JWT. `schedule` is R3. Rules in `lib/saved-reports.js`:
@@ -242,7 +244,7 @@ The file format:
 
 ## 7. R2–R4
 - **R2** (deferred, sketch) — Tim authors the starter set as saved definitions (pipeline by stage / rep, solar by PM and stage with contract totals, service jobs by status and payer, invoices + balances, estimates sent / approved, calls per tech per week) and pins them per department in `sundial_dashboards`. The Dashboard page gains a "My Dashboard" built from `GET /dashboards/me`; the existing stat cards stay.
-- **R4** (sketch) — Reports page: "Describe the report you want" → the model (tool-use, the catalog + report types + business definitions in a cached prompt) returns a definition → shown as plain English + editable filter chips / column list → Run → Save. The model never sees rows. A `reports.ai` refusal (budget exhausted) leaves the chips editable by hand.
+- **R4** — the report assistant. Built 2026-11-10 (D-092, `feature/reports-r4`) — §7.2. The Reports page's "Describe the report you want" box, the plain-English summary and the editable chips are harmon-crm's (not built yet).
 
 ### 7.1 R3 — scheduled delivery (built 2026-11-10, D-091, `feature/reports-r3`)
 A saved report goes out by email on a schedule. The sketch said `cron`, format `csv | pdf` and `{ task: "deliver" }`; as built it is cadences, CSV only, and `{ task: "tick" }`.
@@ -276,7 +278,59 @@ A saved report goes out by email on a schedule. The sketch said `cron`, format `
 
 **Proof:** `node scripts/verify-report-schedule.mjs` (ZZ users; send-now to zz-admin checked by the SES result, a Manager's outside address refused, a forced-due schedule ticked twice at once runs once and advances).
 
+### 7.2 R4 — the report assistant (built 2026-11-10, D-092, `feature/reports-r4`)
+
+**What it is.** `POST /reports/assist`: plain English → a report DEFINITION, or ONE question; or a definition → a paragraph. The model never sees a row and never writes SQL. **Everything it proposes goes through `normalizeDefinition` with the caller's gates**, exactly like a hand-built definition, and what is returned is `stripDefinition(def, n.stripped)` — the object the editor holds, relative tokens kept. A saved report never consults the model again (D-087).
+
+**Three modes.**
+- **build** — messages (+ `type`?). With no type, a small router call picks one of the ten from one-line descriptions (or asks).
+- **refine** — messages + `currentDefinition` (validated first; its type is the type). The current definition rides in the last user message.
+- **explain** — `currentDefinition` → one paragraph. Same cached prefix, `tool_choice: none`.
+
+**The tool IS the definition rules** (`lib/report-assist-schema.js`). `propose_report`'s JSON schema is generated per report type and per caller:
+- every field is an enum of that type's `alias.column` names, defined once under `$defs` and referenced, minus non-reportable and gated fields (for a caller without the gate, a cost column does not exist);
+- a filter is one of ~14 branches, one per field family × operator group, so an operator a field does not allow, or a value of the wrong shape, cannot be written;
+- groupBy is a field or `{ field, dateTrunc }` on a date; aggregates are count / sum-avg of numbers / min-max of numbers and dates.
+
+A test runs every field × operator × value shape the schema offers through `normalizeDefinition`, for all ten types with and without the cost gate. What the schema cannot express (one group level, the 50 / 10 / 5 limits, sort naming a shown column) is in the descriptions and enforced by the validator. `ask_question` takes one question.
+
+**The call.**
+- Model `REPORT_ASSIST_MODEL` (default `claude-sonnet-5-5`), adaptive thinking at effort `low`, the server-side refusal fallback on (`fallbacks: "default"`).
+- Sonnet 5.5 refuses forced tool use, so `tool_choice: auto` (one call at most) plus `strict: true`. If the API refuses the strict schema, the same call goes again without strict, remembered for that type and gate set. A turn that ends in text is the question.
+- `maxRetries: 0`; the turn has a 26 s budget inside API Gateway's 29 s.
+
+**Two attempts.** A proposal the validator refuses goes back once as an error `tool_result` naming the code and the field (append-only: the assistant turn exactly as returned). A second refusal, or less than 10 s left, becomes a question that names the problem (`outcome: invalid`).
+
+**Prompt caching.** The cached prefix is tools → system: the rules + `docs/reporting-glossary.md` (`lib/report-glossary.js`, generated) + the type's catalog block (one line per field: `alias.column | label | type | picklist values | notes`). Its breakpoint is on the last system block with a 1-hour TTL. It is a pure function of (type, gate set): ≤ 20 variants plus the router's. Today's date rides on the last user message, after the cache.
+
+Size, measured from the generated text at about 3.6 characters a token (the verify script prints the API's real counts):
+
+| Type | Approximate cached prefix |
+|---|---|
+| customers | ~25k |
+| service_calls / estimates / estimate_lines / payments | ~28–30k |
+| roofing | ~35k |
+| invoices_payments | ~44k |
+| service_jobs | ~48k |
+| solar / customers_solar | ~53k |
+
+At Sonnet 5.5 prices ($2 / $10 per million in / out, $0.10 cache read, $4 cache write at 1 h), a warm turn costs about $0.01–0.03 and the first turn of an hour adds about $0.10–0.21 for the cache write.
+
+**The budget.**
+- `sql/2026-11-10_report_assist.sql`: `sundial_report_assist_usage` holds one counter per tenant per Arizona month and per user per Arizona day. `sundial_report_assist_claim` checks and increments both atomically, or neither, BEFORE the model is called; `_release` gives the turn back after an upstream failure.
+- The limits are `private.app_config` `report_assist_tenant_month_limit` (500) / `report_assist_user_day_limit` (40), read inside the function. A missing or junk value means the default; 0 turns it off. Over a limit: `429 ASSIST_BUDGET_EXHAUSTED { scope, limit, resetsAt }`. The editor never needs this route.
+- A refusal or a question counts; an upstream 5xx / timeout / API error is released. The key (`sundial/anthropic` `api_key`, `apiKey` accepted) is one shared Constructive Ops key, a platform service like SES — not a D-078 single-credential integration.
+
+**The log.** `sundial_report_assist_log`, 90 days: the last user message, the reply / question, the validated definition, outcome, attempts, validation codes, strict, model, tokens, per-call kinds and ms. Never a row. The 15-minute tick (`schedule.js` `runTick`) deletes older rows and old per-user day counters, best effort.
+
+**The glossary** (`docs/reporting-glossary.md`) is the business meaning of words — sold, active, open job, unpaid, paid, revenue (ask), the stage families, the status lists. Tests pin that every `alias.column` it names is a real field, its terminal stage line is exactly `lib/stage-rules.js`, every relative token is listed and every job / invoice / solar / customer status value appears. **Editing it needs `node scripts/generate-report-glossary.mjs` and a redeploy** of `sundial-reports`.
+
+**"Active" was corrected on the way (D-092).** The Dashboard's terminal rule was a substring match that called "Inspection Completed" and "Go Back Items Complete" finished. It is now the explicit list `SOLAR_TERMINAL_STAGES` in `lib/stage-rules.js`, used by the Dashboard (`sundial_solar_pipeline` `p_terminal_stages`) and the glossary alike.
+
+**Proof:** `node scripts/verify-report-assist.mjs` (ZZ users): five canned requests that must come back as definitions that run, an ambiguous one that must come back as a question, refine, explain, a sales rep's 403, and the 429 by filling zz-admin's own daily counter (restored after). It prints tokens and latency per turn.
+
 ## 8. Open items
-- Business definitions for the AI and the picker: "Active" = `NOT_TERMINAL_STAGES` (`sundial-sf-query`), "sold" = which stage values, "contract date" = `Contract_Date__c`, "revenue" = `contract_amount` vs invoice `total`. Collect as `docs/reporting-glossary.md` during R2 while authoring the starter set.
+- ~~Business definitions for the AI~~ — `docs/reporting-glossary.md` (D-092), Tim to review the draft.
+- **A second group level** ("calls per tech per week") — a later engine item (TASKS). The assistant asks or builds one level today.
 - Harmon's own wish list (not yet available): changes which saved reports exist, not the architecture.
 - Commercial (`Sundial_Commercial__c`) is not cached today; it joins the catalog when Phase 3 lands.

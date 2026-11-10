@@ -189,7 +189,7 @@ test("an empty tenant answers empty shapes and zero counts", async () => {
 });
 
 test("anon and authenticated CANNOT execute it; service_role can", async () => {
-  const sig = "public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[])";
+  const sig = "public.sundial_solar_pipeline(text, jsonb, jsonb, text[], text[], text[])";
   for (const role of ["anon", "authenticated"]) {
     const r = await db.query(`select has_function_privilege($1, '${sig}', 'execute') ok`, [role]);
     assert.equal(r.rows[0].ok, false, `${role} must not execute`);
@@ -201,4 +201,46 @@ test("anon and authenticated CANNOT execute it; service_role can", async () => {
   const r = await db.query(`select public.sundial_solar_pipeline('${T}', '{}'::jsonb, null, null, null) p`);
   await db.exec(`reset role`);
   assert.equal(r.rows[0].p.stats.total_projects, 9);
+});
+
+// --- D-092 (2026-11-10): the EXPLICIT terminal list --------------------------------------
+
+const EXACT = ["PTO Approval Granted", "Request to Archive", "Archive", "Cancelled - Awaiting Sales to Resell", "Cancelled"];
+
+async function pipelineExact(stages, tenant = T) {
+  const r = await db.query(
+    `select public.sundial_solar_pipeline(p_client_sf_id => $1, p_filters => '{}'::jsonb, p_terminal_stages => $2::text[]) as p`,
+    [tenant, stages]
+  );
+  return r.rows[0].p;
+}
+
+test("D-092: with p_terminal_stages the match is EXACT — 'Inspection COMPLETED' is active, Archive / Cancelled are not", async () => {
+  // Non-blank 8; terminal by exact list: Archive ×2, Cancelled = 3 → in progress 5
+  // (Permitting ×2, Billing Complete, Inspection COMPLETED, Green Tagged).
+  assert.equal((await pipelineExact(EXACT)).stats.in_progress, 5);
+});
+
+test("D-092: p_terminal_stages wins over any legacy terms passed with it", async () => {
+  const r = await db.query(
+    `select public.sundial_solar_pipeline($1, '{}'::jsonb, null, $2::text[], $3::text[], $4::text[]) p`,
+    [T, NEW_TERMS, KEEP, EXACT]
+  );
+  assert.equal(r.rows[0].p.stats.in_progress, 5);
+});
+
+test("D-092: an empty exact list = nothing terminal; the deployed Lambda's named legacy args still work", async () => {
+  assert.equal((await pipelineExact([])).stats.in_progress, 8);
+  const legacy = await db.query(
+    `select public.sundial_solar_pipeline(p_client_sf_id => $1, p_filters => '{}'::jsonb, p_narrow => null, p_terminal_terms => $2::text[], p_not_terminal => $3::text[]) p`,
+    [T, NEW_TERMS, KEEP]
+  );
+  assert.equal(legacy.rows[0].p.stats.in_progress, 4, "the pre-D-092 rule until sundial-sf-query is redeployed");
+});
+
+test("D-092: re-running the file leaves ONE function (the 5-argument one is dropped)", async () => {
+  await db.exec(`create or replace function public.sundial_solar_pipeline(a text, b jsonb, c jsonb, d text[], e text[]) returns jsonb language sql as $$ select '{}'::jsonb $$`);
+  await db.exec(await readFile(new URL("./sundial_solar_pipeline.sql", import.meta.url), "utf8"));
+  const r = await db.query(`select count(*)::int n from pg_proc where proname = 'sundial_solar_pipeline'`);
+  assert.equal(r.rows[0].n, 1);
 });

@@ -216,8 +216,10 @@ const SOLAR_RPC = {
   stats: { total_projects: 4, in_progress: 3, contract_total: 50000, system_size_kw_total: 21.5, recent: [["a1Q1", "P1", "Ada Lee", "Permitting", "2026-10-05T10:00:00Z"]] },
 };
 
-test("solar pipeline: calls sundial_solar_pipeline with the terminal rule from ONE place; shapes the answer", async () => {
-  const { TERMINAL_STAGE_TERMS, NOT_TERMINAL_STAGES } = await import("./index.js");
+test("solar pipeline: calls sundial_solar_pipeline with the EXPLICIT terminal list from lib/stage-rules.js (D-092); shapes the answer", async () => {
+  const { SOLAR_TERMINAL_STAGES } = await import("./index.js");
+  const rules = await import("../../lib/stage-rules.js");
+  assert.equal(SOLAR_TERMINAL_STAGES, rules.SOLAR_TERMINAL_STAGES, "re-exported, not copied");
   ctx.rpcResult = SOLAR_RPC;
   const res = await handler(ev("/sf/solar/pipeline"));
   assert.equal(res.statusCode, 200);
@@ -225,11 +227,11 @@ test("solar pipeline: calls sundial_solar_pipeline with the terminal rule from O
     fn: "sundial_solar_pipeline",
     args: {
       p_client_sf_id: TENANT, p_filters: { eq: {} }, p_narrow: null,
-      p_terminal_terms: [...TERMINAL_STAGE_TERMS], p_not_terminal: [...NOT_TERMINAL_STAGES],
+      p_terminal_stages: [...SOLAR_TERMINAL_STAGES],
     },
   }]);
-  assert.deepEqual([...TERMINAL_STAGE_TERMS], ["complete", "cancel", "pto", "closed", "archive"]);
-  assert.deepEqual([...NOT_TERMINAL_STAGES], ["Billing Complete - Pending Closeout"]);
+  assert.ok(!SOLAR_TERMINAL_STAGES.includes("Inspection Completed"));
+  assert.ok(!SOLAR_TERMINAL_STAGES.includes("Go Back Items Complete"));
   assert.deepEqual(JSON.parse(res.body), { ...SOLAR_RPC, narrowed: false });
 });
 

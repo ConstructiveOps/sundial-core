@@ -198,7 +198,9 @@ set up", not "uses Harmon's".
 | `sundial/lead-webhooks` | the vendor's URL slug → this tenant | A lead vendor posting straight to Sundial (D-077) | — (only if wanted) |
 
 **Shared, nothing per tenant:** `sundial/salesforce`, `sundial/supabase`, `sundial/push`
-(one VAPID pair for every portal), `sundial/google-maps` (one server key; billing only).
+(one VAPID pair for every portal), `sundial/google-maps` (one server key; billing only),
+`sundial/anthropic` (the report assistant, D-092: one Constructive Ops key; each tenant's turns
+are counted separately against the limits in `private.app_config` — no setup).
 **Primary tenant only, never copied:** `sundial/acumatica`, `sundial/aurora`,
 `sundial/retell`, `sundial/hcp`.
 

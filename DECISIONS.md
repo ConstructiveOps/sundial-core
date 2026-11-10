@@ -4014,3 +4014,47 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **Format is CSV only** — there is no report PDF; `format` exists so one can be added.
 - **A shared report's viewers see that it is scheduled and when, never to whom.**
 - **The 7-day link and the 7-day file expire together**: the bucket's `REPORTS/` lifecycle rule deletes the file at 7 days.
+
+## D-092 (2026-11-10): Reporting R4 — the report assistant; and the solar "active" rule becomes an explicit list
+
+**Context.** D-087 promised an AI front door that generates report definitions, never data or SQL. Tim's brief (2026-11-10) set the model, the budget, the modes and the logging; his answers to the plan the same day settled the rest. Writing the glossary exposed a bug in the Dashboard's "active" rule, which Tim corrected in the same change.
+
+**Decision.**
+1. **`POST /reports/assist`** (`lambdas/sundial-reports/assist.js`, `lib/report-assist.js`). Three modes: **build** (plain English → a definition or ONE question), **refine** (the definition open in the editor + a request), **explain** (a definition → one paragraph). **The model never sees rows and never writes SQL.** Everything it proposes goes through `normalizeDefinition` with the CALLER's gates, and the answer is `stripDefinition(def, n.stripped)` — the object the editor would have built, relative tokens kept.
+2. **Action `reports.ai`** = every tenant-scope level (Executive / Admin / Manager), no `ACTION_LEVELS` row (like `reports.write`).
+3. **The tool is the definition rules.** `propose_report`'s input schema is generated per report type and per caller (`lib/report-assist-schema.js`):
+   - field enums (defined once in `$defs`) exclude non-reportable and gated fields;
+   - one filter branch per field family × operator group, so a wrong operator or value shape cannot be written;
+   - `DATE_TRUNCS` periods, and aggregates by type.
+
+   `tool_choice: auto` + `strict: true` (Sonnet 5.5 refuses forced tool use). If the API refuses the strict schema, the call is repeated non-strict and that is remembered per type and gate set. **Two attempts:** a refused proposal goes back once as an error tool result; the second failure becomes a question.
+4. **The model:** `REPORT_ASSIST_MODEL`, default `claude-sonnet-5-5`; adaptive thinking at effort `low`; the server-side refusal fallback on (`fallbacks: "default"`).
+5. **The key** lives in Secrets Manager `sundial/anthropic` (`api_key`, `apiKey` accepted) and is never logged. It is **one shared Constructive Ops key, a platform service like SES — not a D-078 single-credential integration**: every tenant may use it, within its own budget.
+6. **Context:** one cached prefix per report type and gate set — the rules + `docs/reporting-glossary.md` + that type's catalog (≈ 25k–53k tokens; 1-hour cache). When no type is given, a small router call picks one first. Rejected: everything at once (≈ 100k+, with the schema repeating every field per type, and very likely too large for strict mode). Today's date is in the last user message, after the cache.
+7. **The budget** lives in `private.app_config`: `report_assist_tenant_month_limit` (500) and `report_assist_user_day_limit` (40), Arizona periods.
+   - It is read only inside `sundial_report_assist_claim`, which counts both counters atomically BEFORE the model is called. The Lambda cannot read `private`.
+   - **A turn counts once it reaches the model.** An upstream 5xx, timeout or API error releases it; a refusal or a question still counts.
+   - Over a limit → `429 ASSIST_BUDGET_EXHAUSTED { scope, limit, resetsAt }`, and the editor stays usable.
+8. **Every turn is logged for 90 days** (`sundial_report_assist_log`): the text, the definition, the outcome and validation codes, the tokens — never rows. The existing 15-minute tick deletes older rows.
+9. **New relative periods:** `today`, `this_week`, `last_week` (weeks start Monday), `last_quarter`, `this_year`, `last_year`, alongside the existing ones, in `lib/report-def.js` `RELATIVE_TOKENS`. The tool schema and the glossary list them.
+10. **The glossary** `docs/reporting-glossary.md` (a draft for Tim's review) is read on every turn. Its definitions:
+    - "sold" = `solar.contract_date` set, and "sold in <period>" = `contract_date` in that period;
+    - "active" = stage not in the explicit terminal list;
+    - "open job" = `job.status` not in [Paid, Closed] AND not archived;
+    - "unpaid" = `invoice.balance > 0` and status not in [Void, Draft];
+    - "paid" = status Paid;
+    - **"revenue" is ambiguous by default** — the assistant asks.
+
+    The Lambda carries a generated copy (`lib/report-glossary.js`), so **editing it needs a regenerate + redeploy**; a test fails while they differ.
+11. **"Active" solar stages: an explicit list (correcting D-080 amendment 1).**
+    - The Dashboard's terminal rule was a substring match on `complete` / `cancel` / `pto` / `closed` / `archive`. That made **"Inspection Completed"** and **"Go Back Items Complete"** finished; Tim: both are ACTIVE.
+    - The rule is now **`SOLAR_TERMINAL_STAGES`** in `lib/stage-rules.js`: PTO Approval Granted, Request to Archive, Archive, Cancelled - Awaiting Sales to Resell, Cancelled — the substring result over the picklist minus those two (and minus Billing Complete - Pending Closeout, as before). `sundial-sf-query` re-exports it.
+    - `sundial_solar_pipeline` gains `p_terminal_stages` (exact match). The old 5-argument signature is dropped; the legacy arguments still work while `p_terminal_stages` is null.
+    - The glossary's "active" is the same list. A test fails if a new picklist stage contains one of the old terms, so it gets decided on purpose.
+    - **Live effect (2026-11-10): 0 Harmon projects change category; 3 conops-demo projects (2 Inspection Completed, 1 Go Back Items Complete) move from finished to active.**
+
+**Consequences.**
+- A request for two group levels ("calls per tech per week") cannot be built. The assistant asks or builds one level; a second group level is a later engine item.
+- Cost is bounded by the budget: about $0.01–0.03 a warm turn and $0.10–0.21 a cold one (measured counts in PROGRESS).
+- The portal's chat box / chips are harmon-crm's, not yet built; its feature-inventory row lands with it.
+- `sundial-auth-proxy` must be redeployed for `/auth/me` to advertise `reports.ai`; `sundial-sf-query` must be redeployed for the Dashboard to use the explicit list (the SQL accepts both meanwhile).

@@ -14,6 +14,7 @@
       GET    /reports/recipients                                    (R3, D-091)
       GET / PUT / DELETE /reports/{id}/schedule                     (R3, D-091)
       POST   /reports/{id}/send-now                                 (R3, D-091)
+      POST   /reports/assist         the report assistant            (R4, D-092)
       GET    /public/reports/download/{token}   NO LOGIN — a delivered report's 7-day link (R3)
     plus OPTIONS (204, CORS) on every resource. AWS_PROXY, authorization NONE at the gateway —
     the Supabase JWT is checked IN the Lambda (reports.read: Executive / Admin / Manager); the
@@ -115,6 +116,9 @@ Wire-All (Ensure-Resource $reports "recipients") @("GET")
 Wire-All (Ensure-Resource $one "schedule") @("GET", "PUT", "DELETE")
 Wire-All (Ensure-Resource $one "send-now") @("POST")
 
+Write-Host "==> R4 (D-092): /reports/assist : POST (the report assistant; reports.ai + a budget, checked in the Lambda)" -ForegroundColor Cyan
+Wire-All (Ensure-Resource $reports "assist") @("POST")
+
 Write-Host "==> R3 (D-091): /public/reports/download/{token} : GET (no login; the token is the credential)" -ForegroundColor Cyan
 $public = Ensure-Resource $root "public"
 $pubReports = Ensure-Resource $public "reports"
@@ -169,6 +173,6 @@ if (-not $Yes) {
 }
 Write-Host "==> create-deployment -> $Stage" -ForegroundColor Cyan
 aws apigateway create-deployment --rest-api-id $ApiId --region $Region --stage-name $Stage `
-    --description "Report engine routes (R1b + D-089 am. 1 + R3 schedules, D-091) -> $Fn" --output json | Out-Null
+    --description "Report engine routes (R1b + D-089 am. 1 + R3 schedules D-091 + R4 assist D-092) -> $Fn" --output json | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "create-deployment failed" }
 Write-Host "SUCCESS. Next (R3): .\scripts\wire-reports-schedule.ps1, then node scripts/verify-report-schedule.mjs" -ForegroundColor Green

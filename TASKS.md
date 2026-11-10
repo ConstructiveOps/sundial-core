@@ -16,14 +16,15 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 - [x] Docs: D-091, `docs/reporting-module.md` §6.3 + §7.1, `docs/api-endpoints.md`, CLAUDE.md item 11
 
 **Tim — SQL, in this order** (Supabase SQL editor, each file pasted whole and Run):
-- [ ] **1. `sql/2026-11-10_report_schedules.sql`** (new). The check at the bottom must show `report_columns_7` = **7**, `export_delivery_1` = **1**, and **false** in both `…_false` columns.
-- [ ] **2. `sql/sundial_report_run.sql`** (re-run: the `trunc` group). The check at the bottom must show **false** in all **eight** columns.
+- [x] **1. `sql/2026-11-10_report_schedules.sql`** (new). The check at the bottom must show `report_columns_7` = **7**, `export_delivery_1` = **1**, and **false** in both `…_false` columns.
+- [x] **2. `sql/sundial_report_run.sql`** (re-run: the `trunc` group). The check at the bottom must show **false** in all **eight** columns.
+- [x] Both run by Tim 2026-11-10.
 
 **Claude, after "SQL is in":**
-- [ ] `.\deploy.ps1 sundial-reports`
-- [ ] `.\scripts\wire-reports-routes.ps1 -Yes`
-- [ ] `.\scripts\wire-reports-schedule.ps1`
-- [ ] `node scripts/verify-report-schedule.mjs` → merge `feature/reports-r3` into `master` (`--no-ff`), push
+- [x] `.\deploy.ps1 sundial-reports` (2026-11-10)
+- [x] `.\scripts\wire-reports-routes.ps1 -Yes` (2026-11-10)
+- [x] `.\scripts\wire-reports-schedule.ps1` — rule `sundial-reports-tick` `cron(0/15 * * * ? *)` **ENABLED** (2026-11-10)
+- [x] `node scripts/verify-report-schedule.mjs` — **38 checks, all passed** (2026-11-10) → merged `feature/reports-r3` into `master` (`--no-ff`), pushed
 - [ ] harmon-crm: a Schedule panel on the report editor (picker from `GET /reports/recipients`, outside addresses only when `canAddExternal`), "Send to me" / "Send now", the schedule column on the Reports list, the period choice on a date group; then a feature-inventory row (R8: scheduled delivery — sundial-core dependency: the routes above, rule `sundial-reports-tick`, SQL `2026-11-10_report_schedules.sql`; new-client step: none, shared)
 - [ ] R2 dashboards (deferred)
 

@@ -173,7 +173,14 @@ try {
     const r = ex?.delivery?.results?.[0];
     check("the scheduled delivery is sent", ex?.delivery?.status === "sent", `${ex?.delivery?.status} ${ex?.delivery?.code ?? ex?.error_code ?? ""}`);
     check("SES accepted it (a message id)", typeof r?.messageId === "string" && r.messageId.length > 10, r?.messageId ? `messageId ${r.messageId}` : "none");
-    const done = (await supabase.from("sundial_reports").select("last_run_status, consecutive_failures").eq("id", reportId).single()).data;
+    // The worker records the delivery on the export FIRST, then the outcome on the report — so
+    // wait for the report to leave "running" rather than read it the instant the email is out.
+    let done = null;
+    for (let i = 0; i < 15; i++) {
+      done = (await supabase.from("sundial_reports").select("last_run_status, consecutive_failures").eq("id", reportId).single()).data;
+      if (done?.last_run_status !== "running") break;
+      await sleep(2000);
+    }
     check("the report reads last_run_status ok", done?.last_run_status === "ok" && done?.consecutive_failures === 0, `${done?.last_run_status}`);
   }
   const list = await api(tokens.admin, "GET", "/reports");

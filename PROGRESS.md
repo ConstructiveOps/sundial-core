@@ -1,6 +1,6 @@
 # Sundial — Progress Log
 
-## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`) — BUILT; SQL is Tim's, then deploy / wire / verify
+## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`) — DEPLOYED, VERIFIED LIVE, merged to master
 
 **Why.** Harmon wants saved reports to arrive by email on a schedule, without anyone opening the portal. Tim's brief and his answers to the plan (2026-11-10) set every rule. Dashboards (R2) stay deferred.
 
@@ -15,7 +15,14 @@
 - **Tests:** 46 new — `lambdas/sundial-reports/schedule.test.js` (16: picker, PUT rules incl. the Manager / outside-address refusal, owner-only views, send-now toMe + saved, two racing ticks claim once, runs with the owner's gates, owner gone → off, 3 failures → off + one notice, demoted owner skips outside addresses, lost run, 8 MB+ links / hash / 302 / 429 / 410 / 404 / no token in logs, grouped body, delivery status), `lib/report-schedule.test.js` (11: next_run_at for every cadence across month ends, leap years, the year boundary and the US DST dates), `lib/report-email.test.js` (5), `sql/2026-11-10_report_schedules.test.js` (4), +4 PGlite period tests, +2 definition tests, +4 identity tests. Full suite: **2,059 tests + 214 budget checks, all pass**.
 - **Docs:** D-091; `docs/reporting-module.md` §6.3 (periods) and §7.1 (R3 as built — the sketch's `cron` / pdf / `deliver` replaced); `docs/api-endpoints.md` (routes, errors, env); CLAUDE.md item 11; `sql/sundial_reports.sql`'s stale "reports.share = Admin / Executive" comment corrected.
 
-**Tim:** run `sql/2026-11-10_report_schedules.sql`, then `sql/sundial_report_run.sql` (TASKS.md, top section).
+**Tim:** run `sql/2026-11-10_report_schedules.sql`, then `sql/sundial_report_run.sql` (TASKS.md, top section). — **Done 2026-11-10.**
+
+**Live (2026-11-10).**
+- `sundial-reports` deployed. The R3 routes and `/public/reports/download/{token}` are wired and deployed to `prod`. The `download` resource sits beside `sundial-service-public`'s existing `/public/reports/{token}`; API Gateway matches the fixed word first.
+- `wire-reports-schedule.ps1` added `EMAIL_FROM` / `EMAIL_REPLY_TO` / `EMAIL_CONFIG_SET` to the Lambda (`ACCESS_MODEL_MODE` kept; `SES_REGION` is unset there and on the source Lambda, so both use the `us-west-1` default), the `ses:SendEmail` policy, and rule `sundial-reports-tick` `cron(0/15 * * * ? *)`, **ENABLED**.
+- `node scripts/verify-report-schedule.mjs` → **38 checks, all passed**: send-now toMe and the ticked delivery both accepted by SES (message ids printed); two concurrent ticks claimed the forced-due schedule once (`claimed: 1` + `claimed: 0`); `next_run_at` advanced to 07:00 Arizona tomorrow; a Manager's outside address and a sales rep's address refused; 43 months of solar grouped by period adding up to the 4,551 total; the public route 404s an unknown link with no login.
+- Its first run failed one check: it read the report the instant the email went out, but the worker records the outcome on the report a moment after recording the delivery on the export. The script now waits for the report to leave `running`; the second run passed everything.
+- **Deploy note:** in a shell whose output is captured, `deploy.ps1` stops on esbuild's normal stderr summary (`$ErrorActionPreference = "Stop"`). `powershell -File .\deploy.ps1 <fn>` is unaffected; so is running it in a terminal.
 
 ## 2026-11-09 — Reports: record links on every row; distinct values for filters (D-089 amendment 1) — DEPLOYED (sundial-reports + the /reports/values route); SQL is Tim's
 

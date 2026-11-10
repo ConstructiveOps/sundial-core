@@ -36,7 +36,32 @@
 - **Tests:** 80 new — schema 25, assist 18, handler 11, SQL 10, glossary 5, stage rules 3, pipeline +4, periods +2, access +1. Full suite **2,139, all pass**.
 - **Docs:** D-092; `docs/reporting-module.md` §6.3 / §6.5 (the budget is `private.app_config`, not `sundial/anthropic`) / §7.2 / §8; `docs/api-endpoints.md`; CLAUDE.md; `docs/multi-client-deployment.md`.
 
-**Tim:** create `sundial/anthropic`, run `sql/2026-11-10_report_assist.sql` then `sql/sundial_solar_pipeline.sql` (TASKS.md, top section).
+**Tim:** create `sundial/anthropic`, run `sql/2026-11-10_report_assist.sql` then `sql/sundial_solar_pipeline.sql` (TASKS.md, top section). — **Done 2026-11-10.**
+
+**Live (2026-11-10).** `sundial-reports`, `sundial-sf-query` (the Dashboard on the explicit list) and `sundial-auth-proxy` (`reports.ai` on `/auth/me`) are deployed. `/reports/assist` is wired and deployed to `prod`. `node scripts/verify-report-assist.mjs` → **all checks passed** (third run; numbers below).
+- **The five canned requests all came back as definitions that run:**
+  - solar sold this quarter by rep → 10 rows;
+  - open service jobs, oldest first → 441;
+  - unpaid invoices by customer → 539;
+  - calls per tech this month → 8;
+  - customers with no dealer → 5,000, truncated.
+- "Show me revenue for last month" came back as the glossary's three-way question.
+- Refine moved the solar report to `last_quarter` and kept the rest. Explain wrote one accurate paragraph.
+- zz-rep-a1 got 403. zz-admin's filled daily counter gave 429 `ASSIST_BUDGET_EXHAUSTED` (scope user) while the editor still ran reports, and the counter was restored.
+- **Real tokens and latency** (warm cache):
+  - router call: 110–121 in / 47–93 out, 5,949 cached, 1.1–1.9 s;
+  - build call: 110–121 in / 335–383 out, 38,558 (customers) / 42,842 (service_calls) / 69,518 (invoices_payments) / 75,216 (service_jobs) / 79,579 (solar) cached, 2.0–2.8 s;
+  - refine: 330 in / 352 out, 2.7 s; explain: 386 in / 176 out, 2.4 s;
+  - **per turn as the caller saw it: median 3.96 s, max 4.98 s.**
+  - Totals for 8 turns / 13 calls: input 1,963, output 2,653, cache read 496,202, cache write 0.
+  - The earlier run's cold writes were 5,949 for the router and 38,558–79,579 per type (solar's prefix is ~80k real tokens; the character estimate said ~53k).
+- **Cost** at Sonnet 5.5 prices: a warm turn ≈ $0.01; the first turn of an hour for solar adds ≈ $0.32 of cache write (≈ $0.15 for customers).
+- **Strict mode:** the API refused the strict schema for every type, so every proposal went out non-strict. That is the designed fallback, and every one of the 15 proposals still validated on its FIRST attempt (no retries, no codes). The refusal reason is not logged yet — a follow-up.
+- **Model choices worth knowing:**
+  - "by rep" on solar grouped on `solar.sales_rep_name` (the project's own rep field, the one the Solar page counts), not the joined `rep.name`; the verify script accepts both;
+  - "calls per tech" left out Cancelled calls, as the glossary says.
+- The **first** run's first three requests got API Gateway's "Invalid key=value pair in Authorization header" 403: the just-created `prod` deployment had not reached the new resource yet. The same requests passed seconds later; no code changed.
+- **Stage-category change (item 2), live:** Harmon 0 projects; conops-demo 3.
 
 ## 2026-11-10 — Reporting R3: scheduled delivery of saved reports (D-091, `feature/reports-r3`) — DEPLOYED, VERIFIED LIVE, merged to master
 

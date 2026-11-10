@@ -76,8 +76,10 @@ console.log("\n== A. Build (no type given: the router picks it) ==");
 const CANNED = [
   {
     ask: "solar projects sold this quarter by rep with contract totals", types: ["solar", "customers_solar"],
-    shape: (d) => /contract_date/.test(fieldsOf(d.filters)) && /this_quarter/.test(fieldsOf(d.filters)) && /rep\./.test(groupField(d) ?? "") && /contract_amount/.test(fieldsOf(d.aggregates)),
-    expect: "filter contract_date this_quarter, group by rep, sum contract_amount",
+    // "By rep" is either the joined user (rep.name) or the project's own rep-name field
+    // (solar.sales_rep_name — what the Solar page's rep dropdown counts). Both are the rep.
+    shape: (d) => /contract_date/.test(fieldsOf(d.filters)) && /this_quarter/.test(fieldsOf(d.filters)) && /^(rep\.name|solar\.sales_rep_name)$/.test(groupField(d) ?? "") && /contract_amount/.test(fieldsOf(d.aggregates)),
+    expect: "filter contract_date this_quarter, group by rep (rep.name or solar.sales_rep_name), sum contract_amount",
   },
   {
     ask: "service jobs still open, oldest first", types: ["service_jobs"],

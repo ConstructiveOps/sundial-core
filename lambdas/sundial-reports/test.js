@@ -165,6 +165,11 @@ mock.module("../../lib/supabase.js", {
           const slice = all.slice(off, off + args.p_def.limit);
           const page = { rows: slice, aggregates: {}, truncated: off + args.p_def.limit < all.length };
           if (ctx.rpcPages.records) page.records = ctx.rpcPages.records.slice(off, off + args.p_def.limit);
+          // A summary (D-093): the page's groups, and the grand totals when asked for.
+          if (ctx.rpcPages.groupsFor) {
+            page.groups = ctx.rpcPages.groupsFor(off, slice.length);
+            if (args.p_def.totals) Object.assign(page, { aggregates: ctx.rpcPages.grand ?? {}, totalRows: all.length });
+          }
           return { data: page, error: ctx.rpcPages.error ?? null };
         }
         return ctx.rpcResult;
@@ -993,4 +998,102 @@ test("saved: GET /reports/{id} and GET /reports/{id}/schedule name the owner as 
   const degradedSched = await call(`/reports/${admins}/schedule`);
   assert.equal(degradedSched.status, 200);
   assert.equal(degradedSched.body.ownerName, null);
+});
+
+// =========================================================================================
+// D-093 — summary reports (showDetails)
+// =========================================================================================
+const SUMMARY = { type: "customers", showDetails: true, groupBy: ["customer.city"], columns: ["customer.name"], aggregates: [{ fn: "count" }] };
+
+test("D-093 run: a summary answers rows + records + labelled page groups + groupCount + the grand totals", async () => {
+  reset("Admin");
+  ctx.rpcResult = { data: {
+    rows: [["Ada"], ["Bo"], ["Cy"]], aggregates: { count: 9 }, truncated: true,
+    records: [{ customer: { sfId: "a1", name: "Ada" } }, { customer: { sfId: "a2", name: "Bo" } }, { customer: { sfId: "a3", name: "Cy" } }],
+    groups: [{ key: "Mesa", first: 0, shown: 2, count: 2, aggregates: { count: 2 } }, { key: null, first: 2, shown: 1, count: 5, aggregates: { count: 5 } }],
+    groupCount: 4, totalRows: 9,
+  }, error: null };
+  const r = await call("/reports/run", { method: "POST", body: SUMMARY });
+  assert.equal(r.status, 200);
+  const w = ctx.rpcCalls[0].args.p_def;
+  assert.equal(w.grouped, false);
+  assert.equal(w.details, true);
+  assert.deepEqual(w.group, { alias: "customer", column: "city" });
+  assert.deepEqual(r.body.columns.map((c) => c.field), ["customer.name"]);
+  assert.equal(r.body.group.field, "customer.city");
+  assert.deepEqual(r.body.groups, [
+    { key: "Mesa", label: "Mesa", count: 2, aggregates: { count: 2 }, first: 0, shown: 2 },
+    { key: null, label: "(blank)", count: 5, aggregates: { count: 5 }, first: 2, shown: 1 },
+  ]);
+  assert.equal(r.body.groupCount, 4);
+  assert.equal(r.body.totalRows, 9);
+  assert.equal(r.body.records.length, 3);
+  assert.deepEqual(r.body.aggregates.map((a) => [a.field, a.value]), [["count", 9]]);
+  assert.equal(r.body.truncated, true);
+  // an ordinary run carries none of the summary keys
+  reset("Admin");
+  const plain = await call("/reports/run", { method: "POST", body: SIMPLE });
+  assert.equal("groups" in plain.body, false);
+});
+
+test("D-093 run: a database function older than D-093 (no groups) is 500 REPORT_ENGINE_OUTDATED; an aggregate sort is a 400", async () => {
+  reset("Admin");
+  ctx.rpcResult = { data: { rows: [["Ada"]], aggregates: {}, truncated: false, records: [{}] }, error: null };
+  const r = await call("/reports/run", { method: "POST", body: SUMMARY });
+  assert.equal(r.status, 500);
+  assert.equal(r.body.code, "REPORT_ENGINE_OUTDATED");
+  reset("Admin");
+  const s = await call("/reports/run", { method: "POST", body: { ...SUMMARY, sort: [{ field: "count", dir: "desc" }] } });
+  assert.equal(s.status, 400);
+  assert.equal(s.body.code, "BAD_SORT");
+  assert.equal(ctx.rpcCalls.length, 0);
+});
+
+test("D-093 csv worker: group first, a subtotal after each group (one, across a page break), a grand total last; totals on page 1 only", async () => {
+  reset("Admin");
+  const q = await call("/reports/csv", { method: "POST", body: SUMMARY });
+  assert.equal(q.status, 202);
+  assert.deepEqual(lastExport().job.group.field, "customer.city");
+  assert.deepEqual(lastExport().job.totals.map((t) => t.field), ["count"]);
+  // 6,000 rows: the first 5,500 are Mesa, the rest Tempe — Mesa runs across the page break.
+  const keyOf = (i) => (i < 5500 ? "Mesa" : "Tempe");
+  const full = { Mesa: 5500, Tempe: 500 };
+  ctx.rpcPages = {
+    rows: Array.from({ length: 6000 }, (_, i) => [`Name ${i}`]),
+    grand: { count: 6000 },
+    groupsFor: (off, len) => {
+      const out = [];
+      for (let k = 0; k < len; k++) {
+        const key = keyOf(off + k);
+        const last = out[out.length - 1];
+        if (last && last.key === key) last.shown += 1;
+        else out.push({ key, first: k, shown: 1, count: full[key], aggregates: { count: full[key] } });
+      }
+      return out;
+    },
+  };
+  const res = await worker(q.body.exportId);
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.deepEqual(ctx.rpcCalls.map((c) => [c.args.p_def.offset, c.args.p_def.totals, c.args.p_def.details]), [[0, true, true], [5000, false, true]]);
+  const text = ctx.s3.filter((x) => x.kind === "PutObject")[0].input.Body.toString("utf8");
+  const lines = text.split("\r\n");
+  assert.match(lines[0], /^﻿Customer: City,Customer: Customer Name,Count/);
+  assert.match(lines[1], /^Mesa,Name 0,,/);
+  assert.match(lines[5500], /^Mesa,Name 5499,,/);
+  assert.match(lines[5501], /^Subtotal: Mesa \(5500 records\),,5500/);
+  assert.match(lines[5502], /^Tempe,Name 5500,,/);
+  assert.match(lines[6002], /^Subtotal: Tempe \(500 records\),,500/);
+  assert.match(lines[6003], /^Grand total \(6000 records\),,6000/);
+  assert.equal(lines.length, 6005);
+  assert.equal(text.split("Subtotal: Mesa").length - 1, 1, "one subtotal for the split group");
+  assert.equal(lastExport().row_count, 6000);
+});
+
+test("D-093 csv worker: a SQL older than D-093 fails the summary export REPORT_ENGINE_OUTDATED", async () => {
+  reset("Admin");
+  const q = await call("/reports/csv", { method: "POST", body: SUMMARY });
+  ctx.rpcPages = { rows: [["Ada"]] };
+  const res = await worker(q.body.exportId);
+  assert.equal(res.ok, false);
+  assert.equal(res.code, "REPORT_ENGINE_OUTDATED");
 });

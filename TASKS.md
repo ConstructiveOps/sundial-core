@@ -4,6 +4,28 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — DONE, verified, merged
+
+- [x] `lib/report-def.js`: `showDetails` (only with `groupBy` — `DETAILS_NEED_GROUP`); the user's own columns; sort on shown columns only (an aggregate / the group field → `BAD_SORT`); a gated group field → a plain detail report; the wire `group` + `details`
+- [x] `sql/sundial_report_run.sql`: rows ordered by the group value first; `groups` (the page's, with first / shown and count / aggregates over all rows), `groupCount`, `totalRows` — one call
+- [x] `lib/report-groups.js` (labels, sections); `lambdas/sundial-reports/index.js` (the response; `500 REPORT_ENGINE_OUTDATED` on an old function)
+- [x] CSV: group first, one column per aggregate, a subtotal after each group, a grand total last (`lib/report-csv.js` `createSummaryCsv`, `csv.js`)
+- [x] Saved / scheduled: the flag stored unchanged (`stripDefinition` drops it with a stripped group); the email draws the first 100 detail rows under their groups with subtotals + grand total (`schedule.js`, `deliver.js`, `lib/report-email.js`)
+- [x] The assistant: `showDetails` in `propose_report`, the prompt rules, `docs/reporting-glossary.md` (+ regenerated `lib/report-glossary.js`)
+- [x] `scripts/verify-report-run.mjs` section S (summary run + summary CSV, live, as zz-admin)
+- [x] Docs: D-093, `docs/reporting-module.md` §6.3 / §6.4 / §6.7 / §7.1, `docs/api-endpoints.md`, CLAUDE.md item 11
+- [x] Tests: full suite 2,181 — 2,179 pass; the 2 failures are `scripts/demo-seed` tests that fail the same way on clean `master` (they compare against the local, git-ignored `migration/demo/plan.json`)
+
+**Tim — before the deploy:**
+- [x] **SQL: `sql/sundial_report_run.sql`** (re-run, done 2026-11-11, Supabase SQL editor, the whole file pasted and Run). The check at the bottom must show **false** in all eight columns. Run it BEFORE `sundial-reports` is redeployed.
+
+**Claude, after "SQL is in":**
+- [ ] `.\deploy.ps1 sundial-reports`; `node scripts/generate-report-glossary.mjs` (no change expected — regenerated in the branch); `node scripts/verify-report-run.mjs` → merge `feature/reports-summary` into `master` (`--no-ff`), push
+
+**Later:**
+- [ ] **Order the groups by their totals** in a summary report (`sort` on an aggregate with `showDetails` — refused in v1 with `BAD_SORT`)
+- [ ] The portal's summary view (harmon-crm): the "show details" toggle, group headings + subtotal rows from `groups` / `first` / `shown`; its feature-inventory row lands with it
+
 ## 2026-11-10 — Reporting R4: the report assistant (D-092, `feature/reports-r4`)
 
 - [x] `POST /reports/assist` (build / refine / explain) — `lambdas/sundial-reports/assist.js`, `lib/report-assist.js`; action `reports.ai` (every tenant level)

@@ -38,7 +38,12 @@
 //               grouped; catalog nameField / valuesLookup; GET /reports/values ordered, its
 //               solar.stage counts equal a grouped count, q narrows, a joined alias works, a
 //               number / an id are 400, sales / tech 403. Counts only — no value printed.
-//   H. DENIED   zz-rep-a1, zz-mgr-a and zz-tech get 403 MODULE_FORBIDDEN from every R1b route.
+//   S. SUMMARY  (D-093, runs after F) zz-admin runs solar by rep WITH DETAILS: the groups'
+//               first / shown tile the rows exactly, each group's count ≥ its shown rows, the
+//               grand totals equal the ungrouped run's; an aggregate sort is 400 BAD_SORT; the
+//               summary CSV has the group first, a subtotal after each group's rows (one per
+//               group, carrying the run's counts) and the grand total last. Counts only.
+//   H. DENIED  zz-rep-a1, zz-mgr-a and zz-tech get 403 MODULE_FORBIDDEN from every R1b route.
 //   CLEANUP     every "ZZ VERIFY" report deleted (through the API, then any leftover by the
 //               service role), and every export this run made: its CSV file in S3 and its row.
 //
@@ -275,6 +280,106 @@ async function waitForExport(token, exportId, label) {
   }
 }
 
+// --- S. summary reports (D-093) ---------------------------------------------------------------
+console.log("\n== S. Summary report (showDetails, D-093) ==");
+{
+  const SUM_DEF = {
+    type: "solar", showDetails: true, groupBy: ["rep.name"],
+    columns: ["solar.project_name", "solar.stage", "solar.contract_amount"],
+    aggregates: [{ fn: "count" }, { fn: "sum", field: "solar.contract_amount" }],
+    sort: [{ field: "solar.contract_amount", dir: "desc" }],
+  };
+  const r = await api(tokens.admin, "POST", "/reports/run", SUM_DEF);
+  check("summary run as zz-admin → 200", r.status === 200, r.status === 200 ? "" : `${r.status} ${r.text.slice(0, 300)}`);
+  const b = r.body ?? {};
+  const rows = b.rows ?? [];
+  const groups = b.groups ?? [];
+  console.log(`  rows ${rows.length}  groups on page ${groups.length}  groupCount ${b.groupCount}  totalRows ${b.totalRows}  truncated ${b.truncated}  asOf ${b.asOf ?? "—"}`);
+  // first / shown tile the rows exactly: group k starts where k-1 ended, the last ends at the last row.
+  let next = 0;
+  let tiles = groups.length > 0;
+  for (const g of groups) {
+    if (g.first !== next || !(g.shown >= 1)) tiles = false;
+    next = g.first + g.shown;
+  }
+  check("summary: groups' first / shown tile the rows exactly", tiles && next === rows.length, `${groups.length} groups end at ${next} of ${rows.length}`);
+  check("summary: each group's count ≥ its shown rows", groups.every((g) => Number(g.count) >= g.shown));
+  check("summary: each group's count aggregate equals its count", groups.every((g) => Number(g.aggregates?.count) === Number(g.count)));
+  check("summary: records parallel to rows", Array.isArray(b.records) && b.records.length === rows.length);
+  check("summary: groupCount ≥ the groups on the page", Number(b.groupCount) >= groups.length);
+  if (!b.truncated && Number(b.groupCount) === groups.length) {
+    const sum = groups.reduce((n, g) => n + Number(g.count), 0);
+    check("summary: every group on the page, so their counts add up to totalRows", sum === Number(b.totalRows), `${sum} vs ${b.totalRows}`);
+  }
+  // The grand totals are the plain (ungrouped) run's.
+  const plain = await api(tokens.admin, "POST", "/reports/run", { type: "solar", columns: ["solar.project_name"], aggregates: SUM_DEF.aggregates, limit: 1 });
+  const val = (resp, f) => Number((resp.body?.aggregates ?? []).find((a) => a.field === f)?.value ?? NaN);
+  for (const f of ["count", "sum_solar_contract_amount"]) {
+    const a = val(r, f);
+    const p = val(plain, f);
+    check(`summary: grand total ${f} = the ungrouped run's`, Number.isFinite(a) && Math.abs(a - p) < 0.005, `${a} vs ${p}`);
+  }
+  check("summary: totalRows = the ungrouped count", Number(b.totalRows) === val(plain, "count"), `${b.totalRows} vs ${val(plain, "count")}`);
+  const agg = await api(tokens.admin, "POST", "/reports/run", { ...SUM_DEF, sort: [{ field: "count", dir: "desc" }] });
+  check("summary: sorting the groups by a total is a 400 BAD_SORT (not in v1)", agg.status === 400 && agg.body?.code === "BAD_SORT", `${agg.status} ${agg.body?.code ?? ""}`);
+
+  // The CSV: group first, a subtotal after each group's last row, a grand total at the end.
+  const q = await api(tokens.admin, "POST", "/reports/csv", SUM_DEF);
+  if (q.body?.exportId) exportIds.push(q.body.exportId);
+  check("summary CSV: POST → 202", q.status === 202, `${q.status} ${q.text.slice(0, 200)}`);
+  if (q.body?.exportId) {
+    const s = await waitForExport(tokens.admin, q.body.exportId);
+    console.log(`  summary export ${s.body?.status} in ${s.seconds.toFixed(1)} s  rowCount ${s.body?.rowCount}  truncated ${s.body?.truncated}`);
+    check("summary CSV: the export finishes", s.body?.status === "done", JSON.stringify({ status: s.body?.status, code: s.body?.code }));
+    if (s.body?.status === "done") {
+      const text = Buffer.from(await (await fetch(s.body.url)).arrayBuffer()).toString("utf8").replace(/^﻿/, "");
+      const lines = text.split("\r\n").filter((l, i, all) => !(i === all.length - 1 && l === ""));
+      const firstCell = (line) => {
+        if (!line.startsWith('"')) return line.slice(0, line.indexOf(",") < 0 ? line.length : line.indexOf(","));
+        let i = 1;
+        let out = "";
+        for (; i < line.length; i++) {
+          if (line[i] === '"' && line[i + 1] === '"') { out += '"'; i++; } else if (line[i] === '"') break; else out += line[i];
+        }
+        return out;
+      };
+      const header = lines[0];
+      check("summary CSV: the header starts with the group and ends its data part with the aggregates",
+        header.startsWith("Sales rep: User Name,Solar project: Project Name,") && /,Count,Sum of Contract Amount(,|$)/.test(header), header.slice(0, 160));
+      const isSub = (l) => firstCell(l).startsWith("Subtotal: ");
+      const isGrand = (l) => firstCell(l).startsWith("Grand total");
+      let details = 0;
+      let subtotals = 0;
+      let order = true;
+      let prevKey = null;
+      for (let i = 1; i < lines.length; i++) {
+        const l = lines[i];
+        if (isGrand(l)) {
+          if (i !== lines.length - 1 || !isSub(lines[i - 1])) order = false;
+        } else if (isSub(l)) {
+          subtotals++;
+          if (isSub(lines[i - 1]) || i === 1) order = false; // a subtotal follows a detail row
+          prevKey = null;
+        } else {
+          details++;
+          const key = firstCell(l);
+          if (prevKey !== null && key !== prevKey) order = false; // a new group must come after a subtotal
+          prevKey = key;
+        }
+      }
+      check("summary CSV: the last line is the grand total", isGrand(lines[lines.length - 1] ?? ""));
+      check("summary CSV: a subtotal after each group's rows, before the next group and before the grand total", order);
+      check("summary CSV: one subtotal per group", subtotals === Number(b.groupCount), `${subtotals} vs ${b.groupCount}`);
+      check("summary CSV: rowCount detail rows", details === s.body.rowCount, `${details} vs ${s.body.rowCount}`);
+      // The subtotals carry the same counts as the run's groups (labels compared, never printed).
+      const subs = new Set(lines.filter(isSub).map(firstCell));
+      const missing = groups.filter((g) => !subs.has(`Subtotal: ${g.label} (${g.count} record${g.count === 1 ? "" : "s"})`)).length;
+      check("summary CSV: each on-screen group's subtotal line carries its full count", missing === 0, `${missing} of ${groups.length} missing`);
+      check("summary CSV: the grand total line names totalRows", firstCell(lines[lines.length - 1] ?? "") === `Grand total (${b.totalRows} record${Number(b.totalRows) === 1 ? "" : "s"})`);
+    }
+  }
+}
+
 // --- I. record links + distinct values (D-089 amendment 1) ------------------------------------
 console.log("\n== I. Record links + distinct values (D-089 am. 1) ==");
 {
@@ -311,9 +416,11 @@ console.log("\n== I. Record links + distinct values (D-089 am. 1) ==");
   // Values: solar.stage's counts agree with a grouped count of the same column.
   const v = await api(tokens.manager, "GET", "/reports/values?type=solar&field=solar.stage");
   const vals = v.body?.values ?? [];
+  // Ties are in the database's collation order (case- and punctuation-aware), so compare
+  // with localeCompare, not raw code points (2026-11-11: two stages tied on count).
   // On failure the status and error code only — never the body (it holds values).
   check("GET /reports/values solar.stage → 200 with values", v.status === 200 && vals.length > 0, `${v.status} ${v.body?.code ?? ""} ${vals.length} values`);
-  const sorted = vals.every((x, i) => i === 0 || vals[i - 1].count > x.count || (vals[i - 1].count === x.count && vals[i - 1].value <= x.value));
+  const sorted = vals.every((x, i) => i === 0 || vals[i - 1].count > x.count || (vals[i - 1].count === x.count && String(vals[i - 1].value).localeCompare(String(x.value)) <= 0));
   check("values: most frequent first, then by value; ≤ 200; partial says whether more exist",
     sorted && vals.length <= 200 && v.body?.partial === (v.body?.totalDistinct > vals.length), `${vals.length} of ${v.body?.totalDistinct}`);
   const byStage = await api(tokens.manager, "POST", "/reports/run", { type: "solar", groupBy: ["solar.stage"], aggregates: [{ fn: "count" }], limit: 5000 });

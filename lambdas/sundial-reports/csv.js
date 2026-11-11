@@ -31,6 +31,11 @@
 // `sundial/brand` portalUrl. It is resolved ONCE, when the export is queued, and stored in the
 // job; a tenant with no address gets an export without link columns, never another tenant's.
 //
+// SUMMARY (D-093, showDetails). The group value is the first column and each aggregate its own
+// trailing column; a subtotal line follows each group's last row (a group split across two
+// pages gets one, from the function's per-group numbers over ALL its rows) and a grand-total
+// line ends the file — lib/report-csv.js createSummaryCsv. The first page asks for totals.
+//
 // WHO: reports.read, then the export row's owner in its tenant — anyone else's export is 404
 // RECORD_NOT_FOUND, the saved-report rule. NEVER LOGGED: a row, a value, a filter, the URL.
 
@@ -42,7 +47,7 @@ import { jsonResponse } from "../../lib/http.js";
 import { DENY } from "../../lib/access.js";
 import { normalizeDefinition } from "../../lib/report-def.js";
 import { reportType } from "../../lib/report-types.js";
-import { csvHeader, csvRows, exportKey, downloadName, linkColumns, cleanOrigin, REPORTS_BUCKET, REPORTS_REGION } from "../../lib/report-csv.js";
+import { csvHeader, csvRows, exportKey, downloadName, linkColumns, cleanOrigin, summaryCsvHeader, createSummaryCsv, REPORTS_BUCKET, REPORTS_REGION } from "../../lib/report-csv.js";
 import { createTenantSettings } from "../../lib/tenant-settings.js";
 import { isUuid } from "../../lib/saved-reports.js";
 
@@ -91,13 +96,18 @@ export async function startExport({ def, reportId = null, tenantId, tenantSlug =
   if (!n.ok) return jsonResponse(n.status, cors, n.body);
 
   const portalOrigin = await exportOrigin(reportType(def.type), n.wire, tenantSlug);
-  const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects, portalOrigin };
+  const job = { type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects, portalOrigin, ...summaryJob(n) };
   const q = await queueExport({ tenantId, ownerProfileId: profileId, reportId, reportType: def.type, job });
   if (q.error === "QUEUE_FAILED") return jsonResponse(500, cors, { error: "server_error" });
   if (q.error) return jsonResponse(502, cors, { error: "worker_invoke_failed", code: "WORKER_INVOKE_FAILED" });
   const data = { id: q.exportId };
   console.log(JSON.stringify({ csv: "queued", exportId: data.id, report: def.type, saved: !!reportId, columns: n.output.length, rowLimit: n.rowLimit }));
   return jsonResponse(202, cors, { exportId: data.id, status: "queued", stripped: n.stripped });
+}
+
+/** What a summary export (D-093) also stores in its job: the group column and the aggregates. */
+export function summaryJob(n) {
+  return n.summary ? { group: n.group, totals: n.totals } : {};
 }
 
 /**
@@ -280,18 +290,28 @@ export async function runExport(exportId, { remainingMs = () => Infinity, asOfFo
     // An export queued before D-089 am. 1 has no portalOrigin: no link columns.
     const origin = !job.wire.grouped ? cleanOrigin(job.portalOrigin) : null;
     const links = origin ? linkColumns(type) : [];
-    await writer.write(csvHeader(job.output, type, links));
+    // A summary (D-093): group first, aggregates after the columns, a subtotal after each
+    // group and a grand total at the end. The grand totals ride on the FIRST page only.
+    const summary = job.wire.details === true && job.group ? createSummaryCsv({ output: job.output, group: job.group, totals: job.totals ?? [], links, origin }) : null;
+    let grand = null;
+    await writer.write(summary ? summaryCsvHeader(job.output, job.group, job.totals ?? [], type, links) : csvHeader(job.output, type, links));
     for (;;) {
       if (remainingMs() < STOP_BEFORE_END_MS) throw new ExportError("CSV_TOO_SLOW");
       const limit = Math.min(job.wire.limit, job.rowLimit - rows);
-      const { data, error } = await supabase.rpc("sundial_report_run", { p_client_sf_id: row.client_sf_id, p_def: { ...job.wire, limit, offset: rows, totals: false } });
+      const { data, error } = await supabase.rpc("sundial_report_run", { p_client_sf_id: row.client_sf_id, p_def: { ...job.wire, limit, offset: rows, totals: !!summary && rows === 0 } });
       if (error) {
         const msg = String(error.message || "");
         throw new ExportError(msg.startsWith("sundial_report_run:") ? "REPORT_CATALOG_MISMATCH" : "CSV_FAILED", msg);
       }
       const page = data?.rows ?? [];
       pages += 1;
-      if (page.length) await writer.write(csvRows(page, job.output, { records: data?.records ?? null, links, origin }));
+      if (summary) {
+        if (!Array.isArray(data?.groups)) throw new ExportError("REPORT_ENGINE_OUTDATED");
+        if (rows === 0) grand = { aggregates: data?.aggregates ?? {}, totalRows: data?.totalRows ?? null };
+        if (page.length) await writer.write(summary.page({ rows: page, records: data?.records ?? null, groups: data.groups }));
+      } else if (page.length) {
+        await writer.write(csvRows(page, job.output, { records: data?.records ?? null, links, origin }));
+      }
       rows += page.length;
       if (!data?.truncated) break;
       if (rows >= job.rowLimit) {
@@ -299,6 +319,7 @@ export async function runExport(exportId, { remainingMs = () => Infinity, asOfFo
         break;
       }
     }
+    if (summary) await writer.write(summary.end(grand ?? {}));
     await writer.finish();
     await supabase.from(EXPORTS_TABLE).update({
       status: "done", s3_key: key, row_count: rows, truncated, as_of: asOf, finished_at: now().toISOString(),

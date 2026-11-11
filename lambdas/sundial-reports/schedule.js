@@ -46,7 +46,7 @@ import {
 } from "../../lib/report-schedule.js";
 import { buildDisabledEmail } from "../../lib/report-email.js";
 import { sendEmail } from "../../lib/email.js";
-import { queueExport, tenantPortalOrigin } from "./csv.js";
+import { queueExport, tenantPortalOrigin, summaryJob } from "./csv.js";
 import { loadVisible, ownerNameOf, REPORTS_TABLE } from "./saved.js";
 import { heldGates } from "./gates.js";
 import { cleanupAssist } from "./assist.js";
@@ -246,17 +246,21 @@ export async function queueDelivery({ row, kind, to, skipped = 0, ownerIdentity,
   const type = reportType(def.type);
   let bodyWire = null;
   let bodyOutput = null;
-  if (n.wire.grouped) {
+  let bodySummary = null;
+  if (n.wire.grouped || n.summary) {
     const b = normalizeDefinition(def, { heldGates: held, now, mode: "run" });
     if (b.ok) {
-      bodyWire = { ...b.wire, limit: BODY_ROWS, offset: 0, totals: false };
+      // A summary (D-093): its first BODY_ROWS detail rows under their groups, with each
+      // group's subtotal and the grand total — so it asks for the totals too.
+      bodyWire = { ...b.wire, limit: BODY_ROWS, offset: 0, totals: !!b.summary };
       bodyOutput = b.output;
+      if (b.summary) bodySummary = { group: b.group, totals: b.totals };
     }
   }
   const portal = await tenantPortalOrigin(ownerIdentity?.tenantSlug ?? null);
   const owner = ownerIdentity?.user ?? {};
   const job = {
-    type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects,
+    type: def.type, wire: n.wire, output: n.output, rowLimit: n.rowLimit, stripped: n.stripped, objects: n.objects, ...summaryJob(n),
     // Link columns follow the export's own rule: ungrouped, and a type with record pages.
     portalOrigin: !n.wire.grouped && type && linkColumns(type).length ? portal : null,
     delivery: {
@@ -270,6 +274,7 @@ export async function queueDelivery({ row, kind, to, skipped = 0, ownerIdentity,
       runDate: arizonaToday(now),
       bodyWire,
       bodyOutput,
+      bodySummary,
     },
   };
   const q = await queueExport({ tenantId: row.client_sf_id, ownerProfileId: row.owner_profile_id, reportId: row.id, reportType: def.type, job, beforeInvoke });

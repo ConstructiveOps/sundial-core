@@ -1,6 +1,6 @@
 # Sundial — Progress Log
 
-## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — BUILT, SQL + deploy pending
+## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — DEPLOYED, verified, merged
 
 **Why.** A grouped report showed one line per group. Harmon reads Salesforce-style summary reports: each record under its group, with the group's subtotals and a grand total.
 
@@ -16,7 +16,9 @@
 
 **Tests.** New / extended: `sql/sundial_report_run.test.js` +7 (ordering, page groups, a capped run cutting a group with its full count, offset pages, tenant isolation, a `dateTrunc` month / quarter group, RAISEs), `lib/report-def.test.js` +5, `lib/report-csv.test.js` +4, `lib/report-groups.test.js` 2 (new), `lib/report-email.test.js` +1, `lib/saved-reports.test.js` +1, `lib/report-assist-schema.test.js` +1 (a summary proposal validates for all ten types), `lambdas/sundial-reports/test.js` +4, `schedule.test.js` +1. **Full suite 2,181: 2,179 pass, 2 fail** — `scripts/demo-seed` (`plan.test.js` (a), `growth.test.js` (c)), which fail identically on clean `master` (they compare against the local, git-ignored `migration/demo/plan.json`). The Lambda bundles with esbuild.
 
-**Next:** Tim runs `sql/sundial_report_run.sql`; then deploy `sundial-reports`, regenerate the glossary, run the verify script, merge.
+**Deployed + verified (2026-11-11).** Tim ran `sql/sundial_report_run.sql`; `sundial-reports` deployed; the glossary regenerated with no change. `node scripts/verify-report-run.mjs`: **152 checks, all pass**. Section S, live: solar by rep with details = 4,554 rows in 74 groups, every group on the page, first / shown tiling all 4,554 rows, the grand totals equal to the ungrouped run's (count 4,554; contract amount 121,444,815.41); the summary CSV (4,554 detail rows, 5.6 s) carries 74 subtotals with the run's counts and the grand total last.
+
+**Fixed on the way (the verify script, not the product).** The first run failed one section-I check, "values: most frequent first, then by value": two solar stages were tied on count, and the check compared the tie with raw character codes while `sundial_report_values` orders by the database's collation (which `localeCompare` agrees with — checked without printing a value). The check now uses `localeCompare`. Unrelated to D-093; it surfaced because live counts happened to tie.
 
 ## 2026-11-10 — Demo tenant tax zones (`scripts/seed-demo-tax-zones.mjs`) + the isolation verifier checks the dealer cache — BUILT, not yet applied
 

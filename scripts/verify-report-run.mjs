@@ -416,9 +416,11 @@ console.log("\n== I. Record links + distinct values (D-089 am. 1) ==");
   // Values: solar.stage's counts agree with a grouped count of the same column.
   const v = await api(tokens.manager, "GET", "/reports/values?type=solar&field=solar.stage");
   const vals = v.body?.values ?? [];
+  // Ties are in the database's collation order (case- and punctuation-aware), so compare
+  // with localeCompare, not raw code points (2026-11-11: two stages tied on count).
   // On failure the status and error code only — never the body (it holds values).
   check("GET /reports/values solar.stage → 200 with values", v.status === 200 && vals.length > 0, `${v.status} ${v.body?.code ?? ""} ${vals.length} values`);
-  const sorted = vals.every((x, i) => i === 0 || vals[i - 1].count > x.count || (vals[i - 1].count === x.count && vals[i - 1].value <= x.value));
+  const sorted = vals.every((x, i) => i === 0 || vals[i - 1].count > x.count || (vals[i - 1].count === x.count && String(vals[i - 1].value).localeCompare(String(x.value)) <= 0));
   check("values: most frequent first, then by value; ≤ 200; partial says whether more exist",
     sorted && vals.length <= 200 && v.body?.partial === (v.body?.totalDistinct > vals.length), `${vals.length} of ${v.body?.totalDistinct}`);
   const byStage = await api(tokens.manager, "POST", "/reports/run", { type: "solar", groupBy: ["solar.stage"], aggregates: [{ fn: "count" }], limit: 5000 });

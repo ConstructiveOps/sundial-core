@@ -21,8 +21,13 @@ import { canaryTags, packFields, readRecordInFull, CANARY_URI_CHARS, SOQL_HARD_L
 import { parseArgs } from "./args.js";
 import { SEEDED_OBJECTS } from "./policy.js";
 import { schemaFromProbe } from "./schema.js";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const probe = loadProbe();
+/** The 24 Solar fields the D-090 cleanup deleted (salesforce/solar-field-cleanup-2026-11/). The plan must never write one. */
+const DELETED_SOLAR_FIELDS = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "salesforce", "solar-field-cleanup-2026-11", "fields.json"), "utf8")).fields;
 const countBy = (list, f) => list.reduce((m, x) => m.set(f(x), (m.get(f(x)) || 0) + 1), new Map());
 
 test("(a) the full plan passes the preflight against the captured org metadata — on every anchor", () => {
@@ -140,6 +145,8 @@ test("(c) safety: tenant stamp, forbidden objects and fields, fictional contact 
       for (const f of Object.keys(op.fields)) {
         assert.ok(!isForbiddenField(op.object, f), `${op.key} writes ${f}`);
         assert.ok(!/HCP_Id|Acumatica|Aurora|Sunbase|Dropbox|Stripe/i.test(f), `${op.key} writes ${f}`);
+        // The probe predates the D-090 cleanup, so the describe would still accept these; the plan must not rely on that.
+        if (op.object === OBJ.solar) assert.ok(!DELETED_SOLAR_FIELDS.includes(f), `${op.key} writes ${f}, deleted by the Solar field cleanup (D-090)`);
       }
       if (op.op === "create" && op.object !== OBJ.tenant) assert.deepEqual(op.fields.Client__c, { $ref: "tenant" }, `${op.key} is not stamped with the demo tenant`);
       // Every update targets a record the plan itself creates.

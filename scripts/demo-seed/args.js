@@ -1,6 +1,7 @@
 // args.js — the command line of scripts/seed-demo-tenant.mjs.
 
 import { DEFAULT_TENANT_SLUG, PHASES, SEEDED_OBJECTS } from "./policy.js";
+import { validCustomerCount, customerCountHelp, BASE_CUSTOMERS, GROWTH_STEP } from "./batches.js";
 
 export const HELP = `
 Seed the Sundial DEMO tenant with plausible, entirely fictional data.
@@ -25,6 +26,12 @@ Options
                               demo solar project (the stage Harmon's Salesforce alerts fire on).
                               Without it the customer sits in "Processing Documents", the project
                               in "Audit", and 33 of the 34 solar stages are covered.
+  --customers <n>             how many customers the data set holds: ${BASE_CUSTOMERS} (the default), or
+                              ${BASE_CUSTOMERS} plus a multiple of ${GROWTH_STEP} (${BASE_CUSTOMERS + GROWTH_STEP}, ${BASE_CUSTOMERS + 2 * GROWTH_STEP}, …). Each block of ${GROWTH_STEP} adds
+                              25 solar projects, 5 roofing jobs and 22 service jobs with their estimates,
+                              calls, invoices and payments — to the SAME tenant, changing nothing that
+                              was already seeded. Only ever grows: stored with the first --apply that
+                              used it; a smaller number is refused afterwards.
   --show-passwords            print the demo logins' passwords from Secrets Manager, then stop
   --freshen                   move the dispatch board / payroll to the current week (see the docs)
   --accept-canary <Object>    after a canary failure you have investigated: accept THAT difference
@@ -44,7 +51,7 @@ export function parseArgs(argv) {
   const a = {
     apply: false, tenant: DEFAULT_TENANT_SLUG, phase: null, withFiles: false, demoPhone: null, demoEmail: null,
     withSoldPendingReview: false, showPasswords: false, freshen: false, acceptCanary: [], allowUnaccounted: false,
-    seed: null, offline: false, help: false, problems: [],
+    seed: null, offline: false, help: false, problems: [], customers: null,
   };
   const value = (i, flag) => {
     const v = argv[i + 1];
@@ -68,6 +75,7 @@ export function parseArgs(argv) {
       case "--demo-email": a.demoEmail = value(i, f); i++; break;
       case "--accept-canary": a.acceptCanary.push(value(i, f)); i++; break;
       case "--seed": a.seed = Number(value(i, f)); i++; break;
+      case "--customers": a.customers = Number(value(i, f)); i++; break;
       default: a.problems.push(`unknown option ${f}`);
     }
   }
@@ -81,6 +89,7 @@ export function parseArgs(argv) {
   if (a.demoPhone && !/^\+1\d{10}$/.test(a.demoPhone)) a.problems.push("--demo-phone must look like +1XXXXXXXXXX");
   if (a.demoEmail && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.demoEmail)) a.problems.push("--demo-email is not an email address");
   if (a.seed !== null && !Number.isInteger(a.seed)) a.problems.push("--seed must be a whole number");
+  if (a.customers !== null && !validCustomerCount(a.customers)) a.problems.push(customerCountHelp);
   if (a.offline && a.apply) a.problems.push("--offline is for a dry run only; it cannot be combined with --apply");
   if (!a.tenant || !/^[a-z0-9][a-z0-9-]{1,38}$/.test(a.tenant)) a.problems.push("--tenant must be a lower-case slug");
   return a;

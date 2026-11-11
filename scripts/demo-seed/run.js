@@ -31,6 +31,7 @@ import { phxDateOf } from "./dates.js";
 import { PERSONAS, TECH_KEYS } from "./catalog.js";
 import { BUDGET_RATES } from "./budget-rates.js";
 import { GATED_STAGE, SAFE_NEWLY_SOLD_CUSTOMER_STAGE } from "./plan-solar.js";
+import { BASE_CUSTOMERS } from "./batches.js";
 
 const SUPABASE_PHASES = ["users", "supabase", "files"];
 
@@ -101,6 +102,11 @@ function printSummary(log, plan, pre) {
   }
 
   log(`Roofing pipeline: ${plan.roofingStageMap.map((x) => `${x.stage} (${x.count})`).join(", ") || "no live stages"}.`);
+  if (plan.meta.batches) {
+    log("");
+    log(`Data set: ${plan.meta.options.customers} customers in ${plan.meta.batches.length} batches (--customers). Every batch is planned on its own, so a batch that was already applied is identical to the day it was written:`);
+    for (const b of plan.meta.batches) log(`  batch ${b.index}: ${b.customers} — ${b.solar} solar, ${b.roofing} roofing, ${b.jobs} jobs / ${b.estimates} estimates / ${b.calls} calls`);
+  }
   log(`Canary read-backs: ${s.canaries.total} records are read back in full — the first of each object, and the first in every stage on customers (${s.canaries.customer}) and solar projects (${s.canaries.solar}).`);
   log("");
   log(`Anchor date ${plan.meta.anchorDate} (America/Phoenix); today's dispatch picture is drawn for ${plan.meta.demoNow}; seed ${plan.meta.seed}.`);
@@ -192,6 +198,13 @@ function checkOptionChanges({ changed, storedOptions, plan, idmap }) {
           live.map((d) => `${d.name} (${d.key}${idmap.idOf(d.key) ? `, ${idmap.idOf(d.key)}` : ", not created yet"})`).join("; ") +
           `. Then run again WITHOUT ${flagOf(k)}.`
       );
+    } else if (k === "customers") {
+      const before = storedOptions.customers ?? BASE_CUSTOMERS;
+      if (changed.includes(k) && (plan.meta.options.customers ?? BASE_CUSTOMERS) < before) {
+        errors.push(`--customers ${plan.meta.options.customers ?? BASE_CUSTOMERS} is smaller than the data set already seeded (${before} customers). The data set only ever grows — the seed never removes a record. Run without --customers, or with ${before} or more.`);
+      } else {
+        notes.push(`--customers ${plan.meta.options.customers}: the data set grows from ${before} to ${plan.meta.options.customers} customers. The records already seeded (customer:001 … customer:${String(before).padStart(3, "0")} and everything under them) are planned exactly as before and are skipped; only the new batch is written.`);
+      }
     } else if (k === "withSoldPendingReview") {
       const g = plan.meta.soldPendingReview;
       const made = g ? [g.customerKey, g.solarKey].filter((key) => idmap.has(key)) : [];
@@ -370,7 +383,9 @@ export async function runSeed(argv, io) {
     }
 
     // --- 3. the plan, and every check on it ---------------------------------------------------------
-    const given = { demoPhone: args.demoPhone, demoEmail: args.demoEmail, withSoldPendingReview: args.withSoldPendingReview };
+    // `customers` is only an option once it has been asked for, so a data set that was never
+    // grown keeps the options (and the run record in the secret) it has always had.
+    const given = { demoPhone: args.demoPhone, demoEmail: args.demoEmail, withSoldPendingReview: args.withSoldPendingReview, ...(args.customers !== null ? { customers: args.customers } : {}) };
     const storedOptions = stored.options;
     const { options, changed } = mergeOptions(storedOptions, given);
     if (stored.seed !== null && args.seed !== null && args.seed !== stored.seed) errors.push(`--seed ${args.seed} differs from the seed of the first --apply (${stored.seed}).`);
@@ -542,7 +557,7 @@ async function freshenMode({ args, io, idmap, schema, counters, log, slug }) {
   const knownKeys = Object.keys(idmap.ids).map((k) => [k, objectOfKey(k, idmap.data.objects)]).filter(([, o]) => o);
   const pre = preflightPlan({ ops: fresh.ops }, schema, { knownKeys });
   const s = fresh.summary;
-  log(`  open calls moved into ${newDate} … +7 days: ${s.moved}${s.reassigned ? ` (${s.reassigned} to another tech)` : ""}`);
+  log(`  open calls moved into ${newDate} … +${s.horizonDays ?? 7} days: ${s.moved}${s.reassigned ? ` (${s.reassigned} to another tech)` : ""}`);
   log(`  calls promoted for today's picture:          ${s.promoted}`);
   log(`  Complete calls added (with clock data):      ${s.addedCalls}`);
   log(`  tech days added / closed:                    ${s.addedDays} / ${s.closedDays}`);

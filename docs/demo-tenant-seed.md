@@ -15,8 +15,10 @@ the writing is separate. The tests run against a fake org and never touch anythi
 
 ## What it creates
 
-Counts are for one run; calls, tech days and activity rows vary by a few with the day of
-the week the seed is first applied.
+Counts are for one run at the default size (100 customers); calls, tech days and activity
+rows vary by a few with the day of the week the seed is first applied. The data set can be
+grown afterwards in blocks of 50 customers without touching what is already there — see
+[Growing the data set](#growing-the-data-set).
 
 | Where | What | How many |
 |---|---|---|
@@ -271,9 +273,12 @@ Then do it:
 node scripts/seed-demo-tenant.mjs --freshen --apply
 ```
 
-Freshen moves the still-open calls into today and the next seven days, redraws today's
-picture (one tech on a job, one on the way, one scheduled), adds finished calls with clock
-data for the **current payroll week only**, and adds the matching tech days. Its limits:
+Freshen moves the still-open calls into today and the next seven days (fourteen when the
+data set has been grown and one week cannot hold every open call — the dry run says so in
+a `note:` line), redraws today's picture (one tech on a job, one on the way, one
+scheduled), adds finished calls with clock data for the **current payroll week only**, and
+adds the matching tech days. It covers every record in the id-map, whichever batch seeded
+it. Its limits:
 
 - It adds records each time (calls and tech days); it cannot remove old ones.
 - The new finished calls are added to jobs already In Progress, so those jobs collect
@@ -285,6 +290,122 @@ data for the **current payroll week only**, and adds the matching tech days. Its
   [If the id-map is lost](#if-the-id-map-is-lost)).
 
 Run the cache sync (step 5) afterwards, and copy `id-map.json` to your safe place again.
+
+---
+
+## Growing the data set
+
+The seed can add **50 more customers at a time** to the tenant it already seeded, with the
+same mix hung off them, and change nothing that is already there. The size is a plan-level
+setting, `--customers <n>`: `100` (the default), `150`, `200`, … — anything that is not 100
+plus a multiple of 50 is refused.
+
+**How it stays safe for the records that exist.** The plan is a list of *batches*
+(`scripts/demo-seed/batches.js`). Batch 0 is the original 100 customers and everything
+under them, planned exactly as on the first `--apply`: the same random streams, the same
+keys, the same field values — byte for byte, whether or not a later batch exists. Each
+growth batch draws from its own random streams and continues the key numbering
+(`customer:101`…, `solar:101`…, `roofing:011`…, `job:052` / `estimate:052`… — the service
+numbers start after batch 0's last estimate, so a job and its estimate keep sharing a
+number). The writer skips every key already in the id-map, so an `--apply` at the larger
+size creates only the new batch and never rewrites a record. The test
+`scripts/demo-seed/growth.test.js` proves the 100-customer plan against
+`migration/demo/plan.json` record for record, and that the first batch is identical at the
+larger size.
+
+**What one block of 50 adds** (about 300 Salesforce records, ~60 follow-up updates):
+
+| What | How many |
+|---|---|
+| `Sundial_Customer__c` — 25 solar, 5 roofing-only, 20 service-only (5 who have only called in) | 50 |
+| `Sundial_Solar__c` — spread over about 20 of the active stages; never "Sold - Pending Review" or "Archive" | 25 |
+| `Sundial_Roofing__c` | 5 (one more when a new project sits in "Re-Roof Needed") |
+| `Sundial_Service_Job__c` — every status the board shows except the two that mean "a tech is on it right now" (those stay batch 0's) | 22 |
+| `Sundial_Estimate__c` (22 with a job, 3 without) + `Sundial_Service_Line__c` | 25 + ~90 |
+| `Sundial_Service_Call__c` — in a window of its own: the week before the original board and the week after it, so no tech is ever double-booked | ~70 |
+| `Sundial_Service_Invoice__c` / `Sundial_Service_Payment__c` | 5 / ~6 |
+| `Sundial_Tech_Day__c` | ~14 |
+| Supabase `sundial_service_activity` rows (no new comments, texts or bell rows) | ~450 |
+
+No new canary is needed in practice: every stage a new record sits in was read back on the
+first seed, and the writer only reads back a record in a stage (or on an object) that has
+not been settled yet. The dry run still prints the plan's canary count (the first of each
+stage, all in batch 0); an `--apply` logs a `canary …` line only if a stage is genuinely new.
+
+**The command sequence.** PowerShell, in the `sundial-core` folder, with the id-map in
+`migration/demo/` (the same PC the seed was applied from):
+
+1. Dry run at the new size:
+
+   ```powershell
+   node scripts/seed-demo-tenant.mjs --customers 150
+   ```
+
+   Success looks like this — read these lines:
+
+   ```text
+   Data set: 150 customers in 2 batches (--customers). Every batch is planned on its own, …
+     batch 0: customer:001 … customer:100 — 50 solar, 10 roofing, 45 jobs / 51 estimates / 94 calls
+     batch 1: customer:101 … customer:150 — 25 solar, 5 roofing, 22 jobs / 25 estimates / 68 calls
+   Notes
+     - --customers 150: the data set grows from 100 to 150 customers. The records already seeded
+       (customer:001 … customer:100 and everything under them) are planned exactly as before and
+       are skipped; only the new batch is written.
+   Already in Salesforce for this tenant and recorded in the id-map: 619 record(s).
+   Preflight passed: …
+   Nothing was written …
+   ```
+
+   (619 is the id-map's 620 records minus the tenant row, which that line never counts.)
+   `Optional fields left out` lists the same five roofing-package fields as always, now on
+   15 records instead of 10. Anything under `PREFLIGHT FAILED`, or a `Notes` line you did
+   not expect — stop and read it. The tenant must hold nothing the id-map does not know
+   (records made while demoing need `--allow-unaccounted`, as always).
+
+2. Apply it:
+
+   ```powershell
+   node scripts/seed-demo-tenant.mjs --apply --customers 150
+   ```
+
+   The phases run as usual; every record of batch 0 counts as `already done`. The tally at
+   the end reads `Sundial_Customer__c created 50 updated 25 already done 150`,
+   `Sundial_Solar__c created 25 … already done 53`, `Sundial_Service_Job__c created 22 …`,
+   and the final check says `all records verified`. The `users` and `supabase` phases run
+   too and add nothing but the new activity rows (logins and profiles are reused).
+
+   The setting is stored with this apply — in the id-map **and** in the run record in
+   Secrets Manager — so every later run (with or without `--customers`) rebuilds the
+   150-customer plan, and a lost id-map is rebuilt at the right size. **A smaller number is
+   refused afterwards**: the seed never removes a record.
+
+3. Pull the new records into the list cache (step 5 above), then copy `id-map.json` to
+   your safe place.
+
+If the apply stops part-way, run the same command again; it continues where it stopped.
+
+### Before a demo
+
+On the day, or the day before:
+
+```powershell
+node scripts/seed-demo-tenant.mjs --freshen
+```
+
+```powershell
+node scripts/seed-demo-tenant.mjs --freshen --apply
+```
+
+```powershell
+aws lambda invoke --function-name sundial-cache-sync --region us-west-1 --cli-binary-format raw-in-base64-out --cli-read-timeout 0 --payload "{}" out-cache-sync.json
+```
+
+Freshen reads every demo call in the id-map, from every batch, and moves the open ones
+into today's board. With 150 customers that is about 70 open calls — more than one week
+holds — so the dry run prints `note: 71 open calls are more than one full week holds: the
+board is laid out over 14 days (today … +14)` and the board is filled two weeks ahead.
+A `note: call:… no free slot` line means a call was left where it was (it shows as
+overdue); there should be none.
 
 ---
 
@@ -464,6 +585,95 @@ After a rebuild, `--freshen` works again and continues from the date of the last
 
 ---
 
+## Tax zones for the demo tenant
+
+The Service module's sales tax comes from the four `sundial_tax_*` tables in Supabase, read
+by **tenant slug** (D-083). Harmon's rows are copied from Acumatica every day and belong to
+Harmon alone (D-078), so a demo job shows "Tax zone needed" and invoice issue refuses with
+`TAX_ZONE_REQUIRED` until `conops-demo` has rows of its own. `scripts/seed-demo-tax-zones.mjs`
+writes an INVENTED set — nothing is copied from Harmon's tables or from Acumatica:
+
+| zone | name | rate | city (city_key) | aliases |
+|------|------|------|-----------------|---------|
+| `DM-PHX` | Phoenix (demo) | 8.6 % | PHOENIX | CITY OF PHOENIX, PHOENIX AZ |
+| `DM-SCO` | Scottsdale (demo) | 8.05 % | SCOTTSDALE | CITY OF SCOTTSDALE, SCOTTSDALE AZ |
+| `DM-TEM` | Tempe (demo) | 8.1 % | TEMPE | CITY OF TEMPE, TEMPE AZ |
+| `DM-MES` | Mesa (demo) | 8.3 % | MESA | CITY OF MESA, MESA AZ |
+| `DM-CHA` | Chandler (demo) | 7.8 % | CHANDLER | CITY OF CHANDLER, CHANDLER AZ |
+| `DM-GIL` | Gilbert (demo) | 7.8 % | GILBERT | CITY OF GILBERT, GILBERT AZ |
+| `DM-GLE` | Glendale (demo) | 9.2 % | GLENDALE | CITY OF GLENDALE, GLENDALE AZ |
+| `DM-PEO` | Peoria (demo) | 8.1 % | PEORIA | CITY OF PEORIA, PEORIA AZ |
+| `DM-SUR` | Surprise (demo) | 8.5 % | SURPRISE | CITY OF SURPRISE, SURPRISE AZ |
+| `DM-GOO` | Goodyear (demo) | 8.8 % | GOODYEAR | CITY OF GOODYEAR, GOODYEAR AZ |
+| `DM-QCR` | Queen Creek (demo) | 8.55 % | QUEEN CREEK | CITY OF QUEEN CREEK, QUEEN CREEK AZ |
+| `DM-CAV` | Cave Creek (demo) | 9.3 % | CAVE CREEK | CITY OF CAVE CREEK, CAVE CREEK AZ |
+| `DM-AVO` | Avondale (demo) | 8.8 % | AVONDALE | CITY OF AVONDALE, AVONDALE AZ |
+| `DM-BUC` | Buckeye (demo) | 9.3 % | BUCKEYE | CITY OF BUCKEYE, BUCKEYE AZ |
+
+One zone per city in `scripts/demo-seed/catalog.js` `CITIES`, at **the same rate the seeded
+estimates already carry** in `Tax_Rate__c` (the catalog's `taxRate`), so an invoice re-issued
+in a demo agrees with the seeded money. Each zone carries a county + state tax `DM-MCORT`
+(6.3 %) plus its own city tax (`DM-PHX-CT` …, the remainder) — the same shape as Harmon's
+zones. Categories are Harmon's: **RETAIL is taxed** (materials); **LABSERV, SOLAR,
+WARRANTY and RESALE are 0 %** (each untaxed category has a 0 % tax of its own, RESALE has
+none, so the Acumatica rule in `lib/tax-zones.js` gives 0 either way).
+
+The rows are written through `syncTaxTables` — the daily refresh's own writer — so they are
+identical in form to Harmon's. **Harmon's daily refresh never touches them:** `runTaxZoneRefresh`
+in `lambdas/sundial-cache-sync/index.js` syncs the primary slug only, and every read, upsert
+and prune in `syncTaxTables` is `.eq("tenant", <slug>)`. The test pins that
+(`scripts/seed-demo-tax-zones.test.mjs`).
+
+**Running it** (PowerShell, in the sundial-core repo root; `sql/sundial_tax_zones.sql` must
+have been run once, which it has for Harmon). `--tenant` is required; `harmon` (or whatever
+`SUNDIAL_PRIMARY_TENANT` names) and any slug other than `conops-demo` are refused.
+
+1. Dry run — the zone table above, every category's rate, and where each existing demo job's
+   city lands (how many through an alias). Reads only; opens no Supabase client.
+
+   ```powershell
+   node scripts/seed-demo-tax-zones.mjs --tenant conops-demo
+   ```
+
+   Success ends with `every demo job's city resolves to a demo zone.`, a
+   `backfill-job-tax-zones.mjs --tenant conops-demo would write N open job(s) …` line and
+   `Dry run — nothing written.` An `UNMATCHED cities` line (exit 3) means a job's city is not
+   in the catalog — add the city to `CITIES` and `CITY_CODES` before applying.
+
+2. Write the rows (idempotent; a re-run upserts the same rows and deletes nothing):
+
+   ```powershell
+   node scripts/seed-demo-tax-zones.mjs --tenant conops-demo --apply
+   ```
+
+   Success prints `written for conops-demo: {"zones":14,"taxes":18,"categories":5,"aliases":28,"deleted":0}`
+   and `re-read: 14 zone(s) for conops-demo, all DM-*`.
+
+3. Stamp the zone on the demo's open jobs — the SAME backfill Harmon used, now for the demo
+   slug (exact matches only; canary first; never overwrites a zone). Dry run first:
+
+   ```powershell
+   node scripts/backfill-job-tax-zones.mjs --tenant conops-demo
+   ```
+
+   Success: `Tenant conops-demo: N open job(s) with no tax zone.`, `exact matches (would be
+   written): N`, one line per `DM-` zone, and `unmatched … : 0`. Then:
+
+   ```powershell
+   node scripts/backfill-job-tax-zones.mjs --tenant conops-demo --apply
+   ```
+
+   Success: `canary ok: SVC-… → DM-… (… (demo)); no other field moved.` then
+   `written: N of N`. Run a cache sync for `job` afterwards so the lists show the zone.
+
+Closed / Cancelled / Paid demo jobs keep a blank zone (the backfill never touches them), and
+their seeded invoices keep the totals they were seeded with. After this, a demo job's page
+shows e.g. "Phoenix (demo) (8.6%)" and issuing an invoice works. The Acumatica refresh
+reports no drift for these zones, and `scripts/verify-demo-isolation.mjs` is unaffected (it
+reads cache tables, not the tax tables).
+
+---
+
 ## Removing the demo tenant
 
 The script does not delete anything, and **the integration user cannot delete** dealers,
@@ -573,10 +783,13 @@ Solar" deals. Budget output fields are left blank on purpose — press Recalcula
 ## Tests
 
 ```powershell
-node --experimental-test-module-mocks --test scripts/demo-seed/plan.test.js scripts/demo-seed/run.test.js scripts/demo-seed/freshen.test.js
+node --experimental-test-module-mocks --test scripts/demo-seed/plan.test.js scripts/demo-seed/run.test.js scripts/demo-seed/freshen.test.js scripts/demo-seed/growth.test.js
+node --test scripts/demo-seed/verify-isolation.test.js scripts/seed-demo-tax-zones.test.mjs
 ```
 
-Name the three files, as above: on Node 22 `node --test scripts/demo-seed/` does not run
-the tests in a folder. They are also part of `npm test`. They run against a fake org built from
+Name the files, as above: on Node 22 `node --test scripts/demo-seed/` does not run the
+tests in a folder. They are also part of `npm test`. They run against a fake org built from
 `migration/demo/probe.json`; they prove the plan is consistent and the safety rules hold,
-not that the live org behaves the way the probe says.
+not that the live org behaves the way the probe says. `growth.test.js` also reads
+`migration/demo/plan.json` and `id-map.json` when they are present (the folder is
+git-ignored) and proves the plan at the applied size is still what was applied.

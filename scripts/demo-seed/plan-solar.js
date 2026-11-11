@@ -134,6 +134,27 @@ export function solarStageList(liveStages, count = SOLAR_COUNT) {
   return out;
 }
 
+/**
+ * The stages of a GROWTH batch (batches.js): `count` more projects, spread over the live
+ * pipeline with the active middle busiest. Every live stage is in the pool once and the
+ * busy stages a few times more, the pool is shuffled by the batch's own stream, and the
+ * first `count` are taken — so 25 projects land in about 20 different stages, every one of
+ * them a stage batch 0 already covers. Two stages never appear here: the gated
+ * "Sold - Pending Review" (plan.js — only batch 0's one project may use it, with the flag)
+ * and "Archive" (an archived project adds nothing to a demo). A pipeline with fewer live
+ * stages than that simply cycles.
+ */
+export const GROWTH_SKIPPED_STAGES = Object.freeze([GATED_STAGE, "Archive"]);
+export function growthSolarStageList(liveStages, count, rng) {
+  const usable = liveStages.filter((s) => !GROWTH_SKIPPED_STAGES.includes(s));
+  const pool = [...usable];
+  for (const [stage, n] of EXTRA_STAGE_WEIGHTS) if (usable.includes(stage)) for (let i = 0; i < n; i++) pool.push(stage);
+  const shuffled = pool.length ? rng.shuffle(pool) : [];
+  const out = [];
+  for (let i = 0; out.length < count && shuffled.length; i++) out.push(shuffled[i % shuffled.length]);
+  return out;
+}
+
 const PANELS = [
   { solar: "Hanwha Q.Peak Duo BLK ML-G10+ 410w", customer: "Qcells - Q.PEAK DUO BLK ML-G10+ 410", watts: 410 },
   { solar: "Hyundai HiN-T440NF(BK)", customer: "Hyundai Energy Solutions - HiN-T440NF(BK)", watts: 440 },
@@ -241,16 +262,18 @@ function buildTimeline(rule, rng, anchorDate) {
  * Design all the projects. Adds `profile.solar` to each of the first 50 profiles.
  * @returns {{ stageMap: Array<{stage, known, count}>, warnings: string[], gated: null | { stage, customerKey, solarKey, used, movedTo } }}
  */
-export function designSolarProjects(profiles, { rng, schema, anchorDate, options }) {
+export function designSolarProjects(profiles, { rng, schema, anchorDate, options, growth = false }) {
   const S = OBJ.solar;
   const warnings = [];
   const liveStages = schema.values(S, "Stage__c");
   const solarProfiles = profiles.filter((p) => p.kind === "solar");
-  let stages = rng.shuffle(solarStageList(liveStages, solarProfiles.length));
+  // A growth batch (batches.js) spreads its projects over the active pipeline from its own
+  // stream; the gated stage is never in its list, so nothing below about it applies.
+  let stages = growth ? growthSolarStageList(liveStages, solarProfiles.length, rng) : rng.shuffle(solarStageList(liveStages, solarProfiles.length));
   // The FIRST project is the canary: written alone and compared field by field. Put a
   // busy mid-pipeline stage there so the canary carries plenty of fields, and its customer
   // is a plain "Sold" one (the welcome-call guard is what a sold-stage Flow would test).
-  const canaryStage = ["Permit Submitted", "Permitting Received", "Design Received"].find((s) => stages.includes(s));
+  const canaryStage = growth ? null : ["Permit Submitted", "Permitting Received", "Design Received"].find((s) => stages.includes(s));
   if (canaryStage) {
     const i = stages.indexOf(canaryStage);
     [stages[0], stages[i]] = [stages[i], stages[0]];

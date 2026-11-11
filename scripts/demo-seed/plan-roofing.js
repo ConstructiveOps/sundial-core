@@ -24,18 +24,27 @@ const STAGE_RANK = Object.freeze({
 const SOLD_RANK = 4;
 const PRICE_PER_SQUARE = { shingle: 550, tile: 850, recoat: 400 };
 
-export function designRoofing(profiles, { rng, schema, anchorDate }) {
+/**
+ * @param {object[]} profiles  the profiles of ONE batch (batches.js)
+ * @param {object} p
+ *   firstNo    the number of the batch's first roofing key ("roofing:011" for 11)
+ *   count      how many roofing jobs the batch has
+ *   withSolar  how many of them are re-roofs tied to a solar project of the batch
+ *   strict     a growth batch ties a re-roof ONLY to a project that is actually waiting on
+ *              a roof ("Re-Roof Needed"); batch 0 fills its three from the next best stages
+ */
+export function designRoofing(profiles, { rng, schema, anchorDate, firstNo = 1, count = ROOFING_COUNT, withSolar = ROOFING_WITH_SOLAR, strict = false }) {
   const R = OBJ.roofing;
   const stages = schema.values(R, "Stage__c");
   // Three solar customers whose project is waiting on (or just had) a new roof.
   const solar = profiles.filter((p) => p.kind === "solar" && p.n !== 1);
   const tied = [];
-  for (const want of ["Re-Roof Needed", "Hold", "Scheduling"]) {
+  for (const want of strict ? ["Re-Roof Needed"] : ["Re-Roof Needed", "Hold", "Scheduling"]) {
     const hit = solar.find((p) => p.solar.stage === want && !tied.includes(p));
     if (hit) tied.push(hit);
   }
-  for (const p of solar) if (tied.length < ROOFING_WITH_SOLAR && !tied.includes(p)) tied.push(p);
-  const owners = [...tied.slice(0, ROOFING_WITH_SOLAR), ...profiles.filter((p) => p.kind === "roofing")].slice(0, ROOFING_COUNT);
+  if (!strict) for (const p of solar) if (tied.length < withSolar && !tied.includes(p)) tied.push(p);
+  const owners = [...tied.slice(0, withSolar), ...profiles.filter((p) => p.kind === "roofing")].slice(0, count);
   owners.forEach((p, i) => {
     const r = rng.fork(p.key);
     const stage = stages.length ? stages[i % stages.length] : null;
@@ -45,7 +54,7 @@ export function designRoofing(profiles, { rng, schema, anchorDate }) {
     const squares = Math.round(((p.property.sqft * 1.2) / 100) * 10) / 10;
     const sold = rank >= SOLD_RANK && stage !== "Cancelled";
     p.roofing = {
-      key: `roofing:${String(i + 1).padStart(3, "0")}`,
+      key: `roofing:${String(firstNo + i).padStart(3, "0")}`,
       stage, rank, kind, squares, roofType,
       withSolar: p.kind === "solar",
       scope: kind === "recoat" ? "Repair" : "Full Re-Roof",

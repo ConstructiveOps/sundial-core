@@ -32,15 +32,33 @@ const C = OBJ.customer;
 const pad3 = (n) => String(n).padStart(3, "0");
 const money = (n) => Math.round(n * 100) / 100;
 
-/** The people and places, before anything hangs off them. */
-export function buildProfiles({ rng, schema, pick }) {
+/** customer n -> its kind, for the original 100 (batches.js describes the growth batches). */
+const baseKind = (n) => (n <= 50 ? "solar" : n <= 50 + PIPELINE_COUNT ? "pipeline" : n <= 50 + PIPELINE_COUNT + ROOFING_ONLY_COUNT ? "roofing" : "service");
+
+/**
+ * The people and places, before anything hangs off them.
+ *
+ * `batches` (batches.js) says how many customers there are and what kind each one is.
+ * The cast and the profile stream are drawn from IN ORDER, one customer after another, so
+ * the first 100 profiles are the same whether the list stops at 100 or goes on to 150:
+ * a growth batch only ever APPENDS draws, it never changes an earlier one. (That is also
+ * why the names, streets and phone numbers of a growth batch cannot repeat an earlier
+ * batch's: they come from the same cast, which never hands one out twice.)
+ */
+export function buildProfiles({ rng, schema, pick, batches = null }) {
   const cast = createCast(rng.fork("cast"));
   const r = rng.fork("profiles");
   const leadSources = schema.liveSubset(C, "Lead_Source__c", GENERIC_LEAD_SOURCES);
   const roofTypes = [["Concrete Tile", 45], ["Asphalt Shingle", 30], ["Clay Tile", 10], ["Flat/Foam", 10], ["Metal", 5]].filter(([v]) => schema.isLive(C, "Roof_Type__c", v));
   const profiles = [];
-  for (let n = 1; n <= CUSTOMER_COUNT; n++) {
-    const kind = n <= 50 ? "solar" : n <= 50 + PIPELINE_COUNT ? "pipeline" : n <= 50 + PIPELINE_COUNT + ROOFING_ONLY_COUNT ? "roofing" : "service";
+  const count = batches ? batches.reduce((s, b) => s + b.customers, 0) : CUSTOMER_COUNT;
+  const kindOf = (n) => {
+    if (!batches) return baseKind(n);
+    const b = batches.find((x) => n >= x.firstCustomer && n < x.firstCustomer + x.customers);
+    return b.kindOf(n - b.firstCustomer + 1);
+  };
+  for (let n = 1; n <= count; n++) {
+    const kind = kindOf(n);
     const person = cast.person();
     const place = cast.place();
     const repKey = r.weighted(SALES_PEOPLE.map((s) => [s.key, s.share]));

@@ -20,7 +20,7 @@ import { runSeed } from "./run.js";
 import { loadProbe } from "./test-helpers.js";
 import { OBJ, DEMO_USERS_SECRET } from "./policy.js";
 import {
-  verify, parseVerifyArgs, findDemoIds, sampleIds, id15, CACHE_OBJECTS, RECORD_TABLES, KNOWN_OBJECTS, MAX_SOQL_CHARS,
+  verify, parseVerifyArgs, findDemoIds, sampleIds, id15, CACHE_OBJECTS, SYNC_ONLY_OBJECTS, RECORD_TABLES, KNOWN_OBJECTS, MAX_SOQL_CHARS,
   TEST_USERS_SECRET, C2_EVERY, C2_SAMPLED,
 } from "./verify-isolation.js";
 import { soqlShim, describeShim, readOnlySupabase, simulateCacheSync, createFakeApi, cacheRowOf } from "./verify-fakes.js";
@@ -35,12 +35,29 @@ const AVERY = "tim+demo-avery@constructiveoperations.com";
  * A seeded fake world plus the primary tenant's test fixtures, and the read-only `io` the
  * check is given. `inject(world)` runs after the seed (and after the simulated sync).
  */
+/**
+ * sundial_dealer_cache was created after probe.json was captured (D-089, reports-only), so
+ * the fake project does not know it. Its columns are read from the DDL in sql/, so the fake
+ * table is the live one's shape; one Harmon row, like every other fake cache table.
+ */
+function addDealerCacheTable(db) {
+  const ddl = readFileSync(resolve(REPO, "sql", "sundial_dealer_cache.sql"), "utf8");
+  const body = /create table if not exists public\.sundial_dealer_cache \(([\s\S]*?)\n\);/.exec(ddl)[1];
+  const cols = [...body.matchAll(/^\s+([a-z_]+)\s+(?:text|boolean|numeric|timestamptz|integer)/gm)].map((m) => m[1]);
+  assert.ok(cols.includes("sf_id") && cols.includes("client_sf_id") && cols.includes("tenant_id"), cols.join(","));
+  db.columns.set("sundial_dealer_cache", new Set(cols));
+  const row = Object.fromEntries(cols.map((c) => [c, null]));
+  row.sf_id = "a1X7y00000HarmonDlr"; row.client_sf_id = PRIMARY; row.tenant_id = "harmon";
+  db.tables.set("sundial_dealer_cache", [row]);
+}
+
 async function buildWorld({ sync = false, supabase: supabaseOpts = {}, seedArgs = ["--with-files"] } = {}) {
   const w = createFakeIo(loadProbe());
   const code = await runSeed(["--apply", ...seedArgs], w.io);
   assert.equal(code, 0, w.output().split("\n").slice(-20).join("\n"));
   const org = w.org;
   const db = w.supabase;
+  addDealerCacheTable(db);
   const idmap = w.idmap();
   const demoTenant = idmap.ids.tenant;
 
@@ -697,20 +714,32 @@ test("(12) no password, token or key appears in the output — lines, results or
 // ---------------------------------------------------------------------------------------
 // the script's copies of what the Lambdas and the tables are called
 // ---------------------------------------------------------------------------------------
-test("CACHE_OBJECTS is the OBJECT_ALLOWLIST of both Lambdas, and every table and column the script reads is in probe.json and sql/", () => {
+test("CACHE_OBJECTS is the OBJECT_ALLOWLIST of cache-sync (sf-query = the same minus the reports-only caches), and every table and column the script reads is in probe.json and sql/", () => {
   const probe = loadProbe();
-  for (const lambda of ["sundial-sf-query", "sundial-cache-sync"]) {
+  const allowlistOf = (lambda) => {
     const src = readFileSync(resolve(REPO, "lambdas", lambda, "index.js"), "utf8");
     const block = /const OBJECT_ALLOWLIST = \{([\s\S]*?)\n\};/.exec(src)[1];
     const found = {};
     for (const m of block.matchAll(/(\w+):\s*\{\s*sfObject:\s*"(\w+)",\s*cacheTable:\s*"(\w+)",?\s*\}/g)) found[m[1]] = { sfObject: m[2], cacheTable: m[3] };
-    assert.deepEqual(found, { ...CACHE_OBJECTS }, lambda);
-  }
+    return found;
+  };
+  // cache-sync fills every table the script checks …
+  assert.deepEqual(allowlistOf("sundial-cache-sync"), { ...CACHE_OBJECTS }, "sundial-cache-sync");
+  // … and sf-query serves all of them but the reports-only ones (D-089: sundial_dealer_cache is never in its allowlist).
+  const served = Object.fromEntries(Object.entries(CACHE_OBJECTS).filter(([k]) => !SYNC_ONLY_OBJECTS.includes(k)));
+  assert.deepEqual(allowlistOf("sundial-sf-query"), served, "sundial-sf-query");
+  for (const k of SYNC_ONLY_OBJECTS) assert.ok(CACHE_OBJECTS[k], `${k} is a CACHE_OBJECTS key`);
   const snapshot = readFileSync(resolve(REPO, "sql", "live-snapshot-2026-08-27.sql"), "utf8");
   for (const { sfObject, cacheTable } of Object.values(CACHE_OBJECTS)) {
     assert.ok(probe.salesforce[sfObject], sfObject);
     const cols = probe.supabase[cacheTable]?.columns;
     if (!cols) {
+      if (cacheTable === "sundial_dealer_cache") {
+        // Created after the probe (D-089); its DDL in sql/ carries the three columns.
+        const ddl = readFileSync(resolve(REPO, "sql", "sundial_dealer_cache.sql"), "utf8");
+        for (const c of ["sf_id", "client_sf_id", "tenant_id"]) assert.match(ddl, new RegExp(`^\\s+${c}\\s+text`, "m"), `${cacheTable}.${c}`);
+        continue;
+      }
       // The probe did not look at this table; the live snapshot in sql/ has it.
       assert.equal(cacheTable, "sundial_po_cache");
       const start = snapshot.indexOf(`-- ---- public.${cacheTable} -`);
@@ -735,7 +764,10 @@ test("CACHE_OBJECTS is the OBJECT_ALLOWLIST of both Lambdas, and every table and
   assert.match(query, /code: "RECORD_NOT_FOUND"/);
   assert.match(query, /String\(qs\.full\)\.toLowerCase\(\) === "true"/);
   assert.match(query, /hasMore: offset \+ records\.length < adjustedTotal/);
-  assert.match(query, /phone: \["primary_phone", "alternate_contact_phone"\]/);
+  // The search (phone columns included) moved to lib/cache-read.js on 2026-10-23, shared with sundial-dealer.
+  const cacheRead = readFileSync(resolve(REPO, "lib/cache-read.js"), "utf8");
+  assert.match(cacheRead, /phone: \["primary_phone", "alternate_contact_phone"\]/);
+  assert.match(query, /searchOrExpr/);
   const auth = readFileSync(resolve(REPO, "lambdas/sundial-auth-proxy/index.js"), "utf8");
   assert.match(auth, /tenant: \{ clientId: identity\.tenantId, slug: identity\.tenantSlug \?\? null \}/);
   const board = readFileSync(resolve(REPO, "lambdas/sundial-service-board/index.js"), "utf8");

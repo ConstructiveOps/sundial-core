@@ -51,6 +51,10 @@ const chunk = (arr, n) => {
   return out;
 };
 
+/** Open calls are laid out over today … +7; a grown data set (batches.js) may need today … +14. */
+export const FRESHEN_HORIZON_DAYS = 7;
+export const FRESHEN_WIDE_HORIZON_DAYS = 14;
+
 /** The date the board is currently anchored to: the last freshen, else the original seed. */
 export function boardDateOf(idmapData) {
   const last = (idmapData.freshen || []).slice(-1)[0];
@@ -108,14 +112,21 @@ export function planFreshen(state, { boardDate, newDate, nowIso, seed, existingD
   const history = Math.min(gap - 1, daysBetween(weekMonday(newDate), newDate));
   // The week ahead is laid out like the original board. If that leaves fewer free slots than
   // there are open calls to place, the future days are made fuller (three to four calls a
-  // day, then four) — today's picture and the history days are the same either way.
+  // day, then four) — today's picture and the history days are the same either way. A data
+  // set that has been grown (batches.js) carries more open calls than one full week holds,
+  // so the horizon is then widened to two weeks (today … +14) rather than leave calls behind.
   let usable = [];
-  for (const futureDay of [NORMAL_DAY, [[3, 60], [4, 40]], [[4, 100]]]) {
-    const slots = buildSchedule({ rng: createRng(seed, tag), anchorDate: newDate, nowMin, fromOffset: -history, toOffset: 7, futureDay });
-    // Days the original board (or an earlier freshen) already covers are never written to twice.
-    usable = slots.filter((s) => s.date > boardDate);
-    if (usable.filter((s) => ["scheduled", "inprogress", "enroute"].includes(s.kind)).length >= open.length) break;
+  let horizon = FRESHEN_HORIZON_DAYS;
+  outer: for (const days of [FRESHEN_HORIZON_DAYS, FRESHEN_WIDE_HORIZON_DAYS]) {
+    for (const futureDay of [NORMAL_DAY, [[3, 60], [4, 40]], [[4, 100]]]) {
+      const slots = buildSchedule({ rng: createRng(seed, tag), anchorDate: newDate, nowMin, fromOffset: -history, toOffset: days, futureDay });
+      // Days the original board (or an earlier freshen) already covers are never written to twice.
+      usable = slots.filter((s) => s.date > boardDate);
+      horizon = days;
+      if (usable.filter((s) => ["scheduled", "inprogress", "enroute"].includes(s.kind)).length >= open.length) break outer;
+    }
   }
+  if (horizon > FRESHEN_HORIZON_DAYS) notes.push(`${open.length} open calls are more than one full week holds: the board is laid out over ${horizon} days (today … +${horizon}).`);
   const r = createRng(seed, `${tag}/calls`);
   const near = (p, spread = 0.0003) => ({ lat: Math.round((p.lat + (r.next() - 0.5) * spread) * 1e6) / 1e6, lng: Math.round((p.lng + (r.next() - 0.5) * spread) * 1e6) / 1e6, accuracy: r.int(5, 18) });
   const byStart = (a, b) => String(a.start ?? "").localeCompare(String(b.start ?? "")) || a.key.localeCompare(b.key);
@@ -252,5 +263,6 @@ export function planFreshen(state, { boardDate, newDate, nowIso, seed, existingD
     });
     summary.closedDays++;
   }
+  summary.horizonDays = horizon;
   return { ops, summary, notes, newDate, demoNow: now };
 }

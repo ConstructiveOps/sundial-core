@@ -22,6 +22,7 @@ import { designRoofing, roofingFields } from "./plan-roofing.js";
 import { planService, priceBookOps } from "./plan-service.js";
 import { planSupabase } from "./plan-supabase.js";
 import { planFiles } from "./plan-files.js";
+import { batchesFor, batchProfiles, BASE_CUSTOMERS } from "./batches.js";
 
 export const DEFAULT_SEED = 20260929;
 
@@ -110,19 +111,28 @@ function peopleOps(tenantSlug, cast) {
  *   anchorDate   YYYY-MM-DD in Phoenix — every date in the plan hangs off it
  *   anchorNow    ISO instant of the run (decides today's picture on the dispatch board)
  *   seed         number
- *   options      { demoPhone?, demoEmail?, withSoldPendingReview? }
+ *   options      { demoPhone?, demoEmail?, withSoldPendingReview?, customers? }
+ *                customers: how many customers the data set holds — 100 (the default) or
+ *                100 plus a multiple of 50 (batches.js). Growing it later adds records
+ *                and changes none of the plan that was already applied.
  */
 export function buildPlan({ schema, tenantSlug, anchorDate, anchorNow, seed = DEFAULT_SEED, options = {} }) {
   const rng = createRng(seed, tenantSlug);
   const pick = createPicker(schema);
   const warnings = [];
   const ctx = { rng, schema, pick, anchorDate, anchorNow, options };
+  const batches = batchesFor(options.customers ?? BASE_CUSTOMERS);
+  // Batch 0 draws from the streams the plan has always used ("solar", "roofing", "service");
+  // a growth batch has its own ("growth1/solar", …), so its draws can never shift batch 0's.
+  const streams = (b) => (b.growth ? rng.fork(`growth${b.index}`) : rng);
 
-  const profiles = buildProfiles({ rng: rng.fork("customers"), schema, pick });
+  const profiles = buildProfiles({ rng: rng.fork("customers"), schema, pick, batches });
   assignPipelineStages(profiles, { schema });
-  const solar = designSolarProjects(profiles, { rng: rng.fork("solar"), schema, anchorDate, options });
-  warnings.push(...solar.warnings);
-  const roofing = designRoofing(profiles, { rng: rng.fork("roofing"), schema, anchorDate });
+  const solarBatches = batches.map((b) => designSolarProjects(batchProfiles(profiles, b), { rng: streams(b).fork("solar"), schema, anchorDate, options, growth: b.growth }));
+  const solar = solarBatches[0];
+  for (const sb of solarBatches) for (const w of sb.warnings) if (!warnings.includes(w)) warnings.push(w);
+  const roofingBatches = batches.map((b) => designRoofing(batchProfiles(profiles, b), { rng: streams(b).fork("roofing"), schema, anchorDate, ...b.roofing, strict: b.growth }));
+  const roofing = { owners: roofingBatches.flatMap((r) => r.owners), stageMap: mergeStageMaps(roofingBatches.map((r) => r.stageMap)) };
   for (const s of roofing.stageMap) if (!s.known && s.count) warnings.push(`Roofing stage "${s.stage}" is not one this script knows; its ${s.count} job(s) are filled like a sold roofing job.`);
   // The three live-demo customers: the first opportunity waiting for a proposal, the job a
   // tech is driving to, and the first job ready to bill (the last two are picked inside
@@ -133,7 +143,8 @@ export function buildPlan({ schema, tenantSlug, anchorDate, anchorNow, seed = DE
     liveDemoKeys.push(...keys);
     applyLiveDemo(profiles, keys, options);
   };
-  const service = planService({ profiles, rng: rng.fork("service"), schema, pick, anchorDate, anchorNow, onLiveDemo: markLive });
+  const serviceBatches = batches.map((b) => planService({ profiles: batchProfiles(profiles, b), rng: streams(b).fork("service"), schema, pick, anchorDate, anchorNow, onLiveDemo: markLive, batch: b.service }));
+  const service = mergeService(serviceBatches);
   if (pipelineDemo) markLive([pipelineDemo.key]);
 
   // Service summary on each customer that has service history (the Service > Customers board).
@@ -170,7 +181,9 @@ export function buildPlan({ schema, tenantSlug, anchorDate, anchorNow, seed = DE
   const plan = {
     meta: {
       tenantSlug, anchorDate, anchorNow, demoNow: service.demoNow, seed,
-      options: { demoPhone: options.demoPhone ?? null, demoEmail: options.demoEmail ?? null, withSoldPendingReview: !!options.withSoldPendingReview },
+      // `customers` is only written when the data set has been grown, so the plan of the
+      // original 100 reads exactly as it did on the first --apply.
+      options: { demoPhone: options.demoPhone ?? null, demoEmail: options.demoEmail ?? null, withSoldPendingReview: !!options.withSoldPendingReview, ...(batches.length > 1 ? { customers: profiles.length } : {}) },
       liveDemo: liveDemoKeys.map((k) => {
         const p = profiles.find((x) => x.key === k);
         return { key: k, name: p.person.name, what: p.kind === "pipeline" ? `sales opportunity (${p.pipeline.stage})` : "service customer" };
@@ -182,12 +195,46 @@ export function buildPlan({ schema, tenantSlug, anchorDate, anchorNow, seed = DE
     supabase,
     files,
     warnings,
-    solarStageMap: solar.stageMap,
+    solarStageMap: mergeStageMaps(solarBatches.map((s) => s.stageMap)),
     roofingStageMap: roofing.stageMap,
   };
+  if (batches.length > 1) {
+    plan.meta.batches = batches.map((b) => ({
+      index: b.index,
+      customers: `customer:${String(b.firstCustomer).padStart(3, "0")} … customer:${String(b.firstCustomer + b.customers - 1).padStart(3, "0")}`,
+      solar: profiles.filter((p) => p.n >= b.firstCustomer && p.n < b.firstCustomer + b.customers && p.solar).length,
+      roofing: roofingBatches[b.index].owners.length,
+      jobs: serviceBatches[b.index].jobs.length,
+      estimates: serviceBatches[b.index].estimates.length,
+      calls: serviceBatches[b.index].calls.length,
+    }));
+  }
   // Models the tests (and --freshen) look at. Not part of plan.json.
-  Object.defineProperty(plan, "models", { value: { profiles, service, roofing }, enumerable: false });
+  Object.defineProperty(plan, "models", { value: { profiles, service, roofing, batches, serviceBatches }, enumerable: false });
   return plan;
+}
+
+/** Stage maps of several batches (the same live stage list each) -> one, counts added up. */
+function mergeStageMaps(maps) {
+  if (maps.length === 1) return maps[0];
+  return maps[0].map((row, i) => ({ ...row, count: maps.reduce((s, m) => s + (m[i]?.count ?? 0), 0) }));
+}
+
+/** The service plans of every batch as one, batch 0 first — so every "first job that …" the Supabase and file planners pick is batch 0's. */
+function mergeService(batches) {
+  if (batches.length === 1) return batches[0];
+  const [first] = batches;
+  return {
+    ops: batches.flatMap((b) => b.ops),
+    jobs: batches.flatMap((b) => b.jobs),
+    estimates: batches.flatMap((b) => b.estimates),
+    calls: batches.flatMap((b) => b.calls),
+    techDays: batches.flatMap((b) => b.techDays),
+    slots: batches.flatMap((b) => b.slots),
+    demoNow: first.demoNow,
+    nowMin: first.nowMin,
+    liveDemoKeys: first.liveDemoKeys,
+  };
 }
 
 /** What the Service > Customers board shows for a customer, from their latest estimate / job. */

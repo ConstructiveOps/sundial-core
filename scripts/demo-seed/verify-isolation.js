@@ -72,9 +72,10 @@ const MAX_DESCRIBED_OBJECTS = 40;
 const SYSTEM_REFERENCE_FIELDS = new Set(["OwnerId", "CreatedById", "LastModifiedById"]);
 
 /**
- * The portal's object keys and their list-cache tables — a copy of OBJECT_ALLOWLIST in
- * lambdas/sundial-sf-query/index.js (the cache-sync Lambda carries the same map and fills
- * every one of them). The test reads both Lambdas' source and fails if this copy drifts.
+ * The object keys and their cache tables — a copy of OBJECT_ALLOWLIST in
+ * lambdas/sundial-cache-sync/index.js (what fills every cache table). sundial-sf-query
+ * serves the same map MINUS the SYNC_ONLY_OBJECTS below (reports-only caches that no list
+ * reads). The test reads both Lambdas' source and fails if this copy drifts.
  */
 export const CACHE_OBJECTS = Object.freeze({
   solar: { sfObject: "Sundial_Solar__c", cacheTable: "sundial_solar_cache" },
@@ -91,7 +92,12 @@ export const CACHE_OBJECTS = Object.freeze({
   servicepayment: { sfObject: "Sundial_Service_Payment__c", cacheTable: "sundial_service_payment_cache" },
   serviceplan: { sfObject: "Sundial_Service_Plan__c", cacheTable: "sundial_service_plan_cache" },
   membership: { sfObject: "Sundial_Membership__c", cacheTable: "sundial_membership_cache" },
+  // Reports-only (D-089): filled by cache-sync, joined by sundial-reports, never served by
+  // sundial-sf-query. Checked here all the same — a demo dealer's row must carry the demo tenant.
+  dealer: { sfObject: "Sundial_Dealer__c", cacheTable: "sundial_dealer_cache" },
 });
+/** CACHE_OBJECTS keys the cache-sync fills that sundial-sf-query deliberately does not serve. */
+export const SYNC_ONLY_OBJECTS = Object.freeze(["dealer"]);
 
 /**
  * The Supabase tables that hold rows ABOUT records (not the list cache).

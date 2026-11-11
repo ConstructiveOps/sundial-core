@@ -47,10 +47,12 @@ export const JOB_STATUS_ORDER = Object.freeze([
   "Closed", "Paid", "Invoiced", "Ready to Bill", "Awaiting Parts", "Awaiting Office Review", "In Progress",
   "Scheduled", "Ready to Schedule", "Remote Investigation", "Triaging", "New",
 ]);
-const JOB_STATUS_COUNTS = Object.freeze({
+export const JOB_STATUS_COUNTS = Object.freeze({
   Closed: 2, Paid: 4, Invoiced: 4, "Ready to Bill": 3, "Awaiting Parts": 2, "Awaiting Office Review": 4, "In Progress": 4,
   Scheduled: 14, "Ready to Schedule": 4, "Remote Investigation": 1, Triaging: 1, New: 2,
 });
+/** The six estimates that never became a job, in the order they are numbered. */
+export const JOBLESS_ESTIMATE_STATUSES = Object.freeze(["Draft", "Draft", "Sent", "Sent", "Declined", "Expired"]);
 /** settleJobStatus (lambdas/sundial-service-board/index.js): what counts as an open call / an unscheduled job. */
 export const OPEN_CALL_STATUSES = Object.freeze(["Scheduled", "En Route", "In Progress"]);
 export const UNSCHEDULED_JOB_STATUSES = Object.freeze(["New", "Triaging", "Remote Investigation", "Ready to Schedule", "Awaiting Parts"]);
@@ -486,16 +488,34 @@ function buildEstimate(spec, r) {
 // 4. Everything together
 // ---------------------------------------------------------------------------------------
 
+/** The service plan of batch 0 (plan-service.js as it has always been; batches.js has the growth batches). */
+export const BASE_SERVICE_BATCH = Object.freeze({ firstNo: 1, jobCounts: JOB_STATUS_COUNTS, jobless: JOBLESS_ESTIMATE_STATUSES, callInOnly: 5, liveDemo: true, windows: null });
+
 /**
  * @param {object} p
- *   profiles     all customer profiles (solar designed already)
+ *   profiles     the customer profiles of ONE batch (solar designed already)
  *   rng, schema, pick, anchorDate, anchorNow
+ *   batch        which jobs this batch holds and where its calls go (batches.js):
+ *                  firstNo     the number of its first job / estimate key
+ *                  jobCounts   jobs per status
+ *                  jobless     the statuses of its estimates that never became a job
+ *                  callInOnly  how many service-only customers have only called in
+ *                  liveDemo    whether its two service "live demo" customers are chosen (batch 0 only)
+ *                  windows     null for the original board (ten days back, today, seven ahead), or
+ *                              { past: [from, to], future: [from, to] } day offsets of its own
+ *                              slice of the board — no "today", so its In Progress jobs are the
+ *                              "worked once, another visit booked" kind
  * @returns {{ ops: object[], jobs: object[], estimates: object[], calls: object[], techDays: object[], slots: object[], demoNow: string }}
  */
-export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow, onLiveDemo = null }) {
+export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow, onLiveDemo = null, batch = BASE_SERVICE_BATCH }) {
   const J = OBJ.job;
   const { nowMin, now } = demoNowFor(anchorDate, anchorNow);
-  const slots = buildSchedule({ rng: rng.fork("schedule"), anchorDate, nowMin });
+  const slots = batch.windows
+    ? [
+        ...buildSchedule({ rng: rng.fork("schedule"), anchorDate, nowMin, fromOffset: batch.windows.past[0], toOffset: batch.windows.past[1] }),
+        ...buildSchedule({ rng: rng.fork("schedule"), anchorDate, nowMin, fromOffset: batch.windows.future[0], toOffset: batch.windows.future[1] }),
+      ]
+    : buildSchedule({ rng: rng.fork("schedule"), anchorDate, nowMin });
   for (const s of slots) s.demoNow = now;
   const r = rng.fork("service");
 
@@ -504,11 +524,11 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
   const jobs = [];
   let lost = 0;
   for (const status of JOB_STATUS_ORDER) {
-    if (!liveStatuses.has(status)) { lost += JOB_STATUS_COUNTS[status]; continue; }
-    for (let i = 0; i < JOB_STATUS_COUNTS[status]; i++) jobs.push({ status, idx: i, slots: [], extraSlots: [] });
+    if (!liveStatuses.has(status)) { lost += batch.jobCounts[status] ?? 0; continue; }
+    for (let i = 0; i < (batch.jobCounts[status] ?? 0); i++) jobs.push({ status, idx: i, slots: [], extraSlots: [] });
   }
   for (let i = 0; i < lost; i++) jobs.push({ status: "Scheduled", idx: 100 + i, slots: [], extraSlots: [] });
-  jobs.forEach((j, i) => { j.no = i + 1; j.key = `job:${pad3(i + 1)}`; j.estKey = `estimate:${pad3(i + 1)}`; });
+  jobs.forEach((j, i) => { j.no = batch.firstNo + i; j.key = `job:${pad3(j.no)}`; j.estKey = `estimate:${pad3(j.no)}`; });
   const of = (status) => jobs.filter((j) => j.status === status);
 
   // --- lay the jobs over the board ------------------------------------------------------
@@ -519,10 +539,12 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
   for (const s of cancelledSlots) s.kind = "cancelled";
   if (noShowSlot) noShowSlot.kind = "noshow";
 
-  const livePivot = slots.find((s) => s.kind === "inprogress");
+  // Without today's picture (a growth batch) every In Progress job is of the second kind:
+  // a visit completed, another one booked.
+  const livePivot = slots.find((s) => s.kind === "inprogress") ?? null;
   const inProgress = of("In Progress");
-  const liveJob = inProgress[0] ?? null;
-  const multiVisit = inProgress.slice(1);
+  const liveJob = livePivot ? inProgress[0] ?? null : null;
+  const multiVisit = livePivot ? inProgress.slice(1) : inProgress;
   if (liveJob && livePivot) liveJob.slots.push(livePivot);
 
   // Jobs whose work is done take the completed calls, oldest status first. The calls of the
@@ -556,10 +578,11 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
 
   // --- who each job is for ----------------------------------------------------------------
   // Service-only customers with work: the first five have only called in (no estimate yet).
-  const serviceOnly = profiles.filter((p) => p.kind === "service").slice(5);
+  const serviceOnly = profiles.filter((p) => p.kind === "service").slice(batch.callInOnly);
   const INSTALLED_FROM = ["installEnd", "inspectionBooked", "inspection", "inspectionPass", "utilityDocs", "meterSet", "pto", "finalInvoiced", "finalPaid", "closeoutDocs", "closed"];
   const installed = profiles.filter((p) => p.kind === "solar" && INSTALLED_FROM.includes(p.solar.rule.done) && !p.solar.rule.cancelled && !p.solar.rule.hold);
-  const total = jobs.length + JOBLESS_ESTIMATE_COUNT;
+  const joblessStatuses = batch.jobless.filter((s) => schema.isLive(OBJ.estimate, "Status__c", s));
+  const total = jobs.length + joblessStatuses.length;
   const owners = new Array(total).fill(null);
   // Eight service-only customers get exactly ONE piece of work each, chosen so that the
   // Service > Customers board has a card in every column: closed, resolved, waiting on
@@ -568,10 +591,12 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
   // now, and the first job ready to bill.
   const enRouteJob = jobs.find((j) => j.slots.some((s) => s.kind === "enroute")) ?? null;
   const readyToBill = of("Ready to Bill")[0] ?? null;
-  const joblessNo = (i) => jobs.length + 1 + i; // Draft, Draft, Sent, Sent, Declined, Expired
-  const single = [enRouteJob?.no, readyToBill?.no, of("Closed")[0]?.no, of("Paid")[0]?.no, of("Awaiting Parts")[0]?.no, of("New")[0]?.no, joblessNo(2), joblessNo(4)]
-    .filter((no) => Number.isInteger(no));
-  [...new Set(single)].forEach((no, i) => { if (serviceOnly[i]) owners[no - 1] = serviceOnly[i]; });
+  // `slot` is the position in `owners` (0-based); batch 0's jobless estimates are Draft, Draft, Sent, Sent, Declined, Expired.
+  const slotOf = (job) => (job ? job.no - batch.firstNo : null);
+  const joblessSlot = (i) => (i < joblessStatuses.length ? jobs.length + i : null);
+  const single = [slotOf(enRouteJob), slotOf(readyToBill), slotOf(of("Closed")[0]), slotOf(of("Paid")[0]), slotOf(of("Awaiting Parts")[0]), slotOf(of("New")[0]), joblessSlot(2), joblessSlot(4)]
+    .filter((i) => Number.isInteger(i));
+  [...new Set(single)].forEach((at, i) => { if (serviceOnly[i]) owners[at] = serviceOnly[i]; });
   const shared = serviceOnly.slice(new Set(single).size);
   let si = 0;
   let ii = 0;
@@ -580,10 +605,10 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
     const useSolar = installed.length && (i % 2 === 1 || !shared.length);
     owners[i] = useSolar ? installed[ii++ % installed.length] : (shared.length ? shared : serviceOnly)[si++ % (shared.length || serviceOnly.length)];
   }
-  const liveDemoKeys = [enRouteJob, readyToBill].filter(Boolean).map((j) => owners[j.no - 1].key);
+  const liveDemoKeys = batch.liveDemo ? [enRouteJob, readyToBill].filter(Boolean).map((j) => owners[slotOf(j)].key) : [];
   // The owner's own phone / email go onto the live-demo customers NOW, before any record
   // (and its snapshot of the customer's contact details) is built.
-  if (onLiveDemo) onLiveDemo(liveDemoKeys);
+  if (onLiveDemo && batch.liveDemo) onLiveDemo(liveDemoKeys);
 
   // A customer never gets the same kind of job twice (it also keeps estimates tell-apart-able).
   const usedScenario = new Map();
@@ -615,7 +640,7 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
 
   // --- jobs ------------------------------------------------------------------------------
   for (const job of jobs) {
-    const profile = owners[job.no - 1];
+    const profile = owners[slotOf(job)];
     const jr = r.fork(job.key);
     job.profile = profile;
     job.scenario = scenarioFor(profile, job.no);
@@ -802,10 +827,9 @@ export function planService({ profiles, rng, schema, pick, anchorDate, anchorNow
   }
 
   // --- the six estimates that never became a job ------------------------------------------
-  const joblessStatuses = ["Draft", "Draft", "Sent", "Sent", "Declined", "Expired"].filter((s) => schema.isLive(OBJ.estimate, "Status__c", s));
   joblessStatuses.forEach((status, i) => {
-    const no = jobs.length + 1 + i;
-    const profile = owners[no - 1];
+    const no = batch.firstNo + jobs.length + i;
+    const profile = owners[jobs.length + i];
     const jr = r.fork(`jobless${i}`);
     const scenario = scenarioFor(profile, no);
     const ageDays = { Draft: 1 + i, Sent: 3 + i, Declined: 12, Expired: 48 }[status];

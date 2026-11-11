@@ -24,7 +24,8 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 **Later:**
 - [ ] **Order the groups by their totals** in a summary report (`sort` on an aggregate with `showDetails` — refused in v1 with `BAD_SORT`)
-- [ ] The portal's summary view (harmon-crm): the "show details" toggle, group headings + subtotal rows from `groups` / `first` / `shown`; its feature-inventory row lands with it
+- [~] The portal's summary view (harmon-crm `feature/summary-reports`, 2026-11-11): built and pushed, awaiting Tim's merge; feature-inventory row R11 added
+- [ ] demo-seed tests (2) fail on a clean master because they compare against the local migration/demo/plan.json — fix or make them skip when the file is absent.
 
 ## 2026-11-10 — Reporting R4: the report assistant (D-092, `feature/reports-r4`)
 

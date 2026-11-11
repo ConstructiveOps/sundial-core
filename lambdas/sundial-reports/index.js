@@ -1,6 +1,7 @@
 // sundial-reports — the report engine's API (D-087 / D-088 R1a / D-089 R1b; docs/reporting-module.md §6).
 //
 //   POST /reports/run       a report definition in → { columns, rows, records?, aggregates, truncated, stripped, asOf }
+//                           (+ group, groups, groupCount, totalRows for a summary — showDetails, D-093)
 //   GET  /reports/types     the report types (aliases + labels + default columns + recordPath / linkVia; no table names)
 //   GET  /reports/catalog?type=solar   the fields a report of that type may use, FOR THIS CALLER
 //   GET  /reports/values?type=&field=<alias.column>&q=   a text field's distinct values, for a
@@ -48,6 +49,7 @@ import { corsHeaders, normalizeHeaders, jsonResponse, mapIdentityError } from ".
 import { CATALOG } from "../../lib/report-catalog/index.js";
 import { reportType, aliasesOf, describeTypes, fieldsOf } from "../../lib/report-types.js";
 import { normalizeDefinition, OPERATORS, valuesLookupAllowed } from "../../lib/report-def.js";
+import { labelGroups } from "../../lib/report-groups.js";
 import { startExport, exportStatus, runExport } from "./csv.js";
 import { listReports, createReport, getReport, updateReport, deleteReport, loadVisible } from "./saved.js";
 import { isUuid } from "../../lib/saved-reports.js";
@@ -202,6 +204,12 @@ async function runDefinition({ def, tenantId, access, cors, extra = {} }) {
     console.error("reports: rpc error:", msg);
     return jsonResponse(500, cors, { error: "server_error" });
   }
+  // A summary (D-093) needs the function's groups; a function older than D-093 ignores the
+  // group and answers a plain detail run — the SQL was not run before this deploy.
+  if (n.summary && !Array.isArray(data?.groups)) {
+    console.error(`reports: ${RPC} returned no groups for a summary run — run sql/sundial_report_run.sql (D-093) before deploying sundial-reports.`);
+    return jsonResponse(500, cors, { error: "server_error", code: "REPORT_ENGINE_OUTDATED" });
+  }
   const totals = data?.aggregates ?? {};
   const res = jsonResponse(200, cors, {
     ...extra,
@@ -211,6 +219,14 @@ async function runDefinition({ def, tenantId, access, cors, extra = {} }) {
     // Ungrouped only (D-089 am. 1): per row, { <alias>: { sfId, name } | null } for every record
     // alias — GET /reports/types says which page each opens (recordPath / linkVia).
     ...(n.wire.grouped ? {} : { records: data?.records ?? [] }),
+    // A summary (D-093): the group column, the groups on this page (each one's count and
+    // aggregates over ALL its rows; first / shown = its rows here), and how many in all.
+    ...(n.summary ? {
+      group: n.group,
+      groups: labelGroups(data.groups, n.group),
+      groupCount: data.groupCount ?? null,
+      totalRows: data.totalRows ?? null,
+    } : {}),
     aggregates: n.totals.map((t) => ({ ...t, value: totals[t.field] ?? null })),
     truncated: data?.truncated === true,
     limit: n.wire.limit,
@@ -226,6 +242,8 @@ async function runDefinition({ def, tenantId, access, cors, extra = {} }) {
     columns: n.output.length,
     filters: n.wire.filters.length,
     grouped: n.wire.grouped,
+    summary: n.summary,
+    groups: n.summary ? data.groups.length : undefined,
     stripped: n.stripped.length,
     bytes: res.body.length,
   }));

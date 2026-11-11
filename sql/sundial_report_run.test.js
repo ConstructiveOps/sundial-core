@@ -647,3 +647,112 @@ test("D-091 dateTrunc: a plain string groupBy is unchanged; the function RAISES 
   const ungrouped = normalizeDefinition({ type: "solar", columns: ["solar.contract_date"] }, { now: NOW }).wire;
   await raises({ ...ungrouped, columns: [{ alias: "solar", column: "contract_date", trunc: "month" }] }, /grouped report only/, TR);
 });
+
+// --- D-093: summary reports (showDetails) ----------------------------------------------------
+// Tenant SM: Ann has 3 projects, Bob 2, one has no rep. The group is the rep's name.
+const SM = "a0Xsummary";
+await insert("sundial_user_cache", { sf_id: "SU1", client_sf_id: SM, name: "Ann" });
+await insert("sundial_user_cache", { sf_id: "SU2", client_sf_id: SM, name: "Bob" });
+for (const [id, name, rep, amount] of [
+  ["SM1", "A-100", "SU1", 100], ["SM2", "A-200", "SU1", 200], ["SM3", "A-300", "SU1", 300],
+  ["SM4", "B-1000", "SU2", 1000], ["SM5", "B-2000", "SU2", 2000], ["SM6", "Nobody", null, 5],
+]) {
+  await insert("sundial_solar_cache", { sf_id: id, client_sf_id: SM, project_name: name, sales_rep_sf_id: rep, contract_amount: amount, stage: "Install" });
+}
+// Another tenant's project on a rep id that exists only in SM: never counted in SM's groups.
+await insert("sundial_solar_cache", { sf_id: "SMX", client_sf_id: OTHER, project_name: "Other", sales_rep_sf_id: "SU1", contract_amount: 77777, stage: "Install" });
+
+const SUMMARY_DEF = {
+  type: "solar", showDetails: true, groupBy: ["rep.name"],
+  columns: ["solar.project_name", "solar.contract_amount"],
+  aggregates: [{ fn: "count" }, { fn: "sum", field: "solar.contract_amount" }],
+  sort: [{ field: "solar.contract_amount", dir: "desc" }],
+};
+
+test("D-093 summary: detail rows ordered by the group (blanks last), then the sort, with page groups, totals and records", async () => {
+  const r = await run(SUMMARY_DEF, { tenant: SM });
+  assert.deepEqual(r.rows, [["A-300", 300], ["A-200", 200], ["A-100", 100], ["B-2000", 2000], ["B-1000", 1000], ["Nobody", 5]]);
+  assert.deepEqual(r.groups, [
+    { key: "Ann", first: 0, shown: 3, count: 3, aggregates: { count: 3, sum_solar_contract_amount: 600 } },
+    { key: "Bob", first: 3, shown: 2, count: 2, aggregates: { count: 2, sum_solar_contract_amount: 3000 } },
+    { key: null, first: 5, shown: 1, count: 1, aggregates: { count: 1, sum_solar_contract_amount: 5 } },
+  ]);
+  assert.equal(r.groupCount, 3);
+  assert.equal(r.totalRows, 6);
+  assert.deepEqual(r.aggregates, { count: 6, sum_solar_contract_amount: 3605 });
+  assert.equal(r.truncated, false);
+  // records stay parallel to the rows (a summary's rows are records)
+  assert.equal(r.records.length, 6);
+  assert.equal(r.records[0].solar.sfId, "SM3");
+  assert.equal(r.records[5].rep, null);
+  // the wire is ungrouped + the group
+  assert.equal(r.n.wire.grouped, false);
+  assert.deepEqual(r.n.wire.group, { alias: "rep", column: "name" });
+  assert.equal(r.n.wire.details, true);
+});
+
+test("D-093 summary: a capped run cuts a group — its count and aggregates still cover ALL its rows", async () => {
+  const r = await run({ ...SUMMARY_DEF, limit: 4 }, { tenant: SM });
+  assert.equal(r.truncated, true);
+  assert.deepEqual(r.rows.map((x) => x[0]), ["A-300", "A-200", "A-100", "B-2000"]);
+  assert.deepEqual(r.groups.map((g) => [g.key, g.first, g.shown, g.count, g.aggregates.sum_solar_contract_amount]), [
+    ["Ann", 0, 3, 3, 600],
+    ["Bob", 3, 1, 2, 3000], // 1 shown, 2 in all
+  ]);
+  assert.equal(r.groupCount, 3); // the blank group exists, just not on this page
+  assert.equal(r.totalRows, 6);
+});
+
+test("D-093 summary: offset pages carry their own groups; a group split across pages reads the same numbers on both", async () => {
+  const n = normalizeDefinition({ ...SUMMARY_DEF, limit: 4 }, { now: NOW });
+  const p2 = await runWire({ ...n.wire, offset: 4, totals: false }, SM);
+  assert.deepEqual(p2.rows.map((x) => x[0]), ["B-1000", "Nobody"]);
+  assert.deepEqual(p2.groups.map((g) => [g.key, g.first, g.shown, g.count, g.aggregates.sum_solar_contract_amount]), [["Bob", 0, 1, 2, 3000], [null, 1, 1, 1, 5]]);
+  // totals:false skips the grand totals and the group count
+  assert.deepEqual(p2.aggregates, {});
+  assert.equal(p2.groupCount, null);
+  const past = await runWire({ ...n.wire, offset: 40, totals: false }, SM);
+  assert.deepEqual(past.rows, []);
+  assert.deepEqual(past.groups, []);
+});
+
+test("D-093 summary: the group field may also be a column, and a group with no aggregates still counts", async () => {
+  const r = await run({ type: "solar", showDetails: true, groupBy: ["rep.name"], columns: ["rep.name", "solar.project_name"] }, { tenant: SM });
+  assert.deepEqual(r.rows, [["Ann", "A-100"], ["Ann", "A-200"], ["Ann", "A-300"], ["Bob", "B-1000"], ["Bob", "B-2000"], [null, "Nobody"]]);
+  assert.deepEqual(r.groups.map((g) => [g.key, g.count, g.aggregates]), [["Ann", 3, {}], ["Bob", 2, {}], [null, 1, {}]]);
+  assert.deepEqual(r.aggregates, {});
+});
+
+test("D-093 summary: tenant isolation — another tenant's rows never reach a group", async () => {
+  const r = await run({ type: "solar", showDetails: true, groupBy: ["solar.stage"], columns: ["solar.project_name"], aggregates: [{ fn: "sum", field: "solar.contract_amount" }] }, { tenant: SM });
+  assert.deepEqual(r.groups, [{ key: "Install", first: 0, shown: 6, count: 6, aggregates: { sum_solar_contract_amount: 3605 } }]);
+});
+
+test("D-093 summary: a dateTrunc group — periods in order (Arizona days), blanks last, keys are the period's first day", async () => {
+  const r = await run({
+    type: "solar", showDetails: true, groupBy: [{ field: "solar.created_date", dateTrunc: "month" }],
+    columns: ["solar.project_name"], aggregates: [{ fn: "sum", field: "solar.contract_amount" }],
+  }, { tenant: TR });
+  // TR1 is Nov 1 06:30 UTC = Oct 31, 11:30 PM in Arizona → October
+  assert.deepEqual(r.rows.map((x) => x[0]), ["T1", "T2", "T3", "T4"]);
+  assert.deepEqual(r.groups.map((g) => [g.key, g.first, g.shown, g.count, g.aggregates.sum_solar_contract_amount]), [
+    ["2026-10-01", 0, 1, 1, 100], ["2026-11-01", 1, 2, 2, 600], [null, 3, 1, 1, 800],
+  ]);
+  assert.deepEqual(r.n.wire.group, { alias: "solar", column: "created_date", trunc: "month" });
+  assert.equal(r.n.group.type, "date");
+  const q = await run({ type: "solar", showDetails: true, groupBy: [{ field: "solar.contract_date", dateTrunc: "quarter" }], columns: ["solar.project_name"] }, { tenant: TR });
+  assert.deepEqual(q.groups.map((g) => [g.key, g.count]), [["2026-10-01", 3], [null, 1]]);
+});
+
+test("D-093 summary: the function RAISES on a malformed summary wire", async () => {
+  const w = normalizeDefinition(SUMMARY_DEF, { now: NOW }).wire;
+  await raises({ ...w, details: false }, /detail group needs details/, SM);
+  await raises({ ...w, group: null }, /details needs a group/, SM);
+  await raises({ ...w, details: "yes" }, /details must be true or false/, SM);
+  await raises({ ...w, group: { alias: "rep", column: "nope" } }, /unknown column rep\.nope/, SM);
+  await raises({ ...w, group: { alias: "solar", column: "stage", trunc: "month" } }, /trunc needs a date column/, SM);
+  await raises({ ...w, group: { alias: "solar", column: "contract_date", trunc: "decade" } }, /bad trunc decade/, SM);
+  await raises({ ...w, columns: [] }, /needs columns/, SM);
+  const g = normalizeDefinition({ type: "solar", groupBy: ["rep.name"], aggregates: [{ fn: "count" }] }, { now: NOW }).wire;
+  await raises({ ...g, group: { alias: "rep", column: "name" }, details: true }, /grouped report takes no detail group/, SM);
+});

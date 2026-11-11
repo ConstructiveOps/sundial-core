@@ -1,5 +1,23 @@
 # Sundial — Progress Log
 
+## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — BUILT, SQL + deploy pending
+
+**Why.** A grouped report showed one line per group. Harmon reads Salesforce-style summary reports: each record under its group, with the group's subtotals and a grand total.
+
+**Built.**
+- **Definition** (`lib/report-def.js`): `showDetails` (boolean, only with a `groupBy` — `400 DETAILS_NEED_GROUP`). The columns are the user's own (the group may or may not be one), aggregates / `dateTrunc` / `limit` / `chart` unchanged. Sort is on shown columns only; a sort on an aggregate or the group field is `400 BAD_SORT` with a message saying ordering groups by a total is not available yet. A group field the caller's gate removes leaves a plain detail report. The wire is ungrouped (records kept) + `group: { alias, column, trunc? }` + `details: true`.
+- **Engine** (`sql/sundial_report_run.sql`): rows ordered by the group value (the trunc period when there is one), blanks last, then the sort, then the record id. The same call returns `groups` — the groups ON THE PAGE, `{ key, first, shown, count, aggregates }`, count / aggregates over ALL their rows from one `GROUP BY` pass narrowed to the page's values — plus `groupCount` / `totalRows` (with totals). RAISES on `grouped` + `group`, a group without `details`, `details` without a group, a bad trunc.
+- **One call, measured** (read-only, live cache, Harmon's 39,470 customers ⟕ rep): the 5,000-row detail page **231 ms**; a group pass **31 ms** hashed, **187 ms** when it had to sort and spill → ~0.3–0.45 s in the database. A second call would add a round trip and could straddle a cache sync.
+- **Lambda** (`index.js`): the response adds `group`, `groups` (labelled by the new `lib/report-groups.js` — "November 2026", "Q4 2026", "Week of Nov 2, 2026", "(blank)"), `groupCount`, `totalRows`; grand totals stay `aggregates`. A function with no `groups` → `500 REPORT_ENGINE_OUTDATED`.
+- **CSV** (`lib/report-csv.js` `summaryCsvHeader` / `createSummaryCsv`, `csv.js`): group first, columns, one trailing column per aggregate, links; `Subtotal: <label> (n records)` after each group's last row (one, even across a page break), `Grand total (n records)` last; the grand totals ride on page 1. A group cut by the cap keeps its full count.
+- **Saved / scheduled**: stored unchanged (`stripDefinition` drops `showDetails` with a stripped group). The email draws the first 100 detail rows under their group headings with each group's full count, its subtotal and the grand total (`schedule.js` → `deliver.js` `bodyTable` → `lib/report-email.js`).
+- **Assistant**: `propose_report` has a required boolean `showDetails`; the prompt's shape / sort rules and the glossary know "with the details" / "each project under its rep" (`lib/report-glossary.js` regenerated).
+- **Verify**: `scripts/verify-report-run.mjs` section S — as zz-admin, solar by rep with details: first / shown tile the rows exactly, each count ≥ its shown, the grand totals = the ungrouped run's, an aggregate sort is 400; the summary CSV's header, one subtotal per group (carrying the run's counts), each before the next group, the grand total last.
+
+**Tests.** New / extended: `sql/sundial_report_run.test.js` +7 (ordering, page groups, a capped run cutting a group with its full count, offset pages, tenant isolation, a `dateTrunc` month / quarter group, RAISEs), `lib/report-def.test.js` +5, `lib/report-csv.test.js` +4, `lib/report-groups.test.js` 2 (new), `lib/report-email.test.js` +1, `lib/saved-reports.test.js` +1, `lib/report-assist-schema.test.js` +1 (a summary proposal validates for all ten types), `lambdas/sundial-reports/test.js` +4, `schedule.test.js` +1. **Full suite 2,181: 2,179 pass, 2 fail** — `scripts/demo-seed` (`plan.test.js` (a), `growth.test.js` (c)), which fail identically on clean `master` (they compare against the local, git-ignored `migration/demo/plan.json`). The Lambda bundles with esbuild.
+
+**Next:** Tim runs `sql/sundial_report_run.sql`; then deploy `sundial-reports`, regenerate the glossary, run the verify script, merge.
+
 ## 2026-11-10 — Demo tenant tax zones (`scripts/seed-demo-tax-zones.mjs`) + the isolation verifier checks the dealer cache — BUILT, not yet applied
 
 **Why.** Every demo job showed "Tax zone needed" and invoice issue refused `TAX_ZONE_REQUIRED`: the D-083 tables are read by tenant slug and `conops-demo` had no rows (Harmon's are Acumatica's, D-078). Zones are never guessed, so the demo tenant gets its own invented set.

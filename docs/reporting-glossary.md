@@ -29,6 +29,11 @@
 - **Grouping by period** ("per week", "by month") is `groupBy: [{ field, dateTrunc }]` with
   `day | week | month | quarter | year`. Only ONE group level exists: "per tech per week" cannot be
   built; offer "per tech" for the period, or "per week" for everyone, and ask which.
+- **With the details / under each group** ("show each project under its rep", "jobs grouped by
+  status with the details", "list them by month") is a summary report: the same one `groupBy`,
+  plus `showDetails: true` and the record columns to list. Each group's records are shown under
+  it with the group's subtotals, then a grand total. "By rep" alone, with no request to see the
+  records, is a plain grouped report (no details). The groups stay in order of the group value.
 
 ## Solar projects (report type `solar`; `customers_solar` for a customer with their newest project)
 

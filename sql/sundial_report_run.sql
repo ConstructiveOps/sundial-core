@@ -32,7 +32,24 @@
 --     "allowedGates": ["service.costing.read"]   the gates the caller holds
 --     "records": [{ "alias", "column"? }]     (D-089 am. 1) UNGROUPED only, ≤ 11: per row, each
 --                                             record alias's sf_id + its name column
+--     "group":  { "alias", "column", "trunc"? }   (D-093) a SUMMARY report: UNGROUPED rows,
+--     "details": true                         ordered by this value first; requires details
 --   }
+--
+-- SUMMARY REPORTS (D-093, 2026-11-11). With "group" + "details" the rows are ordinary detail
+-- rows (the columns, records kept) ordered by the group value (its trunc period when there is
+-- one) ascending with blanks last, THEN the sort, THEN the record id — so the CSV's offset pages
+-- still partition the result exactly. Three more things come back:
+--   groups      one entry per group that has a row ON THIS PAGE, in page order:
+--               { key, first, shown, count, aggregates } — first = the 0-based index of its
+--               first row on the page, shown = its rows on the page (a group's rows are one
+--               unbroken run), count and aggregates ({ name: value }) over ALL its matching rows,
+--               not just the page. key = the group value as JSON (null = blank).
+--   groupCount  the number of groups over all matching rows       } only when totals are
+--   totalRows   the number of matching rows                       } asked for (totals: true)
+-- All three are read in this one call, so they see the same data as the rows (a STABLE
+-- function runs on one snapshot) — two calls could straddle a cache sync. Only the page's
+-- groups are returned: a group per customer name is ~37,000 groups, too many for the response.
 --
 -- THE JOIN KINDS (R1b, D-089). Each yields AT MOST ONE row per base row, so a report has
 -- exactly its base object's rows — a join never multiplies or drops one:
@@ -242,6 +259,12 @@ declare
   ra       text;
   totals   jsonb := '{}'::jsonb;
   truncated boolean := false;
+  details  boolean := false;
+  g_expr   text;
+  keys_json jsonb := '[]'::jsonb;
+  groups_json jsonb := '[]'::jsonb;
+  group_count bigint;
+  total_rows bigint;
   sql      text;
   alias_re constant text := '^[a-z][a-z0-9_]{0,30}$';
   name_re  constant text := '^[a-z][a-z0-9_]{0,62}$';
@@ -454,6 +477,42 @@ begin
     where_sql := where_sql || ' and ' || pred;
   end loop;
 
+  -- The summary group (D-093): one checked column, its trunc period built like a grouped
+  -- column's below. Only with details, never on a grouped report.
+  if d ? 'details' and jsonb_typeof(d -> 'details') <> 'null' then
+    if jsonb_typeof(d -> 'details') <> 'boolean' then
+      raise exception 'sundial_report_run: details must be true or false';
+    end if;
+    details := (d ->> 'details')::boolean;
+  end if;
+  if d ? 'group' and jsonb_typeof(d -> 'group') <> 'null' then
+    if grouped then
+      raise exception 'sundial_report_run: a grouped report takes no detail group';
+    end if;
+    if not details then
+      raise exception 'sundial_report_run: a detail group needs details';
+    end if;
+    if jsonb_typeof(d -> 'group') <> 'object' then
+      raise exception 'sundial_report_run: group must be an object';
+    end if;
+    dt := public.sundial_report_column(aliases, d -> 'group' ->> 'alias', d -> 'group' ->> 'column', gates, true);
+    g_expr := public.sundial_report_ref(aliases, d -> 'group' ->> 'alias', d -> 'group' ->> 'column');
+    if (d -> 'group') ? 'trunc' and jsonb_typeof(d -> 'group' -> 'trunc') <> 'null' then
+      if coalesce(d -> 'group' ->> 'trunc', '') not in ('day', 'week', 'month', 'quarter', 'year') then
+        raise exception 'sundial_report_run: bad trunc %', coalesce(d -> 'group' ->> 'trunc', '(null)');
+      end if;
+      if dt = 'date' then
+        g_expr := format('date_trunc(%L, (%s)::timestamp)::date', d -> 'group' ->> 'trunc', g_expr);
+      elsif dt = 'timestamp with time zone' then
+        g_expr := format('date_trunc(%L, %s at time zone %L)::date', d -> 'group' ->> 'trunc', g_expr, 'America/Phoenix');
+      else
+        raise exception 'sundial_report_run: trunc needs a date column, not %', dt;
+      end if;
+    end if;
+  elsif details then
+    raise exception 'sundial_report_run: details needs a group';
+  end if;
+
   -- Output columns.
   if jsonb_array_length(coalesce(d -> 'columns', '[]'::jsonb)) > 50 then
     raise exception 'sundial_report_run: too many columns';
@@ -551,6 +610,9 @@ begin
   if not grouped and n_out = 0 and coalesce(array_length(aggs_sql, 1), 0) = 0 then
     raise exception 'sundial_report_run: nothing to return';
   end if;
+  if details and n_out = 0 then
+    raise exception 'sundial_report_run: a report with details needs columns';
+  end if;
 
   -- Rows.
   if n_out > 0 then
@@ -580,33 +642,65 @@ begin
       ord := ord || '__k asc'::text;
       ord_q := ord_q || 'q.__k asc'::text;
     end if;
+    -- A summary (D-093): the group value comes before everything else in the order.
+    if details then
+      ord := '__g asc nulls last'::text || ord;
+      ord_q := 'q.__g asc nulls last'::text || ord_q;
+    end if;
 
     sql := format(
-      'select coalesce(jsonb_agg(jsonb_build_array(%s) order by %s), %L::jsonb), %s from ('
-      || 'select %s%s%s from %s where %s%s order by %s limit %s offset %s'
+      'select coalesce(jsonb_agg(jsonb_build_array(%s) order by %s), %L::jsonb), %s, %s from ('
+      || 'select %s%s%s%s from %s where %s%s order by %s limit %s offset %s'
       || ') q',
       (select string_agg(format('q.%I', '__o' || i), ', ' order by i) from generate_series(1, n_out) i),
       array_to_string(ord_q, ', '),
       '[]',
       -- The records, in the SAME order as the rows (the order ends on the unique sf_id).
       case when want_recs then format('coalesce(jsonb_agg(q.__rec order by %s), %L::jsonb)', array_to_string(ord_q, ', '), '[]') else '''[]''::jsonb' end,
+      -- A summary's group value per row (as JSON; a blank is JSON null), in the rows' order.
+      case when details then format('coalesce(jsonb_agg(coalesce(to_jsonb(q.__g), %L::jsonb) order by %s), %L::jsonb)', 'null', array_to_string(ord_q, ', '), '[]') else '''[]''::jsonb' end,
       (select string_agg(format('%s as %I', outs[i], '__o' || i), ', ' order by i) from generate_series(1, n_out) i),
       case when grouped then '' else format(', %I.sf_id as __k', base_a) end,
       case when want_recs then format(', jsonb_build_object(%s) as __rec', array_to_string(rec_parts, ', ')) else '' end,
+      case when details then format(', %s as __g', g_expr) else '' end,
       from_sql,
       where_sql,
       case when grouped then ' group by 1' else '' end,
       array_to_string(ord, ', '),
       lim + 1,
       off);
-    execute sql into rows_json, recs_json;
+    execute sql into rows_json, recs_json, keys_json;
     if jsonb_array_length(rows_json) > lim then
       truncated := true;
       rows_json := rows_json - lim; -- drop the (limit+1)th row
       recs_json := recs_json - lim;
+      keys_json := keys_json - lim;
     end if;
   else
     rows_json := '[]'::jsonb;
+  end if;
+
+  -- A summary's groups (D-093): the groups on this page, each with its count and aggregates
+  -- over ALL its matching rows — one GROUP BY pass narrowed to the page's group values.
+  if details then
+    if jsonb_array_length(keys_json) > 0 then
+      execute format(
+        'select coalesce(jsonb_agg(jsonb_build_object(%L, p.k, %L, p.f, %L, p.n, %L, coalesce(g.n, 0), %L, coalesce(g.a, %L::jsonb)) order by p.f), %L::jsonb)'
+        || ' from (select k, min(i) - 1 as f, count(*) as n from jsonb_array_elements(%L::jsonb) with ordinality as t(k, i) group by k) p'
+        || ' left join (select coalesce(to_jsonb(%s), %L::jsonb) as k, count(*) as n, jsonb_build_object(%s) as a'
+        || ' from %s where %s and coalesce(to_jsonb(%s), %L::jsonb) in (select distinct jsonb_array_elements(%L::jsonb))'
+        || ' group by 1) g on g.k = p.k',
+        'key', 'first', 'shown', 'count', 'aggregates', '{}', '[]',
+        keys_json,
+        g_expr, 'null', array_to_string(aggs_sql, ', '),
+        from_sql, where_sql, g_expr, 'null', keys_json)
+        into groups_json;
+    end if;
+    if want_totals then
+      execute format('select count(*), coalesce(sum(n), 0) from (select %s as k, count(*) as n from %s where %s group by 1) s',
+        g_expr, from_sql, where_sql)
+        into group_count, total_rows;
+    end if;
   end if;
 
   -- Grand totals over every matching row.
@@ -615,6 +709,10 @@ begin
       into totals;
   end if;
 
+  if details then
+    return jsonb_build_object('rows', rows_json, 'aggregates', totals, 'truncated', truncated, 'records', recs_json,
+      'groups', groups_json, 'groupCount', group_count, 'totalRows', total_rows);
+  end if;
   if want_recs then
     return jsonb_build_object('rows', rows_json, 'aggregates', totals, 'truncated', truncated, 'records', recs_json);
   end if;

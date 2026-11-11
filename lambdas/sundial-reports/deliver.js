@@ -10,7 +10,9 @@
 //     good for 7 days. Only the token's SHA-256 is stored (sundial_report_downloads); following
 //     it signs a fresh 15-minute S3 link and redirects. (A presigned URL straight from the Lambda
 //     cannot last 7 days: it dies with the role's short-lived credentials.)
-//   - a GROUPED report also gets its first BODY_ROWS rows drawn in the email body;
+//   - a GROUPED report also gets its first BODY_ROWS rows drawn in the email body; a SUMMARY
+//     report (D-093) its first BODY_ROWS detail rows under their group headings, each group's
+//     subtotal (over all its rows) and the grand total;
 //   - ONE email per recipient: nobody sees anyone else's address, one bounce sinks nobody else.
 //   - From = the existing sender (EMAIL_FROM), Reply-To = the owner, subject "<name> — <date>".
 // What happened (sent / failed per recipient, with the SES message id) is written on the export
@@ -29,6 +31,7 @@ import {
   ATTACH_MAX_BYTES, LINK_TTL_MS, MAX_DOWNLOADS_PER_LINK, newDownloadToken, hashToken, isDownloadToken,
 } from "../../lib/report-schedule.js";
 import { buildDeliveryEmail } from "../../lib/report-email.js";
+import { labelGroups } from "../../lib/report-groups.js";
 import { recordOutcome } from "./schedule.js";
 
 export const EXPORTS_TABLE = "sundial_report_exports";
@@ -46,12 +49,27 @@ async function readObject(key) {
   return new Uint8Array(await out.Body.transformToByteArray());
 }
 
-/** A grouped report's first rows for the email body, or null (never a reason to fail). */
-async function bodyTable(supabase, row, d) {
+/**
+ * A grouped report's first rows for the email body, or null (never a reason to fail). A summary
+ * report (D-093) also carries its groups (labelled, with subtotals over ALL their rows), the
+ * aggregate columns and the grand totals.
+ */
+export async function bodyTable(supabase, row, d) {
   if (!d.bodyWire || !Array.isArray(d.bodyOutput)) return null;
   try {
     const { data, error } = await supabase.rpc("sundial_report_run", { p_client_sf_id: row.client_sf_id, p_def: d.bodyWire });
     if (error) throw new Error(error.message);
+    if (d.bodySummary) {
+      if (!Array.isArray(data?.groups)) throw new Error("no groups — the SQL predates D-093");
+      return {
+        output: d.bodyOutput, rows: data?.rows ?? [], more: data?.truncated === true,
+        summary: {
+          group: d.bodySummary.group, totals: d.bodySummary.totals ?? [],
+          groups: labelGroups(data.groups, d.bodySummary.group),
+          grand: data?.aggregates ?? {}, totalRows: data?.totalRows ?? null,
+        },
+      };
+    }
     return { output: d.bodyOutput, rows: data?.rows ?? [], more: data?.truncated === true };
   } catch (err) {
     console.warn(`reports deliver: body table skipped for ${row.id}:`, err?.message || String(err));

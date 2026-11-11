@@ -163,7 +163,13 @@ mock.module("../../lib/supabase.js", {
         ctx.rpcCalls.push({ name, args: structuredClone(args) });
         const off = args.p_def.offset ?? 0;
         const all = ctx.rpcPages.rows;
-        return { data: { rows: all.slice(off, off + args.p_def.limit), aggregates: {}, truncated: off + args.p_def.limit < all.length }, error: ctx.rpcPages.error ?? null };
+        const data = { rows: all.slice(off, off + args.p_def.limit), aggregates: {}, truncated: off + args.p_def.limit < all.length };
+        // A summary (D-093): every row of this fixture is one group; totals when asked for.
+        if (args.p_def.details) {
+          data.groups = data.rows.length ? [{ key: ctx.rpcPages.groupKey ?? null, first: 0, shown: data.rows.length, count: all.length, aggregates: { count: all.length } }] : [];
+          if (args.p_def.totals) Object.assign(data, { aggregates: { count: all.length }, totalRows: all.length, groupCount: 1 });
+        }
+        return { data, error: ctx.rpcPages.error ?? null };
       },
       from: (t) => builder(t),
     }),
@@ -608,4 +614,28 @@ test("GET /reports/csv/{exportId} carries a delivery's progress — counts only,
   // A plain export has no delivery block.
   const plain = await call("/reports/csv", { method: "POST", body: SIMPLE });
   assert.equal((await call(`/reports/csv/${plain.body.exportId}`)).body.delivery, undefined);
+});
+
+test("D-093: a summary report's email draws its first 100 detail rows under the group, with the subtotal and the grand total", async () => {
+  reset();
+  const id = await saveReport("Admin", { type: "customers", showDetails: true, groupBy: ["customer.city"], columns: ["customer.name"], aggregates: [{ fn: "count" }] });
+  ctx.rpcPages = { rows: Array.from({ length: 150 }, (_, i) => [`Name ${i}`]), groupKey: "Mesa" };
+  const q = await call(`/reports/${id}/send-now`, { method: "POST", body: { toMe: true } });
+  await worker(q.body.exportId);
+  const body = ctx.rpcCalls.find((c) => c.args.p_def.limit === 100);
+  assert.ok(body, "the body table's run");
+  assert.equal(body.args.p_def.details, true);
+  assert.equal(body.args.p_def.totals, true);
+  const html = ctx.sent[0].html;
+  assert.match(html, /Mesa <span[^>]*>— 150 records<\/span>/);
+  assert.match(html, /Name 99</);
+  assert.ok(!html.includes("Name 100<"), "at most 100 detail rows");
+  assert.match(html, /Subtotal — Count: 150/);
+  assert.match(html, /Grand total — 150 records · Count: 150/);
+  assert.match(html, /Showing the first 100 rows/);
+  assert.match(ctx.sent[0].text, /Mesa \(150 records\)/);
+  // the attached CSV has its subtotal and grand total lines
+  const csv = Buffer.from(ctx.sent[0].attachments[0].content).toString("utf8");
+  assert.match(csv, /\r\nSubtotal: Mesa \(150 records\),,150/);
+  assert.match(csv, /\r\nGrand total \(150 records\),,150/);
 });

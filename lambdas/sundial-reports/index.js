@@ -57,6 +57,7 @@ import { CATALOG_GATES, heldGates } from "./gates.js";
 import { listRecipients, getSchedule, putSchedule, deleteSchedule, sendNow, runTick } from "./schedule.js";
 import { deliverExport, publicDownload } from "./deliver.js";
 import { assist } from "./assist.js";
+import { liveCatalogForType } from "./live-catalog.js";
 
 export const ACTION = "reports.read";
 export const AI_ACTION = "reports.ai";
@@ -106,7 +107,7 @@ export function matchPublicDownload(path) {
 }
 
 /** The catalog of one report type, projected for the caller (gated + non-reportable removed). */
-export function catalogFor(typeKey, held) {
+export function catalogFor(typeKey, held, catalog = CATALOG) {
   const t = reportType(typeKey);
   if (!t) return null;
   const holds = new Set(held);
@@ -119,7 +120,7 @@ export function catalogFor(typeKey, held) {
       object: objectKey,
       label: labels.get(alias),
       // A rollup alias (D-089) offers its measures; a table alias its catalog.
-      fields: fieldsOf(t, alias, CATALOG)
+      fields: fieldsOf(t, alias, catalog)
         .filter((f) => f.reportable && (!f.gate || holds.has(f.gate)))
         .map((f) => ({
           field: `${alias}.${f.column}`,
@@ -379,7 +380,8 @@ export const handler = async (event, context) => {
         return jsonResponse(200, cors, { types: describeTypes() });
       case "catalog": {
         const typeKey = event?.queryStringParameters?.type;
-        const cat = catalogFor(typeKey, held);
+        // Picklist values from the live describe (D-089 am. 2); the generated ones as the fallback.
+        const cat = reportType(typeKey) ? catalogFor(typeKey, held, await liveCatalogForType(typeKey)) : null;
         if (!cat) return jsonResponse(400, cors, { error: "invalid_report", code: "UNKNOWN_TYPE", field: "type", message: "type: name a report type (GET /reports/types)." });
         return jsonResponse(200, cors, cat);
       }

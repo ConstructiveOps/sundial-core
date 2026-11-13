@@ -1,5 +1,18 @@
 # Sundial — Progress Log
 
+## 2026-11-13 — Reporting: picklist values read live from the describe (D-089 am. 2) — DEPLOYED
+
+**Why.** The report catalog's picklist values were a snapshot from generation time, so a value added in Salesforce Setup did not reach the filter pickers or the report assistant until the catalog was regenerated and `sundial-reports` redeployed.
+
+**Built.**
+- `lib/report-live-picklists.js`: `overlayPicklists` (pure) and `liveCatalog` — the live describe's active values over the JSON's, per picklist / multipicklist field, by `sfField`; falls back to the JSON when the describe fails, times out (3 s) or lacks the field.
+- `lib/report-catalog-build.js`: `activePicklistValues`, the one active-only rule, used by the generator and the overlay.
+- `lambdas/sundial-reports/live-catalog.js` `liveCatalogForType`; `GET /reports/catalog` and the assistant (`runAssist` option `catalogForType` → `typeSystem` / `catalogBlock` / `proposeTool` take the catalog) use it.
+- Tests: `lib/report-live-picklists.test.js` (8 — a new value appears, an inactive value is dropped, the describe failing / hanging falls back, the assistant's cached block changes with the values) + 1 route test with a mocked describe.
+- Docs: `docs/reporting-module.md` §6.1 + the prompt-caching note, `docs/caching-architecture.md` (regenerating the catalog is for new fields and types only), DECISIONS D-089 am. 2.
+
+**Result.** Suite 2,190 tests, 2,188 pass; the 2 failures are the demo-seed tests that need the local, git-ignored `migration/demo/plan.json` (unchanged on clean master).
+
 ## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — DEPLOYED, verified, merged
 
 **Why.** A grouped report showed one line per group. Harmon reads Salesforce-style summary reports: each record under its group, with the group's subtotals and a grand total.

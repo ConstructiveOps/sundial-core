@@ -22,6 +22,7 @@ import { getSupabaseClient } from "../../lib/supabase.js";
 import { jsonResponse } from "../../lib/http.js";
 import { prepareAssist, runAssist, AssistUpstreamError } from "../../lib/report-assist.js";
 import { getAnthropicClient, assistModel, AssistNotConfiguredError } from "../../lib/anthropic.js";
+import { liveCatalogForType } from "./live-catalog.js";
 
 export const LOG_TABLE = "sundial_report_assist_log";
 export const USAGE_TABLE = "sundial_report_assist_usage";
@@ -30,12 +31,12 @@ export const RELEASE_RPC = "sundial_report_assist_release";
 export const LOG_RETENTION_DAYS = 90;
 
 // Test seams.
-const deps = { getAnthropicClient, runAssist, now: () => new Date() };
+const deps = { getAnthropicClient, runAssist, now: () => new Date(), catalogForType: liveCatalogForType };
 export function _setAssistDeps(over) {
   Object.assign(deps, over);
 }
 export function _resetAssistDeps() {
-  Object.assign(deps, { getAnthropicClient, runAssist, now: () => new Date() });
+  Object.assign(deps, { getAnthropicClient, runAssist, now: () => new Date(), catalogForType: liveCatalogForType });
 }
 
 const usageOut = (u) => ({
@@ -101,7 +102,7 @@ export async function assist({ body, me, heldGates, cors }) {
   const started = Date.now();
   let r;
   try {
-    r = await deps.runAssist(plan, { heldGates, client, model, now });
+    r = await deps.runAssist(plan, { heldGates, client, model, now, catalogForType: deps.catalogForType });
   } catch (err) {
     if (!(err instanceof AssistUpstreamError)) {
       await release(supabase, me, claim);

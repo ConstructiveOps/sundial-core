@@ -53,6 +53,7 @@ const USERS = {
 const ctx = {};
 function reset(level = "Admin") {
   ctx.level = level;
+  ctx.describe = null; // the live picklist overlay (D-089 am. 2): null = the describe fails → the JSON values
   ctx.tenant = TENANT;
   ctx.slug = "harmon";
   ctx.secretReads = 0;
@@ -212,6 +213,16 @@ mock.module("@aws-sdk/client-lambda", {
       }
     },
     InvokeCommand: cmd("Invoke"),
+  },
+});
+
+// --- The Salesforce describe (live picklist values, D-089 am. 2) -----------------------------
+mock.module("../../lib/sf-describe.js", {
+  namedExports: {
+    getRawDescribe: async (sfObject) => {
+      if (!ctx.describe) throw new Error("describe unavailable (test)");
+      return ctx.describe(sfObject);
+    },
   },
 });
 
@@ -1096,4 +1107,35 @@ test("D-093 csv worker: a SQL older than D-093 fails the summary export REPORT_E
   const res = await worker(q.body.exportId);
   assert.equal(res.ok, false);
   assert.equal(res.code, "REPORT_ENGINE_OUTDATED");
+});
+
+test("catalog: picklist values come from the live describe; the generated ones when it fails (D-089 am. 2)", async () => {
+  reset("Manager");
+  const stageOf = (r) => r.body.aliases[0].fields.find((f) => f.field === "solar.stage");
+  // The describe fails (the default here): the generated values.
+  const snapshot = stageOf(await call("/reports/catalog", { qs: { type: "solar" } })).picklistValues;
+  assert.ok(snapshot.length > 0);
+
+  ctx.describe = (sfObject) => ({
+    fields: sfObject === "Sundial_Solar__c"
+      ? [{ name: "Stage__c", type: "picklist", picklistValues: [
+          { value: snapshot[0], active: true },
+          { value: "Brand New Stage", active: true },
+          { value: snapshot[1], active: false },
+        ] }]
+      : [],
+  });
+  const r = await call("/reports/catalog", { qs: { type: "solar" } });
+  assert.equal(r.status, 200);
+  const stage = stageOf(r);
+  assert.deepEqual(stage.picklistValues, [snapshot[0], "Brand New Stage"], "a new value appears, an inactive one is dropped");
+  // Nothing else about the field changes.
+  assert.equal(stage.type, "picklist");
+  assert.ok(stage.operators.includes("in"));
+  // A picklist the describe does not carry keeps its generated values.
+  const customerAlias = r.body.aliases.find((a) => a.alias === "customer");
+  const before = catalogFor("solar", []).aliases.find((a) => a.alias === "customer");
+  const picks = (fields) => fields.filter((f) => f.picklistValues).map((f) => [f.field, f.picklistValues]);
+  assert.ok(picks(before.fields).length > 0);
+  assert.deepEqual(picks(customerAlias.fields), picks(before.fields));
 });

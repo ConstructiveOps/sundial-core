@@ -575,6 +575,14 @@ report. It never runs the SQL. Both files are deterministic: an unchanged state 
 diff, and `--check` exits 1 when either would change. The decisions are in
 `lib/report-columns.js`, unit-tested with fixtures in `lib/report-columns.test.js`.
 
+**Then regenerate the report catalog** (`node scripts/generate-report-catalog.mjs`, run its SQL,
+redeploy `sundial-reports`) so the new column is reportable. That step is for a new FIELD or a
+new report type only. **A new picklist VALUE needs nothing** (D-089 am. 2, 2026-11-13):
+`GET /reports/catalog` and the report assistant overlay each picklist's values from the live
+describe (`lib/report-live-picklists.js`, through `lib/sf-describe.js` and its 5-minute TTL), so a
+value added in Setup reaches the filter pickers within about five minutes. The generated values
+are the fallback when the describe fails.
+
 ### The type map (§4.2)
 
 | Salesforce describe type | Postgres |

@@ -3957,6 +3957,18 @@ The 5-minute sweep in `sundial-notify` gains one step that rings nobody: every *
 - **A response is larger** by about 50–80 bytes per record alias per row (≤ 7 aliases): ~1–2 MB more at 5,000 rows, inside the 6 MB response limit with the 50-column cap.
 - **A multipicklist's values are its stored combinations** ("A;B"), which is what `eq` / `in` match; its single values are still in the catalog's `picklistValues`.
 
+### D-089 amendment 2 (2026-11-13): picklist values are read live, the generated catalog is the fallback
+
+**Context.** `lib/report-catalog/*.json` carries each picklist field's active values as of generation. A value Tim adds in Salesforce Setup did not reach the report filter pickers or the assistant until the catalog was regenerated and `sundial-reports` redeployed — a code release for a data change.
+
+**Decision.**
+1. **At request time, `GET /reports/catalog` and the assistant's per-type prompt block overlay each picklist / multipicklist field's `picklistValues` from the live describe** (`lib/report-live-picklists.js`; `lambdas/sundial-reports/live-catalog.js` picks the type's objects). The describe is `lib/sf-describe.js` `getRawDescribe` — the platform's one describe cache, 5-minute TTL (D-045). The filter is `activePicklistValues`, now exported by `lib/report-catalog-build.js` and used by the generator too, so the two can never disagree. Fields are matched by the entry's `sfField` on its object.
+2. **The JSON is the fallback**, per field: the describe fails or takes over 3 s, lacks the field, or no longer calls it a picklist. Never a reason to fail a request; the failure logs the object name only.
+3. **Only the values change.** Types, gates, `nameField`, `valuesLookup`, labels and the field set stay the generated catalog's. A new field or a new report type still needs the generator, its SQL and a redeploy.
+4. **The assistant's prompt cache follows the values.** The values are in the cached catalog block's text and the API caches on exact bytes, so a changed list is a new cache entry; the strict-schema memo is unaffected (the tool schema lists fields, never values).
+
+**Consequences.** `sundial-reports` now reads Salesforce metadata (never a record) — the first describe call in this Lambda, on the shared execution role that already reads the Salesforce secret. A cold describe adds up to ~1 s per object to the first catalog / assist request in five minutes. The run path is unchanged: the engine never validated picklist values (any text matches).
+
 ## D-090 (2026-11-04): Sundial_Solar__c is at the 500-field cap; 24 unused fields deleted, references first
 
 **Context.** Harmon needs two new fields on `Sundial_Solar__c`, and the object holds 500 custom fields, which is Salesforce's Enterprise Edition cap. `scripts/audit-solar-fields.mjs` (read-only) audited all 500. For each field it recorded the data (records with a value, last touched) and every reference in both repos and the three design sheets. Its output is `docs/audits/solar-fields-2026-11.{csv,md}`. The result was A 2, B 30, C 468. Most of the object is in use, and the room to free is small.

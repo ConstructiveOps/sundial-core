@@ -396,7 +396,10 @@ function fakeSalesforce() {
           // plays the old Text(255) org.
           : obj === "Sundial_Service_Line__c"
             ? [{ name: "Description__c", type: "textarea", length: flags.shortLineDescription ? 255 : 32768 }]
-            : [],
+            // 2026-11-19: the estimate's job notes (Harmon); `fake.flags.noEstimateJobNotes` plays the org before the package.
+            : obj === "Sundial_Estimate__c" && !flags.noEstimateJobNotes
+              ? [{ name: "Issue_Description__c", type: "textarea" }, { name: "Initial_Remote_Diagnosis__c", type: "textarea" }, { name: "Office_Notes__c", type: "textarea" }]
+              : [],
   });
   // A PostgREST-shaped stub over three things: stale flags, the activity table, and
   // the file-metadata table (the estimate PDF registers a row there on send).
@@ -2421,6 +2424,125 @@ test("stripe (amendment 11): the office's card on file — status from Stripe, t
   assert.equal(job.Status__c, "Paid");
   r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 1 });
   assert.equal(r.body.code, "NOTHING_DUE");
+});
+
+test("2026-11-19 (Harmon): job notes typed on the estimate ride onto the job at Create Job — the request's own value wins, blanks are left alone, an org without the fields still gets its job", async () => {
+  const fake = fakeSalesforce();
+  const h = makeHandler(fake);
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ora Lee", First_Name__c: "Ora", Last_Name__c: "Lee", Primary_Email__c: "ora@example.com" });
+  const customer = fake.store.Sundial_Customer__c[0];
+  const e = await call(h, "POST", "/service/estimates", { customer: { id: customer.Id } });
+  assert.equal(e.status, 201, JSON.stringify(e.body));
+  const est = fake.store.Sundial_Estimate__c[0];
+  // The office types the three job notes on the estimate page (the generic record PATCH writes them).
+  Object.assign(est, { Issue_Description__c: "Inverter offline since Monday", Initial_Remote_Diagnosis__c: "Portal shows no comms; likely the gateway", Office_Notes__c: "Customer prefers afternoons" });
+  const j = await call(h, "POST", `/service/estimates/${est.Id}/create-job`, { job: { issueDescription: "Typed on the popup" } });
+  assert.equal(j.status, 201, JSON.stringify(j.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal(job.Issue_Description__c, "Typed on the popup", "the request's own value wins");
+  assert.equal(job.Initial_Remote_Diagnosis__c, "Portal shows no comms; likely the gateway");
+  assert.equal(job.Office_Notes__c, "Customer prefers afternoons");
+  assert.equal(est.Issue_Description__c, "Inverter offline since Monday", "the estimate keeps its copy (the portal just stops showing it)");
+  // A second estimate with blank notes: nothing is written, nothing is nulled.
+  const e2 = await call(h, "POST", "/service/estimates", { customer: { id: customer.Id } });
+  const est2 = fake.store.Sundial_Estimate__c.find((x) => x.Id === e2.body.id) ?? fake.store.Sundial_Estimate__c[1];
+  const j2 = await call(h, "POST", `/service/estimates/${est2.Id}/create-job`, {});
+  assert.equal(j2.status, 201, JSON.stringify(j2.body));
+  const job2 = fake.store.Sundial_Service_Job__c.find((x) => x.Estimate__c === est2.Id);
+  assert.equal(job2.Issue_Description__c, undefined);
+  assert.equal(job2.Office_Notes__c, undefined);
+  // The org before the package: the describe lacks the fields, the job is still created.
+  const old = fakeSalesforce();
+  old.flags.noEstimateJobNotes = true;
+  const ho = makeHandler(old);
+  await old.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Pat Old" });
+  const e3 = await call(ho, "POST", "/service/estimates", { customer: { id: old.store.Sundial_Customer__c[0].Id } });
+  const soqlBefore = old.calls.queries.filter((q) => /Issue_Description__c/.test(q)).length;
+  const j3 = await call(ho, "POST", `/service/estimates/${old.store.Sundial_Estimate__c[0].Id}/create-job`, {});
+  assert.equal(j3.status, 201, JSON.stringify(j3.body));
+  assert.equal(old.calls.queries.filter((q) => /Issue_Description__c/.test(q)).length, soqlBefore, "no query names a field the org lacks");
+  assert.equal(e3.status, 201);
+});
+
+test("2026-11-19 (Harmon): a card on file on ANY Bill To — the card belongs to the PAYER record (the company on a Partner job), the link goes to the payer, a by-name-only payer is refused until the office picks the record", async () => {
+  const fake = fakeSalesforce();
+  fake.stripeSecret = STRIPE_SECRET;
+  const stripeCalls = [];
+  let hasCard = false;
+  fake.stripe = async (url, init) => {
+    stripeCalls.push({ url, method: init?.method, params: init?.body ? new URLSearchParams(init.body) : null });
+    if (url.endsWith("/customers") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cus_sunrun" }) };
+    if (/\/customers\/cus_sunrun$/.test(url) && init.method === "GET") return { ok: true, status: 200, json: async () => ({ id: "cus_sunrun", deleted: false, invoice_settings: { default_payment_method: hasCard ? "pm_amex" : null } }) };
+    if (url.endsWith("/payment_methods/pm_amex")) return { ok: true, status: 200, json: async () => ({ id: "pm_amex", card: { brand: "amex", last4: "0005", exp_month: 1, exp_year: 2031 } }) };
+    if (url.endsWith("/checkout/sessions") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "cs_partner_1", url: "https://checkout.stripe.com/c/pay/cs_partner_1" }) };
+    if (url.endsWith("/payment_intents") && init.method === "POST") return { ok: true, status: 200, json: async () => ({ id: "pi_partner_1", status: "requires_confirmation" }) };
+    if (/\/payment_intents\/pi_partner_1\/confirm$/.test(url)) return { ok: true, status: 200, json: async () => ({ id: "pi_partner_1", status: "succeeded", created: 1_789_002_000, latest_charge: "ch_pi_partner_1" }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const texts = [];
+  fake.sms = { sendText: async (args) => { texts.push(args); return { ok: true, code: null, error: null, to: args.to, message: { id: "m1" } }; } };
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "Ivy Home", First_Name__c: "Ivy", Last_Name__c: "Home", Primary_Email__c: "ivy@example.com", Primary_Phone__c: "602-555-0101" });
+  await fake.deps.sfCreateRecord("Sundial_Customer__c", { Client__c: TENANT, Name: "SunRun", Is_Company__c: true, Company_Name__c: "SunRun", Primary_Email__c: "ap@sunrun.example", Primary_Phone__c: "480-555-0199" });
+  const [home, co] = fake.store.Sundial_Customer__c;
+  const h = makeHandler(fake);
+  const q = await call(h, "POST", "/service/jobs", { customer: { id: home.Id }, job: { billToType: "Manufacturer", billToCustomerId: co.Id }, lines: [{ description: "Truck roll", kind: "Labor", unitPrice: 275 }] });
+  assert.equal(q.status, 201, JSON.stringify(q.body));
+  const job = fake.store.Sundial_Service_Job__c[0];
+  assert.equal(job.Bill_To_Customer__c, co.Id);
+
+  // 1. The status names the payer; the office may keep a card for them.
+  let r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.customerPays, false);
+  assert.equal(r.body.payerRecordMissing, false);
+  assert.deepEqual(r.body.payer, { id: co.Id, name: "SunRun" });
+  assert.equal(r.body.owed, 275);
+  // 2. Stripe's card page is opened on the PAYER's Stripe customer, remembered on the payer's record — never the homeowner's.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-session`);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const created = stripeCalls.find((c) => c.url.endsWith("/customers") && c.method === "POST");
+  assert.equal(created.params.get("name"), "SunRun");
+  assert.equal(created.params.get("email"), "ap@sunrun.example");
+  assert.equal(created.params.get("metadata[sundialCustomerId]"), co.Id);
+  assert.equal(co.Stripe_Customer_Id__c, "cus_sunrun");
+  assert.equal(home.Stripe_Customer_Id__c, undefined, "the homeowner's record is untouched");
+  // 3. The link goes to the payer's phone / email, not the homeowner's.
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-link`, { via: "sms" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(texts[0].to, "480-555-0199");
+  assert.ok(texts[0].body.startsWith("Hi SunRun,"), texts[0].body);
+  r = await call(h, "POST", `/service/jobs/${job.Id}/card-link`, { via: "email" });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.to, "ap@sunrun.example");
+  // 4. With the card on file, an Admin takes a deposit on the partner's card; the receipt goes to the payer.
+  hasCard = true;
+  r = await call(h, "GET", `/service/jobs/${job.Id}/card`);
+  assert.equal(r.body.cardOnFile, true);
+  assert.equal(r.body.card.brand, "amex");
+  r = await call(h, "POST", `/service/jobs/${job.Id}/charge`, { amount: 100 });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.type, "Deposit");
+  const pi = stripeCalls.find((c) => c.url.endsWith("/payment_intents") && c.method === "POST");
+  assert.equal(pi.params.get("customer"), "cus_sunrun");
+  assert.equal(pi.params.get("receipt_email"), "ap@sunrun.example");
+  assert.equal(pi.params.get("metadata[customerId]"), co.Id);
+  assert.equal(job.Payment_Status__c, "Deposit Paid");
+
+  // 5. A job that bills a partner BY NAME ONLY (pre-D-081) has nowhere to keep a card: every card route says to pick the payer first.
+  const q2 = await call(h, "POST", "/service/jobs", { customer: { id: home.Id }, lines: [{ description: "Diag", kind: "Labor", unitPrice: 150 }] });
+  const job2 = fake.store.Sundial_Service_Job__c.find((x) => x.Id === q2.body.jobId) ?? fake.store.Sundial_Service_Job__c[1];
+  Object.assign(job2, { Bill_To_Type__c: "Partner", Bill_To_Name__c: "Old Warranty Co", Bill_To_Customer__c: null });
+  r = await call(h, "GET", `/service/jobs/${job2.Id}/card`);
+  assert.equal(r.status, 200);
+  assert.equal(r.body.payerRecordMissing, true);
+  assert.equal(r.body.payer, null);
+  assert.equal(r.body.cardOnFile, false);
+  for (const [m, path] of [["POST", "card-session"], ["POST", "card-link"], ["POST", "charge"]]) {
+    r = await call(h, m, `/service/jobs/${job2.Id}/${path}`, { via: "sms", amount: 10 });
+    assert.equal(r.status, 409, `${path}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.code, "PAYER_RECORD_REQUIRED", path);
+    assert.match(r.body.message, /Old Warranty Co by name only/);
+  }
 });
 
 // ---------------------------------------------------------------------------

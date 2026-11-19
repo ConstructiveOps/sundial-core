@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  estimate-job-notes-2026-11-19 (Harmon) - the job's three intake notes on the ESTIMATE, so the
+  office can write them before a job exists: Issue_Description__c, Initial_Remote_Diagnosis__c,
+  Office_Notes__c on Sundial_Estimate__c (the same names, types and lengths as on
+  Sundial_Service_Job__c). Create Job copies them onto the new job; the estimate page shows them
+  under "Job Notes" only while the estimate has no job. CustomField members only - nothing here
+  touches object settings or any other field.
+
+  Until this deploys the estimate Lambda creates jobs without carrying notes (describe-guarded)
+  and the estimate page's Job Notes section cannot save. Deploy this FIRST.
+
+  DEPLOY: node scripts/zip-package.mjs salesforce/estimate-job-notes-2026-11-19 (NEVER PowerShell
+  5.1 Compress-Archive) -> Workbench -> Migration -> Deploy -> Single Package -> CHECK ONLY first,
+  expect 4/4 components (3 fields + 1 permission set), then deploy for real. Assign
+  Sundial_Estimate_Job_Notes to the integration user.
+-->
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+    <types>
+        <members>Sundial_Estimate__c.Issue_Description__c</members>
+        <members>Sundial_Estimate__c.Initial_Remote_Diagnosis__c</members>
+        <members>Sundial_Estimate__c.Office_Notes__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Sundial_Estimate_Job_Notes</members>
+        <name>PermissionSet</name>
+    </types>
+    <version>62.0</version>
+</Package>

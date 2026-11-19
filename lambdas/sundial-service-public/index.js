@@ -39,7 +39,7 @@ import {
 import { getSupabaseClient as realGetSupabaseClient } from "../../lib/supabase.js";
 import { corsHeaders, normalizeHeaders, jsonResponse, parseJsonBody, httpMethod } from "../../lib/http.js";
 import { renderEstimateDocument, DEFAULT_BRAND } from "../../lib/estimate-document.js";
-import { billToCustomerLoader, BILL_TO_SELF } from "../../lib/bill-to.js";
+import { billToCustomerLoader, BILL_TO_SELF, payerCustomerIdOf, payerIsHomeowner, payerRecordMissing } from "../../lib/bill-to.js";
 import { EVENTS, recordActivity } from "../../lib/service-activity.js";
 import { computeTotals, lineFromRecord, estimateFromRecord, withStoredTotals, showsStoredTotals } from "../sundial-service-estimate/totals.js";
 import { estimateTaxContext, loadTaxTables as realLoadTaxTables } from "../../lib/tax-zones.js";
@@ -78,7 +78,7 @@ const ROUTES = [
 export const CHECKOUT_KINDS = Object.freeze(["setup", "deposit", "balance"]);
 export const CUSTOMER_SF_OBJECT = "Sundial_Customer__c";
 export const TENANT_SF_OBJECT = "Sundial_Tenant__c";
-const PUBLIC_JOB_SELECT = "Id, Name, Client__c, Status__c, Payment_Status__c, Bill_To_Type__c, Sundial_Customer__c, Customer_Card_on_File__c, Customer_Name_at_Creation__c, Primary_Email_at_Creation__c, Primary_Phone_at_Creation__c";
+const PUBLIC_JOB_SELECT = "Id, Name, Client__c, Status__c, Payment_Status__c, Bill_To_Type__c, Bill_To_Customer__c, Bill_To_Name__c, Sundial_Customer__c, Customer_Card_on_File__c, Customer_Name_at_Creation__c, Primary_Email_at_Creation__c, Primary_Phone_at_Creation__c";
 const PUBLIC_CUSTOMER_SELECT = "Id, Name, Client__c, Primary_Email__c, Primary_Phone__c, Stripe_Customer_Id__c";
 const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -87,8 +87,11 @@ const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
  *   deposit  — approved, a deposit is required and not yet paid
  *   setup    — approved, no card on file yet (nothing charged; the card is for the work)
  *   balance  — the job's live invoice has a balance
- * `null` when there is nothing to pay or keep. A partner-billed job never asks the
- * customer for a card.
+ * `null` when there is nothing to pay or keep. Any Bill To may pay by card (2026-11-19,
+ * Harmon): the card belongs to the PAYER record (lib/bill-to.js payerCustomerIdOf) — the
+ * homeowner, or the paying company / person on a Partner / Other job. A Partner / Other job
+ * that names its payer by name only has no record to keep a card on, so nothing is offered
+ * until the office picks one.
  */
 export function paymentSummary({ est, job, invoice, configured }) {
   const approved = ["Approved", "Invoiced"].includes(est?.Status__c);
@@ -96,7 +99,9 @@ export function paymentSummary({ est, job, invoice, configured }) {
   // Draft): the card-on-file step is offered as soon as there is a job, while the deposit still
   // waits for the customer's approval (amendment 11, 2026-09-28).
   const cardStep = approved || !!job;
-  const partner = job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer";
+  // No payer record (a Partner / Other job by name only) → nothing to offer. The estimate's
+  // own Bill To governs before the job exists.
+  const noPayer = payerRecordMissing(job || est);
   const live = invoice && invoice.Status__c !== "Void" && invoice.Status__c !== "Draft" ? invoice : null;
   const balance = live ? cents((Number(live.Total__c) || 0) - (Number(live.Paid_Amount__c) || 0)) : 0;
   const depositAmount = cents(est?.Deposit_Amount__c);
@@ -104,7 +109,7 @@ export function paymentSummary({ est, job, invoice, configured }) {
   const depositPaidAt = est?.Deposit_Paid_At__c ?? null;
   const cardOnFile = job?.Customer_Card_on_File__c === true;
   let next = null;
-  if (!partner) {
+  if (!noPayer) {
     if (live && balance > 0) next = "balance";
     else if (approved && depositRequired && !depositPaidAt && !live) next = "deposit";
     else if (cardStep && !cardOnFile && !live) next = "setup";
@@ -257,11 +262,18 @@ export function createHandler(deps = {}) {
     const rows = (await d.sfQuery(`SELECT ${INVOICE_SELECT} FROM ${INVOICE_SF_OBJECT} WHERE Service_Job__c = '${soqlEscapeString(job.Id)}' AND Client__c = '${soqlEscapeString(job.Client__c)}' ORDER BY CreatedDate`)) || [];
     return rows.find((i) => i.Status__c !== "Void") ?? null;
   }
-  async function loadCustomer(est) {
-    if (!est.Sundial_Customer__c) return null;
-    const rows = await d.sfQuery(`SELECT ${PUBLIC_CUSTOMER_SELECT} FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(est.Sundial_Customer__c)}' AND Client__c = '${soqlEscapeString(est.Client__c)}' LIMIT 1`);
+  /**
+   * WHO PAYS — the record a Stripe customer is kept on (2026-11-19): the job's payer when there
+   * is a job, else the estimate's. The homeowner for Bill To = Customer; the paying company /
+   * person for Partner / Other; null when such a job names its payer by name only.
+   */
+  async function loadPayer(est, job) {
+    const id = payerCustomerIdOf(job || est);
+    if (!id) return null;
+    const rows = await d.sfQuery(`SELECT ${PUBLIC_CUSTOMER_SELECT}, Is_Company__c, Company_Name__c, First_Name__c, Last_Name__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(est.Client__c)}' LIMIT 1`);
     return rows?.[0] ?? null;
   }
+  const payerName = (c) => (c ? (c.Is_Company__c === true && c.Company_Name__c ? String(c.Company_Name__c).trim() : [c.First_Name__c, c.Last_Name__c].filter(Boolean).join(" ").trim() || c.Name || null) : null);
   async function tenantSlug(tenantId) {
     const rows = await d.sfQuery(`SELECT Id, Name FROM ${TENANT_SF_OBJECT} WHERE Id = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0]?.Name ?? null;
@@ -404,7 +416,7 @@ export function createHandler(deps = {}) {
       const job = await loadJob(est);
       const invoice = await loadLiveInvoice(job);
       const summary = paymentSummary({ est, job, invoice, configured: true });
-      const allowed = summary.next === kind || (kind === "setup" && (["Approved", "Invoiced"].includes(est.Status__c) || !!job) && !summary.cardOnFile && !(job?.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer"));
+      const allowed = summary.next === kind || (kind === "setup" && (["Approved", "Invoiced"].includes(est.Status__c) || !!job) && !summary.cardOnFile && !payerRecordMissing(job || est));
       if (!allowed) return jsonResponse(409, cors, { error: "not_applicable", code: "CHECKOUT_NOT_APPLICABLE", next: summary.next, message: summary.next ? "That step isn't the one that's due — reload the page." : "There's nothing to pay right now." });
       // Where Stripe sends the customer back to, and the name on Stripe's page (D-078).
       // SERVICE_PUBLIC_BASE_URL and SERVICE_BRAND_NAME are one value per Lambda and they
@@ -417,14 +429,17 @@ export function createHandler(deps = {}) {
       const base = String(primary ? d.publicBaseUrl || "" : brandPublicUrl(tenantBrand)).replace(/\/+$/, "");
       if (!base) return jsonResponse(503, cors, { error: "not_configured", code: "PUBLIC_URL_NOT_SET", message: "Online payment isn't set up yet — please give us a call." });
 
-      // The Stripe customer: reuse the id on the customer hub, else create and remember it.
-      const customer = await loadCustomer(est);
+      // The Stripe customer is the PAYER's record (2026-11-19): reuse the id on it, else create
+      // and remember it there. The estimate's / job's snapshot fills a blank only when the
+      // homeowner is the payer — never the homeowner's details on a company's Stripe customer.
+      const customer = await loadPayer(est, job);
+      const homeowner = payerIsHomeowner(job || est);
       let stripeCustomerId = customer?.Stripe_Customer_Id__c || null;
       try {
         const ensured = await ensureStripeCustomer(stripe.client, {
           existingId: stripeCustomerId,
-          name: customer?.Name || est.Customer_Name_at_Creation__c || job?.Customer_Name_at_Creation__c || undefined,
-          email: customer?.Primary_Email__c || est.Primary_Email_at_Creation__c || job?.Primary_Email_at_Creation__c || undefined,
+          name: payerName(customer) || (homeowner ? est.Customer_Name_at_Creation__c || job?.Customer_Name_at_Creation__c : undefined) || undefined,
+          email: customer?.Primary_Email__c || (homeowner ? est.Primary_Email_at_Creation__c || job?.Primary_Email_at_Creation__c : undefined) || undefined,
           phone: customer?.Primary_Phone__c || undefined,
           metadata: { tenant: slug, sundialCustomerId: customer?.Id || "", source: "sundial" },
         });

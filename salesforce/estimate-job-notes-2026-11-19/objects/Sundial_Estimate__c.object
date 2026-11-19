@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sundial_Estimate__c - the three job notes added on 2026-11-19 ONLY (the job's fields of the same
+  name, so Create Job copies them one-to-one). package.xml lists them as CustomField members, so
+  this file changes these three fields and touches nothing else on the object. NEVER convert this
+  to a whole-object deploy. The whole-object source (salesforce/service-objects/) carries them too.
+-->
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fields>
+        <fullName>Issue_Description__c</fullName>
+        <description>Customer-reported issue, written on the estimate before its job exists (2026-11-19). Copied onto the job's Issue_Description__c at Create Job.</description>
+        <externalId>false</externalId>
+        <label>Issue Description</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Initial_Remote_Diagnosis__c</fullName>
+        <description>Remote-first findings before any truck roll, written on the estimate before its job exists (2026-11-19). Copied onto the job at Create Job.</description>
+        <externalId>false</externalId>
+        <label>Initial Remote Diagnosis</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Office_Notes__c</fullName>
+        <description>The office's own notes on the future job, written on the estimate before it exists (2026-11-19). Copied onto the job's Office_Notes__c at Create Job. Never shown to the customer or the tech.</description>
+        <externalId>false</externalId>
+        <label>Office Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+</CustomObject>

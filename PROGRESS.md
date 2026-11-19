@@ -1,5 +1,24 @@
 # Sundial — Progress Log
 
+## 2026-11-19 — Harmon: a card on file on ANY Bill To (the payer's card), and job notes on the estimate before the job (D-072 amendment 18)
+
+**Asked (Tim, 2026-11-19).** (1) On an estimate created before its job, group the current fields under **Estimate Notes** and add a **Job Notes** section with `Issue_Description__c`, `Initial_Remote_Diagnosis__c`, `Office_Notes__c`; when a job is created from the estimate, copy them onto the job and stop showing them on the estimate. (2) Let Harmon take a card deposit / payment on jobs whose Bill To is Partner or Other.
+
+**Built — the card.**
+- **`lib/bill-to.js`: `payerCustomerIdOf(src)` / `payerIsHomeowner(src)` / `payerRecordMissing(src)`** — WHO PAYS as a customer record: the job's own customer for Bill To = Customer (or blank), `Bill_To_Customer__c` for anything else; null for a Partner / Other job that names its payer by name only (pre-D-081). The homeowner is never the fallback.
+- **`sundial-service-estimate/stripe.js`:** the three `NOT_CUSTOMER_PAY` refusals are gone. `cardOnFileFor`, the card page (`card-session`), the card link (`card-link`) and `chargeCard` all key on the payer record — the Stripe customer is created on it (a company payer by its company name) and remembered on ITS `Stripe_Customer_Id__c`; the link goes to the payer's phone / email (the job's snapshot only when the homeowner pays), the receipt email to the payer. A by-name-only payer is `409 PAYER_RECORD_REQUIRED` ("pick the paying company or person in Bill To first") on all three routes. `GET /service/jobs/{id}/card` adds `payer: { id, name } | null` and `payerRecordMissing`; `customerPays` now means the homeowner is the payer.
+- **`sundial-service-public`:** `paymentSummary` no longer withholds every step from a partner-billed job — only from one with no payer record; the checkout's Stripe customer is the payer's (`loadPayer`), never the homeowner's details on a company's Stripe customer. `PUBLIC_JOB_SELECT` + `Bill_To_Customer__c`, `Bill_To_Name__c`.
+- Tests: estimate suite +1 (a partner job: status names the payer, the card page / link / charge on the payer's record and phone / email, the homeowner's record untouched, by-name-only → 409 on every route); public suite's partner case rewritten (payer record → `balance`; by name only → nothing). Estimate suite 86 pass (6 photo-report tests fail here for want of the image library — the same 6 on the untouched copy; green on the device); public 12 / 12; `lib/bill-to.test.js` 10 / 10.
+
+**Built — the job notes.**
+- **`salesforce/estimate-job-notes-2026-11-19/`** (+ `.zip` from `scripts/zip-package.mjs`): `Issue_Description__c`, `Initial_Remote_Diagnosis__c`, `Office_Notes__c` on `Sundial_Estimate__c` (the job's names, types and lengths) + permission set `Sundial_Estimate_Job_Notes`; the whole-object source in `salesforce/service-objects/` carries them too.
+- **`createJobFromEstimate`** reads them with ONE describe-guarded query (`estimateJobNotes`; `ESTIMATE_SELECT` is shared with the public Lambda and does not name them) and `createJobRecord({ carry })` puts them on the job unless the request typed its own value; blanks are left alone; the estimate keeps its copy. An org without the fields creates its job exactly as before. Test +1.
+- **harmon-crm:** the estimate page's notes card is **Estimate Notes**; **Job Notes** (three inline text areas, generic record PATCH like Internal notes) shows only while the estimate has no job. `JobCardOnFileCard`: the "partner gets the invoice, no customer card" branch is gone — the card names the payer ("Card for SunRun (Manufacturer)") and every button works; a payer by name only reads "pick the paying company or person in Bill To first". Tests +3.
+
+**Docs.** DECISIONS D-072 amendment 18; CLAUDE.md (the card bullet); `docs/api-endpoints.md` (card routes, create-job); `docs/integrations/stripe.md`; `docs/service-data-model.md`; inventory S31 updated, S64 added.
+
+**Tim, in order:** (1) deploy the field package (Workbench, check-only first — 4/4) and assign `Sundial_Estimate_Job_Notes` to the integration user; (2) `.\deploy.ps1 sundial-service-estimate` and `.\deploy.ps1 sundial-service-public`; (3) push harmon-crm `main`. Until (1) the Job Notes card cannot save (the fields do not exist) and Create Job carries nothing — nothing else is affected.
+
 ## 2026-11-13 — Reporting: picklist values read live from the describe (D-089 am. 2) — DEPLOYED
 
 **Why.** The report catalog's picklist values were a snapshot from generation time, so a value added in Salesforce Setup did not reach the filter pickers or the report assistant until the catalog was regenerated and `sundial-reports` redeployed.

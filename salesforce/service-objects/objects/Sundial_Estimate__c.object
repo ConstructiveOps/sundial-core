@@ -752,6 +752,36 @@
         <visibleLines>8</visibleLines>
     </fields>
     <fields>
+        <fullName>Issue_Description__c</fullName>
+        <description>Customer-reported issue, written on the estimate before its job exists (2026-11-19). Copied onto the job's Issue_Description__c at Create Job.</description>
+        <externalId>false</externalId>
+        <label>Issue Description</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Initial_Remote_Diagnosis__c</fullName>
+        <description>Remote-first findings before any truck roll, written on the estimate before its job exists (2026-11-19). Copied onto the job at Create Job.</description>
+        <externalId>false</externalId>
+        <label>Initial Remote Diagnosis</label>
+        <length>32768</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>5</visibleLines>
+    </fields>
+    <fields>
+        <fullName>Office_Notes__c</fullName>
+        <description>The office's own notes on the future job, written on the estimate before it exists (2026-11-19). Copied onto the job's Office_Notes__c at Create Job. Never shown to the customer or the tech.</description>
+        <externalId>false</externalId>
+        <label>Office Notes</label>
+        <length>131072</length>
+        <trackTrending>false</trackTrending>
+        <type>LongTextArea</type>
+        <visibleLines>8</visibleLines>
+    </fields>
+    <fields>
         <fullName>Created_In_Field__c</fullName>
         <defaultValue>false</defaultValue>
         <description>True when a tech created/extended it from the PWA (field estimate, D-065.7).</description>

@@ -177,8 +177,10 @@ test("paymentSummary: what the page offers, from the records alone", () => {
   assert.deepEqual(s.invoice, { number: "SVC-00003", status: "Issued", total: 405.32, paid: 101.33, balance: 303.99 });
   assert.equal(paymentSummary({ est, job, invoice: { ...inv, Status__c: "Paid", Paid_Amount__c: 405.32 }, configured: true }).next, null);
   assert.equal(paymentSummary({ est, job, invoice: { ...inv, Status__c: "Void" }, configured: true }).next, "deposit"); // a void invoice is no invoice
-  // A partner-billed job never asks the customer for a card or money.
-  assert.equal(paymentSummary({ est, job: { ...job, Bill_To_Type__c: "Manufacturer" }, invoice: inv, configured: true }).next, null);
+  // Any Bill To may pay by card (2026-11-19): a partner-billed job WITH a payer record is offered the
+  // balance like anyone else; one that names its payer by name only has no record to keep a card on → nothing.
+  assert.equal(paymentSummary({ est, job: { ...job, Bill_To_Type__c: "Manufacturer", Bill_To_Customer__c: "CUS000000000000002" }, invoice: inv, configured: true }).next, "balance");
+  assert.equal(paymentSummary({ est, job: { ...job, Bill_To_Type__c: "Manufacturer", Bill_To_Customer__c: null }, invoice: inv, configured: true }).next, null);
   // Stripe not configured: nothing offered, and the page is told why.
   const off = paymentSummary({ est, job, invoice: null, configured: false });
   assert.equal(off.next, null);

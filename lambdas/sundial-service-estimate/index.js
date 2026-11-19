@@ -387,6 +387,13 @@ const JOB_CREATE_FIELDS = Object.freeze({
 
 const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
 
+// Job notes written on the estimate BEFORE its job exists (Harmon, 2026-11-19): the same
+// three fields the job carries, on Sundial_Estimate__c (salesforce/estimate-job-notes-2026-11-19/).
+// Create Job copies them onto the new job (a value the request names wins; the estimate's
+// copy is kept, the portal just stops showing it once the job exists). Describe-guarded —
+// an org without the fields still creates its job.
+export const ESTIMATE_JOB_NOTES_FIELDS = Object.freeze(["Issue_Description__c", "Initial_Remote_Diagnosis__c", "Office_Notes__c"]);
+
 function numOrNull(v) {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
@@ -1247,8 +1254,28 @@ export function createHandler(deps = {}) {
   }
   const billToRefused = (cors, r) => jsonResponse(r.status, cors, { error: r.code.toLowerCase(), code: r.code, field: "Bill_To_Customer__c", message: r.message });
 
-  async function createJobRecord({ customer, estimateId, body, tenantId, billTo = null }) {
+  /**
+   * The estimate's job notes (ESTIMATE_JOB_NOTES_FIELDS), or {} when the org has no such
+   * fields yet / the estimate has nothing in them. One guarded query, never in ESTIMATE_SELECT
+   * (which the public Lambda shares — a missing field there would break both).
+   */
+  async function estimateJobNotes(estimateId, tenantId) {
+    try {
+      if (!(await fieldExists(ESTIMATE_SF_OBJECT, ESTIMATE_JOB_NOTES_FIELDS[0]))) return {};
+      const rows = await d.sfQuery(`SELECT ${ESTIMATE_JOB_NOTES_FIELDS.join(", ")} FROM ${ESTIMATE_SF_OBJECT} WHERE Id = '${soqlEscapeString(estimateId)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+      const out = {};
+      for (const f of ESTIMATE_JOB_NOTES_FIELDS) if (strOrNull(rows?.[0]?.[f])) out[f] = rows[0][f];
+      return out;
+    } catch (e) {
+      console.error("create job: estimate job notes read failed:", e?.sfBody || e?.message || e);
+      return {};
+    }
+  }
+
+  async function createJobRecord({ customer, estimateId, body, tenantId, billTo = null, carry = {} }) {
     const { fields: extra, rejected } = translate(body?.job || {}, JOB_CREATE_FIELDS);
+    // The estimate's job notes ride onto the job (2026-11-19) unless the request typed its own.
+    for (const [f, v] of Object.entries(carry || {})) if (!strOrNull(extra[f])) extra[f] = v;
     // The Bill To trio comes ONLY from resolveBillTo (callers that never send one — the
     // Service Club's public pages — get the default: the job's own customer pays).
     delete extra.Bill_To_Type__c;
@@ -1796,9 +1823,10 @@ export function createHandler(deps = {}) {
       const inherited = est.Bill_To_Type__c ? { billToType: est.Bill_To_Type__c, billToCustomerId: est.Bill_To_Customer__c ?? null } : {};
       const billTo = await jobBillTo(namesBillTo ? body.job : inherited, tenantId);
       if (!billTo.ok) return billToRefused(cors, billTo);
+      const notes = await estimateJobNotes(est.Id, tenantId);
       let job;
       try {
-        job = await createJobRecord({ customer, estimateId: est.Id, body: { job: { intakeChannel: "Estimate Conversion", ...(body?.job || {}) } }, tenantId, billTo });
+        job = await createJobRecord({ customer, estimateId: est.Id, body: { job: { intakeChannel: "Estimate Conversion", ...(body?.job || {}) } }, tenantId, billTo, carry: notes });
         await d.sfUpdateRecord(ESTIMATE_SF_OBJECT, est.Id, { Service_Job__c: job.id });
       } catch (e) {
         return sfError(cors, e, "job create");

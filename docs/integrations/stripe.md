@@ -31,8 +31,12 @@ job the moment it exists.
 
 **What the customer sees.** After Approve the page offers exactly one step: the deposit (if
 the estimate requires one and it is unpaid), else "Keep a card on file" (if none), else — once the
-invoice is issued — "Pay SVC-00042 — $440.07". A partner-billed job never asks the customer for
-a card. If Stripe is not configured for the tenant the page says "Online payment isn't set up
+invoice is issued — "Pay SVC-00042 — $440.07". **Any Bill To may pay by card (D-072 am. 18,
+2026-11-19):** the Stripe customer is the PAYER's record (`lib/bill-to.js` `payerCustomerIdOf`
+— the homeowner for Bill To = Customer, the paying company / person for Partner / Other), so
+a partner-billed job's page offers the same steps to the partner; a job that names its payer by
+name only (no `Bill_To_Customer__c`) is offered nothing until the office picks the payer, and the
+homeowner's card is never the fallback. If Stripe is not configured for the tenant the page says "Online payment isn't set up
 yet — we'll take care of it over the phone." instead of a dead button.
 
 ## Going LIVE — switching the keys from Test to Live (Tim)

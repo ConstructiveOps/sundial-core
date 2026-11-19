@@ -45,6 +45,7 @@ import { isPrimaryTenant } from "../../lib/tenant-guard.js";
 import { portalUrlNotConfiguredBody } from "../../lib/tenant-settings.js";
 import { PAYMENT_SELECT, PAYMENT_SF_OBJECT } from "./invoice.js";
 import { ESTIMATE_SF_OBJECT, JOB_SF_OBJECT } from "./fields.js";
+import { payerCustomerIdOf, payerIsHomeowner, payerRecordMissing } from "../../lib/bill-to.js";
 
 export const STRIPE_EVENTS_TABLE = "sundial_stripe_events";
 export const TENANT_SF_OBJECT = "Sundial_Tenant__c";
@@ -131,7 +132,7 @@ export function createStripeHandlers(d, h) {
   }
   async function loadCustomer(id, tenantId) {
     if (!SF_ID_RE.test(id || "")) return null;
-    const rows = await d.sfQuery(`SELECT Id, Name, Client__c, Primary_Email__c, Primary_Phone__c, Stripe_Customer_Id__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
+    const rows = await d.sfQuery(`SELECT Id, Name, First_Name__c, Last_Name__c, Is_Company__c, Company_Name__c, Client__c, Primary_Email__c, Primary_Phone__c, Stripe_Customer_Id__c FROM ${CUSTOMER_SF_OBJECT} WHERE Id = '${soqlEscapeString(id)}' AND Client__c = '${soqlEscapeString(tenantId)}' LIMIT 1`);
     return rows?.[0] ?? null;
   }
   async function loadEstimateLite(id, tenantId) {
@@ -380,7 +381,8 @@ export function createStripeHandlers(d, h) {
   async function cardOnFileFor({ ctx, job }) {
     const stripe = await stripeFor(ctx.tenantSlug);
     if (!stripe) return { configured: false, mode: null, cardOnFile: false, card: null, customer: null, stripe: null };
-    const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, ctx.tenantId) : null;
+    const payerId = payerCustomerIdOf(job);
+    const customer = payerId ? await loadCustomer(payerId, ctx.tenantId) : null;
     if (!customer?.Stripe_Customer_Id__c) return { configured: true, mode: stripe.config.mode, cardOnFile: false, card: null, customer, stripe };
     let pm = null;
     let card = null;
@@ -418,7 +420,10 @@ export function createStripeHandlers(d, h) {
   async function chargeCard({ ctx, job, invoice = null, amount, note = null, kind = "charge" }) {
     const { tenantId } = ctx;
     if (invoice && invoice.Status__c === "Void") return { ok: false, code: "INVOICE_VOID", message: "This invoice is void." };
-    if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return { ok: false, code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}, not the customer's card.` };
+    // Any Bill To (2026-11-19, Harmon): the card charged is the PAYER's — the homeowner's, or
+    // the paying company's / person's record on a Partner / Other job. Never the homeowner's
+    // card for a job somebody else pays.
+    if (payerRecordMissing(job)) return { ok: false, code: "PAYER_RECORD_REQUIRED", message: payerMissingMessage(job) };
     const wanted = round2(amount);
     if (!(wanted > 0)) return { ok: false, code: "AMOUNT_INVALID", message: "Enter an amount greater than zero." };
     const due = await owedOn({ job, invoice, tenantId });
@@ -435,7 +440,8 @@ export function createStripeHandlers(d, h) {
     const metadata = { tenant: ctx.tenantSlug || "", tenantId, jobId: job.Id, invoiceId: invoice?.Id || "", estimateId: job.Estimate__c || "", customerId: customer.Id, kind };
     const brandName = h.brandFor ? h.brandFor(ctx).companyName || "Sundial" : "Sundial";
     const description = `${invoice ? invoice.Name : `${job.Name} deposit`} — ${brandName}`.slice(0, 200);
-    const email = customer.Primary_Email__c || job.Primary_Email_at_Creation__c || null;
+    // The receipt goes to the payer; the job's snapshot email only when the homeowner pays.
+    const email = customer.Primary_Email__c || (payerIsHomeowner(job) ? job.Primary_Email_at_Creation__c : null) || null;
     const type = invoice ? "Payment" : "Deposit";
     // Created UNCONFIRMED so the Pending row exists before any money moves. Stripe accepts
     // `off_session` only together with `confirm: true` (Harmon's first live charge, 2026-10-12:
@@ -523,9 +529,12 @@ export function createStripeHandlers(d, h) {
     return { applied };
   }
 
-  const chargeStatusFor = (code) => (["NOTHING_DUE", "INVOICE_VOID", "NOT_CUSTOMER_PAY", "CHARGE_PENDING", "AMOUNT_TOO_HIGH"].includes(code) ? 409 : ["NO_CARD", "STRIPE_NOT_CONFIGURED", "AMOUNT_INVALID"].includes(code) ? 400 : 402);
+  const chargeStatusFor = (code) => (["NOTHING_DUE", "INVOICE_VOID", "PAYER_RECORD_REQUIRED", "CHARGE_PENDING", "AMOUNT_TOO_HIGH"].includes(code) ? 409 : ["NO_CARD", "STRIPE_NOT_CONFIGURED", "AMOUNT_INVALID"].includes(code) ? 400 : 402);
   /** The customer's page for this job's estimate — where a card is added or a bill paid (money.customerLinkFor mints the token). */
   const customerLinkFor = async (job, tenantId, ctx) => ({ ...(await money.customerLinkFor(job, tenantId, ctx)), estimate: job.Estimate__c ? { Id: job.Estimate__c } : null });
+  /** A payer's name for a message: the company name for a company, else First + Last, else Name. */
+  const payerDisplayName = (c) => (c ? (c.Is_Company__c === true && c.Company_Name__c ? String(c.Company_Name__c).trim() : [c.First_Name__c, c.Last_Name__c].filter(Boolean).join(" ").trim() || c.Name || null) : null);
+  const payerMissingMessage = (job) => `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c} by name only — pick the paying company or person in Bill To first, so the card is kept on their record.`;
   const cardView = (cof) => ({ configured: cof.configured, mode: cof.mode, cardOnFile: cof.cardOnFile, card: cof.card ? { brand: cof.card.brand, last4: cof.card.last4, expMonth: cof.card.expMonth, expYear: cof.card.expYear } : null, stripeError: cof.error ?? null });
 
   return {
@@ -547,7 +556,12 @@ export function createStripeHandlers(d, h) {
         jobId: job.Id,
         ...cardView(cof),
         billToType: job.Bill_To_Type__c || "Customer",
-        customerPays: !job.Bill_To_Type__c || job.Bill_To_Type__c === "Customer",
+        customerPays: payerIsHomeowner(job),
+        // Whose card this is (2026-11-19): the payer record — the homeowner, or the paying
+        // company / person on a Partner / Other job. null = the job names its payer by name
+        // only, so there is nowhere to keep a card until the office picks the payer record.
+        payer: cof.customer ? { id: cof.customer.Id, name: payerDisplayName(cof.customer) || job.Bill_To_Name__c || null } : null,
+        payerRecordMissing: payerRecordMissing(job),
         owed: due.owed,
         owedBasis: due.basis,
         invoice: invoice ? { id: invoice.Id, number: invoice.Name, status: invoice.Status__c, balance: money.balanceOf(invoice) } : null,
@@ -563,20 +577,22 @@ export function createStripeHandlers(d, h) {
       const { tenantId, cors } = ctx;
       const job = await money.loadJob(params[0], tenantId);
       if (!job) return notFound(cors);
-      if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c} — there is no customer card to keep.` });
+      if (payerRecordMissing(job)) return jsonResponse(409, cors, { error: "not_applicable", code: "PAYER_RECORD_REQUIRED", message: payerMissingMessage(job) });
       const stripe = await stripeFor(ctx.tenantSlug);
       if (!stripe) return jsonResponse(503, cors, { error: "not_configured", code: "STRIPE_NOT_CONFIGURED", message: "Stripe isn't set up for this tenant yet (Secrets Manager sundial/stripe)." });
       // The tenant's own customer-page address (D-078) — Stripe sends the office back there.
       const base = String(h.portalBaseUrl?.(ctx) || "").replace(/\/+$/, "");
       if (!base) return jsonResponse(503, cors, noPublicUrl(ctx));
-      const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
+      const customer = await loadCustomer(payerCustomerIdOf(job), tenantId);
       if (!customer) return jsonResponse(409, cors, { error: "no_customer", code: "NO_CUSTOMER", message: "This job has no customer record to keep a card for." });
       let stripeCustomerId = customer.Stripe_Customer_Id__c || null;
       try {
         const ensured = await ensureStripeCustomer(stripe.client, {
           existingId: stripeCustomerId,
-          name: customer.Name || job.Customer_Name_at_Creation__c || undefined,
-          email: customer.Primary_Email__c || job.Primary_Email_at_Creation__c || undefined,
+          // Stripe's customer is the PAYER (a company payer by its company name); the job's
+          // snapshot fills a blank only when the homeowner pays.
+          name: payerDisplayName(customer) || (payerIsHomeowner(job) ? job.Customer_Name_at_Creation__c : undefined) || undefined,
+          email: customer.Primary_Email__c || (payerIsHomeowner(job) ? job.Primary_Email_at_Creation__c : undefined) || undefined,
           phone: customer.Primary_Phone__c || undefined,
           metadata: { tenant: ctx.tenantSlug || "", sundialCustomerId: customer.Id, source: "sundial" },
         });
@@ -609,8 +625,12 @@ export function createStripeHandlers(d, h) {
       const { tenantId, cors } = ctx;
       const job = await money.loadJob(params[0], tenantId);
       if (!job) return notFound(cors);
-      if (job.Bill_To_Type__c && job.Bill_To_Type__c !== "Customer") return jsonResponse(409, cors, { error: "not_applicable", code: "NOT_CUSTOMER_PAY", message: `This job bills ${job.Bill_To_Name__c || job.Bill_To_Type__c}.` });
+      if (payerRecordMissing(job)) return jsonResponse(409, cors, { error: "not_applicable", code: "PAYER_RECORD_REQUIRED", message: payerMissingMessage(job) });
       const via = body?.via === "email" ? "email" : "sms";
+      // The link goes to WHOEVER PAYS (2026-11-19): the payer record's phone / email first; the
+      // job's snapshot only when the homeowner is the payer.
+      const payer = await loadCustomer(payerCustomerIdOf(job), tenantId);
+      const homeowner = payerIsHomeowner(job);
       const link = await customerLinkFor(job, tenantId, ctx);
       if (!link.url) {
         if (!job.Estimate__c) return jsonResponse(409, cors, { error: "no_link", code: "NO_ESTIMATE_LINK", message: "This job has no estimate to link to." });
@@ -618,19 +638,21 @@ export function createStripeHandlers(d, h) {
         return jsonResponse(409, cors, { error: "no_link", code: isPrimaryTenant(ctx.tenantSlug) ? "NO_ESTIMATE_LINK" : why.code, message: why.message });
       }
       const brand = h.brandFor ? h.brandFor(ctx).companyName || "" : "";
-      const first = (job.Customer_Name_at_Creation__c || "").split(" ")[0] || "there";
+      const first = homeowner ? (job.Customer_Name_at_Creation__c || "").split(" ")[0] || "there" : payerDisplayName(payer) || job.Bill_To_Name__c || "there";
       const text = `Hi ${first}, ${brand ? `${brand} here. ` : ""}To keep a card on file for ${job.Name}, open this secure link and choose "Keep a card on file": ${link.url}`;
       if (via === "sms") {
         if (!d.sms) return jsonResponse(503, cors, { error: "not_configured", code: "SMS_NOT_WIRED", message: "Texting is not wired on this Lambda." });
-        const r = await d.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job, to: body?.to ? String(body.to) : null, body: text, sentBy: { id: ctx.userId ?? null, name: ctx.actor?.name ?? null } });
+        // A typed number wins; else the payer's own phone; the job's snapshot only for the homeowner.
+        const toPhone = body?.to ? String(body.to) : homeowner ? null : payer?.Primary_Phone__c || null;
+        if (!homeowner && !toPhone) return jsonResponse(409, cors, { error: "send_failed", code: "NO_PHONE", message: `${payerDisplayName(payer) || "The payer"} has no mobile number on file — enter one.` });
+        const r = await d.sms.sendText({ tenantId, tenantSlug: ctx.tenantSlug, job, to: toPhone, body: text, sentBy: { id: ctx.userId ?? null, name: ctx.actor?.name ?? null } });
         if (!r.ok) return jsonResponse(r.code === "NO_PHONE" ? 409 : 502, cors, { error: "send_failed", code: r.code || "SMS_FAILED", message: r.code === "NO_PHONE" ? "No mobile number on this job — enter one." : r.error || "The text could not be sent." });
         await h.act(ctx, { event: EVENTS.JOB_UPDATED, recordType: "job", recordSfId: job.Id, jobSfId: job.Id, estimateSfId: job.Estimate__c ?? null, details: { cardLink: "sms", to: r.to ?? null, via: "office" } });
         return jsonResponse(200, cors, { success: true, via, to: r.to ?? null, url: link.url });
       }
       if (!d.isEmailConfigured || !d.isEmailConfigured()) return jsonResponse(503, cors, { error: "not_configured", code: "EMAIL_NOT_WIRED", message: "Email is not wired on this Lambda." });
-      const customer = job.Sundial_Customer__c ? await loadCustomer(job.Sundial_Customer__c, tenantId) : null;
-      const to = (body?.to ? String(body.to).trim() : "") || customer?.Primary_Email__c || job.Primary_Email_at_Creation__c || null;
-      if (!to) return jsonResponse(409, cors, { error: "no_email", code: "NO_EMAIL", message: "The customer has no email address on file — enter one." });
+      const to = (body?.to ? String(body.to).trim() : "") || payer?.Primary_Email__c || (homeowner ? job.Primary_Email_at_Creation__c : null) || null;
+      if (!to) return jsonResponse(409, cors, { error: "no_email", code: "NO_EMAIL", message: `${homeowner ? "The customer" : payerDisplayName(payer) || "The payer"} has no email address on file — enter one.` });
       const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
       const subject = `Keep a card on file for ${job.Name}${brand ? ` — ${brand}` : ""}`;
       const html = `<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#18181b;max-width:560px"><p>Hi ${esc(first)},</p><p>${esc(brand ? `${brand} keeps a card on file so we can bill your service work when it is done.` : "We keep a card on file so we can bill your service work when it is done.")} Open the secure link below and choose <strong>Keep a card on file</strong>. Your card details go straight to Stripe — we never see the number.</p><p><a href="${esc(link.url)}" style="display:inline-block;background:#0f172a;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none">Keep a card on file</a></p><p style="color:#52525b">Or copy this link: ${esc(link.url)}</p><p style="color:#52525b">Questions? Just reply to this email.</p></div>`;

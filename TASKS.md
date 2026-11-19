@@ -4,6 +4,12 @@ Status markers: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[!]` BLOCKED
 
 Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — BE-owned items: G2 (G2b, G2c), E1.
 
+## 2026-11-19 — Harmon: card on any Bill To + job notes on the estimate (D-072 am. 18)
+
+- [x] The card belongs to the payer (`payerCustomerIdOf`): card page / link / charge / customer-page checkout on the payer record; by-name-only payer → `PAYER_RECORD_REQUIRED` — 2026-11-19 (PROGRESS). **Tim:** `.\deploy.ps1 sundial-service-estimate`, `.\deploy.ps1 sundial-service-public`.
+- [x] Job notes on the estimate: package `salesforce/estimate-job-notes-2026-11-19/`, Create Job carries them, the estimate page's Estimate Notes / Job Notes cards — 2026-11-19. **Tim:** deploy the package (check-only first, 4/4), assign `Sundial_Estimate_Job_Notes` to the integration user, then push harmon-crm.
+- [ ] Later, if wanted: cache columns + report catalog entries for the three estimate notes fields (not needed for the pages — the estimate detail is a live full read).
+
 ## 2026-11-11 — Reporting: summary reports, `showDetails` (D-093, `feature/reports-summary`) — DONE, verified, merged
 
 - [x] `lib/report-def.js`: `showDetails` (only with `groupBy` — `DETAILS_NEED_GROUP`); the user's own columns; sort on shown columns only (an aggregate / the group field → `BAD_SORT`); a gated group field → a plain detail report; the wire `group` + `details`

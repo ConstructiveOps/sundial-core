@@ -2434,8 +2434,13 @@ test("2026-11-19 (Harmon): job notes typed on the estimate ride onto the job at 
   const e = await call(h, "POST", "/service/estimates", { customer: { id: customer.Id } });
   assert.equal(e.status, 201, JSON.stringify(e.body));
   const est = fake.store.Sundial_Estimate__c[0];
-  // The office types the three job notes on the estimate page (the generic record PATCH writes them).
+  // The office types the three job notes on the estimate page (the generic record PATCH writes them)…
   Object.assign(est, { Issue_Description__c: "Inverter offline since Monday", Initial_Remote_Diagnosis__c: "Portal shows no comms; likely the gateway", Office_Notes__c: "Customer prefers afternoons" });
+  // …and the estimate read carries them back while there is no job (ESTIMATE_SELECT does not name them).
+  let read = await call(h, "GET", `/service/estimates/${est.Id}`);
+  assert.equal(read.status, 200);
+  assert.equal(read.body.estimate.Issue_Description__c, "Inverter offline since Monday");
+  assert.equal(read.body.estimate.Office_Notes__c, "Customer prefers afternoons");
   const j = await call(h, "POST", `/service/estimates/${est.Id}/create-job`, { job: { issueDescription: "Typed on the popup" } });
   assert.equal(j.status, 201, JSON.stringify(j.body));
   const job = fake.store.Sundial_Service_Job__c[0];
@@ -2443,6 +2448,7 @@ test("2026-11-19 (Harmon): job notes typed on the estimate ride onto the job at 
   assert.equal(job.Initial_Remote_Diagnosis__c, "Portal shows no comms; likely the gateway");
   assert.equal(job.Office_Notes__c, "Customer prefers afternoons");
   assert.equal(est.Issue_Description__c, "Inverter offline since Monday", "the estimate keeps its copy (the portal just stops showing it)");
+  // (With a job, the read stops asking for them — the fake SOQL returns whole rows, so that is not asserted here.)
   // A second estimate with blank notes: nothing is written, nothing is nulled.
   const e2 = await call(h, "POST", "/service/estimates", { customer: { id: customer.Id } });
   const est2 = fake.store.Sundial_Estimate__c.find((x) => x.Id === e2.body.id) ?? fake.store.Sundial_Estimate__c[1];

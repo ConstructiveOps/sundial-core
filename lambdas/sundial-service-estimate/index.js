@@ -1371,7 +1371,11 @@ export function createHandler(deps = {}) {
       // What a line COSTS is Admin / Executive only (lib/cost-gate.js); the sell price stays.
       const seesCost = ctx.can ? ctx.can(COSTING_READ) === true : false;
       const shown = seesCost ? lines : lines.map((l) => stripCost("serviceline", l));
-      return jsonResponse(200, cors, { estimate: est, lines: shown, totals, taxZone: totals.tax, ...(await estimateReadExtras(est, tenantId)) });
+      // The job notes written here before the job exists (2026-11-19) ride on the read while there
+      // is no job — ESTIMATE_SELECT cannot name them (shared with the public Lambda), so one
+      // guarded query fills them in. Once the job exists they live on the job page.
+      const notes = est.Service_Job__c ? {} : await estimateJobNotes(est.Id, tenantId);
+      return jsonResponse(200, cors, { estimate: { ...est, ...notes }, lines: shown, totals, taxZone: totals.tax, ...(await estimateReadExtras(est, tenantId)) });
     },
 
     async patchEstimate({ ctx, params, body }) {

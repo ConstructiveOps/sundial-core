@@ -107,7 +107,9 @@ Harmon Phase 1 punchlist: see ../harmon-crm/docs/HARMON_PHASE1_PUNCHLIST.md — 
 
 - [x] Upstream time budgets (token 15 s, query `SF_FETCH_TIMEOUT_MS` / 60 s, secret 10 s) + per-request `req: start` / `req: slow` lines + `sfBody` in the error logs — 2026-11-09 (PROGRESS). **Tim:** set `SF_FETCH_TIMEOUT_MS=25000` on `sundial-sf-query`, `.\deploy.ps1 sundial-sf-query`.
 - [x] One cross-object search endpoint (`GET /sf/search?q=`) in `sundial-sf-query` + `GlobalSearch.tsx` on it — one request per keystroke instead of five (the 16:03 UTC burst was 40 cold starts at once) — 2026-11-09 (PROGRESS). **Tim:** `.\deploy.ps1 sundial-sf-query`, `.\scripts\wire-global-search-route.ps1`, push harmon-crm.
-- [ ] After the next alarm: read the `req: start` lines with no `req: slow` / REPORT (the hung phase) and the `cold-cache count error … sfBody` lines (which query 400s ~30×/day — likely the demo tenant with no cache rows); fix the query or short-circuit a tenant with zero rows.
+- [x] After the next alarm (fired 2026-11-25, PROGRESS): a shared upstream stalled ~3.5 min (sf-query + both cache-sync runs recovered at the same instant); the Supabase calls and the describe had no budget, so nothing said which. Now every Supabase call and describe has a budget, sf-query has a 26 s deadline answering `503 UPSTREAM_TIMEOUT` with one `"req":"deadline"` line naming the phase and the calls in flight, and the 400s were the single filter quoting a boolean (`Is_Template__c = 'true'`) — typed now, and an empty templates list no longer reaches Salesforce. Deployed 2026-11-25.
+- [ ] **Tim:** on `sundial-sf-query` set `SF_FETCH_TIMEOUT_MS=15000` and `SUPABASE_FETCH_TIMEOUT_MS=10000` (PROGRESS 2026-11-25).
+- [ ] **Tim:** the metric filter `{ $.req = "deadline" }` → `Sundial/SfQueryUpstreamTimeouts` and the alarm `sundial-sf-query-upstream-timeouts` (Sum ≥ 5 in 5 min, same SNS topic) — exact settings in PROGRESS 2026-11-25. Until then a Supabase / Salesforce stall is a handled 503 the `Errors` alarm cannot see.
 
 ## 2026-11-05 — The photo report (D-072 amendment 17, `feature/photo-report`)
 

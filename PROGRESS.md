@@ -1,5 +1,88 @@
 # Sundial — Progress Log
 
+## 2026-11-25 — sf-query alarm #2: a budget on every Supabase call and every describe, a 26 s request deadline (503 UPSTREAM_TIMEOUT), the typed single filter — DEPLOYED (sundial-sf-query)
+
+**What happened.** `sundial-sf-query-errors` fired again on 2026-11-25. **17:12:15 → 17:15:46 UTC, 60 invocations died at the 30 s Lambda timeout** (Errors/min 15, 22, 16, 7). None logged `UPSTREAM_TIMEOUT`, although `SF_FETCH_TIMEOUT_MS=25000` was set. Requests that finished just before had identity ~200 ms and respond 5–27 s, on every route (customer, job, solar, roofing, search). Both `sundial-cache-sync` runs in the window fetched 0 rows but took 151 s and 171 s (normally 4–9 s), and both finished at **17:15:46.15, the moment sf-query recovered**. So a SHARED upstream stalled for ~3.5 minutes. The logs could not say which, because the two candidates had no budget: the **Supabase cache calls** (none at all) and the **Salesforce describe** (`describeObject`, `lib/sf-describe.js` — a bare `fetch`).
+
+**Found in the code (beyond the alarm).**
+- **supabase-js (postgrest-js 2.108) retries a GET up to 3 more times, with backoff, after any fetch error.** A slow Supabase could cost one request four slow attempts, and a timeout added naively would multiply the same way. The new timeout is thrown as an `AbortError`, which postgrest-js never retries (proved with the real client: one attempt).
+- **`lib/cache-read.js` `getOpenApiSpec` (the cache column list)** had no budget AND kept a rejected promise. One stalled or failed read on a cold start broke every later request on that container for its whole life. Now it has the budget, and a failed read is forgotten.
+- **The ~30 a day `cold-cache count error … (400)` (TASKS 2026-11-09):** the single list filter `?field=&value=` quoted every value, so `Is_Template__c = 'true'` on `Sundial_Estimate__c` came back `400 INVALID_FIELD` ("must be of type boolean and should not be enclosed in quotes") on the COUNT and the SELECT, a 500 in the portal. It reached Salesforce at all because, unlike `f[]`, an EMPTY page under the single filter was treated as a cold cache: the estimate templates list, on a tenant with no templates, went to Salesforce on every open.
+- **The cold path swallowed a COUNT timeout and then spent a second budget on the SELECT.** It now stops at the COUNT.
+
+**Built.**
+- **`lib/upstream.js` (new)**, the one home for upstream budgets:
+  - `fetchWithTimeout` / `sfFetchTimeoutMs` moved here from `lib/salesforce.js` (re-exported there, so callers are unchanged).
+  - `createTimedFetch()` is the Supabase budget: env **`SUPABASE_FETCH_TIMEOUT_MS`**, **60 s when unset**, so `sundial-cache-sync`'s long upserts and the scripts are unchanged. On timeout it throws `AbortError` with code `UPSTREAM_TIMEOUT` and message `"Supabase request timed out after N s"`; supabase-js reports it as `{ error: { message: "AbortError: Supabase request timed out after 10 s" } }`.
+  - **The per-request in-flight list** (`AsyncLocalStorage`): every timed Salesforce and Supabase call is listed while it waits, by LABEL only (`"Salesforce query"`, `"Salesforce describe"`, `"Supabase GET sundial_job_cache"`, `"Supabase POST rpc sundial_solar_pipeline"`) — never a URL, query string or record id. **Each request gets a fresh store.** Work cut off by the deadline keeps its OLD store. When it resumes during the container's next request, its late finishes, late calls and late timeouts land in that old store, so they never appear in the new request's line. Outside a request (cache-sync, scripts) tracking is a no-op.
+- **`lib/supabase.js`:** the service-role client is built with `global: { fetch: createTimedFetch() }`, so every Lambda that uses it gets the budget on its next deploy (60 s by default, which changes nothing for them).
+- **`lib/salesforce.js` `describeObject` and `lib/sf-describe.js` `getRawDescribe`** are on `fetchWithTimeout("Salesforce describe", …, sfFetchTimeoutMs())`, like `sfQuery`.
+- **`sundial-sf-query` — the request deadline.**
+  - The handler takes `(event, context)` and races the request against **min(26 s, remaining Lambda time − 2.5 s)**. When the deadline wins, it answers **`503 { error: "upstream_timeout", code: "UPSTREAM_TIMEOUT" }`**, which reaches the browser because 26 s is under API Gateway's 29 s.
+  - **A single call that ran out of its budget answers the same 503.** That covers a thrown `UPSTREAM_TIMEOUT`, a Supabase `{error}` a route rethrew (recognised by its "timed out after N s" message), and a route's own 500 after a call on THIS request timed out.
+  - **Both write exactly one line of the same shape**, cause `"deadline"` or `"call"`:
+    `{"req":"deadline","cause":"deadline","route":"GET /sf/job/{id}","phase":"route:single","elapsedMs":26003,"inflight":[{"call":"Supabase GET sundial_service_job_cache","ms":25890}],"timedOut":[]}`
+  - Phases: `identity` → `prepare` → `route:<kind>` (single / list / search / pipeline / picklist / picklists / users). `inflight` names the upstream that was hanging, which is what this alarm's logs could not say.
+  - Old work that finishes after its request was answered logs nothing.
+  - Every route's response now passes through the slow-request line (the picklist / users / pipeline routes used to skip it).
+- **The typed single filter (`lib/caller-filters.js` `singleFilterLiteral`)**, the same type rule as `f[]`:
+  - checkbox `true`/`false` (lower-cased), numbers, `YYYY-MM-DD` dates and ISO datetimes go to SOQL **unquoted**;
+  - every other type is quoted and escaped, as before;
+  - a value that does not fit the field's type is **`400 INVALID_FILTER_VALUE`** before any cache or Salesforce query;
+  - the cache path filters with the same value (PostgREST casts `"true"` to the boolean);
+  - `op=includes` stays quoted;
+  - **an empty page under the single filter now gets the same "does this tenant have rows?" probe as `f[]`**, so the templates list answers empty from the cache without asking Salesforce.
+- **Tests:**
+  - `lambdas/sundial-sf-query/deadline.test.js` (11):
+    - the deadline arithmetic;
+    - a stalled cache read → 503 + one line with route / phase / in-flight label and no record id;
+    - a thrown call timeout → 503 with cause `call`, and the SELECT is not run after a timed-out COUNT;
+    - a rethrown Supabase message → 503;
+    - another error → 500 with no line;
+    - **per-request isolation**: request 1 cut off; its work resumes during request 2, starts a late call and times out; request 2's line shows only its own call and no timeouts, and the old work writes nothing;
+    - `Is_Template__c=true` on `Sundial_Estimate__c` unquoted on BOTH the COUNT and the SELECT;
+    - the cache path's `eq("is_template","true")`;
+    - bad checkbox / number / date values → 400;
+    - numbers / dates unquoted, text quoted and escaped;
+    - a warm tenant's empty filtered page makes no Salesforce call.
+  - `lib/upstream.test.js` (8):
+    - the Supabase budget and its env default;
+    - the named `AbortError`;
+    - **one attempt through the real supabase-js client**;
+    - a caller's own abort signal still works;
+    - labels carry no ids;
+    - the store isolation;
+    - both describes time out by name;
+    - a failed schema read is retried.
+  - `lib/salesforce-timeout.test.js` (from 11-09) was never in `npm test`; now it is.
+  - **Full suite: 2,214 tests, 2,212 pass.** The 2 failures are the known `scripts/demo-seed` tests that compare against the local, git-ignored `migration/demo/plan.json` (TASKS line 34), unrelated.
+- No SQL file.
+
+**Deployed:** `.\deploy.ps1 sundial-sf-query` (2026-11-25). The 26 s deadline works without any env change. **Not done here, on purpose (to be applied separately):**
+
+**1. Environment on `sundial-sf-query`** (both keep the existing variables; set together):
+
+| Variable | Value | Was |
+|---|---|---|
+| `SF_FETCH_TIMEOUT_MS` | `15000` | `25000` |
+| `SUPABASE_FETCH_TIMEOUT_MS` | `10000` | unset (= 60 s) |
+
+Why these numbers: a single stalled call then fails by name well inside the 26 s deadline. A normal request is identity (~200 ms) + a few cache reads + at most one Salesforce query page. Leave both unset on `sundial-cache-sync` and every other Lambda.
+
+**2. Keep the alarm seeing outages.** After this deploy, the 503s are HANDLED: the Lambda returns normally, so the `Errors` metric that `sundial-sf-query-errors` watches stays at 0 during exactly the kind of outage it was built for. The existing alarm stays as it is (it still catches crashes and true 30 s kills). Add:
+- **Metric filter** on log group `/aws/lambda/sundial-sf-query`:
+  - name `sundial-sf-query-upstream-timeouts`
+  - pattern `{ $.req = "deadline" }` (counts both causes)
+  - metric namespace `Sundial`, metric name `SfQueryUpstreamTimeouts`, value `1`, default value `0`
+- **Alarm** `sundial-sf-query-upstream-timeouts`:
+  - `Sum` of `Sundial/SfQueryUpstreamTimeouts`, period 300 s
+  - threshold `>= 5`, 1 of 1 datapoints
+  - treat missing data as `notBreaching`
+  - actions = the same SNS topic as `sundial-sf-query-errors`
+- **Optional wider net (not recommended alone; noisier):** an alarm on API Gateway `5XXError` for the sf-query API stage. It counts every 500 and 503 with no log parsing, but it also counts unrelated 500s.
+
+**When the next one fires:** read the `"req":"deadline"` lines. `inflight[].call` names the upstream (Supabase table / RPC, or Salesforce query / describe / token) and `phase` names where the request was.
+
 ## 2026-11-19 — Harmon: a card on file on ANY Bill To (the payer's card), and job notes on the estimate before the job (D-072 amendment 18)
 
 **Asked (Tim, 2026-11-19).** (1) On an estimate created before its job, group the current fields under **Estimate Notes** and add a **Job Notes** section with `Issue_Description__c`, `Initial_Remote_Diagnosis__c`, `Office_Notes__c`; when a job is created from the estimate, copy them onto the job and stop showing them on the estimate. (2) Let Harmon take a card deposit / payment on jobs whose Bill To is Partner or Other.

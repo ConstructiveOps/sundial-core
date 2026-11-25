@@ -56,6 +56,7 @@ import { readFullRecord } from "../../lib/full-read.js";
 export { phonePattern, searchWords, searchOrExpr, SEARCH_MAX_WORDS, SEARCH_FIELDS, EXCLUDED_FIELD_TYPES };
 import { resolveIdentity } from "../../lib/identity.js";
 import { getSupabaseClient } from "../../lib/supabase.js";
+import { newRequestStore, runWithRequest, inflightSnapshot, isUpstreamTimeout } from "../../lib/upstream.js";
 // ACCESS MODEL SHADOW (D-064 Phase 2). Off by default: with ACCESS_MODEL_MODE unset,
 // createShadow() returns a no-op whose methods do nothing, so every call site below is
 // inert and this file behaves exactly as it did before Phase 2. See shadow.js for why it
@@ -72,6 +73,7 @@ import {
   parseSort,
   applyCallerFiltersToQuery,
   callerFiltersToSoql,
+  singleFilterLiteral,
   filtersToNarrow,
   PIPELINE_NARROW_COLUMNS,
   SOLAR_PIPELINE_NARROW_COLUMNS,
@@ -1370,6 +1372,7 @@ async function handleListRead(ctx) {
   let filterFieldName = null;
   let filterColumn = null;
   let filterValue = null;
+  let filterSoql = null; // the typed SOQL literal for an equality filter
   // ?op=includes (2026-09-23, D-075): a multi-select picklist membership test instead of
   // equality — the Service module lists the customers whose Customer_Type__c INCLUDES
   // "Service" ("Solar;Service" must match). Anything but "includes" is equality, as before.
@@ -1392,8 +1395,16 @@ async function handleListRead(ctx) {
       filterFieldName = match.name; // canonical SF field name (safe to interpolate)
       filterColumn = sfFieldToColumn(match);
       filterValue = String(qs.value);
-      // NOTE: filter value is escaped+quoted, so this supports string/picklist
-      // fields. Numeric/boolean filters may produce a SOQL type error for now.
+      // Typed from the describe (2026-11-25, lib/caller-filters.js singleFilterLiteral):
+      // a checkbox / number / date goes to SOQL unquoted and a value that does not fit
+      // the type is a 400 here — never a Salesforce 400 (Is_Template__c = 'true') or a
+      // Postgres cast error that reaches the portal as a 500. INCLUDES stays quoted.
+      if (filterOp === "eq") {
+        const lit = singleFilterLiteral(match, filterValue, soqlEscapeString);
+        if (!lit) return jsonResponse(400, cors, { error: "invalid_filter_value", code: "INVALID_FILTER_VALUE" });
+        filterSoql = lit.soql;
+        filterValue = lit.cacheValue;
+      }
     }
   }
 
@@ -1423,7 +1434,7 @@ async function handleListRead(ctx) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug,
       createdDateSources, cors, selectFields, selectList,
-      filterFieldName, filterValue, filterOp,
+      filterFieldName, filterValue, filterSoql, filterOp,
       limit: Math.min(limit, SF_LIVE_MAX_LIMIT),
       offset,
       parentSfField: parentFilter.sfField,
@@ -1546,21 +1557,27 @@ async function handleListRead(ctx) {
   //    rep with no Leads) and must not send every such request to Salesforce. So the
   //    cache counts as cold only if the TENANT has no rows for this object at all — one
   //    head-only probe, paid only on an empty filtered page.
-  if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0) && callerFilters.active) {
+  //
+  //    The SINGLE filter too (2026-11-25): the estimate templates list
+  //    (?field=Is_Template__c&value=true) on a tenant with no templates went to
+  //    Salesforce on every open. Only when the filter column is cached — otherwise the
+  //    cache query did not apply it and an empty page already means an empty tenant.
+  const singleFilterApplied = !!(filterColumn && columnSet.has(filterColumn));
+  if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0) && (callerFilters.active || singleFilterApplied)) {
     const { count: tenantRows, error: probeErr } = await supabase
       .from(cacheTable)
       .select("sf_id", { count: "exact", head: true })
       .eq("client_sf_id", tenantId)
       .limit(1);
     if (!probeErr && (tenantRows ?? 0) > 0) {
-      logFreshness({ mode: "n/a", objectKey }, { path: "list", rows: 0, offset, stale: 0, soql: 0, filters: callerFilters.any.length + callerFilters.not.length });
+      logFreshness({ mode: "n/a", objectKey }, { path: "list", rows: 0, offset, stale: 0, soql: 0, filters: callerFilters.any.length + callerFilters.not.length + (singleFilterApplied ? 1 : 0) });
       return jsonResponse(200, cors, { source: "cache", count: 0, total: 0, limit, offset, hasMore: false, records: [] });
     }
   }
   if ((total ?? 0) === 0 && (!pageRows || pageRows.length === 0)) {
     return await listColdCacheFallback({
       supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-      selectFields, selectList, filterFieldName, filterValue, filterOp,
+      selectFields, selectList, filterFieldName, filterValue, filterSoql, filterOp,
       parentSfField: parentId ? parentFilter.sfField : null,
       parentId,
       // LIVE Salesforce path — original 500 cap, as above.
@@ -1718,7 +1735,7 @@ async function handleListRead(ctx) {
 async function listColdCacheFallback(ctx) {
   const {
     supabase, sfObject, cacheTable, columnSet, tenantId, tenantSlug, createdDateSources, cors,
-    selectFields, selectList, filterFieldName, filterValue, filterOp, limit, offset,
+    selectFields, selectList, filterFieldName, filterValue, filterSoql, filterOp, limit, offset,
     parentSfField, parentId, searchTerm, searchSfFields,
     shadow, objectKey, shadowPath, shadowFilters, enforce, access, listColumns = null,
     callerFilters = null, sort = null, fields = null,
@@ -1738,7 +1755,7 @@ async function listColdCacheFallback(ctx) {
   if (filterFieldName) {
     where += filterOp === "includes"
       ? ` AND ${filterFieldName} INCLUDES ('${soqlEscapeString(filterValue)}')`
-      : ` AND ${filterFieldName} = '${soqlEscapeString(filterValue)}'`;
+      : ` AND ${filterFieldName} = ${filterSoql ?? `'${soqlEscapeString(filterValue)}'`}`;
   }
   // ?q= name search: OR of LIKE '%term%' across the object's SF name fields, ANDed
   // into the WHERE. Term is sanitized (no % _ ' injection) then SOQL-escaped.
@@ -1767,6 +1784,9 @@ async function listColdCacheFallback(ctx) {
     const cnt = await sfQuery(`SELECT COUNT(Id) c FROM ${sfObject} WHERE ${where}`);
     total = Number(cnt?.[0]?.c ?? cnt?.[0]?.expr0 ?? 0) || 0;
   } catch (e) {
+    // A COUNT that ran out of budget means Salesforce is stalled: stop here (→ 503) rather
+    // than spend a second budget on the SELECT (2026-11-25).
+    if (isUpstreamTimeout(e)) throw e;
     console.error("cold-cache count error:", e?.message || String(e), e?.sfBody ? String(e.sfBody).slice(0, 400) : "", `object=${sfObject}`);
   }
 
@@ -2107,7 +2127,7 @@ async function handleUsersRead(ctx) {
  * nothing at all, which is what made them impossible to place.
  */
 const SLOW_REQUEST_MS = 5000;
-function requestTimer(event) {
+function requestTimer(event, store) {
   const t0 = Date.now();
   const marks = {};
   let last = t0;
@@ -2118,10 +2138,15 @@ function requestTimer(event) {
   console.log(JSON.stringify({ req: "start", route, cold: !globalThis.__sfQueryWarm }));
   globalThis.__sfQueryWarm = true;
   return {
-    mark(name) {
+    route,
+    t0,
+    // The phase now RUNNING (2026-11-25) — what the deadline line names. `mark` closes the
+    // phase that just ended (its time goes in `phases`) and opens `next`.
+    mark(name, next = null) {
       const now = Date.now();
       marks[name] = now - last;
       last = now;
+      if (store && next) store.phase = next;
     },
     done(status) {
       const total = Date.now() - t0;
@@ -2130,7 +2155,48 @@ function requestTimer(event) {
   };
 }
 
-export const handler = async (event) => {
+/**
+ * The request deadline (2026-11-25, the second sundial-sf-query-errors alarm). For ~3.5
+ * minutes a shared upstream stalled and 60 requests died at Lambda's 30 s with nothing
+ * logged. Now a request gets at most REQUEST_DEADLINE_MS, and never later than
+ * DEADLINE_MARGIN_MS before Lambda would kill it; then it stops waiting, logs ONE line and
+ * answers 503 UPSTREAM_TIMEOUT. 26 s is under API Gateway's 29 s, so the 503 reaches the
+ * browser. Per-call budgets (sf-query: SF_FETCH_TIMEOUT_MS 15000, SUPABASE_FETCH_TIMEOUT_MS
+ * 10000) fit inside it, so a single stalled call usually fails first, by name.
+ */
+export const REQUEST_DEADLINE_MS = 26_000;
+export const DEADLINE_MARGIN_MS = 2_500;
+export function requestDeadlineMs(context) {
+  const remaining = typeof context?.getRemainingTimeInMillis === "function" ? Number(context.getRemainingTimeInMillis()) : NaN;
+  if (!Number.isFinite(remaining)) return REQUEST_DEADLINE_MS;
+  return Math.max(0, Math.min(REQUEST_DEADLINE_MS, remaining - DEADLINE_MARGIN_MS));
+}
+
+/**
+ * The ONE line an upstream timeout writes, whether the whole request ran out of time
+ * (`cause: "deadline"`) or a single call ran out of its budget (`cause: "call"`) — so one
+ * CloudWatch metric filter, `{ $.req = "deadline" }`, counts both. Route ids blanked; the
+ * in-flight list is labels only (lib/upstream.js), never a URL or a record.
+ */
+function logUpstreamTimeout(cause, timer, store) {
+  console.log(JSON.stringify({
+    req: "deadline",
+    cause,
+    route: timer.route,
+    phase: store.phase,
+    elapsedMs: Date.now() - timer.t0,
+    inflight: inflightSnapshot(store),
+    timedOut: [...store.timedOut],
+  }));
+}
+
+function upstreamTimeoutResponse(cors) {
+  return jsonResponse(503, cors, { error: "upstream_timeout", code: "UPSTREAM_TIMEOUT" });
+}
+
+const DEADLINE = Symbol("deadline");
+
+export const handler = async (event, context) => {
   const method =
     event?.requestContext?.http?.method || event?.httpMethod || "GET";
   const headers = normalizeHeaders(event?.headers);
@@ -2139,12 +2205,43 @@ export const handler = async (event) => {
   if (method === "OPTIONS") {
     return { statusCode: 204, headers: cors, body: "" };
   }
-  const timer = requestTimer(event);
-  const finish = (res) => {
+  // A FRESH store per request: the in-flight list and the timeouts are this request's
+  // alone. Work a deadline cut off keeps its own (old) store, so when it resumes during a
+  // later request its calls, finishes and errors never reach that request's line.
+  const store = newRequestStore();
+  return runWithRequest(store, async () => {
+    const timer = requestTimer(event, store);
+    store.phase = "identity";
+    let deadlineTimer;
+    const deadline = new Promise((resolve) => {
+      deadlineTimer = setTimeout(() => resolve(DEADLINE), requestDeadlineMs(context));
+    });
+    const work = handleRequest({ event, method, headers, cors, timer, store });
+    const res = await Promise.race([work, deadline]);
+    clearTimeout(deadlineTimer);
+    store.settled = true;
+    if (res === DEADLINE) {
+      logUpstreamTimeout("deadline", timer, store);
+      timer.mark(store.phase);
+      timer.done(503);
+      return upstreamTimeoutResponse(cors);
+    }
+    // A route that caught the failure itself and answered 500 (the pipeline RPC, a cache
+    // read it could not fall back from) after a call on THIS request ran out of budget:
+    // the same 503 and the same line as a thrown timeout.
+    if (res?.statusCode === 500 && store.timedOut.length > 0) {
+      logUpstreamTimeout("call", timer, store);
+      timer.mark("respond");
+      timer.done(503);
+      return upstreamTimeoutResponse(cors);
+    }
     timer.mark("respond");
     timer.done(res?.statusCode ?? null);
     return res;
-  };
+  });
+};
+
+async function handleRequest({ event, method, headers, cors, timer, store }) {
   if (method !== "GET") {
     return jsonResponse(405, cors, {
       error: "method_not_allowed",
@@ -2177,10 +2274,10 @@ export const handler = async (event) => {
       identity = await resolveIdentity(headers["authorization"]);
     } catch (err) {
       const mapped = mapIdentityError(err?.code);
-      if (mapped) return finish(jsonResponse(mapped.status, cors, mapped.body));
+      if (mapped) return jsonResponse(mapped.status, cors, mapped.body);
       throw err; // unexpected -> 500 below
     }
-    timer.mark("identity");
+    timer.mark("identity", "prepare");
 
     const tenantId = identity.tenantId;
     const tenantSlug = identity.tenantSlug;
@@ -2227,6 +2324,9 @@ export const handler = async (event) => {
       qs: event.queryStringParameters || {},
       supabase: getSupabaseClient,
     });
+    // From here on the request is in its route (what the deadline line names as the phase;
+    // the in-flight list says which upstream it was waiting on).
+    timer.mark("prepare", `route:${route.kind}`);
 
     // META picklist route: org-wide metadata, NOT tenant-scoped (see
     // handlePicklistRead). Handled before Supabase/cache setup since it needs
@@ -2265,15 +2365,14 @@ export const handler = async (event) => {
 
     // Global search (2026-11-09): every object the header search shows, in ONE request.
     if (route.kind === "search") {
-      timer.mark("prepare");
-      return finish(await handleGlobalSearch({
+      return await handleGlobalSearch({
         supabase: await getSupabaseClient(),
         tenantId,
         access,
         enforcing,
         qs: event.queryStringParameters || {},
         cors,
-      }));
+      });
     }
 
     // Pipeline counts (D-080): the same identity and the same `enforce` as the list, so
@@ -2337,15 +2436,25 @@ export const handler = async (event) => {
       // ?full=true (exact, case-insensitive) opts into the all-fields, cache-
       // bypassing detail read. Any other value keeps existing cache-first behavior.
       const full = String(qs.full).toLowerCase() === "true";
-      return finish(hideCost(objectKey, await handleSingleRead({ ...shared, id: route.id, full }), seesCost));
+      return hideCost(objectKey, await handleSingleRead({ ...shared, id: route.id, full }), seesCost);
     }
     // Repeated keys (f[stage]=A&f[stage]=B) survive ONLY in the multi-value map —
     // see caller-filters.js readMulti.
-    return finish(hideCost(objectKey, await handleListRead({ ...shared, qs, multi: readMulti(event, qs) }), seesCost));
+    return hideCost(objectKey, await handleListRead({ ...shared, qs, multi: readMulti(event, qs) }), seesCost);
   } catch (err) {
+    // Cut off by the deadline already: the browser has its 503 and the line is written.
+    // This is old work finishing late (possibly during a later request) — say nothing.
+    if (store.settled) return null;
+    // A call that ran out of its budget (2026-11-25) — thrown with its own code, or a
+    // Supabase {error} a route rethrew, or any error after a timeout on THIS request —
+    // is a 503 with the same line as the overall deadline (cause "call").
+    if (isUpstreamTimeout(err) || store.timedOut.length > 0) {
+      logUpstreamTimeout("call", timer, store);
+      return upstreamTimeoutResponse(cors);
+    }
     // Salesforce's own words (sfBody) are what say WHICH query was bad (2026-11-09: two
     // weeks of "Salesforce query failed (400)" with no way to tell what was asked).
-    console.error("sf-query unexpected error:", err?.message || String(err), err?.sfBody ? String(err.sfBody).slice(0, 400) : "", err?.code === "UPSTREAM_TIMEOUT" ? "(upstream timeout)" : "");
-    return finish(jsonResponse(500, cors, { error: "server_error" }));
+    console.error("sf-query unexpected error:", err?.message || String(err), err?.sfBody ? String(err.sfBody).slice(0, 400) : "");
+    return jsonResponse(500, cors, { error: "server_error" });
   }
-};
+}
